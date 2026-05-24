@@ -14,6 +14,10 @@ export const loveList = markRaw<LX.List.MyLoveListInfo>({
   name: 'list__name_love',
   // name: '我的收藏',
 })
+export const webDAVList = markRaw<LX.List.MyWebDAVListInfo>({
+  id: LIST_IDS.WEBDAV,
+  name: '我的云盘',
+})
 export const tempList = markRaw<LX.List.MyTempListInfo>({
   id: LIST_IDS.TEMP,
   name: '临时列表',

@@ -7,7 +7,7 @@ const isWin = process.platform == 'win32'
 const defaultSetting: LX.AppSetting = {
   version: '2.1.0',
 
-  'common.windowSizeId': 3,
+  'common.windowSizeId': 5,
   'common.fontSize': 16,
   'common.startInFullscreen': false,
   'common.langId': null,
@@ -134,6 +134,11 @@ const defaultSetting: LX.AppSetting = {
   'network.proxy.enable': false,
   'network.proxy.host': '',
   'network.proxy.port': '',
+
+  'webdav.url': 'https://dav.jianguoyun.com/dav/lx-music',
+  'webdav.username': '',
+  'webdav.password': '',
+  'webdav.autoRefresh': true,
 
   'tray.enable': false,
   // 'tray.isToTray': false,

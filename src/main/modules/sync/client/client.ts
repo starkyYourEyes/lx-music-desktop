@@ -148,6 +148,7 @@ const heartbeatTools = {
 
 
 let client: LX.Sync.Client.Socket | null
+export const getClient = () => client
 // let listSyncPromise: Promise<void>
 export const connect = (urlInfo: LX.Sync.Client.UrlInfo, keyInfo: LX.Sync.ClientKeyInfo) => {
   client = new WebSocket(`${urlInfo.wsProtocol}//${urlInfo.hostPath}/socket?i=${encodeURIComponent(keyInfo.clientId)}&t=${encodeURIComponent(aesEncrypt(SYNC_CODE.msgConnect, keyInfo.key))}`, {
@@ -202,6 +203,7 @@ export const connect = (urlInfo: LX.Sync.Client.UrlInfo, keyInfo: LX.Sync.Client
   client.remote = message2read.remote
   client.remoteQueueList = message2read.createQueueRemote('list')
   client.remoteQueueDislike = message2read.createQueueRemote('dislike')
+  client.remoteQueueParty = message2read.createQueueRemote('party')
 
   client.addEventListener('message', ({ data }) => {
     if (data == 'ping') return
@@ -238,6 +240,7 @@ export const connect = (urlInfo: LX.Sync.Client.UrlInfo, keyInfo: LX.Sync.Client
     client!.moduleReadys = {
       list: false,
       dislike: false,
+      party: false,
     }
     disconnected = false
     sendSyncStatus({

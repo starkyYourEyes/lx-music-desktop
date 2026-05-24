@@ -136,6 +136,7 @@ const modules = {
 
     open_api_action: 'open_api_action',
     sync_action: 'sync_action',
+    party_action: 'party_action',
     sync_get_server_devices: 'sync_get_server_devices',
     sync_remove_server_device: 'sync_remove_server_device',
 
@@ -154,6 +155,21 @@ const modules = {
     download_list_update: 'download_list_update',
     download_list_remove: 'download_list_remove',
     download_list_clear: 'download_list_clear',
+
+    webdav_test: 'webdav_test',
+    webdav_list_musics: 'webdav_list_musics',
+    webdav_get_music_url: 'webdav_get_music_url',
+    webdav_get_music_pic: 'webdav_get_music_pic',
+    webdav_get_music_lyric: 'webdav_get_music_lyric',
+
+    netease_get_account_status: 'netease_get_account_status',
+    netease_login_qr_create: 'netease_login_qr_create',
+    netease_login_qr_check: 'netease_login_qr_check',
+    netease_logout: 'netease_logout',
+    netease_get_recommend_songs: 'netease_get_recommend_songs',
+    netease_get_recommend_playlists: 'netease_get_recommend_playlists',
+    netease_get_music_url: 'netease_get_music_url',
+    netease_like_music: 'netease_like_music',
   },
   winLyric: {
     close: 'close',

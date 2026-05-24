@@ -36,6 +36,27 @@ declare namespace LX {
       ext: string
     }
 
+    interface MusicInfoMeta_webdav extends MusicInfoMetaBase {
+      url: string
+      path: string
+      fileName: string
+      ext: string
+      title?: string | null
+      artist?: string | null
+      album?: string | null
+      albumArtist?: string | null
+      year?: number | null
+      genre?: string[] | null
+      hasEmbeddedPic?: boolean
+      embeddedLyric?: string | null
+      lyricPath?: string | null
+      krcPath?: string | null
+      picPath?: string | null
+      size?: number
+      etag?: string
+      lastModified?: string
+    }
+
 
     interface MusicInfoBase<S = LX.Source> {
       id: string
@@ -48,6 +69,10 @@ declare namespace LX {
 
     interface MusicInfoLocal extends MusicInfoBase<'local'> {
       meta: MusicInfoMeta_local
+    }
+
+    interface MusicInfoWebDAV extends MusicInfoBase<'webdav'> {
+      meta: MusicInfoMeta_webdav
     }
 
     interface MusicInfo_online_common extends MusicInfoBase<'kw' | 'wy'> {
@@ -83,7 +108,19 @@ declare namespace LX {
     }
 
     type MusicInfoOnline = MusicInfo_online_common | MusicInfo_kg | MusicInfo_tx | MusicInfo_mg
-    type MusicInfo = MusicInfoOnline | MusicInfoLocal
+    type MusicInfo = MusicInfoOnline | MusicInfoLocal | MusicInfoWebDAV
+
+    interface WebDAVConfig {
+      url: string
+      username: string
+      password: string
+    }
+
+    interface WebDAVListMusicParams {
+      url?: string
+      username?: string
+      password?: string
+    }
 
     interface LyricInfo {
       // 歌曲歌词

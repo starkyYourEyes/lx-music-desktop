@@ -1,8 +1,8 @@
 import { computed, ref, reactive, nextTick } from '@common/utils/vueTools'
 import { useI18n } from '@renderer/plugins/i18n'
-import { userLists, defaultList, loveList } from '@renderer/store/list/state'
+import { userLists, defaultList, loveList, webDAVList } from '@renderer/store/list/state'
 import musicSdk from '@renderer/utils/musicSdk'
-import { addLocalFile } from './actions'
+import { addLocalFile, addWebDAVMusics, refreshWebDAVMusics } from './actions'
 
 export default ({
   emit,
@@ -21,6 +21,8 @@ export default ({
     duplicate: true,
     sort: true,
     local_file: true,
+    webdav_file: true,
+    webdav_refresh: true,
     sourceDetail: true,
     import: true,
     export: true,
@@ -52,6 +54,16 @@ export default ({
         name: t('lists__select_local_file'),
         action: 'local_file',
         disabled: !menuControl.local_file,
+      },
+      {
+        name: '添加 WebDAV 音乐',
+        action: 'webdav_file',
+        disabled: !menuControl.webdav_file,
+      },
+      {
+        name: '刷新云盘',
+        action: 'webdav_refresh',
+        disabled: !menuControl.webdav_refresh,
       },
       {
         name: t('lists__sync'),
@@ -99,15 +111,29 @@ export default ({
   const showMenu = (event, index) => {
     let source
     switch (index) {
+      case -3:
+        menuControl.rename = false
+        menuControl.remove = false
+        menuControl.sync = false
+        menuControl.local_file = false
+        menuControl.webdav_file = false
+        menuControl.webdav_refresh = true
+        break
       case -1:
       case -2:
         menuControl.rename = false
         menuControl.remove = false
         menuControl.sync = false
+        menuControl.local_file = true
+        menuControl.webdav_file = true
+        menuControl.webdav_refresh = false
         break
       default:
         menuControl.rename = true
         menuControl.remove = true
+        menuControl.local_file = true
+        menuControl.webdav_file = true
+        menuControl.webdav_refresh = false
         source = userLists[index].source
         menuControl.sync = !!source && !!musicSdk[source]?.songList
         break
@@ -132,6 +158,9 @@ export default ({
   const getListInfo = (index) => {
     let list
     switch (index) {
+      case -3:
+        list = webDAVList
+        break
       case -2:
         list = defaultList
         break
@@ -163,6 +192,12 @@ export default ({
         break
       case 'local_file':
         addLocalFile(listInfo)
+        break
+      case 'webdav_file':
+        addWebDAVMusics(listInfo)
+        break
+      case 'webdav_refresh':
+        refreshWebDAVMusics()
         break
       case 'sourceDetail':
         handleOpenSourceDetailPage(listInfo)

@@ -212,14 +212,17 @@ export default {
   position: absolute;
   width: 100%;
   border-radius: @form-radius;
-  transition: box-shadow .4s ease, background-color @transition-normal;
+  transition: box-shadow .4s ease, background-color @transition-normal, border-color @transition-normal;
   display: flex;
   flex-flow: column nowrap;
-  background-color: var(--color-primary-light-300-alpha-700);
+  background-color: rgba(255, 255, 255, 0.54);
+  border: 1px solid rgba(128, 128, 128, 0.1);
+  backdrop-filter: saturate(180%) blur(16px);
 
   &.active {
-    background-color: var(--color-primary-light-600-alpha-100);
-    box-shadow: 0 1px 5px 0 rgba(0,0,0,.2);
+    background-color: rgba(255, 255, 255, 0.92);
+    border-color: var(--color-primary-alpha-800);
+    box-shadow: 0 8px 22px rgba(31, 38, 35, 0.12);
     .form {
       input {
         border-bottom-left-radius: 0;
@@ -237,8 +240,8 @@ export default {
     input {
       flex: auto;
       // border: 1px solid;
-      border-top-left-radius: 3px;
-      border-bottom-left-radius: 3px;
+      border-top-left-radius: @form-radius;
+      border-bottom-left-radius: @form-radius;
       background-color: transparent;
       // border-bottom: 2px solid var(--color-primary);
       // border-color: var(--color-primary);
@@ -247,7 +250,7 @@ export default {
 
       outline: none;
       // height: @height-toolbar * .7;
-      padding: 0 5px;
+      padding: 0 10px;
       overflow: hidden;
       font-size: 13.5px;
       line-height: @height-toolbar * 0.52 + 5px;
@@ -270,7 +273,7 @@ export default {
 
       &:last-child {
         border-top-right-radius: 3px;
-        border-bottom-right-radius: 3px;
+        border-bottom-right-radius: @form-radius;
       }
 
       &:hover {
@@ -290,7 +293,7 @@ export default {
     overflow: hidden;
     li {
       cursor: pointer;
-      padding: 8px 5px;
+      padding: 9px 10px;
       transition: background-color .2s ease;
       line-height: 1.3;
       span {
@@ -301,8 +304,8 @@ export default {
         background-color: var(--color-primary-dark-100-alpha-700);
       }
       &:last-child {
-        border-bottom-left-radius: 3px;
-        border-bottom-right-radius: 3px;
+        border-bottom-left-radius: @form-radius;
+        border-bottom-right-radius: @form-radius;
       }
     }
   }

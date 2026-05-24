@@ -7,6 +7,7 @@
 
 <script>
 import { getListPrevSelectId } from '@renderer/utils/data'
+import { LIST_IDS } from '@common/constants'
 
 import MyList from './MyList/index.vue'
 import MusicList from './MusicList/index.vue'
@@ -21,6 +22,7 @@ export default {
     let id = to.query.id
     if (!id) {
       id = await getListPrevSelectId()
+      id ||= LIST_IDS.DEFAULT
       next({
         path: to.path,
         query: { id },

@@ -1,5 +1,5 @@
-import { addListMusics, setFetchingListStatus } from '@renderer/store/list/action'
-import { showSelectDialog } from '@renderer/utils/ipc'
+import { addListMusics, refreshWebDAVList, setFetchingListStatus } from '@renderer/store/list/action'
+import { listWebDAVMusics, showSelectDialog } from '@renderer/utils/ipc'
 
 
 const handleAddMusics = async(listId: string, filePaths: string[], index: number = -1) => {
@@ -27,4 +27,18 @@ export const addLocalFile = async(listInfo: LX.List.MyListInfo) => {
   setFetchingListStatus(listInfo.id, true)
   await handleAddMusics(listInfo.id, filePaths)
   setFetchingListStatus(listInfo.id, false)
+}
+
+export const addWebDAVMusics = async(listInfo: LX.List.MyListInfo) => {
+  setFetchingListStatus(listInfo.id, true)
+  try {
+    const musicInfos = await listWebDAVMusics()
+    if (musicInfos.length) await addListMusics(listInfo.id, musicInfos)
+  } finally {
+    setFetchingListStatus(listInfo.id, false)
+  }
+}
+
+export const refreshWebDAVMusics = async() => {
+  await refreshWebDAVList()
 }

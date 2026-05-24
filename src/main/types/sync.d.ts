@@ -16,12 +16,14 @@ declare global {
           moduleReadys: {
             list: boolean
             dislike: boolean
+            party: boolean
           }
 
           onClose: (handler: (err: Error) => (void | Promise<void>)) => () => void
           remote: LX.Sync.ServerSyncActions
           remoteQueueList: LX.Sync.ServerSyncListActions
           remoteQueueDislike: LX.Sync.ServerSyncDislikeActions
+          remoteQueueParty: LX.Sync.ServerSyncPartyActions
         }
 
         interface UrlInfo {

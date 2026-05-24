@@ -1,6 +1,10 @@
 interface HTMLAudioElementChrome extends HTMLAudioElement {
   setSinkId: (id: string) => Promise<void>
 }
+interface SetResourceOptions {
+  startTime?: number
+  shouldPlay?: boolean
+}
 let audio: HTMLAudioElementChrome | null = null
 let audioContext: AudioContext
 let mediaSource: MediaElementAudioSourceNode
@@ -383,8 +387,45 @@ export const setPitchShifter = (val: number) => {
 
 export const hasInitedAdvancedAudioFeatures = (): boolean => audioContext != null
 
-export const setResource = (src: string) => {
-  if (audio) audio.src = src
+const normalizeSetResourceOptions = (options?: SetResourceOptions): Required<SetResourceOptions> => {
+  return {
+    startTime: options?.startTime ?? 0,
+    shouldPlay: options?.shouldPlay ?? true,
+  }
+}
+
+let clearResourceHandlers: Noop | null = null
+const resetResourceHandlers = () => {
+  clearResourceHandlers?.()
+  clearResourceHandlers = null
+}
+
+export const setResource = (src: string, options?: SetResourceOptions) => {
+  if (!audio) return
+
+  resetResourceHandlers()
+
+  const { startTime, shouldPlay } = normalizeSetResourceOptions(options)
+  const handleLoadedmetadata = () => {
+    if (!audio) return
+    if (startTime > 0) audio.currentTime = startTime
+    if (shouldPlay) void audio.play()
+    else audio.pause()
+    resetResourceHandlers()
+  }
+  const handleEmptied = () => {
+    resetResourceHandlers()
+  }
+
+  clearResourceHandlers = () => {
+    audio?.removeEventListener('loadedmetadata', handleLoadedmetadata)
+    audio?.removeEventListener('emptied', handleEmptied)
+  }
+
+  audio.addEventListener('loadedmetadata', handleLoadedmetadata)
+  audio.addEventListener('emptied', handleEmptied)
+  audio.autoplay = shouldPlay
+  audio.src = src
 }
 
 export const setPlay = () => {
@@ -396,6 +437,7 @@ export const setPause = () => {
 }
 
 export const setStop = () => {
+  resetResourceHandlers()
   if (audio) {
     audio.src = ''
     audio.removeAttribute('src')

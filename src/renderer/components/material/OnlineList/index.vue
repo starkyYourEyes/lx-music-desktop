@@ -142,8 +142,16 @@ export default {
       type: Boolean,
       default: false,
     },
+    directListAdd: {
+      type: Boolean,
+      default: false,
+    },
+    directListPlay: {
+      type: Boolean,
+      default: false,
+    },
   },
-  emits: ['show-menu', 'play-list', 'togglePage'],
+  emits: ['show-menu', 'play-list', 'togglePage', 'list-add'],
   setup(props, { emit }) {
     const actionButtonsVisible = appSetting['list.actionButtonsVisible']
     const rightClickSelectedIndex = ref(-1)
@@ -169,6 +177,23 @@ export default {
       selectedAddMusicInfo,
       handleShowMusicAddModal,
     } = useMusicAdd({ selectedList, props })
+
+    const handleListAdd = (index, single = false) => {
+      if (!props.directListAdd) {
+        handleShowMusicAddModal(index, single)
+        return
+      }
+
+      if (selectedList.value.length && !single) {
+        emit('list-add', [...selectedList.value])
+        removeAllSelect()
+        return
+      }
+
+      const musicInfo = props.list[index]
+      if (!musicInfo) return
+      emit('list-add', [musicInfo])
+    }
 
     const {
       isShowDownload,
@@ -198,7 +223,7 @@ export default {
       handlePlayMusic,
       handlePlayMusicLater,
       handleSearch,
-      handleShowMusicAddModal,
+      handleShowMusicAddModal: handleListAdd,
       handleOpenMusicDetail,
       handleDislikeMusic,
     })
@@ -242,7 +267,7 @@ export default {
           handleSearch(index)
           break
         case 'listAdd':
-          handleShowMusicAddModal(index, true)
+          handleListAdd(index, true)
           break
       }
     }

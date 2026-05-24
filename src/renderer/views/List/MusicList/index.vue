@@ -223,6 +223,7 @@ export default {
       showMenu,
       menuClick,
     } = useMenu({
+      props,
       assertApiSupport,
       emit,
 

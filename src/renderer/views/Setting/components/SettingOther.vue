@@ -12,6 +12,23 @@ dd
     base-checkbox.gap-left(
       v-for="item in trayThemeList" :id="'setting_tray_theme_' + item.id" :key="item.id" :model-value="appSetting['tray.themeId']" name="setting_tray_theme"
       need :label="item.label" :value="item.id" @update:model-value="updateSetting({'tray.themeId': $event})")
+
+dd
+  h3#other_webdav WebDAV 音乐
+  div
+    .p
+      | 地址
+      input.input.gap-left(type="text" :value="appSetting['webdav.url']" placeholder="https://dav.jianguoyun.com/dav/lx-music" @change="handleWebDAVUrlChange")
+    .p
+      | 用户名
+      input.input.gap-left(type="text" :value="appSetting['webdav.username']" placeholder="name@example.com" @change="handleWebDAVUsernameChange")
+    .p
+      | 密码
+      input.input.gap-left(type="password" :value="appSetting['webdav.password']" placeholder="WebDAV 应用密码" @change="handleWebDAVPasswordChange")
+    .p
+      base-btn.btn(min :disabled="isTestingWebDAV" @click="handleTestWebDAV") 测试连接
+    .p
+      base-checkbox(id="setting_webdav_auto_refresh" :model-value="appSetting['webdav.autoRefresh']" label="启动时自动更新我的云盘" @update:model-value="updateSetting({'webdav.autoRefresh': $event})")
 dd
   h3#other_resource_cache
     | {{ $t('setting__other_resource_cache') }}
@@ -75,6 +92,7 @@ import {
   getMusicUrlCount, clearMusicUrl,
   getLyricRawCount, clearLyricRaw,
   getLyricEditedCount, clearLyricEdited,
+  testWebDAV,
 } from '@renderer/utils/ipc'
 import { sizeFormate } from '@common/utils/common'
 import { dialog } from '@renderer/plugins/Dialog'
@@ -123,6 +141,32 @@ export default {
       })
     }
     refreshCacheSize()
+
+    const isTestingWebDAV = ref(false)
+    const handleWebDAVUrlChange = (event) => {
+      updateSetting({ 'webdav.url': event.target.value.trim() })
+    }
+    const handleWebDAVUsernameChange = (event) => {
+      updateSetting({ 'webdav.username': event.target.value.trim() })
+    }
+    const handleWebDAVPasswordChange = (event) => {
+      updateSetting({ 'webdav.password': event.target.value })
+    }
+    const handleTestWebDAV = async() => {
+      isTestingWebDAV.value = true
+      try {
+        await testWebDAV({
+          url: appSetting['webdav.url'],
+          username: appSetting['webdav.username'],
+          password: appSetting['webdav.password'],
+        })
+        void dialog('WebDAV 连接成功')
+      } catch (err) {
+        void dialog(`WebDAV 连接失败：${err.message}`)
+      } finally {
+        isTestingWebDAV.value = false
+      }
+    }
 
 
     const otherSourceCount = ref(0)
@@ -219,6 +263,12 @@ export default {
       cacheSize,
       isDisabledResourceCacheClear,
       clearResourceCache,
+
+      isTestingWebDAV,
+      handleWebDAVUrlChange,
+      handleWebDAVUsernameChange,
+      handleWebDAVPasswordChange,
+      handleTestWebDAV,
 
       otherSourceCount,
       isDisabledOtherSourceCacheClear,

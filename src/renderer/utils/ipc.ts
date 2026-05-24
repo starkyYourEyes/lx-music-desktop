@@ -1,11 +1,13 @@
 import { rendererSend, rendererInvoke, rendererOn, rendererOff } from '@common/rendererIpc'
 import { HOTKEY_RENDERER_EVENT_NAME, WIN_MAIN_RENDERER_EVENT_NAME, CMMON_EVENT_NAME } from '@common/ipcNames'
 import { type ProgressInfo, type UpdateDownloadedEvent, type UpdateInfo } from 'electron-updater'
-import { markRaw } from '@common/utils/vueTools'
+import { markRaw, toRaw } from '@common/utils/vueTools'
 import * as hotKeys from '@common/hotKey'
 import { APP_EVENT_NAMES, DATA_KEYS, DEFAULT_SETTING } from '@common/constants'
 
 type RemoveListener = () => void
+
+const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
 
 export const getSetting = async() => {
   return rendererInvoke<LX.AppSetting>(CMMON_EVENT_NAME.get_app_setting)
@@ -666,6 +668,64 @@ export const getMusicUrlCount = async() => {
   return rendererInvoke<number>(WIN_MAIN_RENDERER_EVENT_NAME.get_music_url_count)
 }
 
+export const testWebDAV = async(config: LX.Music.WebDAVConfig) => {
+  return rendererInvoke<LX.Music.WebDAVConfig, boolean>(WIN_MAIN_RENDERER_EVENT_NAME.webdav_test, config)
+}
+
+export const listWebDAVMusics = async(params?: LX.Music.WebDAVListMusicParams) => {
+  return rendererInvoke<LX.Music.WebDAVListMusicParams | undefined, LX.Music.MusicInfoWebDAV[]>(WIN_MAIN_RENDERER_EVENT_NAME.webdav_list_musics, params)
+}
+
+export const getWebDAVMusicUrl = async(musicInfo: LX.Music.MusicInfoWebDAV) => {
+  return rendererInvoke<LX.Music.MusicInfoWebDAV, string>(WIN_MAIN_RENDERER_EVENT_NAME.webdav_get_music_url, musicInfo)
+}
+
+export const getWebDAVMusicPic = async(musicInfo: LX.Music.MusicInfoWebDAV) => {
+  return rendererInvoke<LX.Music.MusicInfoWebDAV, string>(WIN_MAIN_RENDERER_EVENT_NAME.webdav_get_music_pic, musicInfo)
+}
+
+export const getWebDAVMusicLyric = async(musicInfo: LX.Music.MusicInfoWebDAV) => {
+  return rendererInvoke<LX.Music.MusicInfoWebDAV, LX.Music.LyricInfo | null>(WIN_MAIN_RENDERER_EVENT_NAME.webdav_get_music_lyric, musicInfo)
+}
+
+export const getNeteaseAccountStatus = async() => {
+  return rendererInvoke<LX.Netease.AccountStatus>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_account_status)
+}
+
+export const createNeteaseLoginQr = async() => {
+  return rendererInvoke<LX.Netease.LoginQr>(WIN_MAIN_RENDERER_EVENT_NAME.netease_login_qr_create)
+}
+
+export const checkNeteaseLoginQr = async(key: string) => {
+  return rendererInvoke<string, LX.Netease.LoginQrCheck>(WIN_MAIN_RENDERER_EVENT_NAME.netease_login_qr_check, key)
+}
+
+export const logoutNetease = async() => {
+  await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.netease_logout)
+}
+
+export const getNeteaseRecommendSongs = async() => {
+  return rendererInvoke<LX.Music.MusicInfoOnline[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_recommend_songs)
+}
+
+export const getNeteaseRecommendPlaylists = async(limit: number, removePrivateRecommend = false) => {
+  return rendererInvoke<{ limit: number, removePrivateRecommend: boolean }, LX.Netease.Playlist[]>(
+    WIN_MAIN_RENDERER_EVENT_NAME.netease_get_recommend_playlists,
+    { limit, removePrivateRecommend },
+  )
+}
+
+export const getNeteaseMusicUrl = async(musicInfo: LX.Music.MusicInfo, quality: LX.Quality) => {
+  return rendererInvoke<LX.Netease.MusicUrlParams, string>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_music_url, {
+    musicInfo: toCloneable(musicInfo),
+    quality,
+  })
+}
+
+export const likeNeteaseMusic = async(musicInfo: LX.Music.MusicInfo) => {
+  await rendererInvoke<LX.Music.MusicInfo>(WIN_MAIN_RENDERER_EVENT_NAME.netease_like_music, toCloneable(musicInfo))
+}
+
 /**
  * 退出应用
  */
@@ -784,6 +844,13 @@ export const onSyncAction = (listener: LX.IpcRendererEventListenerParams<LX.Sync
   }
 }
 
+export const onPartyAction = (listener: LX.IpcRendererEventListenerParams<LX.Party.MainWindowActions>): RemoveListener => {
+  rendererOn(WIN_MAIN_RENDERER_EVENT_NAME.party_action, listener)
+  return () => {
+    rendererOff(WIN_MAIN_RENDERER_EVENT_NAME.party_action, listener)
+  }
+}
+
 /**
  * 发送同步事件
  * @param action
@@ -791,6 +858,10 @@ export const onSyncAction = (listener: LX.IpcRendererEventListenerParams<LX.Sync
  */
 export const sendSyncAction = async(action: LX.Sync.SyncServiceActions) => {
   return rendererInvoke<LX.Sync.SyncServiceActions>(WIN_MAIN_RENDERER_EVENT_NAME.sync_action, action)
+}
+
+export const sendPartyAction = async<T = LX.Party.StatePayload>(action: LX.Party.ServiceActions) => {
+  return rendererInvoke<LX.Party.ServiceActions, T>(WIN_MAIN_RENDERER_EVENT_NAME.party_action, action)
 }
 
 /**

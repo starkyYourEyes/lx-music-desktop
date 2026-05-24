@@ -17,6 +17,18 @@
     </div>
     <ul ref="dom_lists_list" class="scroll" :class="[$style.listsContent, { [$style.sortable]: isModDown }]">
       <li
+        class="default-list" :class="[$style.listsItem, {[$style.active]: webDAVList.id == listId}, {[$style.clicked]: rightClickItemIndex == -3}, {[$style.fetching]: fetchingListStatus[webDAVList.id]}]"
+        :aria-label="webDAVList.name" :aria-selected="webDAVList.id == listId"
+        @contextmenu="handleListsItemRigthClick($event, -3)" @click="handleListToggle(webDAVList.id)"
+      >
+        <span :class="$style.listsLabel">
+          <transition name="list-active">
+            <svg-icon v-if="webDAVList.id == listId" name="angle-right-solid" :class="$style.activeIcon" />
+          </transition>
+          {{ webDAVList.name }}
+        </span>
+      </li>
+      <li
         class="default-list" :class="[$style.listsItem, {[$style.active]: defaultList.id == listId}, {[$style.clicked]: rightClickItemIndex == -2}, {[$style.fetching]: fetchingListStatus[defaultList.id]}]"
         :aria-label="$t(defaultList.name)" :aria-selected="defaultList.id == listId"
         @contextmenu="handleListsItemRigthClick($event, -2)" @click="handleListToggle(defaultList.id)"
@@ -86,7 +98,7 @@ import DuplicateMusicModal from './components/DuplicateMusicModal.vue'
 import ListSortModal from './components/ListSortModal.vue'
 import ListUpdateModal from './components/ListUpdateModal.vue'
 
-import { defaultList, loveList, userLists, fetchingListStatus } from '@renderer/store/list/state'
+import { defaultList, loveList, webDAVList, userLists, fetchingListStatus } from '@renderer/store/list/state'
 import { removeUserList } from '@renderer/store/list/action'
 
 import { ref, watch } from '@common/utils/vueTools'
@@ -197,7 +209,7 @@ export default {
     }
 
     const handleMenuClick = (action) => {
-      if (rightClickItemIndex.value < -2) return
+      if (rightClickItemIndex.value < -3) return
       let index = rightClickItemIndex.value
       rightClickItemIndex.value = -10
       menuClick(action, index)
@@ -211,7 +223,7 @@ export default {
     })
 
     watch(() => userLists, (lists) => {
-      if (lists.some(l => l.id == props.listId)) return
+      if (props.listId == webDAVList.id || lists.some(l => l.id == props.listId)) return
       void router.replace({
         path: '/list',
         query: {
@@ -224,6 +236,7 @@ export default {
       rightClickItemIndex,
       defaultList,
       loveList,
+      webDAVList,
       userLists,
       fetchingListStatus,
       dom_lists_list,

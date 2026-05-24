@@ -626,6 +626,26 @@ declare global {
       'network.proxy.port': string
 
       /**
+       * WebDAV 音乐地址
+       */
+      'webdav.url': string
+
+      /**
+       * WebDAV 用户名
+       */
+      'webdav.username': string
+
+      /**
+       * WebDAV 密码
+       */
+      'webdav.password': string
+
+      /**
+       * 鍚姩鏃惰嚜鍔ㄦ洿鏂 WebDAV 浜戠洏鍒楄〃
+       */
+      'webdav.autoRefresh': boolean
+
+      /**
        * 是否启用托盘
        */
       'tray.enable': boolean

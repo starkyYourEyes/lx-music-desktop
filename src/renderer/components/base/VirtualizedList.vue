@@ -156,7 +156,8 @@ export default {
       return list
     }
 
-    const updateView = (currentScrollTop = dom_scrollContainer.value.scrollTop) => {
+    const updateView = (currentScrollTop = dom_scrollContainer.value?.scrollTop ?? 0) => {
+      if (!dom_scrollContainer.value) return
       // const currentScrollTop = this.$refs.dom_scrollContainer.scrollTop
       const itemHeight = props.itemHeight
       const currentStartIndex = Math.floor(currentScrollTop / itemHeight)
@@ -266,16 +267,21 @@ export default {
       return style
     })
 
+    const scheduleUpdateView = () => {
+      void nextTick(() => {
+        requestAnimationFrame(() => {
+          updateView()
+        })
+      })
+    }
+
     const handleReset = list => {
       cachedList = Array(list.length)
       startIndex = -1
       endIndex = -1
+      scrollTop = -1
       if (cachedList.length) {
-        void nextTick(() => {
-          requestAnimationFrame(() => {
-            updateView()
-          })
-        })
+        scheduleUpdateView()
       } else {
         views.value = []
       }
@@ -285,6 +291,9 @@ export default {
     })
     watch(() => props.list, (list) => {
       handleReset(list)
+    })
+    watch(() => props.list.length, () => {
+      handleReset(props.list)
     })
 
     onMounted(() => {
@@ -297,12 +306,7 @@ export default {
       endIndex = -1
 
       if (props.list.length) {
-        void nextTick(() => {
-          requestAnimationFrame(() => {
-            console.log('updateView')
-            updateView()
-          })
-        })
+        scheduleUpdateView()
       }
       window.addEventListener('resize', handleResize)
     })

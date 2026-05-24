@@ -17,6 +17,11 @@ import {
   getPicUrl as getLocalPicUrl,
   getLyricInfo as getLocalLyricInfo,
 } from './local'
+import {
+  getMusicUrl as getWebDAVMusicUrl,
+  getPicUrl as getWebDAVPicUrl,
+  getLyricInfo as getWebDAVLyricInfo,
+} from './webdav'
 
 
 export const getMusicUrl = async({
@@ -36,6 +41,8 @@ export const getMusicUrl = async({
     return getDownloadMusicUrl({ musicInfo, isRefresh, onToggleSource, allowToggleSource })
   } else if (musicInfo.source == 'local') {
     return getLocalMusicUrl({ musicInfo, isRefresh, onToggleSource, allowToggleSource })
+  } else if (musicInfo.source == 'webdav') {
+    return getWebDAVMusicUrl({ musicInfo, isRefresh })
   } else {
     return getOnlineMusicUrl({ musicInfo, isRefresh, quality, onToggleSource, allowToggleSource })
   }
@@ -56,6 +63,8 @@ export const getPicPath = async({
     return getDownloadPicUrl({ musicInfo, isRefresh, listId, onToggleSource })
   } else if (musicInfo.source == 'local') {
     return getLocalPicUrl({ musicInfo, isRefresh, listId, onToggleSource })
+  } else if (musicInfo.source == 'webdav') {
+    return getWebDAVPicUrl({ musicInfo, isRefresh, listId })
   } else {
     return getOnlinePicUrl({ musicInfo, isRefresh, listId, onToggleSource })
   }
@@ -74,6 +83,8 @@ export const getLyricInfo = async({
     return getDownloadLyricInfo({ musicInfo, isRefresh, onToggleSource })
   } else if (musicInfo.source == 'local') {
     return getLocalLyricInfo({ musicInfo, isRefresh, onToggleSource })
+  } else if (musicInfo.source == 'webdav') {
+    return getWebDAVLyricInfo({ musicInfo, isRefresh })
   } else {
     return getOnlineLyricInfo({ musicInfo, isRefresh, onToggleSource })
   }

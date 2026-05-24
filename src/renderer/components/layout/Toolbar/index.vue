@@ -23,9 +23,12 @@ import SearchInput from './SearchInput.vue'
   height: @height-toolbar;
   align-items: center;
   justify-content: space-between;
-  padding-left: 15px;
+  padding: 0 12px 0 18px;
   -webkit-app-region: drag;
   z-index: 2;
+  background-color: var(--color-surface-background);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid rgba(128, 128, 128, 0.1);
 
   &.fullscreen {
     -webkit-app-region: no-drag;

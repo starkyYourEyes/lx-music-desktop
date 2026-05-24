@@ -24,6 +24,11 @@ declare namespace LX {
       // list: LX.Music.MusicInfo[]
     }
 
+    interface MyWebDAVListInfo {
+      id: 'webdav'
+      name: '我的云盘'
+    }
+
     interface MyTempListInfo {
       id: 'temp'
       name: '临时列表'
@@ -34,7 +39,7 @@ declare namespace LX {
       }
     }
 
-    type MyListInfo = MyDefaultListInfo | MyLoveListInfo | UserListInfo
+    type MyListInfo = MyDefaultListInfo | MyLoveListInfo | MyWebDAVListInfo | UserListInfo
 
     interface MyAllList {
       defaultList: MyDefaultListInfo

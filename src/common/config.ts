@@ -39,8 +39,8 @@ export const windowSizeList: WindowSize[] = [
   {
     id: 5,
     name: 'oversized',
-    width: 1385,
-    height: 896,
+    width: 1440,
+    height: 840,
   },
   {
     id: 6,

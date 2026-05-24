@@ -54,7 +54,6 @@ export default () => {
   })
   const rOnWaiting = onWaiting(() => {
     console.log('onWaiting')
-    window.app_event.pause()
     window.app_event.playerWaiting()
   })
 

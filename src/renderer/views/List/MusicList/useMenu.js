@@ -2,8 +2,10 @@ import { computed, ref, shallowReactive, reactive, nextTick } from '@common/util
 import musicSdk from '@renderer/utils/musicSdk'
 import { useI18n } from '@renderer/plugins/i18n'
 import { hasDislike } from '@renderer/core/dislikeList'
+import { LIST_IDS } from '@common/constants'
 
 export default ({
+  props,
   assertApiSupport,
   emit,
 
@@ -104,10 +106,15 @@ export default ({
   })
 
   const showMenu = (event, musicInfo) => {
+    const isWebDAVList = props.listId == LIST_IDS.WEBDAV
     itemMenuControl.sourceDetail = !!musicSdk[musicInfo.source]?.getMusicDetailPageUrl
     // itemMenuControl.play =
     //   itemMenuControl.playLater =
-    itemMenuControl.download = assertApiSupport(musicInfo.source) && musicInfo.source != 'local'
+    itemMenuControl.download = !isWebDAVList && assertApiSupport(musicInfo.source) && musicInfo.source != 'local' && musicInfo.source != 'webdav'
+    itemMenuControl.moveTo = !isWebDAVList
+    itemMenuControl.sort = !isWebDAVList
+    itemMenuControl.toggleSource = !isWebDAVList
+    itemMenuControl.remove = !isWebDAVList
 
     itemMenuControl.dislike = !hasDislike(musicInfo)
 

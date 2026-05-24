@@ -21,6 +21,7 @@ transition(enter-active-class="animated slideInRight" leave-active-class="animat
       music-comment(v-if="visibled" :class="$style.comment" :show="isShowPlayComment" :music-info="playMusicInfo.musicInfo" @close="hideComment")
     transition(enter-active-class="animated fadeIn" leave-active-class="animated fadeOut")
       play-bar(v-if="visibled")
+    PartyModal
     transition(enter-active-class="animated-slow fadeIn" leave-active-class="animated-slow fadeOut")
       common-audio-visualizer(v-if="appSetting['player.audioVisualization'] && visibled")
 </template>
@@ -42,6 +43,7 @@ import {
 } from '@renderer/store/player/action'
 import LyricPlayer from './LyricPlayer.vue'
 import PlayBar from './PlayBar.vue'
+import PartyModal from './PartyModal.vue'
 import MusicComment from './components/MusicComment/index.vue'
 import ControlBtnsLeftHeader from './ControlBtnsLeftHeader.vue'
 import ControlBtnsRightHeader from './ControlBtnsRightHeader.vue'
@@ -56,6 +58,7 @@ export default {
     ControlBtnsRightHeader,
     LyricPlayer,
     PlayBar,
+    PartyModal,
     MusicComment,
   },
   setup() {

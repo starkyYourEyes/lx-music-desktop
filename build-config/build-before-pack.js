@@ -2,7 +2,6 @@ const fs = require('fs')
 const fsPromises = require('fs').promises
 const path = require('path')
 const { Arch } = require('electron-builder')
-const nodeAbi = require('node-abi')
 
 const better_sqlite3_fileNameMap = {
   [Arch.x64]: 'linux-x64',
@@ -54,6 +53,7 @@ const replaceQrcDecodeLib = async(electronNodeAbi, platform, arch) => {
 module.exports = async(context) => {
   const { electronPlatformName, arch } = context
   const electronVersion = context.packager?.info?._framework?.version ?? require('../package.json').devDependencies.electron.replace(/^[^\d]*?(\d+)/, '$1')
+  const nodeAbi = await import('node-abi')
   const electronNodeAbi = nodeAbi.getAbi(electronVersion, 'electron')
   await replaceQrcDecodeLib(electronNodeAbi, electronPlatformName, arch)
   if (electronPlatformName !== 'linux' || process.env.FORCE) return

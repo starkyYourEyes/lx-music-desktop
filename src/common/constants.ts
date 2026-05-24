@@ -28,6 +28,7 @@ export const LIST_IDS = {
   LOVE: 'love',
   TEMP: 'temp',
   DOWNLOAD: 'download',
+  WEBDAV: 'webdav',
   PLAY_LATER: null,
 } as const
 
@@ -43,6 +44,7 @@ export const DATA_KEYS = {
   leaderboardSetting: 'leaderboardSetting',
   songListSetting: 'songListSetting',
   searchSetting: 'searchSetting',
+  neteaseAccount: 'neteaseAccount',
 
   lastStartInfo: 'lastStartInfo',
 } as const

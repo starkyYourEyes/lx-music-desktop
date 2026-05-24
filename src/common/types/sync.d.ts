@@ -75,11 +75,172 @@ declare namespace LX {
     interface DislikeConfig {
       skipSnapshot: boolean
     }
+    type PartyConfig = Record<string, never>
     type ServerType = 'desktop-app' | 'server'
     interface EnabledFeatures {
       list?: false | ListConfig
       dislike?: false | DislikeConfig
+      party?: false | PartyConfig
     }
     type SupportedFeatures = Partial<{ [k in keyof EnabledFeatures]: number }>
+  }
+
+  namespace Party {
+    type RoomControlMode = 'host' | 'all'
+
+    interface OperatorInfo {
+      clientId: string
+      userName: string
+      deviceName: string
+      displayName: string
+    }
+
+    interface Member {
+      clientId: string
+      userName: string
+      deviceName: string
+      displayName: string
+      isHost: boolean
+      isOnline: boolean
+      isReady: boolean
+      isLoading: boolean
+      joinedAt: number
+      lastSeenAt: number
+    }
+
+    interface QueueItem {
+      id: string
+      musicInfo: LX.Music.MusicInfo
+      addedAt: number
+      requestedBy: OperatorInfo
+    }
+
+    interface QueueItemInput {
+      id?: string
+      musicInfo: LX.Music.MusicInfo
+    }
+
+    interface PlaybackState {
+      currentMusic: LX.Music.MusicInfo | null
+      currentIndex: number
+      queue: QueueItem[]
+      playing: boolean
+      progress: number
+      progressAt: number
+      duration: number | null
+      rate: number
+      version: number
+      updatedAt: number
+      operator: OperatorInfo | null
+    }
+
+    interface PlaybackUpdateInput {
+      currentMusic?: LX.Music.MusicInfo | null
+      currentIndex?: number
+      playing?: boolean
+      progress?: number
+      progressAt?: number
+      duration?: number | null
+      rate?: number
+      queue?: QueueItemInput[]
+    }
+
+    interface RoomSettings {
+      controlMode: RoomControlMode
+      maxMembers: number
+      hasPassword?: boolean
+      [key: string]: unknown
+    }
+
+    interface RoomSnapshot {
+      roomId: string
+      roomCode: string
+      name: string
+      ownerClientId: string
+      members: Member[]
+      settings: RoomSettings
+      playback: PlaybackState
+      createdAt: number
+      updatedAt: number
+    }
+
+    interface RoomSummary {
+      roomId: string
+      roomCode: string
+      name: string
+      ownerClientId: string
+      ownerName: string
+      memberCount: number
+      onlineCount: number
+      maxMembers: number
+      hasPassword: boolean
+      controlMode: RoomControlMode
+      currentMusic: LX.Music.MusicInfo | null
+      playing: boolean
+    }
+
+    interface RoomCreateInput {
+      name?: string
+      roomCode?: string
+      password?: string
+      controlMode?: RoomControlMode
+      maxMembers?: number
+      displayName?: string
+    }
+
+    interface RoomJoinInput {
+      roomId?: string
+      roomCode?: string
+      password?: string
+      displayName?: string
+    }
+
+    interface MemberUpdateInput {
+      displayName?: string
+      isReady?: boolean
+      isLoading?: boolean
+    }
+
+    type SyncReason =
+      | 'initial_sync'
+      | 'room_created'
+      | 'room_joined'
+      | 'room_left'
+      | 'room_dismissed'
+      | 'room_updated'
+      | 'owner_transferred'
+      | 'member_updated'
+      | 'member_removed'
+      | 'member_online'
+      | 'member_offline'
+      | 'playback_updated'
+      | 'queue_updated'
+      | 'heartbeat'
+
+    interface SyncAction {
+      action: 'party_room_state'
+      data: {
+        reason: SyncReason
+        room: RoomSnapshot | null
+      }
+    }
+
+    interface StatePayload {
+      room: RoomSnapshot | null
+      selfClientId: string | null
+    }
+
+    type MainWindowActions = LX.Sync.SyncAction<'state', StatePayload>
+
+    type ServiceActions =
+      | LX.Sync.SyncAction<'get_state'>
+      | LX.Sync.SyncAction<'create_room', RoomCreateInput>
+      | LX.Sync.SyncAction<'join_room', RoomJoinInput>
+      | LX.Sync.SyncAction<'leave_room'>
+      | LX.Sync.SyncAction<'dismiss_room'>
+      | LX.Sync.SyncAction<'sync_playback', PlaybackUpdateInput>
+      | LX.Sync.SyncAction<'queue_append', QueueItemInput[]>
+      | LX.Sync.SyncAction<'queue_remove', string[]>
+      | { action: 'ping', data?: MemberUpdateInput }
   }
 }

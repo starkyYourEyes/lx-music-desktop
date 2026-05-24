@@ -1,6 +1,7 @@
 import { toRaw } from '@common/utils/vueTools'
 import { rendererInvoke, rendererOff, rendererOn } from '@common/rendererIpc'
 import { PLAYER_EVENT_NAME } from '@common/ipcNames'
+import { LIST_IDS } from '@common/constants'
 import {
   userListCreate,
   listDataOverwrite,
@@ -69,6 +70,7 @@ export const updateUserListPosition = async(data: LX.List.ListActionUpdatePositi
 export const getListMusics = async(listId: string | null): Promise<LX.Music.MusicInfo[]> => {
   if (!listId) return []
   if (allMusicList.has(listId)) return allMusicList.get(listId)!
+  if (listId == LIST_IDS.WEBDAV) return setMusicList(listId, [])
   const list = await rendererInvoke<string, LX.Music.MusicInfo[]>(PLAYER_EVENT_NAME.list_music_get, listId)
   return setMusicList(listId, list)
 }
@@ -118,6 +120,11 @@ export const updateListMusicsPosition = async(data: LX.List.ListActionMusicUpdat
  * @param data
  */
 export const overwriteListMusics = async(data: LX.List.ListActionMusicOverwrite) => {
+  if (data.listId == LIST_IDS.WEBDAV) {
+    const updatedListIds = listMusicOverwrite(data.listId, data.musicInfos)
+    if (updatedListIds.length) window.app_event.myListUpdate(updatedListIds)
+    return
+  }
   await rendererInvoke<LX.List.ListActionMusicOverwrite>(PLAYER_EVENT_NAME.list_music_overwrite, data)
 }
 

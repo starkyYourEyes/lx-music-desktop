@@ -1,7 +1,7 @@
 import { getPlayInfo } from '@renderer/utils/ipc'
 import music from '@renderer/utils/musicSdk'
 import { log } from '@common/utils'
-import { getListMusics, getUserLists, registerAction } from '@renderer/store/list/action'
+import { getListMusics, getUserLists, refreshWebDAVList, registerAction } from '@renderer/store/list/action'
 
 
 import useInitUserApi from './useInitUserApi'
@@ -51,6 +51,11 @@ export default () => {
       window.app_event.myListUpdate(ids)
     })
     window.lxData.userLists = await getUserLists() // 获取用户列表
+    if (appSetting['webdav.autoRefresh']) {
+      void refreshWebDAVList().catch(err => {
+        log.error(err)
+      })
+    }
     unregisterDislikeEvent = registerRemoteDislikeAction()
     await initDislikeInfo() // 获取不喜欢列表
     await initPrevPlayInfo().catch(err => {

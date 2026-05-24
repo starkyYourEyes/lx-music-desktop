@@ -26,6 +26,18 @@ type PlayerMusicInfoKeys = keyof typeof musicInfo
 
 const musicInfoKeys: PlayerMusicInfoKeys[] = Object.keys(musicInfo) as PlayerMusicInfoKeys[]
 
+const createMusicIdentity = (musicInfo: LX.Download.ListItem | LX.Music.MusicInfo | null) => {
+  if (!musicInfo) return ''
+  const targetMusicInfo = 'progress' in musicInfo ? musicInfo.metadata.musicInfo : musicInfo
+  return `${targetMusicInfo.source}:${targetMusicInfo.id}`
+}
+
+const getInitialPicUrl = (musicInfo: LX.Music.MusicInfo) => {
+  const picUrl = musicInfo.meta.picUrl
+  if (musicInfo.source == 'webdav' && picUrl?.startsWith('webdav:')) return null
+  return picUrl
+}
+
 export const setMusicInfo = (_musicInfo: Partial<PlayerMusicInfo>) => {
   for (const key of musicInfoKeys) {
     const val = _musicInfo[key]
@@ -107,8 +119,8 @@ export const getPlayIndex = (listId: string | null, musicInfo: LX.Download.ListI
 
   const list = getList(listId)
   if (list.length && musicInfo) {
-    const currentId = musicInfo.id
-    playIndex = list.findIndex(m => m.id == currentId)
+    const currentIdentity = createMusicIdentity(musicInfo)
+    playIndex = list.findIndex(m => createMusicIdentity(m) == currentIdentity)
     if (!isTempPlay) {
       if (playIndex < 0) {
         playerPlayIndex = playerPlayIndex < 1 ? (list.length - 1) : (playerPlayIndex - 1)
@@ -143,7 +155,7 @@ const setPlayerMusicInfo = (musicInfo: LX.Music.MusicInfo | LX.Download.ListItem
   if (musicInfo) {
     setMusicInfo('progress' in musicInfo ? {
       id: musicInfo.id,
-      pic: musicInfo.metadata.musicInfo.meta.picUrl,
+      pic: getInitialPicUrl(musicInfo.metadata.musicInfo),
       name: musicInfo.metadata.musicInfo.name,
       singer: musicInfo.metadata.musicInfo.singer,
       album: musicInfo.metadata.musicInfo.meta.albumName ?? '',
@@ -154,7 +166,7 @@ const setPlayerMusicInfo = (musicInfo: LX.Music.MusicInfo | LX.Download.ListItem
       rawlrc: null,
     } : {
       id: musicInfo.id,
-      pic: musicInfo.meta.picUrl,
+      pic: getInitialPicUrl(musicInfo),
       name: musicInfo.name,
       singer: musicInfo.singer,
       album: musicInfo.meta.albumName ?? '',

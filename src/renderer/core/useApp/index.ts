@@ -12,6 +12,7 @@ import useHandleEnvParams from './useHandleEnvParams'
 import useEventListener from './useEventListener'
 import useDeeplink from './useDeeplink'
 import usePlayer from './usePlayer'
+import useParty from './useParty'
 import useSettingSync from './useSettingSync'
 import { useRouter } from '@common/utils/vueRouter'
 import handleListAutoUpdate from './listAutoUpdate'
@@ -31,6 +32,7 @@ export default () => {
   const initStatusbarLyric = useStatusbarLyric()
   useEventListener()
   const initPlayer = usePlayer()
+  const initParty = useParty()
   const handleEnvParams = useHandleEnvParams()
   const initData = useDataInit()
   const initDeeplink = useDeeplink()
@@ -63,6 +65,7 @@ export default () => {
     // 初始化我的列表、下载列表等数据
     void initData().then(() => {
       initPlayer()
+      void initParty()
       handleEnvParams(envParams) // 处理传入的启动参数
       void initDeeplink(envParams)
       void initSyncService()

@@ -1,8 +1,79 @@
 /* eslint-disable no-template-curly-in-string */
 
 const builder = require('electron-builder')
+const fs = require('fs')
+const path = require('path')
 const beforePack = require('./build-before-pack')
 const afterPack = require('./build-after-pack')
+
+const findPackageJson = (startPath) => {
+  let dir = fs.statSync(startPath).isDirectory() ? startPath : path.dirname(startPath)
+
+  while (dir != path.dirname(dir)) {
+    const packageJsonPath = path.join(dir, 'package.json')
+    if (fs.existsSync(packageJsonPath)) return packageJsonPath
+    dir = path.dirname(dir)
+  }
+
+  return null
+}
+
+const resolvePackageJson = (packageName, paths) => {
+  try {
+    return require.resolve(`${packageName}/package.json`, { paths })
+  } catch (error) {}
+
+  try {
+    const entryPath = require.resolve(packageName, { paths })
+    const packageJsonPath = findPackageJson(entryPath)
+    if (packageJsonPath) return packageJsonPath
+  } catch (error) {}
+
+  for (const searchPath of paths) {
+    const packageJsonPath = path.join(searchPath, 'node_modules', ...packageName.split('/'), 'package.json')
+    if (fs.existsSync(packageJsonPath)) return packageJsonPath
+  }
+
+  return null
+}
+
+const getPackageFiles = (packageName) => {
+  const files = []
+  const pending = [{ name: packageName, paths: [process.cwd()] }]
+  const seen = new Set()
+
+  while (pending.length) {
+    const { name, paths } = pending.shift()
+    const packageJsonPath = resolvePackageJson(name, paths)
+    if (!packageJsonPath) {
+      console.warn(`Skip missing package: ${name}`)
+      continue
+    }
+
+    const packageDir = path.dirname(packageJsonPath)
+    const packageDirs = [packageDir]
+    const rootPackageJsonPath = resolvePackageJson(name, [process.cwd()])
+    if (rootPackageJsonPath) packageDirs.push(path.dirname(rootPackageJsonPath))
+
+    for (const currentPackageDir of packageDirs) {
+      if (seen.has(currentPackageDir)) continue
+      seen.add(currentPackageDir)
+      const filePattern = path.relative(process.cwd(), currentPackageDir).replace(/\\/g, '/')
+      files.push(filePattern, `${filePattern}/**/*`)
+    }
+
+    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'))
+    const childPaths = [packageDir, ...paths]
+    for (const dependencyName of [
+      ...Object.keys(packageJson.dependencies ?? {}),
+      ...Object.keys(packageJson.optionalDependencies ?? {}),
+    ]) {
+      pending.push({ name: dependencyName, paths: childPaths })
+    }
+  }
+
+  return files
+}
 
 /**
 * @type {import('electron-builder').Configuration}
@@ -11,6 +82,10 @@ const afterPack = require('./build-after-pack')
 const options = {
   appId: 'cn.toside.music.desktop',
   productName: 'lx-music-desktop',
+  electronDist: './node_modules/electron/dist',
+  toolsets: {
+    winCodeSign: '1.1.0',
+  },
   beforePack,
   afterPack,
   protocols: {
@@ -35,6 +110,7 @@ const options = {
     'node_modules/node-gyp-build',
     'node_modules/bufferutil',
     'node_modules/utf-8-validate',
+    ...getPackageFiles('NeteaseCloudMusicApi'),
     'build/Release/qrc_decode.node',
     'dist/**/*',
   ],

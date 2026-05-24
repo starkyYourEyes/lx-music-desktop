@@ -20,12 +20,12 @@ export default {
   },
   async beforeRouteEnter(to, from, next) {
     let id = to.query.id
-    if (!id) {
+    if (!id || id == LIST_IDS.DEFAULT || id == LIST_IDS.WEBDAV) {
       id = await getListPrevSelectId()
-      id ||= LIST_IDS.DEFAULT
+      if (!id || id == LIST_IDS.DEFAULT || id == LIST_IDS.WEBDAV) id = LIST_IDS.LOVE
       next({
         path: to.path,
-        query: { id },
+        query: { ...to.query, id },
       })
     } else next()
   },
@@ -34,6 +34,7 @@ export default {
     if (to.query.updated) return
     let id = to.query.id
     if (id == null) return
+    if (id == LIST_IDS.DEFAULT || id == LIST_IDS.WEBDAV) id = LIST_IDS.LOVE
     // if (!getList(id)) {
     //   id = defaultList.id
     // }
@@ -56,7 +57,8 @@ export default {
     }
   },
   created() {
-    this.listId = this.$route.query.id
+    const id = this.$route.query.id
+    this.listId = id == LIST_IDS.DEFAULT || id == LIST_IDS.WEBDAV ? LIST_IDS.LOVE : id
   },
 }
 </script>

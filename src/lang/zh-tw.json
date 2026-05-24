@@ -106,6 +106,13 @@
   "list__pause": "暫停任務",
   "list__play": "播放",
   "list__play_later": "稍後播放",
+  "list_profile__created_at": "建立",
+  "list_profile__description": "簡介：",
+  "list_profile__description_placeholder": "介紹一下這個歌單...",
+  "list_profile__edit_title": "編輯歌單資訊",
+  "list_profile__name": "名稱：",
+  "list_profile__play_all": "播放全部",
+  "list_profile__select_cover": "選擇封面",
   "list__remove": "移除",
   "list__remove_tip": "你真的想要移除「{name}」嗎？",
   "list__remove_tip_button": "是的，沒錯",
@@ -358,6 +365,7 @@
   "setting__basic_to_tray": "關閉視窗時不退出軟體將其最小化到系統匣",
   "setting__basic_window_size": "視窗尺寸",
   "setting__basic_window_size_big": "大",
+  "setting__basic_window_size_extraHuge": "特大",
   "setting__basic_window_size_huge": "巨大",
   "setting__basic_window_size_larger": "更大",
   "setting__basic_window_size_medium": "中",
@@ -481,6 +489,8 @@
   "setting__list_click_action": "雙擊清單裡的歌曲時自動切換到目前清單播放（僅對「歌單」、「排行榜」有效）",
   "setting__list_scroll": "記住播放清單滾動條位置（僅對「我的清單」有效）",
   "setting__list_source": "顯示歌曲來自哪個音樂串流平台（僅對「我的清單」有效）",
+  "setting__list_my_list_sidebar_scale": "我的清單側邊欄縮放",
+  "setting__list_playlist_profile_scale": "歌單詳情頂部縮放",
   "setting__network": "網路設定",
   "setting__network_proxy_host": "主機",
   "setting__network_proxy_password": "密碼",
@@ -752,5 +762,6 @@
   "user_api_import_online__input_confirm": "匯入",
   "user_api_import_online__input_loading": "匯入中...",
   "user_api_import_online__input_tip": "請輸入 HTTP 連結",
-  "user_api_import_online__title": "從線上匯入自訂來源 API"
+  "user_api_import_online__title": "從線上匯入自訂來源 API",
+  "cloud_disk": "\u6211\u7684\u96f2\u76e4"
 }

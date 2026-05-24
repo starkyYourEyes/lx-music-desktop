@@ -18,6 +18,7 @@ export default () => {
   })
   watch(() => setting['desktopLyric.direction'], (direction) => {
     setVertical(direction == 'vertical')
+    setLyric()
     // if (isPlay.value)
   })
 }

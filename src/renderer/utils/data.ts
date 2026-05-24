@@ -122,6 +122,16 @@ export const setListUpdateTime = async(id: string, time: number) => {
   listUpdateInfo[id] = targetInfo
   saveListUpdateInfo()
 }
+export const setUserListProfile = async(id: string, profile: LX.List.UserListProfile) => {
+  await initListUpdateInfo()
+  const targetInfo = listUpdateInfo[id] ?? { updateTime: 0, isAutoUpdate: false }
+  targetInfo.profile = {
+    ...targetInfo.profile,
+    ...profile,
+  }
+  listUpdateInfo[id] = targetInfo
+  saveListUpdateInfo()
+}
 // export const setListUpdateInfo = (id, { updateTime, isAutoUpdate }) => {
 //   listUpdateInfo[id] = { updateTime, isAutoUpdate }
 //   saveListUpdateInfo()

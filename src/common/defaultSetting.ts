@@ -108,6 +108,8 @@ const defaultSetting: LX.AppSetting = {
   'list.isSaveScrollLocation': true,
   'list.addMusicLocationType': 'top',
   'list.actionButtonsVisible': false,
+  'list.myListSidebarScale': 90,
+  'list.playlistProfileScale': 85,
 
   'download.enable': false,
   'download.isSavePathGroupByListName': false,

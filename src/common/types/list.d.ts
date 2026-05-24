@@ -10,6 +10,12 @@ declare namespace LX {
       locationUpdateTime: number | null
     }
 
+    interface UserListProfile {
+      description?: string
+      coverUrl?: string
+      createdAt?: number
+    }
+
     interface MyDefaultListInfo {
       id: 'default'
       name: 'list__name_default'
@@ -54,6 +60,7 @@ declare namespace LX {
     type ListUpdateInfo = Record<string, {
       updateTime: number
       isAutoUpdate: boolean
+      profile?: UserListProfile
     }>
 
     type ListSaveType = 'myList' | 'downloadList'

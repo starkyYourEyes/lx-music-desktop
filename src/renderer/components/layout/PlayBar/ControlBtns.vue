@@ -26,7 +26,8 @@
       </svg>
     </button>
     <common-volume-btn v-if="showVolume" compact-player />
-    <common-toggle-play-mode-btn v-if="showPlayMode" />
+    <common-private-fm-mode-btn v-if="showPlayMode && isPrivateFmMode" />
+    <common-toggle-play-mode-btn v-else-if="showPlayMode" />
     <common-list-add-modal v-if="showAddTo" v-model:show="isShowAddMusicTo" :music-info="playMusicInfo.musicInfo" />
   </div>
 </template>
@@ -39,6 +40,7 @@ import { appSetting } from '@renderer/store/setting'
 import { loveList } from '@renderer/store/list/state'
 import { addListMusics, checkListExistMusic, removeListMusics } from '@renderer/store/list/action'
 import { LIST_IDS } from '@common/constants'
+import { isPrivateFmMode } from '@renderer/store/privateFm/state'
 
 export default {
   props: {
@@ -152,6 +154,7 @@ export default {
       addMusicTo,
       toggleCollect,
       playMusicInfo,
+      isPrivateFmMode,
     }
   },
 }
@@ -175,13 +178,13 @@ export default {
 
 .compact {
   height: 32px;
-  gap: 8px;
+  gap: 10px;
 }
 
 .titleBtn {
   flex: none;
   height: 32px;
-  width: 24px;
+  width: 30px;
   transition: @transition-fast;
   transition-property: color, opacity, background-color;
   // color: var(--color-button-font);

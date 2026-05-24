@@ -31,6 +31,14 @@ const router = createRouter({
       },
     },
     {
+      path: '/cloud-disk',
+      name: 'CloudDisk',
+      component: require('./views/CloudDisk/index.vue').default,
+      meta: {
+        name: 'CloudDisk',
+      },
+    },
+    {
       path: '/songList/list',
       name: 'SongList',
       component: require('./views/songList/List/index.vue').default,

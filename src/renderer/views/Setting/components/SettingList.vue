@@ -20,6 +20,32 @@ dd(:aria-label="$t('setting__basic_sourcename_title')")
       id="setting_list_add_music_location_type_bottom" name="setting_list_add_music_location_type" need
       :model-value="appSetting['list.addMusicLocationType']" value="bottom" :label="$t('setting__list_add_music_location_type_bottom')"
       @update:model-value="updateSetting({'list.addMusicLocationType': $event})")
+dd
+  h3#list_my_list_sidebar_scale {{ $t('setting__list_my_list_sidebar_scale') }}
+  div
+    .p(:class="$style.scaleControl")
+      input(
+        :class="$style.scaleRange" type="range" min="70" max="130" step="5"
+        :value="appSetting['list.myListSidebarScale']"
+        @input="handleSidebarScaleChange")
+      base-input.gap-left(
+        :class="$style.scaleInput" type="number"
+        :model-value="appSetting['list.myListSidebarScale']"
+        @change="handleSidebarScaleChange")
+      span(:class="$style.scaleUnit") %
+dd
+  h3#list_playlist_profile_scale {{ $t('setting__list_playlist_profile_scale') }}
+  div
+    .p(:class="$style.scaleControl")
+      input(
+        :class="$style.scaleRange" type="range" min="60" max="140" step="5"
+        :value="appSetting['list.playlistProfileScale']"
+        @input="handlePlaylistProfileScaleChange")
+      base-input.gap-left(
+        :class="$style.scaleInput" type="number"
+        :model-value="appSetting['list.playlistProfileScale']"
+        @change="handlePlaylistProfileScaleChange")
+      span(:class="$style.scaleUnit") %
 
 </template>
 
@@ -27,13 +53,54 @@ dd(:aria-label="$t('setting__basic_sourcename_title')")
 // import { ref, onBeforeUnmount } from '@common/utils/vueTools'
 import { appSetting, updateSetting } from '@renderer/store/setting'
 
+const normalizeSidebarScale = value => {
+  const num = Math.round(Number(value) || 90)
+  return Math.min(130, Math.max(70, num))
+}
+const normalizePlaylistProfileScale = value => {
+  const num = Math.round(Number(value) || 85)
+  return Math.min(140, Math.max(60, num))
+}
+
 export default {
   name: 'SettingList',
   setup() {
+    const handleSidebarScaleChange = value => {
+      updateSetting({ 'list.myListSidebarScale': normalizeSidebarScale(value?.target ? value.target.value : value) })
+    }
+    const handlePlaylistProfileScaleChange = value => {
+      updateSetting({ 'list.playlistProfileScale': normalizePlaylistProfileScale(value?.target ? value.target.value : value) })
+    }
+
     return {
       appSetting,
       updateSetting,
+      handleSidebarScaleChange,
+      handlePlaylistProfileScaleChange,
     }
   },
 }
 </script>
+
+<style lang="less" module>
+@import '@renderer/assets/styles/layout.less';
+
+.scaleControl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.scaleRange {
+  width: 180px;
+  max-width: 36vw;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+}
+.scaleInput {
+  width: 62px;
+  text-align: center;
+}
+.scaleUnit {
+  color: var(--color-label);
+}
+</style>

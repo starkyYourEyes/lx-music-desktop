@@ -34,14 +34,28 @@
       <div v-if="!playlistNoItemText" ref="playlistScrollRef" :class="$style.playlistScroll" class="scroll">
         <div :class="$style.playlistGrid">
           <button
-            v-for="playlist in recommendPlaylists"
+            v-for="playlist in displayedPlaylists"
             :key="playlist.id"
-            :class="$style.playlistCard"
+            :class="[$style.playlistCard, { [$style.privateFmCard]: playlist.isPrivateFm }]"
             type="button"
             @click="handleOpenPlaylist(playlist)"
           >
             <span :class="$style.coverWrap">
               <img :class="$style.cover" loading="lazy" decoding="async" :src="playlist.img" draggable="false">
+              <button
+                v-if="playlist.isPrivateFm"
+                type="button"
+                :class="$style.fmPlayBtn"
+                :aria-label="isPrivateFmPlaying ? '暂停私人 FM' : '播放私人 FM'"
+                @click.stop="handleTogglePrivateFm"
+              >
+                <svg v-if="isPrivateFmPlaying" version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024" space="preserve">
+                  <use xlink:href="#icon-pause" />
+                </svg>
+                <svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024" space="preserve">
+                  <use xlink:href="#icon-play" />
+                </svg>
+              </button>
               <span v-if="playlist.play_count" :class="$style.playCount">
                 <svg-icon name="headphones" />
                 {{ playlist.play_count }}
@@ -72,10 +86,15 @@ import {
   profile,
   setNeteaseAccountStatus,
 } from '@renderer/store/netease'
+import { isPlay } from '@renderer/store/player/state'
+import { enterPrivateFmMode, refreshPrivateFmQueue } from '@renderer/store/privateFm/action'
+import { isLoadingPrivateFm, isPrivateFmMode, privateFmQueue } from '@renderer/store/privateFm/state'
+import { pause, play } from '@renderer/core/player'
 
 const LOGIN_QR_PENDING_CODES = new Set([801, 802])
 const HOME_PLAYLIST_LIMIT = 10
 const EXPLORE_PLAYLIST_LIMIT = 100
+const PRIVATE_FM_CARD_ID = 'private_fm'
 
 const route = useRoute()
 const router = useRouter()
@@ -97,6 +116,32 @@ const isExploreMode = computed(() => route.query.category === 'playlists')
 const playlistLimit = computed(() => isExploreMode.value ? EXPLORE_PLAYLIST_LIMIT : HOME_PLAYLIST_LIMIT)
 const pageTitle = computed(() => isExploreMode.value ? '更多推荐' : '推荐歌单')
 const pageSubTitle = computed(() => isLoggedIn.value ? profileNickname.value : '登录后获取每日推荐歌单，当前展示公开推荐')
+
+const firstPrivateFmSong = computed(() => privateFmQueue[0] ?? null)
+const privateFmCard = computed((): (LX.Netease.Playlist & { isPrivateFm: true }) | null => {
+  const song = firstPrivateFmSong.value
+  if (!song) return null
+  return {
+    id: PRIVATE_FM_CARD_ID,
+    source: 'wy',
+    play_count: '',
+    author: song.singer,
+    name: `从《${song.name}》开始漫游`,
+    time: '',
+    img: song.meta.picUrl ?? '',
+    desc: song.singer || '私人 FM',
+    total: '',
+    isPrivateFm: true,
+  }
+})
+const displayedPlaylists = computed(() => {
+  const list = [...recommendPlaylists.value] as Array<LX.Netease.Playlist & { isPrivateFm?: boolean }>
+  if (isExploreMode.value || !privateFmCard.value) return list
+  if (list.length >= 2) list.splice(1, 1, privateFmCard.value)
+  else list.push(privateFmCard.value)
+  return list
+})
+const isPrivateFmPlaying = computed(() => isPrivateFmMode.value && isPlay.value)
 
 const playlistNoItemText = computed(() => {
   if (isLoadingPlaylists.value) return '推荐歌单加载中...'
@@ -184,7 +229,17 @@ const loadRecommendPlaylists = async() => {
   isLoadingPlaylists.value = true
   playlistLoadError.value = ''
   try {
-    recommendPlaylists.value = await getNeteaseRecommendPlaylists(playlistLimit.value, isExploreMode.value)
+    const tasks: Array<Promise<unknown>> = [
+      getNeteaseRecommendPlaylists(playlistLimit.value, isExploreMode.value).then(list => {
+        recommendPlaylists.value = list
+      }),
+    ]
+    if (!isExploreMode.value && isLoggedIn.value) {
+      tasks.push(refreshPrivateFmQueue().catch(err => {
+        console.warn('Load private FM failed:', err)
+      }))
+    }
+    await Promise.all(tasks)
     setTimeout(() => {
       playlistScrollRef.value?.scrollTo({ top: 0 })
     })
@@ -208,7 +263,11 @@ const handleShowAll = () => {
   })
 }
 
-const handleOpenPlaylist = (playlist: LX.Netease.Playlist) => {
+const handleOpenPlaylist = (playlist: LX.Netease.Playlist & { isPrivateFm?: boolean }) => {
+  if (playlist.isPrivateFm) {
+    void handleTogglePrivateFm()
+    return
+  }
   void router.push({
     path: '/songList/detail',
     query: {
@@ -218,6 +277,23 @@ const handleOpenPlaylist = (playlist: LX.Netease.Playlist) => {
       fromName: route.name as string,
     },
   })
+}
+
+const handleTogglePrivateFm = async() => {
+  if (isPrivateFmPlaying.value) {
+    pause()
+    return
+  }
+  if (isPrivateFmMode.value) {
+    play()
+    return
+  }
+  if (isLoadingPrivateFm.value) return
+  try {
+    await enterPrivateFmMode()
+  } catch (err: any) {
+    playlistLoadError.value = err?.message ?? '私人 FM 加载失败'
+  }
 }
 
 watch(isExploreMode, () => {
@@ -354,6 +430,22 @@ onBeforeUnmount(() => {
   }
 }
 
+.privateFmCard {
+  .coverWrap {
+    box-shadow: 0 12px 28px rgba(0, 0, 0, .16);
+
+    &:after {
+      .mixin-after();
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(180deg, rgba(0, 0, 0, .04), rgba(0, 0, 0, .22));
+      pointer-events: none;
+    }
+  }
+}
+
 .coverWrap {
   position: relative;
   display: block;
@@ -362,6 +454,42 @@ onBeforeUnmount(() => {
   overflow: hidden;
   background-color: rgba(0, 0, 0, .08);
   box-shadow: 0 0 2px 0 rgba(0, 0, 0, .18);
+}
+
+.fmPlayBtn {
+  position: absolute;
+  z-index: 2;
+  right: 10px;
+  bottom: 10px;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  padding: 9px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background-color: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  filter: drop-shadow(0 2px 5px rgba(0, 0, 0, .42));
+  transition: transform @transition-fast, opacity @transition-fast;
+
+  svg {
+    width: 100%;
+    height: 100%;
+    fill: currentColor;
+  }
+
+  &:hover {
+    opacity: .94;
+    transform: scale(1.06);
+  }
+
+  &:active {
+    transform: scale(.98);
+  }
 }
 
 .cover {

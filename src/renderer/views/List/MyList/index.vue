@@ -1,5 +1,5 @@
 <template>
-  <div ref="dom_lists" :class="$style.lists">
+  <div ref="dom_lists" :class="$style.lists" :style="listSidebarStyle">
     <div :class="$style.listHeader">
       <h2 :class="$style.listsTitle">{{ $t('my_list') }}</h2>
       <div :class="$style.headerBtns">
@@ -17,57 +17,34 @@
     </div>
     <ul ref="dom_lists_list" class="scroll" :class="[$style.listsContent, { [$style.sortable]: isModDown }]">
       <li
-        class="default-list" :class="[$style.listsItem, {[$style.active]: webDAVList.id == listId}, {[$style.clicked]: rightClickItemIndex == -3}, {[$style.fetching]: fetchingListStatus[webDAVList.id]}]"
-        :aria-label="webDAVList.name" :aria-selected="webDAVList.id == listId"
-        @contextmenu="handleListsItemRigthClick($event, -3)" @click="handleListToggle(webDAVList.id)"
-      >
-        <span :class="$style.listsLabel">
-          <transition name="list-active">
-            <svg-icon v-if="webDAVList.id == listId" name="angle-right-solid" :class="$style.activeIcon" />
-          </transition>
-          {{ webDAVList.name }}
-        </span>
-      </li>
-      <li
-        class="default-list" :class="[$style.listsItem, {[$style.active]: defaultList.id == listId}, {[$style.clicked]: rightClickItemIndex == -2}, {[$style.fetching]: fetchingListStatus[defaultList.id]}]"
-        :aria-label="$t(defaultList.name)" :aria-selected="defaultList.id == listId"
-        @contextmenu="handleListsItemRigthClick($event, -2)" @click="handleListToggle(defaultList.id)"
-      >
-        <!-- <div v-if="defaultList.id == listId" :class="$style.activeIcon">
-          <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" height="40%" viewBox="0 0 451.846 451.847" space="preserve">
-            <use xlink:href="#icon-right" />
-          </svg>
-        </div> -->
-        <span :class="$style.listsLabel">
-          <transition name="list-active">
-            <svg-icon v-if="defaultList.id == listId" name="angle-right-solid" :class="$style.activeIcon" />
-          </transition>
-          {{ $t(defaultList.name) }}
-        </span>
-      </li>
-      <li
         class="default-list" :class="[$style.listsItem, {[$style.active]: loveList.id == listId}, {[$style.clicked]: rightClickItemIndex == -1}, {[$style.fetching]: fetchingListStatus[loveList.id]}]"
         :aria-label="$t(loveList.name)" :aria-selected="loveList.id == listId"
         @contextmenu="handleListsItemRigthClick($event, -1)" @click="handleListToggle(loveList.id)"
       >
         <span :class="$style.listsLabel">
-          <transition name="list-active">
-            <svg-icon v-if="loveList.id == listId" name="angle-right-solid" :class="$style.activeIcon" />
-          </transition>
-          {{ $t(loveList.name) }}
+          <span :class="$style.coverBox">
+            <img v-if="getListCover(loveList)" :class="$style.coverImg" :src="getListCover(loveList)" loading="lazy">
+            <svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 444.87 391.18" space="preserve">
+              <use xlink:href="#icon-love" />
+            </svg>
+          </span>
+          <span :class="$style.listName">{{ $t(loveList.name) }}</span>
         </span>
       </li>
       <li
         v-for="(item, index) in userLists"
         :key="item.id" class="user-list"
         :class="[$style.listsItem, {[$style.active]: item.id == listId}, {[$style.clicked]: rightClickItemIndex == index}, {[$style.fetching]: fetchingListStatus[item.id]}]"
-        :data-index="index" :aria-label="item.name" :aria-selected="defaultList.id == listId" @contextmenu="handleListsItemRigthClick($event, index)"
+        :data-index="index" :aria-label="item.name" :aria-selected="item.id == listId" @contextmenu="handleListsItemRigthClick($event, index)"
       >
-        <span :class="$style.listsLabel" @click="handleListToggle(item.id, index + 2)">
-          <transition name="list-active">
-            <svg-icon v-if="item.id == listId" name="angle-right-solid" :class="$style.activeIcon" />
-          </transition>
-          {{ item.name }}
+        <span :class="$style.listsLabel" @click="handleListToggle(item.id)">
+          <span :class="$style.coverBox">
+            <img v-if="getListCover(item)" :class="$style.coverImg" :src="getListCover(item)" loading="lazy">
+            <svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 247.498 247.498" space="preserve">
+              <use xlink:href="#icon-musicFolder" />
+            </svg>
+          </span>
+          <span :class="$style.listName">{{ item.name }}</span>
         </span>
         <base-input
           :class="$style.listsInput" type="text" :value="item.name"
@@ -92,22 +69,24 @@
 
 <script>
 import { openUrl } from '@common/utils/electron'
+import { encodePath } from '@common/utils/common'
 
 import musicSdk from '@renderer/utils/musicSdk'
 import DuplicateMusicModal from './components/DuplicateMusicModal.vue'
 import ListSortModal from './components/ListSortModal.vue'
 import ListUpdateModal from './components/ListUpdateModal.vue'
 
-import { defaultList, loveList, webDAVList, userLists, fetchingListStatus } from '@renderer/store/list/state'
-import { removeUserList } from '@renderer/store/list/action'
+import { allMusicList, loveList, userLists, fetchingListStatus } from '@renderer/store/list/state'
+import { getListMusics, removeUserList } from '@renderer/store/list/action'
+import { appSetting } from '@renderer/store/setting'
 
-import { ref, watch } from '@common/utils/vueTools'
+import { computed, onBeforeUnmount, ref, watch } from '@common/utils/vueTools'
 import { useRouter } from '@common/utils/vueRouter'
 import { LIST_IDS } from '@common/constants'
 
 import { dialog } from '@renderer/plugins/Dialog'
 
-import { saveListPrevSelectId } from '@renderer/utils/data'
+import { getListUpdateInfo, saveListPrevSelectId } from '@renderer/utils/data'
 
 import { useI18n } from '@renderer/plugins/i18n'
 
@@ -120,6 +99,15 @@ import useDarg from './useDarg'
 import useEditList from './useEditList'
 import useListScroll from './useListScroll'
 import useDuplicate from './useDuplicate'
+
+const clampSidebarScale = scale => Math.min(130, Math.max(70, Number(scale) || 90))
+const toPx = value => `${Math.round(value)}px`
+const toFixedPx = value => `${Number(value.toFixed(2))}px`
+const buildCoverUrl = coverUrl => {
+  if (!coverUrl) return ''
+  if (/^(https?:|file:|data:)/.test(coverUrl)) return coverUrl
+  return `file:///${encodePath(coverUrl)}`
+}
 
 export default {
   name: 'MyLists',
@@ -141,6 +129,27 @@ export default {
 
     const dom_lists_list = ref(null)
     const rightClickItemIndex = ref(-10)
+    const coverVersion = ref(0)
+    const userListProfiles = ref({})
+    const listSidebarStyle = computed(() => {
+      const scale = clampSidebarScale(appSetting['list.myListSidebarScale']) / 100
+      return {
+        '--my-list-sidebar-width': `${22 * scale}%`,
+        '--my-list-sidebar-min-width': toPx(198 * scale),
+        '--my-list-sidebar-max-width': toPx(260 * scale),
+        '--my-list-item-min-height': toPx(58 * scale),
+        '--my-list-item-margin-y': toPx(Math.max(2, 4 * scale)),
+        '--my-list-item-margin-x': toPx(Math.max(5, 8 * scale)),
+        '--my-list-item-padding-y': toPx(Math.max(6, 8 * scale)),
+        '--my-list-item-padding-x': toPx(Math.max(7, 10 * scale)),
+        '--my-list-item-gap': toPx(Math.max(7, 10 * scale)),
+        '--my-list-cover-size': toPx(42 * scale),
+        '--my-list-cover-radius': toPx(Math.max(6, 8 * scale)),
+        '--my-list-name-font-size': toFixedPx(Math.max(11, 13 * scale)),
+        '--my-list-input-height': toPx(42 * scale),
+        '--my-list-input-padding-left': toPx(52 * scale),
+      }
+    })
 
     const { handleImportList, handleExportList } = useShare()
     const { isShowListUpdateModal, handleUpdateSourceList } = useListUpdate()
@@ -171,7 +180,7 @@ export default {
         if (!isRemove) return
         void removeUserList([listInfo.id])
         if (props.listId == listInfo.id) {
-          handleListToggle(LIST_IDS.DEFAULT)
+          handleListToggle(LIST_IDS.LOVE)
         }
       })
     }
@@ -209,7 +218,7 @@ export default {
     }
 
     const handleMenuClick = (action) => {
-      if (rightClickItemIndex.value < -3) return
+      if (rightClickItemIndex.value < -1) return
       let index = rightClickItemIndex.value
       rightClickItemIndex.value = -10
       menuClick(action, index)
@@ -217,28 +226,69 @@ export default {
 
     const { isModDown } = useDarg({ dom_lists_list, handleMenuClick, handleSaveListName })
 
+    const refreshUserListProfiles = () => {
+      void getListUpdateInfo().then(info => {
+        userListProfiles.value = Object.fromEntries(Object.entries(info).map(([id, item]) => [id, item.profile ?? {}]))
+        coverVersion.value++
+      })
+    }
+
+    const getCustomCover = (listInfo) => {
+      return userListProfiles.value[listInfo.id]?.coverUrl ?? listInfo.coverUrl ?? listInfo.cover ?? listInfo.meta?.coverUrl ?? listInfo.meta?.cover ?? ''
+    }
+
+    const getListCover = (listInfo) => {
+      // Keep coverVersion as a lightweight render trigger after async list preloading.
+      const version = coverVersion.value
+      void version
+      const customCover = getCustomCover(listInfo)
+      if (customCover) return buildCoverUrl(customCover)
+      const firstMusic = allMusicList.get(listInfo.id)?.[0]
+      return firstMusic?.meta?.picUrl ?? ''
+    }
+
+    const preloadListCovers = () => {
+      const ids = [loveList.id, ...userLists.map(l => l.id)]
+      void Promise.all(ids.map(async id => getListMusics(id).catch(() => []))).then(() => {
+        coverVersion.value++
+      })
+    }
+
+    const handleMyListUpdate = (ids) => {
+      if (!ids.some(id => id == loveList.id || userLists.some(l => l.id == id))) return
+      refreshUserListProfiles()
+      coverVersion.value++
+    }
 
     watch(() => props.listId, (listId) => {
-      saveListPrevSelectId(listId)
+      if (listId == LIST_IDS.LOVE || userLists.some(l => l.id == listId)) saveListPrevSelectId(listId)
     })
 
-    watch(() => userLists, (lists) => {
-      if (props.listId == webDAVList.id || lists.some(l => l.id == props.listId)) return
+    watch(() => userLists.map(l => l.id).join(','), () => {
+      if (props.listId == loveList.id || userLists.some(l => l.id == props.listId)) return
       void router.replace({
         path: '/list',
         query: {
-          id: defaultList.id,
+          id: loveList.id,
         },
       })
     })
 
+    watch(() => userLists.map(l => l.id).join(','), preloadListCovers, { immediate: true })
+    refreshUserListProfiles()
+
+    window.app_event.on('myListUpdate', handleMyListUpdate)
+    onBeforeUnmount(() => {
+      window.app_event.off('myListUpdate', handleMyListUpdate)
+    })
+
     return {
       rightClickItemIndex,
-      defaultList,
       loveList,
-      webDAVList,
       userLists,
       fetchingListStatus,
+      listSidebarStyle,
+      getListCover,
       dom_lists_list,
       isShowListUpdateModal,
       isShowListSortModal,
@@ -265,10 +315,12 @@ export default {
 <style lang="less" module>
 @import '@renderer/assets/styles/layout.less';
 
-@lists-item-height: 36px;
+@lists-item-height: 58px;
 .lists {
   flex: none;
-  width: 16%;
+  width: var(--my-list-sidebar-width, 19.8%);
+  min-width: var(--my-list-sidebar-min-width, 178px);
+  max-width: var(--my-list-sidebar-max-width, 234px);
   display: flex;
   flex-flow: column nowrap;
 }
@@ -321,7 +373,28 @@ export default {
   flex: auto;
   min-width: 0;
   overflow-y: scroll !important;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(128, 128, 128, .22) transparent;
   // border-right: 1px solid rgba(0, 0, 0, 0.12);
+
+  &::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+    background-color: transparent;
+  }
+
+  &::-webkit-scrollbar-track {
+    background-color: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background-color: rgba(128, 128, 128, .2);
+  }
+
+  &::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(128, 128, 128, .34);
+  }
 
   &.sortable {
     * {
@@ -344,6 +417,8 @@ export default {
   transition: .3s ease;
   transition-property: color, background-color, opacity;
   background-color: transparent;
+  border-radius: 8px;
+  margin: var(--my-list-item-margin-y, 4px) var(--my-list-item-margin-x, 8px);
   &:not(.active) {
     &:hover {
       background-color: var(--color-primary-background-hover);
@@ -353,6 +428,7 @@ export default {
   &.active {
     // background-color:
     color: var(--color-primary);
+    background-color: var(--color-primary-background-hover);
   }
   &.selected {
     background-color: var(--color-primary-font-active);
@@ -364,7 +440,7 @@ export default {
     opacity: .5;
   }
   &.editing {
-    padding: 0 10px;
+    padding: 8px 10px;
     background-color: var(--color-primary-background-hover);
     .listsLabel {
       display: none;
@@ -374,31 +450,65 @@ export default {
     }
   }
 }
-.activeIcon {
-  height: .9em;
-  width: .9em;
-  margin-left: -0.45em;
-  vertical-align: -0.05em;
-}
 .listsLabel {
+  min-height: var(--my-list-item-min-height, @lists-item-height);
+  padding: var(--my-list-item-padding-y, 8px) var(--my-list-item-padding-x, 10px);
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: var(--my-list-item-gap, 10px);
+  font-size: var(--my-list-name-font-size, 13px);
+  line-height: 1.25;
+}
+.coverBox {
+  flex: none;
+  width: var(--my-list-cover-size, 42px);
+  height: var(--my-list-cover-size, 42px);
+  border-radius: var(--my-list-cover-radius, 8px);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-primary);
+  background-color: var(--color-primary-background-hover);
+  box-shadow: inset 0 0 0 1px rgba(128, 128, 128, .12);
+
+  svg {
+    width: 58%;
+    height: 58%;
+    opacity: .72;
+  }
+}
+.coverImg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
   display: block;
-  height: @lists-item-height;
-  padding: 0 10px;
-  font-size: 13px;
-  line-height: @lists-item-height;
-  .mixin-ellipsis-1();
+}
+.listName {
+  flex: auto;
+  min-width: 0;
+  color: var(--color-font);
+  font-size: var(--my-list-name-font-size, 13px);
+  font-weight: 600;
+  line-height: 1.25;
+  .mixin-ellipsis-2();
+
+  .active & {
+    color: var(--color-primary);
+  }
 }
 .listsInput {
   width: 100%;
-  height: @lists-item-height;
+  height: var(--my-list-input-height, 42px);
   // border: none;
-  padding: 0;
+  padding: 0 0 0 var(--my-list-input-padding-left, 52px);
   // padding-bottom: 1px;
-  line-height: @lists-item-height;
+  line-height: var(--my-list-input-height, 42px);
   background: none !important;
   border-radius: 0;
   // outline: none;
-  font-size: 13px;
+  font-size: var(--my-list-name-font-size, 13px);
   display: none;
   // font-family: inherit;
 }

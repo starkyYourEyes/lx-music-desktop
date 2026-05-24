@@ -106,6 +106,13 @@
   "list__pause": "Stop",
   "list__play": "Play",
   "list__play_later": "Play Later",
+  "list_profile__created_at": " created",
+  "list_profile__description": "Description:",
+  "list_profile__description_placeholder": "Describe this playlist...",
+  "list_profile__edit_title": "Edit playlist info",
+  "list_profile__name": "Name:",
+  "list_profile__play_all": "Play all",
+  "list_profile__select_cover": "Choose cover",
   "list__remove": "Remove",
   "list__remove_tip": "Do you really want to remove \"{name}\"?",
   "list__remove_tip_button": "Yes, that's right",
@@ -358,6 +365,7 @@
   "setting__basic_to_tray": "Minimize the app window to the system tray when closing it",
   "setting__basic_window_size": "Window Size",
   "setting__basic_window_size_big": "Big",
+  "setting__basic_window_size_extraHuge": "Extra Huge",
   "setting__basic_window_size_huge": "Huge",
   "setting__basic_window_size_larger": "Larger",
   "setting__basic_window_size_medium": "Medium",
@@ -481,6 +489,8 @@
   "setting__list_click_action": "Automatically switch to current list when double-clicking a song in the list (Only valid for \"Playlists\" and \"Charts\" page)",
   "setting__list_scroll": "Remember position of scroll bar of playlist (Only valid for \"Your Library\" page)",
   "setting__list_source": "Show which music streaming service the song is from (Only valid for \"Your Library\" page)",
+  "setting__list_my_list_sidebar_scale": "Your Library sidebar scale",
+  "setting__list_playlist_profile_scale": "Playlist detail header scale",
   "setting__network": "Network",
   "setting__network_proxy_host": "Host",
   "setting__network_proxy_password": "Password",
@@ -752,5 +762,6 @@
   "user_api_import_online__input_confirm": "Import",
   "user_api_import_online__input_loading": "Importing...",
   "user_api_import_online__input_tip": "Please enter an HTTP link",
-  "user_api_import_online__title": "Import Music API from network."
+  "user_api_import_online__title": "Import Music API from network.",
+  "cloud_disk": "Cloud Drive"
 }

@@ -496,6 +496,16 @@ declare global {
       'list.actionButtonsVisible': boolean
 
       /**
+       * 我的列表左侧侧边栏缩放比例
+       */
+      'list.myListSidebarScale': number
+
+      /**
+       * 歌单详情头部缩放比例
+       */
+      'list.playlistProfileScale': number
+
+      /**
        * 是否启用下载功能
        */
       'download.enable': boolean

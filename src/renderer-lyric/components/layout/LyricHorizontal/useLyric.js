@@ -1,22 +1,17 @@
 import { ref, onMounted, onBeforeUnmount, watch, nextTick } from '@common/utils/vueTools'
-import { scrollTo } from '@common/utils/renderer'
 import { lyric } from '@lyric/store/lyric'
-import { isPlay, setting } from '@lyric/store/state'
+import { setting } from '@lyric/store/state'
 import { setWindowBounds, setWindowResizeable } from '@lyric/utils/ipc'
 import { isWin } from '@common/utils'
 
-const getOffsetTop = (contentHeight, lineHeight) => {
-  switch (setting['desktopLyric.scrollAlign']) {
-    case 'top': return 0
-    default: return contentHeight * 0.5 - lineHeight / 2
-  }
-}
+const MIN_WINDOW_HEIGHT = 38
+const HEIGHT_PADDING = 18
+const MAX_EXTENDED_LINES = 1
 
-export default (isComputeHeight) => {
+export default () => {
   const dom_lyric = ref(null)
   const dom_lyric_text = ref(null)
   const isMsDown = ref(false)
-  let isStopScroll = false
 
   const winEvent = {
     isMsDown: false,
@@ -26,78 +21,61 @@ export default (isComputeHeight) => {
     windowH: 0,
   }
 
-  let msDownY = 0
-  let msDownScrollY = 0
-  let timeout = null
-  let cancelScrollFn
-  let dom_lines
-  let line_heights
-  let isSetedLines = false
-  let prevActiveLine = 0
+  let heightRaf = null
+  let currentLine = -1
 
+  const setLineExtendedVisible = (lineEl) => {
+    if (!lineEl) return
+    const extendedEls = lineEl.querySelectorAll('.extended')
+    extendedEls.forEach((el, index) => {
+      el.style.display = index < MAX_EXTENDED_LINES ? '' : 'none'
+    })
+  }
 
-  const handleScrollLrc = (duration = 300) => {
-    if (!dom_lines?.length || !dom_lyric.value) return
-    if (isStopScroll) return
-    let dom_p = dom_lines[lyric.line]
+  const syncWindowHeight = () => {
+    if (!dom_lyric_text.value) return
+    if (heightRaf) window.cancelAnimationFrame(heightRaf)
+    heightRaf = window.requestAnimationFrame(() => {
+      heightRaf = null
+      const contentHeight = dom_lyric_text.value.scrollHeight
+      const targetHeight = Math.max(MIN_WINDOW_HEIGHT, Math.ceil(contentHeight + HEIGHT_PADDING))
+      if (Math.abs(window.innerHeight - targetHeight) < 2) return
+      setWindowBounds({
+        x: 0,
+        y: 0,
+        w: window.innerWidth,
+        h: targetHeight,
+      })
+    })
+  }
 
-    if (dom_p) {
-      let offset = 0
-      if (isComputeHeight.value) {
-        let prevLineHeight = line_heights[prevActiveLine] ?? 0
-        offset = prevActiveLine < lyric.line ? ((dom_lines[prevActiveLine]?.clientHeight ?? 0) - prevLineHeight) : 0
-        // console.log(prevActiveLine, dom_lines[prevActiveLine]?.clientHeight ?? 0, prevLineHeight, offset)
-      }
-      cancelScrollFn = scrollTo(dom_lyric.value, dom_p ? (dom_p.offsetTop - offset - getOffsetTop(dom_lyric.value.clientHeight, dom_p.clientHeight)) : 0, duration)
-    } else {
-      cancelScrollFn = scrollTo(dom_lyric.value, 0, duration)
+  const renderCurrentLine = () => {
+    if (!dom_lyric_text.value) return
+    const line = lyric.lines[lyric.line]
+    currentLine = lyric.line
+    dom_lyric_text.value.textContent = ''
+    if (line?.dom_line) {
+      setLineExtendedVisible(line.dom_line)
+      dom_lyric_text.value.appendChild(line.dom_line)
     }
-  }
-  const clearLyricScrollTimeout = () => {
-    if (!timeout) return
-    clearTimeout(timeout)
-    timeout = null
-  }
-  const startLyricScrollTimeout = () => {
-    clearLyricScrollTimeout()
-    timeout = setTimeout(() => {
-      timeout = null
-      isStopScroll = false
-      if (!isPlay.value) return
-      handleScrollLrc()
-    }, 3000)
+    nextTick(syncWindowHeight)
   }
 
-  const handleLyricDown = (target, x, y) => {
-    if (target.classList.contains('font-lrc') ||
-        target.parentNode.classList.contains('font-lrc') ||
-        target.classList.contains('extended') ||
-        target.parentNode.classList.contains('extended')
-    ) {
-      if (delayScrollTimeout) {
-        clearTimeout(delayScrollTimeout)
-        delayScrollTimeout = null
-      }
-      isMsDown.value = true
-      msDownY = y
-      msDownScrollY = dom_lyric.value.scrollTop
-    } else {
-      winEvent.isMsDown = true
-      winEvent.msDownX = x
-      winEvent.msDownY = y
-      winEvent.windowW = window.innerWidth
-      winEvent.windowH = window.innerHeight
-      // https://github.com/lyswhut/lx-music-desktop/issues/2244
-      if (isWin) setWindowResizeable(false)
-    }
+  const handleLyricDown = (x, y) => {
+    winEvent.isMsDown = true
+    winEvent.msDownX = x
+    winEvent.msDownY = y
+    winEvent.windowW = window.innerWidth
+    winEvent.windowH = window.innerHeight
+    if (isWin) setWindowResizeable(false)
   }
   const handleLyricMouseDown = event => {
-    handleLyricDown(event.target, event.clientX, event.clientY)
+    handleLyricDown(event.clientX, event.clientY)
   }
   const handleLyricTouchStart = event => {
     if (event.changedTouches.length) {
       const touch = event.changedTouches[0]
-      handleLyricDown(event.target, touch.clientX, touch.clientY)
+      handleLyricDown(touch.clientX, touch.clientY)
     }
   }
   const handleMouseMsUp = () => {
@@ -107,31 +85,21 @@ export default (isComputeHeight) => {
   }
 
   const handleMove = (x, y) => {
-    if (isMsDown.value) {
-      isStopScroll ||= true
-      if (cancelScrollFn) {
-        cancelScrollFn()
-        cancelScrollFn = null
-      }
-      dom_lyric.value.scrollTop = msDownScrollY + msDownY - y
-      startLyricScrollTimeout()
-    } else if (winEvent.isMsDown) {
-      // https://github.com/lyswhut/lx-music-desktop/issues/2244
-      if (isWin) {
-        setWindowBounds({
-          x: x - winEvent.msDownX,
-          y: y - winEvent.msDownY,
-          w: winEvent.windowW,
-          h: winEvent.windowH,
-        })
-      } else {
-        setWindowBounds({
-          x: x - winEvent.msDownX,
-          y: y - winEvent.msDownY,
-          w: window.innerWidth,
-          h: window.innerHeight,
-        })
-      }
+    if (!winEvent.isMsDown) return
+    if (isWin) {
+      setWindowBounds({
+        x: x - winEvent.msDownX,
+        y: y - winEvent.msDownY,
+        w: winEvent.windowW,
+        h: winEvent.windowH,
+      })
+    } else {
+      setWindowBounds({
+        x: x - winEvent.msDownX,
+        y: y - winEvent.msDownY,
+        w: window.innerWidth,
+        h: window.innerHeight,
+      })
     }
   }
   const handleMouseMsMove = event => {
@@ -144,84 +112,41 @@ export default (isComputeHeight) => {
     }
   }
 
-  const handleWheel = (event) => {
-    console.log(event.deltaY)
-    if (cancelScrollFn) {
-      cancelScrollFn()
-      cancelScrollFn = null
-    }
-    dom_lyric.value.scrollTop = dom_lyric.value.scrollTop + event.deltaY
-    startLyricScrollTimeout()
-  }
+  const handleWheel = () => {}
 
-  const setLyric = (lines) => {
-    const dom_line_content = document.createDocumentFragment()
-    for (const line of lines) {
-      dom_line_content.appendChild(line.dom_line)
-    }
-    dom_lyric_text.value.textContent = ''
-    dom_lyric_text.value.appendChild(dom_line_content)
-    nextTick(() => {
-      dom_lines = dom_lyric.value.querySelectorAll('.line-content')
-      line_heights = Array.from(dom_lines).map(l => l.clientHeight)
-      handleScrollLrc()
-    })
-  }
-
-  const initLrc = (lines, oLines) => {
-    prevActiveLine = 0
-    isSetedLines = true
-    if (oLines) {
-      if (lines.length) {
-        setLyric(lines)
-      } else {
-        cancelScrollFn = scrollTo(dom_lyric.value, 0, 300, () => {
-          if (lyric.lines !== lines) return
-          setLyric(lines)
-        }, 50)
-      }
-    } else {
-      setLyric(lines)
-    }
-  }
-
-  let delayScrollTimeout
-  const scrollLine = (line, oldLine) => {
-    setImmediate(() => {
-      prevActiveLine = line
-    })
-    if (line < 0 || !lyric.lines.length) return
-    if (line == 0 && isSetedLines) return isSetedLines = false
-    isSetedLines &&= false
-    if (oldLine == null || line - oldLine != 1) return handleScrollLrc()
-
-    if (setting['desktopLyric.isDelayScroll']) {
-      delayScrollTimeout = setTimeout(() => {
-        delayScrollTimeout = null
-        handleScrollLrc(600)
-      }, 600)
-    } else {
-      handleScrollLrc()
-    }
-  }
-
-  watch(() => lyric.lines, initLrc)
-  watch(() => lyric.line, scrollLine)
+  watch(() => lyric.lines, renderCurrentLine)
+  watch(() => lyric.line, renderCurrentLine)
+  watch(() => [
+    setting['desktopLyric.style.font'],
+    setting['desktopLyric.style.fontSize'],
+    setting['desktopLyric.style.lineGap'],
+    setting['desktopLyric.style.isZoomActiveLrc'],
+    setting['desktopLyric.style.isFontWeightFont'],
+    setting['desktopLyric.style.isFontWeightLine'],
+    setting['desktopLyric.style.isFontWeightExtended'],
+    setting['player.isShowLyricTranslation'],
+  ], () => {
+    if (currentLine !== lyric.line) renderCurrentLine()
+    else nextTick(syncWindowHeight)
+  })
 
   onMounted(() => {
     document.addEventListener('mousemove', handleMouseMsMove)
     document.addEventListener('mouseup', handleMouseMsUp)
     document.addEventListener('touchmove', handleTouchMove)
     document.addEventListener('touchend', handleMouseMsUp)
+    window.addEventListener('resize', syncWindowHeight)
 
-    initLrc(lyric.lines, null)
+    renderCurrentLine()
   })
 
   onBeforeUnmount(() => {
+    if (heightRaf) window.cancelAnimationFrame(heightRaf)
     document.removeEventListener('mousemove', handleMouseMsMove)
     document.removeEventListener('mouseup', handleMouseMsUp)
     document.removeEventListener('touchmove', handleTouchMove)
     document.removeEventListener('touchend', handleMouseMsUp)
+    window.removeEventListener('resize', syncWindowHeight)
   })
 
   return {

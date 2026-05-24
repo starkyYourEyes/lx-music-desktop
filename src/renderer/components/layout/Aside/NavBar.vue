@@ -43,6 +43,13 @@ const menuList = [
     name: 'List',
   },
   {
+    to: '/cloud-disk',
+    tips: 'cloud_disk',
+    icon: '#icon-cloud-outline',
+    iconSize: '0 0 24 24',
+    name: 'CloudDisk',
+  },
+  {
     to: '/recent-play',
     tips: 'recent_play',
     icon: '#icon-recent-play',

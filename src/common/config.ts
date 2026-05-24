@@ -43,6 +43,12 @@ export const windowSizeList: WindowSize[] = [
     height: 840,
   },
   {
+    id: 7,
+    name: 'extraHuge',
+    width: 1560,
+    height: 940,
+  },
+  {
     id: 6,
     name: 'huge',
     width: 1700,

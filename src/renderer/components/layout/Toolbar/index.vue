@@ -66,7 +66,6 @@ const handleBack = () => {
   gap: 8px;
   flex: 1 1 auto;
   min-width: 0;
-  -webkit-app-region: no-drag;
 }
 
 .backBtn {

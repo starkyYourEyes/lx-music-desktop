@@ -718,6 +718,13 @@ export const getNeteaseRecommendSongs = async() => {
   return rendererInvoke<LX.Music.MusicInfoOnline[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_recommend_songs)
 }
 
+export const getNeteasePrivateFm = async(params: LX.Netease.PrivateFmParams = {}) => {
+  return rendererInvoke<LX.Netease.PrivateFmParams, LX.Music.MusicInfoOnline[]>(
+    WIN_MAIN_RENDERER_EVENT_NAME.netease_get_private_fm,
+    params,
+  )
+}
+
 export const getNeteaseRecommendPlaylists = async(limit: number, removePrivateRecommend = false) => {
   return rendererInvoke<{ limit: number, removePrivateRecommend: boolean }, LX.Netease.Playlist[]>(
     WIN_MAIN_RENDERER_EVENT_NAME.netease_get_recommend_playlists,

@@ -38,6 +38,7 @@ import useSoundEffect from './useSoundEffect'
 import useMaxOutputChannelCount from './useMaxOutputChannelCount'
 import { setPowerSaveBlocker } from '@renderer/core/player/utils'
 import usePreloadNextMusic from './usePreloadNextMusic'
+import { ensurePrivateFmNextSongs, syncPrivateFmModeWithPlayer } from '@renderer/store/privateFm/action'
 
 
 export default () => {
@@ -79,11 +80,15 @@ export default () => {
   }
 
   const handleUpdatePlayInfo = () => {
+    syncPrivateFmModeWithPlayer()
     setTitle(musicInfo.id ? `${musicInfo.name} - ${musicInfo.singer}` : null)
     if (playMusicInfo.musicInfo) {
       const currentMusicInfo = 'progress' in playMusicInfo.musicInfo ? playMusicInfo.musicInfo.metadata.musicInfo : playMusicInfo.musicInfo
       addRecentPlayMusic(currentMusicInfo)
     }
+    void ensurePrivateFmNextSongs().catch(err => {
+      console.warn('Load private FM next songs failed:', err)
+    })
   }
 
   const handleCanplay = () => {
@@ -100,7 +105,11 @@ export default () => {
     }
     // resetPlayerMusicInfo()
     // window.app_event.stop()
-    void playNext(true)
+    void ensurePrivateFmNextSongs().catch(err => {
+      console.warn('Load private FM next songs failed:', err)
+    }).finally(() => {
+      void playNext(true)
+    })
     // })
   }
 

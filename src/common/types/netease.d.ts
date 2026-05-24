@@ -36,6 +36,13 @@ declare namespace LX {
       page?: number
     }
 
+    type PrivateFmModeId = 'DEFAULT' | 'FAMILIAR' | 'EXPLORE' | 'EXERCISE' | 'FOCUS' | 'NIGHT_EMO'
+
+    interface PrivateFmParams {
+      mode?: PrivateFmModeId
+      limit?: number
+    }
+
     interface Playlist {
       play_count: string
       id: string

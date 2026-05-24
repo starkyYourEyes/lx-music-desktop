@@ -99,37 +99,40 @@ const toggleMode = (mode) => {
 @import '@renderer/assets/styles/layout.less';
 .btnContent {
   flex: none;
-  height: 100%;
+  width: 30px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .btn {
+  flex: none;
+  width: 30px;
+  height: 32px;
+  padding: 4px;
   position: relative;
-  // color: var(--color-button-font);
+  color: var(--color-button-font);
   justify-content: center;
   align-items: center;
-  transition: color @transition-normal;
+  transition: color @transition-fast, opacity @transition-fast;
   cursor: pointer;
   background-color: transparent;
   border: none;
-  width: 24px;
   display: flex;
   flex-flow: column nowrap;
-  padding: 0;
+  opacity: .68;
 
   svg {
-    transition: opacity @transition-fast;
-    opacity: .6;
+    width: 100%;
+    height: 100%;
     filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.2));
   }
   &:hover {
-    svg {
-      opacity: .9;
-    }
+    opacity: 1;
   }
   &:active {
-    svg {
-      opacity: 1;
-    }
+    opacity: 1;
   }
 }
 

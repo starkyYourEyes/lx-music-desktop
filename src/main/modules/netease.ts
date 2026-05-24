@@ -13,6 +13,8 @@ const neteaseApi = require('NeteaseCloudMusicApi') as {
   login_status: (params: Record<string, any>) => Promise<any>
   logout: (params: Record<string, any>) => Promise<any>
   recommend_songs: (params: Record<string, any>) => Promise<any>
+  personal_fm: (params: Record<string, any>) => Promise<any>
+  personal_fm_mode: (params: Record<string, any>) => Promise<any>
   personalized: (params: Record<string, any>) => Promise<any>
   recommend_resource: (params: Record<string, any>) => Promise<any>
   playlist_detail: (params: Record<string, any>) => Promise<any>
@@ -209,6 +211,34 @@ export const getRecommendSongs = async(): Promise<LX.Music.MusicInfoOnline[]> =>
 
   const songs = result.body?.data?.dailySongs ?? result.body?.recommend ?? []
   const privileges = result.body?.data?.privileges ?? []
+  return songs.map((song: any, index: number) => normalizeSong(song, privileges[index]))
+}
+
+const privateFmSceneModeMap: Partial<Record<LX.Netease.PrivateFmModeId, string>> = {
+  EXERCISE: 'EXERCISE',
+  FOCUS: 'FOCUS',
+  NIGHT_EMO: 'NIGHT_EMO',
+}
+
+export const getPrivateFmSongs = async(params: LX.Netease.PrivateFmParams = {}): Promise<LX.Music.MusicInfoOnline[]> => {
+  const account = getAccountData()
+  if (!account.cookie) throw new Error('Not logged in')
+
+  const mode = params.mode ?? 'DEFAULT'
+  const limit = Math.max(1, params.limit ?? 3)
+  const result = mode == 'DEFAULT'
+    ? await neteaseApi.personal_fm({ cookie: account.cookie })
+    : await neteaseApi.personal_fm_mode({
+      cookie: account.cookie,
+      mode: privateFmSceneModeMap[mode] ? 'SCENE_RCMD' : mode,
+      submode: privateFmSceneModeMap[mode],
+      limit,
+    })
+
+  if (result.body?.code != null && result.body.code != 200) throw new Error(result.body?.message ?? 'Failed to load private FM')
+
+  const songs = result.body?.data ?? result.body?.songs ?? []
+  const privileges = result.body?.privileges ?? []
   return songs.map((song: any, index: number) => normalizeSong(song, privileges[index]))
 }
 

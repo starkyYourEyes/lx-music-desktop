@@ -4,9 +4,7 @@
     :class="classNames"
     :style="lrcStyles" @wheel="handleWheel" @mousedown="handleLyricMouseDown" @touchstart="handleLyricTouchStart"
   >
-    <div :class="$style.lyricSpace" />
     <div ref="dom_lyric_text" />
-    <div :class="$style.lyricSpace" />
   </div>
 </template>
 
@@ -38,12 +36,8 @@ export default {
       fontSize: Math.trunc(setting['desktopLyric.style.fontSize']) + 'px',
       opacity: setting['desktopLyric.style.opacity'] / 100,
       textAlign: setting['desktopLyric.style.align'],
-      '--line-gap': setting['desktopLyric.style.lineGap'] + 'px',
-      '--line-extended-gap': (setting['desktopLyric.style.lineGap'] / 3).toFixed(2) + 'px',
+      '--line-extended-gap': Math.max(2, setting['desktopLyric.style.lineGap'] / 3).toFixed(2) + 'px',
     }))
-    const isComputeHeight = computed(() => {
-      return setting['desktopLyric.style.isZoomActiveLrc'] && !setting['desktopLyric.isDelayScroll']
-    })
     const {
       dom_lyric,
       dom_lyric_text,
@@ -51,7 +45,7 @@ export default {
       handleLyricMouseDown,
       handleLyricTouchStart,
       handleWheel,
-    } = useLyric(isComputeHeight)
+    } = useLyric()
 
     return {
       classNames,
@@ -79,9 +73,17 @@ export default {
   font-size: 16px;
   contain: strict;
   cursor: move;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 9px 12px;
+  box-sizing: border-box;
   // font-weight: bold;
 
   :global {
+    .line-content {
+      width: 100%;
+    }
     .font-lrc, .shadow {
       padding: 0.08em 0.14em;
       margin: -0.08em 0;
@@ -95,7 +97,7 @@ export default {
     }
     .line-content {
       line-height: 1.2;
-      margin: var(--line-gap) 0;
+      margin: 0;
       overflow-wrap: break-word;
 
       .font-lrc {
@@ -201,9 +203,6 @@ export default {
 //   // -webkit-text-fill-color: #fff;
 //   // -webkit-text-stroke: thin #124628;
 // }
-.lyricSpace {
-  height: 80%;
-}
 // .lyric-text {
 
 // }

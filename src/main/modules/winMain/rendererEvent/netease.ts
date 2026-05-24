@@ -5,6 +5,7 @@ import {
   createLoginQr,
   getAccountStatus,
   getMusicUrl,
+  getPrivateFmSongs,
   getRecommendPlaylistDetail,
   getRecommendPlaylists,
   getRecommendSongs,
@@ -31,6 +32,10 @@ export default () => {
 
   mainHandle<LX.Music.MusicInfoOnline[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_recommend_songs, async() => {
     return getRecommendSongs()
+  })
+
+  mainHandle<LX.Netease.PrivateFmParams, LX.Music.MusicInfoOnline[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_private_fm, async({ params }) => {
+    return getPrivateFmSongs(params)
   })
 
   mainHandle<{ limit?: number, removePrivateRecommend?: boolean }, LX.Netease.Playlist[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_recommend_playlists, async({ params }) => {

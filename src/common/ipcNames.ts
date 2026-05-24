@@ -168,6 +168,7 @@ const modules = {
     netease_logout: 'netease_logout',
     netease_get_recommend_songs: 'netease_get_recommend_songs',
     netease_get_recommend_playlists: 'netease_get_recommend_playlists',
+    netease_get_playlist_detail: 'netease_get_playlist_detail',
     netease_get_music_url: 'netease_get_music_url',
     netease_like_music: 'netease_like_music',
   },

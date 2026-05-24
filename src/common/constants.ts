@@ -35,6 +35,7 @@ export const LIST_IDS = {
 export const DATA_KEYS = {
   viewPrevState: 'viewPrevState',
   playInfo: 'playInfo',
+  recentPlayList: 'recentPlayList',
   searchHistoryList: 'searchHistoryList',
   listScrollPosition: 'listScrollPosition',
   listPrevSelectId: 'listPrevSelectId',

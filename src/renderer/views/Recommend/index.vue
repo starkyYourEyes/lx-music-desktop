@@ -22,8 +22,6 @@
         <div :class="$style.actions">
           <button v-if="!isExploreMode" :class="$style.linkBtn" type="button" @click="handleShowAll">查看全部</button>
           <base-btn v-if="isLoggedIn" min :disabled="isLoadingPlaylists" @click="handleRefresh">刷新</base-btn>
-          <base-btn v-if="isLoggedIn" min outline @click="handleLogout">退出登录</base-btn>
-          <base-btn v-else min :disabled="isCreatingQr" @click="handleShowLogin">登录网易云</base-btn>
         </div>
       </div>
 
@@ -71,7 +69,6 @@ import {
 import {
   initNeteaseAccount,
   isLoggedIn,
-  logoutNeteaseAccount,
   profile,
   setNeteaseAccountStatus,
 } from '@renderer/store/netease'
@@ -202,14 +199,6 @@ const handleRefresh = () => {
   void loadRecommendPlaylists()
 }
 
-const handleLogout = async() => {
-  clearQrTimer()
-  await logoutNeteaseAccount()
-  showLoginPanel.value = false
-  playlistLoadError.value = ''
-  void loadRecommendPlaylists()
-}
-
 const handleShowAll = () => {
   void router.push({
     path: '/recommend',
@@ -235,7 +224,20 @@ watch(isExploreMode, () => {
   void loadRecommendPlaylists()
 })
 
+watch(() => route.query.login, login => {
+  if (login == '1' && !isLoggedIn.value) handleShowLogin()
+}, { immediate: true })
+
+watch(isLoggedIn, () => {
+  void loadRecommendPlaylists()
+})
+
+const handleAccountLoginRequest = () => {
+  if (!isLoggedIn.value) handleShowLogin()
+}
+
 onMounted(() => {
+  window.addEventListener('show-netease-login', handleAccountLoginRequest)
   void initNeteaseAccount()
     .then(() => {
       void loadRecommendPlaylists()
@@ -246,6 +248,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('show-netease-login', handleAccountLoginRequest)
   clearQrTimer()
 })
 </script>
@@ -437,8 +440,8 @@ onBeforeUnmount(() => {
   justify-content: center;
   padding: 24px;
   box-sizing: border-box;
-  background-color: rgba(0, 0, 0, .16);
-  backdrop-filter: blur(6px);
+  background-color: rgba(20, 28, 31, .28);
+  backdrop-filter: blur(8px);
 }
 
 .loginPanel {
@@ -448,9 +451,9 @@ onBeforeUnmount(() => {
   padding: 28px;
   box-sizing: border-box;
   border-radius: 8px;
-  background-color: rgba(255, 255, 255, .36);
-  box-shadow: var(--shadow-soft);
-  backdrop-filter: saturate(180%) blur(18px);
+  background-color: var(--color-main-background);
+  border: 1px solid rgba(128, 128, 128, .14);
+  box-shadow: 0 18px 42px rgba(31, 38, 35, .18);
 
   h3 {
     margin: 18px 0 8px;
@@ -495,7 +498,8 @@ onBeforeUnmount(() => {
   margin: 0 auto;
   border-radius: 8px;
   overflow: hidden;
-  background-color: rgba(255, 255, 255, .82);
+  background-color: #fff;
+  box-shadow: inset 0 0 0 1px rgba(128, 128, 128, .1);
   display: flex;
   align-items: center;
   justify-content: center;

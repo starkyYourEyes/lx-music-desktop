@@ -25,7 +25,7 @@
         <use xlink:href="#icon-desktop-lyric-off" />
       </svg>
     </button>
-    <common-volume-btn v-if="showVolume" />
+    <common-volume-btn v-if="showVolume" compact-player />
     <common-toggle-play-mode-btn v-if="showPlayMode" />
     <common-list-add-modal v-if="showAddTo" v-model:show="isShowAddMusicTo" :music-info="playMusicInfo.musicInfo" />
   </div>

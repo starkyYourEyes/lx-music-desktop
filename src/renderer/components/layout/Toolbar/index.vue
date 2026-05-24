@@ -1,6 +1,13 @@
 <template>
   <div :class="[$style.toolbar, { [$style.fullscreen]: isFullscreen }, appSetting['common.controlBtnPosition'] == 'left' ? $style.controlBtnLeft : $style.controlBtnRight]">
-    <SearchInput />
+    <div :class="$style.leftTools">
+      <button type="button" :class="$style.backBtn" aria-label="返回上一级" title="返回上一级" @click="handleBack">
+        <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" height="54%" viewBox="0 0 451.847 451.847" space="preserve">
+          <use xlink:href="#icon-left" />
+        </svg>
+      </button>
+      <SearchInput />
+    </div>
     <div v-if="appSetting['common.controlBtnPosition'] == 'left'" :class="$style.logo">L X</div>
     <ControlBtns v-else />
   </div>
@@ -9,8 +16,14 @@
 <script setup>
 import { isFullscreen } from '@renderer/store'
 import { appSetting } from '@renderer/store/setting'
+import { useRouter } from '@common/utils/vueRouter'
 import ControlBtns from './ControlBtns.vue'
 import SearchInput from './SearchInput.vue'
+
+const router = useRouter()
+const handleBack = () => {
+  router.back()
+}
 
 </script>
 
@@ -44,6 +57,38 @@ import SearchInput from './SearchInput.vue'
   }
   &.controlBtnRight {
     justify-content: space-between;
+  }
+}
+
+.leftTools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  -webkit-app-region: no-drag;
+}
+
+.backBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  outline: none;
+  background: transparent;
+  color: var(--color-font-label);
+  cursor: pointer;
+  transition: background-color .2s ease, color .2s ease;
+  -webkit-app-region: no-drag;
+
+  &:hover {
+    color: var(--color-primary);
+    background-color: var(--color-button-background-hover);
   }
 }
 

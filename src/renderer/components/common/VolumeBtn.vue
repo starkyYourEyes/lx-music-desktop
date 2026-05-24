@@ -1,11 +1,11 @@
 <template>
-  <material-popup-btn :class="$style.btnContent">
-    <button :class="$style.btn" :aria-label="isMute ? $t('player__volume_muted') : `${$t('player__volume')}${parseInt(volume * 100)}%`" @wheel="handleWheel">
+  <material-popup-btn :class="[$style.btnContent, { [$style.compactPlayer]: compactPlayer }]" @click.capture="handlePopupClick">
+    <button :class="$style.btn" :aria-label="isMute ? $t('player__volume_muted') : `${$t('player__volume')}${parseInt(volume * 100)}%`" :ignore-tip="compactPlayer ? '' : null" @wheel="handleWheel">
       <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" width="100%" viewBox="0 0 24 24" space="preserve">
         <use :xlink:href="icon" />
       </svg>
     </button>
-    <template #content>
+    <template v-if="!hidePopup" #content>
       <div :class="$style.setting">
         <div :class="$style.info">
           <span>{{ Math.trunc(volume * 100) }}%</span>
@@ -29,6 +29,22 @@ import { computed } from '@common/utils/vueTools'
 // import { musicInfo, playMusicInfo } from '@renderer/store/player/state'
 import { saveVolumeIsMute } from '@renderer/store/setting'
 import { volume, isMute } from '@renderer/store/player/volume'
+
+const props = defineProps({
+  compactPlayer: {
+    type: Boolean,
+    default: false,
+  },
+  hidePopup: {
+    type: Boolean,
+    default: false,
+  },
+})
+
+const handlePopupClick = (event) => {
+  if (!props.hidePopup) return
+  event.stopPropagation()
+}
 
 const handleWheel = (event) => {
   window.app_event.setVolume(Math.round(volume.value * 100 + (-event.deltaY / 100 * 2)) / 100)
@@ -57,6 +73,8 @@ const icon = computed(() => {
 .btnContent {
   flex: none;
   height: 100%;
+  display: inline-flex;
+  align-items: center;
 }
 
 .btn {
@@ -87,6 +105,18 @@ const icon = computed(() => {
     svg {
       opacity: 1;
     }
+  }
+}
+
+.compactPlayer {
+  width: 32px;
+  height: 32px;
+  justify-content: center;
+
+  .btn {
+    width: 32px;
+    height: 32px;
+    padding: 3px;
   }
 }
 

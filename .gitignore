@@ -58,6 +58,10 @@ typings/
 # dotenv environment variables file
 .env
 
+# Local agent/tooling state
+.claude/
+.codegraph/
+
 # next.js build output
 .next
 

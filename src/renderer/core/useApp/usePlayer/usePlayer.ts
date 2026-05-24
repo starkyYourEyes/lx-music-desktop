@@ -24,6 +24,7 @@ import {
   clearPlayedList,
   // resetPlayerMusicInfo,
 } from '@renderer/store/player/action'
+import { addRecentPlayMusic, initRecentPlayList } from '@renderer/store/recentPlay/action'
 
 import { appSetting } from '@renderer/store/setting'
 
@@ -52,6 +53,7 @@ export default () => {
   usePlaybackRate()
   useWatchList()
   usePreloadNextMusic()
+  void initRecentPlayList()
 
   const handlePlayNext = () => {
     void playNext()
@@ -78,6 +80,10 @@ export default () => {
 
   const handleUpdatePlayInfo = () => {
     setTitle(musicInfo.id ? `${musicInfo.name} - ${musicInfo.singer}` : null)
+    if (playMusicInfo.musicInfo) {
+      const currentMusicInfo = 'progress' in playMusicInfo.musicInfo ? playMusicInfo.musicInfo.metadata.musicInfo : playMusicInfo.musicInfo
+      addRecentPlayMusic(currentMusicInfo)
+    }
   }
 
   const handleCanplay = () => {

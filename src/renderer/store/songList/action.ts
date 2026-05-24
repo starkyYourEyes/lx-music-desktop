@@ -1,6 +1,7 @@
 // import { getSongListSetting } from '@renderer/utils/data'
 import { deduplicationList, toNewMusicInfo } from '@renderer/utils'
 import musicSdk from '@renderer/utils/musicSdk'
+import { getNeteasePlaylistDetail } from '@renderer/utils/ipc'
 import { markRaw, markRawList } from '@common/utils/vueTools'
 import {
   tags,
@@ -18,6 +19,45 @@ import type {
 } from './state'
 
 const cache = new Map<string, any>()
+const neteasePrivateRadarPlaylistId = '3136952023'
+
+const isNeteasePrivateRadarPlaylist = (id: string, source: LX.OnlineSource) => {
+  return source == 'wy' && id == neteasePrivateRadarPlaylistId
+}
+
+const getListDetailCacheKey = (id: string, source: LX.OnlineSource, page: number) => {
+  return `${isNeteasePrivateRadarPlaylist(id, source) ? 'netease_user_sdetail' : 'sdetail'}__${source}__${id}__${page}`
+}
+
+const normalizeMusicSdkListDetail = (result: ListDetailInfo): ListDetailInfo => {
+  result.list = markRawList(deduplicationList(result.list.map(m => toNewMusicInfo(m)) as LX.Music.MusicInfoOnline[]))
+  return result
+}
+
+const normalizeNeteaseListDetail = (result: LX.Netease.PlaylistDetailInfo): ListDetailInfo => {
+  return {
+    ...result,
+    source: result.source,
+    info: {
+      ...result.info,
+      desc: result.info.desc ?? undefined,
+    },
+    list: markRawList(deduplicationList(result.list)),
+  }
+}
+
+const loadListDetail = async(id: string, source: LX.OnlineSource, page: number, isRefresh = false): Promise<ListDetailInfo> => {
+  const key = getListDetailCacheKey(id, source, page)
+  if (isRefresh && cache.has(key)) cache.delete(key)
+  if (!isRefresh && cache.has(key)) return cache.get(key)
+
+  const result = isNeteasePrivateRadarPlaylist(id, source)
+    ? normalizeNeteaseListDetail(await getNeteasePlaylistDetail(id, page))
+    : normalizeMusicSdkListDetail(await musicSdk[source]?.songList.getListDetail(id, page))
+
+  cache.set(key, result)
+  return result
+}
 
 export const setTags = (tagInfo: TagInfo, source: LX.OnlineSource) => {
   tags[source] = markRaw(tagInfo)
@@ -129,14 +169,7 @@ export const getAndSetList = async(source: LX.OnlineSource, tabId: string, sortI
  * @returns
  */
 export const getListDetail = async(id: string, source: LX.OnlineSource, page: number, isRefresh = false): Promise<ListDetailInfo> => {
-  let key = `sdetail__${source}__${id}__${page}`
-  if (!isRefresh && cache.has(key)) return cache.get(key)
-
-  return musicSdk[source]?.songList.getListDetail(id, page).then((result: ListDetailInfo) => {
-    result.list = markRawList(deduplicationList(result.list.map(m => toNewMusicInfo(m)) as LX.Music.MusicInfoOnline[]))
-    cache.set(key, result)
-    return result
-  })
+  return loadListDetail(id, source, page, isRefresh)
 }
 
 /**
@@ -150,15 +183,7 @@ export const getListDetailAll = async(id: string, source: LX.OnlineSource, isRef
   // console.log(source, id)
   // eslint-disable-next-line @typescript-eslint/promise-function-async
   const loadData = (id: string, page: number): Promise<ListDetailInfo> => {
-    let key = `sdetail__${source}__${id}__${page}`
-    if (isRefresh && cache.has(key)) cache.delete(key)
-    return cache.has(key)
-      ? Promise.resolve(cache.get(key))
-      : musicSdk[source]?.songList.getListDetail(id, page).then((result: ListDetailInfo) => {
-        result.list = markRawList(deduplicationList(result.list.map(m => toNewMusicInfo(m)) as LX.Music.MusicInfoOnline[]))
-        cache.set(key, result)
-        return result
-      }) ?? Promise.reject(new Error('source not found' + source))
+    return loadListDetail(id, source, page, isRefresh)
   }
   // eslint-disable-next-line @typescript-eslint/promise-function-async
   return loadData(id, 1).then((result: ListDetailInfo) => {
@@ -185,7 +210,7 @@ export const getListDetailAll = async(id: string, source: LX.OnlineSource, isRef
  * @returns
  */
 export const getAndSetListDetail = async(id: string, source: LX.OnlineSource, page: number, isRefresh = false) => {
-  let key = `sdetail__${source}__${id}__${page}`
+  let key = getListDetailCacheKey(id, source, page)
 
   if (!isRefresh && listDetailInfo.key == key && listDetailInfo.list.length) return
 

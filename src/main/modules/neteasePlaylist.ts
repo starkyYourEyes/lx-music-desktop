@@ -38,3 +38,9 @@ export const normalizePlaylistList = (playlists: any[] = []): LX.Netease.Playlis
 
   return list
 }
+
+const publicPrivateRadarPlaylistIds = new Set(['3136952023'])
+
+export const filterPublicRecommendPlaylists = (playlists: LX.Netease.Playlist[]): LX.Netease.Playlist[] => {
+  return playlists.filter(playlist => !publicPrivateRadarPlaylistIds.has(playlist.id))
+}

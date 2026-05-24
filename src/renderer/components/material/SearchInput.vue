@@ -203,26 +203,28 @@ export default {
 
 .container {
   position: relative;
-  width: 35%;
-  height: @height-toolbar * 0.52;
+  width: clamp(260px, 32vw, 430px);
+  height: @height-toolbar * 0.58;
   -webkit-app-region: no-drag;
 }
 
 .search {
   position: absolute;
   width: 100%;
-  border-radius: @form-radius;
-  transition: box-shadow .4s ease, background-color @transition-normal, border-color @transition-normal;
+  border-radius: 12px;
+  transition: box-shadow .4s ease, background-color @transition-normal, border-color @transition-normal, transform @transition-normal;
   display: flex;
   flex-flow: column nowrap;
-  background-color: rgba(255, 255, 255, 0.54);
-  border: 1px solid rgba(128, 128, 128, 0.1);
-  backdrop-filter: saturate(180%) blur(16px);
+  background-color: rgba(255, 255, 255, 0.48);
+  border: 1px solid rgba(128, 128, 128, 0.13);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .28);
+  backdrop-filter: saturate(180%) blur(18px);
 
   &.active {
     background-color: rgba(255, 255, 255, 0.92);
     border-color: var(--color-primary-alpha-800);
-    box-shadow: 0 8px 22px rgba(31, 38, 35, 0.12);
+    box-shadow: 0 8px 22px rgba(31, 38, 35, 0.12), inset 0 1px 0 rgba(255, 255, 255, .55);
+    transform: translateY(1px);
     .form {
       input {
         border-bottom-left-radius: 0;
@@ -235,13 +237,13 @@ export default {
   }
   .form {
     display: flex;
-    height: @height-toolbar * 0.52;
+    height: @height-toolbar * 0.58;
     position: relative;
     input {
       flex: auto;
       // border: 1px solid;
-      border-top-left-radius: @form-radius;
-      border-bottom-left-radius: @form-radius;
+      border-top-left-radius: 12px;
+      border-bottom-left-radius: 12px;
       background-color: transparent;
       // border-bottom: 2px solid var(--color-primary);
       // border-color: var(--color-primary);
@@ -250,10 +252,10 @@ export default {
 
       outline: none;
       // height: @height-toolbar * .7;
-      padding: 0 10px;
+      padding: 0 12px;
       overflow: hidden;
-      font-size: 13.5px;
-      line-height: @height-toolbar * 0.52 + 5px;
+      font-size: 14px;
+      line-height: @height-toolbar * 0.58 + 5px;
       &::placeholder {
         color: var(--color-button-font);
         font-size: .98em;
@@ -272,8 +274,8 @@ export default {
       transition: background-color .2s ease;
 
       &:last-child {
-        border-top-right-radius: 3px;
-        border-bottom-right-radius: @form-radius;
+        border-top-right-radius: 12px;
+        border-bottom-right-radius: 12px;
       }
 
       &:hover {
@@ -304,8 +306,8 @@ export default {
         background-color: var(--color-primary-dark-100-alpha-700);
       }
       &:last-child {
-        border-bottom-left-radius: @form-radius;
-        border-bottom-right-radius: @form-radius;
+        border-bottom-left-radius: 12px;
+        border-bottom-right-radius: 12px;
       }
     }
   }

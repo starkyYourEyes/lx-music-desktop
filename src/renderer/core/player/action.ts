@@ -22,6 +22,7 @@ import { addListMusics, removeListMusics } from '@renderer/store/list/action'
 import { loveList } from '@renderer/store/list/state'
 import { addDislikeInfo } from '@renderer/core/dislikeList'
 import musicSdk from '@renderer/utils/musicSdk'
+import { assertApiSupport } from '@renderer/store/utils'
 
 interface SetMusicUrlOptions {
   isRefresh?: boolean
@@ -147,45 +148,21 @@ const diffCurrentMusicInfo = (curMusicInfo: LX.Music.MusicInfo | LX.Download.Lis
   return gettingUrlId != createGettingUrlId(curMusicInfo) || !isSameMusicIdentity(curMusicInfo, playMusicInfo.musicInfo) || isPlay.value
 }
 
-const getIntervalSeconds = (interval: string | null | undefined): number => {
-  if (!interval) return 0
-  return interval.split(':').reduce((total, part) => {
-    const value = Number.parseInt(part)
-    return total * 60 + (Number.isNaN(value) ? 0 : value)
-  }, 0)
-}
-
-const normalizeSearchText = (text: string | null | undefined): string => {
-  return String(text ?? '').toLowerCase().replace(/\s|\.|,|'|"|\(|\)|\[|\]|-|_/g, '')
-}
-
-const findBestWySearchMusic = async(musicInfo: LX.Music.MusicInfo): Promise<LX.Music.MusicInfoOnline | null> => {
+const findBestProjectSourceMusic = async(musicInfo: LX.Music.MusicInfo): Promise<LX.Music.MusicInfoOnline | null> => {
   if (musicInfo.source != 'wy') return null
 
-  const keyword = `${musicInfo.name} ${musicInfo.singer || ''}`.trim()
-  if (!keyword) return null
+  if (!musicInfo.name) return null
 
   setAllStatus(window.i18n.t('toggle_source_try'))
-  const result = await musicSdk.wy.musicSearch.search(keyword, 1, 20).catch(() => null)
-  const list = (result?.list ?? []).map((item: any) => toNewMusicInfo(item) as LX.Music.MusicInfoOnline)
-  if (!list.length || window.lx.isPlayedStop || !isSameMusicIdentity(musicInfo, playMusicInfo.musicInfo)) return null
-
-  const targetName = normalizeSearchText(musicInfo.name)
-  const targetSinger = normalizeSearchText(musicInfo.singer)
-  const targetInterval = getIntervalSeconds(musicInfo.interval)
-  const isSameInterval = (interval: string | null) => {
-    const currentInterval = getIntervalSeconds(interval)
-    return !targetInterval || !currentInterval || Math.abs(targetInterval - currentInterval) < 5
-  }
-  const isSameSinger = (singer: string) => {
-    const currentSinger = normalizeSearchText(singer)
-    return !targetSinger || currentSinger.includes(targetSinger) || targetSinger.includes(currentSinger)
-  }
-
-  const playableSong = list.find((item: LX.Music.MusicInfoOnline) => normalizeSearchText(item.name) == targetName && isSameSinger(item.singer) && isSameInterval(item.interval)) ??
-    list.find((item: LX.Music.MusicInfoOnline) => normalizeSearchText(item.name) == targetName && isSameSinger(item.singer)) ??
-    list.find((item: LX.Music.MusicInfoOnline) => normalizeSearchText(item.name).includes(targetName) && isSameSinger(item.singer)) ??
-    list[0]
+  const list = await musicSdk.findMusic({
+    name: musicInfo.name,
+    singer: musicInfo.singer,
+    albumName: musicInfo.meta.albumName,
+    interval: musicInfo.interval ?? '',
+    source: musicInfo.source,
+  }).then(result => result.map((item: any) => toNewMusicInfo(item) as LX.Music.MusicInfoOnline)).catch(() => [])
+  const playableSong = list.find((item: LX.Music.MusicInfoOnline) => item.source != 'wy' && assertApiSupport(item.source))
+  if (!playableSong || window.lx.isPlayedStop || !isSameMusicIdentity(musicInfo, playMusicInfo.musicInfo)) return null
 
   musicInfo.meta.toggleMusicInfo = playableSong
   gettingUrlId = createGettingUrlId(musicInfo)
@@ -216,6 +193,22 @@ const getDirectMusicUrl = async(musicInfo: LX.Music.MusicInfo | LX.Download.List
     }
   }
 
+  const projectSourceMusic = await findBestProjectSourceMusic(targetMusicInfo)
+  if (projectSourceMusic) {
+    try {
+      return await getPlayableMusicUrl({
+        musicInfo: projectSourceMusic,
+        isRefresh,
+        allowToggleSource: false,
+      })
+    } catch (err: any) {
+      if (err.message == requestMsg.tooManyRequests) throw err
+      console.log(err)
+      targetMusicInfo.meta.toggleMusicInfo = null
+      gettingUrlId = createGettingUrlId(musicInfo)
+    }
+  }
+
   try {
     return await getPlayableMusicUrl({
       musicInfo,
@@ -228,20 +221,6 @@ const getDirectMusicUrl = async(musicInfo: LX.Music.MusicInfo | LX.Download.List
     })
   } catch (err: any) {
     if (targetMusicInfo.source != 'wy' || err.message == requestMsg.tooManyRequests) throw err
-  }
-
-  const wySearchMusic = await findBestWySearchMusic(targetMusicInfo)
-  if (wySearchMusic) {
-    try {
-      return await getPlayableMusicUrl({
-        musicInfo: wySearchMusic,
-        isRefresh,
-        allowToggleSource: false,
-      })
-    } catch (err: any) {
-      if (err.message == requestMsg.tooManyRequests) throw err
-      console.log(err)
-    }
   }
 
   return getPlayableMusicUrl({

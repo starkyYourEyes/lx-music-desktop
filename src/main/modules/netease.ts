@@ -1,7 +1,7 @@
 import { DATA_KEYS, STORE_NAMES } from '@common/constants'
 import { formatPlayTime, sizeFormate } from '@common/utils/common'
 import getStore from '@main/utils/store'
-import { normalizePlaylistList } from './neteasePlaylist'
+import { filterPublicRecommendPlaylists, normalizePlaylistList } from './neteasePlaylist'
 
 // NeteaseCloudMusicApi is CommonJS and dynamically loads module files internally.
 // Keep it as a runtime dependency instead of bundling it into the main process.
@@ -16,6 +16,7 @@ const neteaseApi = require('NeteaseCloudMusicApi') as {
   personalized: (params: Record<string, any>) => Promise<any>
   recommend_resource: (params: Record<string, any>) => Promise<any>
   playlist_detail: (params: Record<string, any>) => Promise<any>
+  song_detail: (params: Record<string, any>) => Promise<any>
   like: (params: Record<string, any>) => Promise<any>
   song_url_v1: (params: Record<string, any>) => Promise<any>
 }
@@ -211,6 +212,102 @@ export const getRecommendSongs = async(): Promise<LX.Music.MusicInfoOnline[]> =>
   return songs.map((song: any, index: number) => normalizeSong(song, privileges[index]))
 }
 
+const playlistDetailLimit = 1000
+
+const getSongDetailList = async(ids: string[], cookie: string) => {
+  const songs: any[] = []
+  const privileges: any[] = []
+  for (let index = 0; index < ids.length; index += playlistDetailLimit) {
+    const chunkIds = ids.slice(index, index + playlistDetailLimit)
+    const result = await neteaseApi.song_detail({
+      cookie,
+      ids: chunkIds.join(','),
+    })
+    if (result.body?.code != 200) throw new Error(result.body?.message ?? 'Failed to load song details')
+    songs.push(...(result.body?.songs ?? []))
+    privileges.push(...(result.body?.privileges ?? []))
+  }
+  return { songs, privileges }
+}
+
+const normalizePlaylistTracks = async(playlist: any, privileges: any[], cookie: string): Promise<LX.Music.MusicInfoOnline[]> => {
+  const trackIds = (playlist.trackIds ?? []).map((track: any) => String(track.id)).filter(Boolean)
+  const trackMap = new Map<string, any>()
+  const privilegeMap = new Map<string, any>()
+
+  for (const track of playlist.tracks ?? []) {
+    if (track?.id == null) continue
+    trackMap.set(String(track.id), track)
+  }
+  for (const privilege of privileges ?? []) {
+    if (privilege?.id == null) continue
+    privilegeMap.set(String(privilege.id), privilege)
+  }
+
+  const missingIds = trackIds.filter((id: string) => !trackMap.has(id))
+  if (missingIds.length) {
+    const detail = await getSongDetailList(missingIds, cookie)
+    for (const track of detail.songs) {
+      if (track?.id == null) continue
+      trackMap.set(String(track.id), track)
+    }
+    for (const privilege of detail.privileges) {
+      if (privilege?.id == null) continue
+      privilegeMap.set(String(privilege.id), privilege)
+    }
+  }
+
+  const orderedIds = trackIds.length
+    ? trackIds
+    : [...trackMap.keys()] as string[]
+
+  return orderedIds
+    .map((id: string) => {
+      const track = trackMap.get(id)
+      return track ? normalizeSong(track, privilegeMap.get(id)) : null
+    })
+    .filter((track: LX.Music.MusicInfoOnline | null): track is LX.Music.MusicInfoOnline => !!track)
+}
+
+export const getRecommendPlaylistDetail = async(id: string, page = 1): Promise<LX.Netease.PlaylistDetailInfo> => {
+  const account = getAccountData()
+  if (!account.cookie) throw new Error('Not logged in')
+
+  const result = await neteaseApi.playlist_detail({
+    cookie: account.cookie,
+    id,
+    timestamp: Date.now(),
+  })
+  if (result.body?.code != 200) throw new Error(result.body?.message ?? 'Failed to load playlist detail')
+
+  const playlist = result.body?.playlist
+  if (!playlist) throw new Error('Playlist not found')
+
+  const list = await normalizePlaylistTracks(playlist, result.body?.privileges ?? [], account.cookie)
+  const normalizedPlaylist = normalizePlaylistList([playlist])[0]
+  const safePage = Math.max(1, page)
+  const rangeStart = (safePage - 1) * playlistDetailLimit
+
+  return {
+    list: list.slice(rangeStart, playlistDetailLimit * safePage),
+    page: safePage,
+    limit: playlistDetailLimit,
+    total: list.length,
+    source: 'wy',
+    desc: playlist.description ?? null,
+    key: null,
+    id: String(id),
+    info: {
+      play_count: normalizedPlaylist?.play_count ?? '',
+      name: normalizedPlaylist?.name ?? playlist.name ?? '',
+      img: normalizedPlaylist?.img ?? playlist.coverImgUrl ?? '',
+      desc: normalizedPlaylist?.desc ?? playlist.description ?? null,
+      author: normalizedPlaylist?.author ?? playlist.creator?.nickname ?? '',
+    },
+    noItemLabel: '',
+  }
+}
+
 const specialPlaylistIds = new Set(['3136952023', '2829883282', '2829816518', '2829896389'])
 
 const replaceSpecialRecommendResult = async(playlists: LX.Netease.Playlist[], cookie: string) => {
@@ -266,7 +363,7 @@ export const getRecommendPlaylists = async(limit = 10, removePrivateRecommend = 
 
   return mergePlaylists([
     ...dailyRecommend,
-    ...normalizePlaylistList(publicResult.body?.result ?? []),
+    ...filterPublicRecommendPlaylists(normalizePlaylistList(publicResult.body?.result ?? [])),
   ]).slice(0, limit)
 }
 

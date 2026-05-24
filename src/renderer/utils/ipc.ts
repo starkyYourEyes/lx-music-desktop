@@ -205,6 +205,16 @@ export const getPlayInfo = async() => {
   return rendererInvoke<string, LX.Player.SavedPlayInfo | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.playInfo)
 }
 
+export const saveRecentPlayList = (list: LX.Music.MusicInfo[]) => {
+  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
+    path: DATA_KEYS.recentPlayList,
+    data: toCloneable(list),
+  })
+}
+export const getRecentPlayList = async() => {
+  return rendererInvoke<string, LX.Music.MusicInfo[] | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.recentPlayList)
+}
+
 export const saveSearchHistoryList = (list: LX.List.SearchHistoryList) => {
   rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
     path: DATA_KEYS.searchHistoryList,
@@ -712,6 +722,13 @@ export const getNeteaseRecommendPlaylists = async(limit: number, removePrivateRe
   return rendererInvoke<{ limit: number, removePrivateRecommend: boolean }, LX.Netease.Playlist[]>(
     WIN_MAIN_RENDERER_EVENT_NAME.netease_get_recommend_playlists,
     { limit, removePrivateRecommend },
+  )
+}
+
+export const getNeteasePlaylistDetail = async(id: string, page = 1) => {
+  return rendererInvoke<LX.Netease.PlaylistDetailParams, LX.Netease.PlaylistDetailInfo>(
+    WIN_MAIN_RENDERER_EVENT_NAME.netease_get_playlist_detail,
+    { id, page },
   )
 }
 

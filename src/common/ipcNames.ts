@@ -172,6 +172,7 @@ const modules = {
     netease_get_playlist_detail: 'netease_get_playlist_detail',
     netease_get_music_url: 'netease_get_music_url',
     netease_like_music: 'netease_like_music',
+    netease_trash_private_fm_music: 'netease_trash_private_fm_music',
   },
   winLyric: {
     close: 'close',

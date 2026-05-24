@@ -750,6 +750,13 @@ export const likeNeteaseMusic = async(musicInfo: LX.Music.MusicInfo) => {
   await rendererInvoke<LX.Music.MusicInfo>(WIN_MAIN_RENDERER_EVENT_NAME.netease_like_music, toCloneable(musicInfo))
 }
 
+export const trashNeteasePrivateFmMusic = async(musicInfo: LX.Music.MusicInfo, time = 25) => {
+  await rendererInvoke<LX.Netease.PrivateFmTrashParams>(WIN_MAIN_RENDERER_EVENT_NAME.netease_trash_private_fm_music, {
+    musicInfo: toCloneable(musicInfo),
+    time,
+  })
+}
+
 /**
  * 退出应用
  */

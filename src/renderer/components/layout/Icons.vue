@@ -152,6 +152,10 @@
       <g id="icon-play-queue" fill="currentColor">
         <path d="M4 6h16v2H4V6zm0 5h16v2H4v-2zm0 5h10v2H4v-2zm13.5-1.5 4 2.5-4 2.5v-5z" />
       </g>
+      <g id="icon-fm-trash" fill="currentColor">
+        <path d="M8.8 4.2 8 5H4.8v2h14.4V5H16l-.8-.8H8.8zM7 9l.7 10.3c.1 1 1 1.7 2 1.7h4.6c1 0 1.9-.7 2-1.7L17 9H7zm3.1 2.2h1.7l.3 7.1h-1.7l-.3-7.1zm2.1 0h1.7l-.3 7.1h-1.7l.3-7.1z" />
+        <path d="M2.8 2.8 21.2 21.2 19.8 22.6 1.4 4.2 2.8 2.8z" />
+      </g>
       <g id="icon-recent-play" fill="currentColor">
         <path d="M12 3a9 9 0 1 0 8.94 10h-2.02A7 7 0 1 1 17.2 8.4L15 10.6h6V4.6l-2.36 2.36A8.96 8.96 0 0 0 12 3z" />
         <path d="M11 7h2v5.02l4.14 2.48-1.03 1.72L11 13.15V7z" />

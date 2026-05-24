@@ -31,6 +31,11 @@ declare namespace LX {
       quality: LX.Quality
     }
 
+    interface PrivateFmTrashParams {
+      musicInfo: LX.Music.MusicInfo
+      time?: number
+    }
+
     interface PlaylistDetailParams {
       id: string
       page?: number

@@ -42,7 +42,19 @@
           </svg>
         </button>
       </div>
-      <button type="button" :class="[$style.queueBtn, { [$style.queueBtnActive]: isShowPlayQueue }]" :aria-label="$t('player__play_queue')" @click="isShowPlayQueue = !isShowPlayQueue">
+      <button
+        v-if="isPrivateFmMode"
+        type="button"
+        :class="[$style.queueBtn, $style.privateFmTrashBtn, { [$style.queueBtnActive]: isTrashingPrivateFm }]"
+        :aria-label="$t('player__private_fm_trash')"
+        :disabled="isTrashingPrivateFm || !playMusicInfo.musicInfo"
+        @click="handleTrashPrivateFmMusic"
+      >
+        <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24 24" space="preserve">
+          <use xlink:href="#icon-fm-trash" />
+        </svg>
+      </button>
+      <button v-else type="button" :class="[$style.queueBtn, { [$style.queueBtnActive]: isShowPlayQueue }]" :aria-label="$t('player__play_queue')" @click="isShowPlayQueue = !isShowPlayQueue">
         <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24 24" space="preserve">
           <use xlink:href="#icon-play-queue" />
         </svg>
@@ -65,12 +77,12 @@
       <control-btns :show-favorite="false" :show-play-mode="false" />
     </div>
 
-    <play-queue v-model:show="isShowPlayQueue" />
+    <play-queue v-if="!isPrivateFmMode" v-model:show="isShowPlayQueue" />
   </div>
 </template>
 
 <script>
-import { ref } from '@common/utils/vueTools'
+import { ref, watch } from '@common/utils/vueTools'
 import { useRouter } from '@common/utils/vueRouter'
 import { clipboardWriteText } from '@common/utils/electron'
 import ControlBtns from './ControlBtns.vue'
@@ -92,6 +104,8 @@ import {
 import { togglePlay, playNext, playPrev } from '@renderer/core/player'
 import { LIST_IDS } from '@common/constants'
 import { party } from '@renderer/store/party'
+import { isPrivateFmMode } from '@renderer/store/privateFm/state'
+import { trashNeteasePrivateFmMusic } from '@renderer/utils/ipc'
 
 export default {
   name: 'ModernPlayBar',
@@ -109,6 +123,7 @@ export default {
   setup() {
     const router = useRouter()
     const isShowPlayQueue = ref(false)
+    const isTrashingPrivateFm = ref(false)
     const {
       nowPlayTimeStr,
       maxPlayTimeStr,
@@ -144,8 +159,35 @@ export default {
       })
     }
 
+    const getCurrentMusicInfo = () => {
+      const currentMusicInfo = playMusicInfo.musicInfo
+      if (!currentMusicInfo) return null
+      return 'progress' in currentMusicInfo ? currentMusicInfo.metadata.musicInfo : currentMusicInfo
+    }
+
+    const handleTrashPrivateFmMusic = async() => {
+      if (isTrashingPrivateFm.value) return
+      const currentMusicInfo = getCurrentMusicInfo()
+      if (!currentMusicInfo) return
+
+      isTrashingPrivateFm.value = true
+      try {
+        await trashNeteasePrivateFmMusic(currentMusicInfo)
+        await playNext(true)
+      } catch (err) {
+        console.warn('Trash private FM music failed:', err)
+      } finally {
+        isTrashingPrivateFm.value = false
+      }
+    }
+
+    watch(isPrivateFmMode, isFmMode => {
+      if (isFmMode) isShowPlayQueue.value = false
+    })
+
     return {
       musicInfo,
+      playMusicInfo,
       nowPlayTimeStr,
       maxPlayTimeStr,
       progress,
@@ -162,6 +204,9 @@ export default {
       handleToMusicLocation,
       isShowPlayerDetail,
       isShowPlayQueue,
+      isPrivateFmMode,
+      isTrashingPrivateFm,
+      handleTrashPrivateFmMusic,
       party,
     }
   },
@@ -359,6 +404,12 @@ export default {
 
 .queueBtnActive {
   color: var(--color-primary);
+}
+
+.privateFmTrashBtn:disabled {
+  cursor: default;
+  opacity: .42;
+  transform: none;
 }
 
 .middleProgress {

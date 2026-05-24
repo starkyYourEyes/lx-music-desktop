@@ -20,6 +20,7 @@ const neteaseApi = require('NeteaseCloudMusicApi') as {
   playlist_detail: (params: Record<string, any>) => Promise<any>
   song_detail: (params: Record<string, any>) => Promise<any>
   like: (params: Record<string, any>) => Promise<any>
+  fm_trash: (params: Record<string, any>) => Promise<any>
   song_url_v1: (params: Record<string, any>) => Promise<any>
 }
 
@@ -408,6 +409,22 @@ export const likeMusic = async(musicInfo: LX.Music.MusicInfo) => {
     id: songId,
     like: true,
   })
+}
+
+export const trashPrivateFmMusic = async({ musicInfo, time = 25 }: LX.Netease.PrivateFmTrashParams) => {
+  const account = getAccountData()
+  if (!account.cookie || musicInfo.source != 'wy') return
+  const songId = musicInfo.meta.songId ?? musicInfo.id?.replace(/^wy_/, '')
+  if (!songId) throw new Error('Missing NetEase song id')
+
+  const result = await neteaseApi.fm_trash({
+    cookie: account.cookie,
+    id: songId,
+    time,
+  })
+  if (result.body?.code != null && result.body.code != 200) {
+    throw new Error(result.body?.message ?? 'Failed to reduce private FM recommendation')
+  }
 }
 
 const qualityLevelMap: Partial<Record<LX.Quality, string>> = {

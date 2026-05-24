@@ -11,6 +11,7 @@ import {
   getRecommendSongs,
   likeMusic,
   logout,
+  trashPrivateFmMusic,
 } from '@main/modules/netease'
 
 export default () => {
@@ -52,5 +53,9 @@ export default () => {
 
   mainHandle<LX.Music.MusicInfo>(WIN_MAIN_RENDERER_EVENT_NAME.netease_like_music, async({ params: musicInfo }) => {
     await likeMusic(musicInfo)
+  })
+
+  mainHandle<LX.Netease.PrivateFmTrashParams>(WIN_MAIN_RENDERER_EVENT_NAME.netease_trash_private_fm_music, async({ params }) => {
+    await trashPrivateFmMusic(params)
   })
 }

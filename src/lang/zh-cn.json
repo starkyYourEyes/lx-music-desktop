@@ -246,6 +246,7 @@
   "player__play_queue_empty": "暂无待播放歌曲",
   "player__play_queue_later": "稍后播放",
   "player__play_queue_pending": "待播放",
+  "player__private_fm_trash": "减少此类推荐",
   "player__play_toggle_mode_list": "顺序播放",
   "player__play_toggle_mode_list_loop": "列表循环播放",
   "player__play_toggle_mode_off": "禁用歌曲切换",

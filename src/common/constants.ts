@@ -46,6 +46,7 @@ export const DATA_KEYS = {
   songListSetting: 'songListSetting',
   searchSetting: 'searchSetting',
   neteaseAccount: 'neteaseAccount',
+  listeningTimeStats: 'listeningTimeStats',
 
   lastStartInfo: 'lastStartInfo',
 } as const

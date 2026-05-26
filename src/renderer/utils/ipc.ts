@@ -215,6 +215,16 @@ export const getRecentPlayList = async() => {
   return rendererInvoke<string, LX.Music.MusicInfo[] | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.recentPlayList)
 }
 
+export const saveListeningTimeStats = (stats: import('@common/utils/listeningTime').ListeningTimeStats) => {
+  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
+    path: DATA_KEYS.listeningTimeStats,
+    data: toCloneable(stats),
+  })
+}
+export const getListeningTimeStats = async() => {
+  return rendererInvoke<string, import('@common/utils/listeningTime').ListeningTimeStats | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.listeningTimeStats)
+}
+
 export const saveSearchHistoryList = (list: LX.List.SearchHistoryList) => {
   rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
     path: DATA_KEYS.searchHistoryList,

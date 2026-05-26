@@ -6,8 +6,12 @@ import { createUserList, setTempList } from '@renderer/store/list/action'
 import { playList } from '@renderer/core/player/action'
 import { LIST_IDS } from '@common/constants'
 import { toMD5 } from '@renderer/utils'
+import { DAILY_RECOMMEND_TEMP_LIST_ID } from '@renderer/store/dailyRecommend/state'
 
 const getListId = (id: string, source: LX.OnlineSource) => `${source}__${id}`
+const getTempListId = (id: string, source: LX.OnlineSource) => source == 'wy' && id == DAILY_RECOMMEND_TEMP_LIST_ID
+  ? DAILY_RECOMMEND_TEMP_LIST_ID
+  : getListId(id, source)
 
 export const addSongListDetail = async(id: string, source: LX.OnlineSource, name?: string) => {
   // console.log(this.listDetail.info)
@@ -38,7 +42,7 @@ export const addSongListDetail = async(id: string, source: LX.OnlineSource, name
 export const playSongListDetail = async(id: string, source: LX.OnlineSource, list?: LX.Music.MusicInfoOnline[], index: number = 0) => {
   let isPlayingList = false
   // console.log(list)
-  const listId = getListId(id, source)
+  const listId = getTempListId(id, source)
   if (!list?.length) list = (await getListDetail(id, source, 1)).list
   if (list?.length) {
     await setTempList(listId, [...list])

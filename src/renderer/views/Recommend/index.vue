@@ -1,14 +1,14 @@
 <template>
   <div :class="$style.recommend">
-    <div :class="$style.playlistPage">
+    <div ref="playlistPageRef" :class="$style.playlistPage">
       <div v-if="showLoginPanel && !isLoggedIn" :class="$style.loginOverlay">
         <div :class="$style.loginPanel">
-          <button :class="$style.closeBtn" type="button" @click="handleCloseLogin">×</button>
+          <button :class="$style.closeBtn" type="button" @click="handleCloseLogin">x</button>
           <div :class="$style.qrWrap">
             <img v-if="qrImg" :src="qrImg" draggable="false">
             <span v-else>{{ isCreatingQr ? '生成中...' : '暂无二维码' }}</span>
           </div>
-          <h3>网易云音乐登录</h3>
+          <h3>登录</h3>
           <p>{{ qrStatusText }}</p>
           <base-btn min :disabled="isCreatingQr" @click="handleCreateLoginQr">重新获取二维码</base-btn>
         </div>
@@ -36,20 +36,20 @@
           <button
             v-for="playlist in displayedPlaylists"
             :key="playlist.id"
-            :class="[$style.playlistCard, { [$style.privateFmCard]: playlist.isPrivateFm }]"
+            :class="[$style.playlistCard, { [$style.playerCard]: playlist.isPrivateFm || playlist.isDailyRecommend || playlist.isPrivateRadar }]"
             type="button"
             @click="handleOpenPlaylist(playlist)"
           >
             <span :class="$style.coverWrap">
               <img :class="$style.cover" loading="lazy" decoding="async" :src="playlist.img" draggable="false">
               <button
-                v-if="playlist.isPrivateFm"
+                v-if="playlist.isPrivateFm || playlist.isDailyRecommend || playlist.isPrivateRadar"
                 type="button"
-                :class="$style.fmPlayBtn"
-                :aria-label="isPrivateFmPlaying ? '暂停私人 FM' : '播放私人 FM'"
-                @click.stop="handleTogglePrivateFm"
+                :class="$style.cardPlayBtn"
+                :aria-label="getCardPlayLabel(playlist)"
+                @click.stop="handleToggleCardPlay(playlist)"
               >
-                <svg v-if="isPrivateFmPlaying" version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024" space="preserve">
+                <svg v-if="isCardPlaying(playlist)" version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024" space="preserve">
                   <use xlink:href="#icon-pause" />
                 </svg>
                 <svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024" space="preserve">
@@ -86,15 +86,37 @@ import {
   profile,
   setNeteaseAccountStatus,
 } from '@renderer/store/netease'
-import { isPlay } from '@renderer/store/player/state'
-import { enterPrivateFmMode, refreshPrivateFmQueue } from '@renderer/store/privateFm/action'
+import { LIST_IDS } from '@common/constants'
+import { isPlay, playInfo } from '@renderer/store/player/state'
+import { tempListMeta } from '@renderer/store/list/state'
+import { enterPrivateFmMode, preparePrivateFmQueue } from '@renderer/store/privateFm/action'
 import { isLoadingPrivateFm, isPrivateFmMode, privateFmQueue } from '@renderer/store/privateFm/state'
+import { loadDailyRecommendSongs, playDailyRecommend } from '@renderer/store/dailyRecommend/action'
+import { DAILY_RECOMMEND_TEMP_LIST_ID, dailyRecommendSongs, isDailyRecommendPlayingList, isLoadingDailyRecommend } from '@renderer/store/dailyRecommend/state'
 import { pause, play } from '@renderer/core/player'
+import { playSongListDetail } from '@renderer/views/songList/Detail/action'
 
 const LOGIN_QR_PENDING_CODES = new Set([801, 802])
-const HOME_PLAYLIST_LIMIT = 10
+const MIN_HOME_PLAYLIST_ROWS = 2
+const MAX_HOME_PLAYLIST_LIMIT = 60
+const HOME_GRID_MIN_COLUMN_WIDTH = 174
+const HOME_GRID_COLUMN_GAP = 24
+const HOME_GRID_ROW_HEIGHT = 252
 const EXPLORE_PLAYLIST_LIMIT = 100
 const PRIVATE_FM_CARD_ID = 'private_fm'
+const PRIVATE_RADAR_PLAYLIST_ID = '3136952023'
+const RECOMMEND_CACHE_TTL = 5 * 60 * 1000
+
+type RecommendCard = LX.Netease.Playlist & {
+  isPrivateFm?: boolean
+  isDailyRecommend?: boolean
+  isPrivateRadar?: boolean
+}
+
+const recommendPlaylistCache = new Map<string, {
+  list: LX.Netease.Playlist[]
+  updatedAt: number
+}>()
 
 const route = useRoute()
 const router = useRouter()
@@ -105,19 +127,39 @@ const isCreatingQr = ref(false)
 const isLoadingPlaylists = ref(false)
 const playlistLoadError = ref('')
 const recommendPlaylists = ref<LX.Netease.Playlist[]>([])
+const playlistPageRef = ref<HTMLElement | null>(null)
 const playlistScrollRef = ref<HTMLElement | null>(null)
+const homePlaylistLimit = ref(0)
 const showLoginPanel = ref(false)
 
 let qrTimer: number | null = null
+let playlistResizeObserver: ResizeObserver | null = null
 
-const profileNickname = computed(() => profile.value?.nickname ? profile.value.nickname : '网易云音乐')
+const profileNickname = computed(() => profile.value?.nickname ? profile.value.nickname : 'WY')
 const qrImg = computed(() => qrInfo.value?.qrimg ?? '')
 const isExploreMode = computed(() => route.query.category === 'playlists')
-const playlistLimit = computed(() => isExploreMode.value ? EXPLORE_PLAYLIST_LIMIT : HOME_PLAYLIST_LIMIT)
+const playlistLimit = computed(() => isExploreMode.value ? EXPLORE_PLAYLIST_LIMIT : homePlaylistLimit.value)
 const pageTitle = computed(() => isExploreMode.value ? '更多推荐' : '推荐歌单')
 const pageSubTitle = computed(() => isLoggedIn.value ? profileNickname.value : '登录后获取每日推荐歌单，当前展示公开推荐')
 
 const firstPrivateFmSong = computed(() => privateFmQueue[0] ?? null)
+const firstDailyRecommendSong = computed(() => dailyRecommendSongs[0] ?? null)
+const dailyRecommendCard = computed((): (LX.Netease.Playlist & { isDailyRecommend: true }) | null => {
+  const song = firstDailyRecommendSong.value
+  if (!song) return null
+  return {
+    id: DAILY_RECOMMEND_TEMP_LIST_ID,
+    source: 'wy',
+    play_count: '',
+    author: song.singer,
+    name: '每日推荐',
+    time: '',
+    img: song.meta.picUrl ?? '',
+    desc: `从《${song.name}》开始`,
+    total: `${dailyRecommendSongs.length}`,
+    isDailyRecommend: true,
+  }
+})
 const privateFmCard = computed((): (LX.Netease.Playlist & { isPrivateFm: true }) | null => {
   const song = firstPrivateFmSong.value
   if (!song) return null
@@ -134,14 +176,34 @@ const privateFmCard = computed((): (LX.Netease.Playlist & { isPrivateFm: true })
     isPrivateFm: true,
   }
 })
+const privateRadarCard = computed((): (LX.Netease.Playlist & { isPrivateRadar: true }) | null => {
+  const playlist = recommendPlaylists.value.find(playlist => playlist.id == PRIVATE_RADAR_PLAYLIST_ID)
+  if (!playlist) return null
+  return {
+    ...playlist,
+    isPrivateRadar: true,
+  }
+})
 const displayedPlaylists = computed(() => {
-  const list = [...recommendPlaylists.value] as Array<LX.Netease.Playlist & { isPrivateFm?: boolean }>
-  if (isExploreMode.value || !privateFmCard.value) return list
-  if (list.length >= 2) list.splice(1, 1, privateFmCard.value)
-  else list.push(privateFmCard.value)
-  return list
+  if (isExploreMode.value) return recommendPlaylists.value.slice(0, playlistLimit.value) as RecommendCard[]
+
+  const result: RecommendCard[] = []
+  if (dailyRecommendCard.value) result.push(dailyRecommendCard.value)
+  if (privateFmCard.value) result.push(privateFmCard.value)
+  if (privateRadarCard.value) result.push(privateRadarCard.value)
+
+  const specialIds = new Set(result.map(playlist => playlist.id))
+  result.push(...recommendPlaylists.value.filter(playlist => !specialIds.has(playlist.id)))
+  return result.slice(0, playlistLimit.value)
 })
 const isPrivateFmPlaying = computed(() => isPrivateFmMode.value && isPlay.value)
+const isDailyRecommendPlaying = computed(() => isDailyRecommendPlayingList.value && isPlay.value)
+
+const getPlaylistTempListId = (playlist: LX.Netease.Playlist) => `${playlist.source}__${playlist.id}`
+
+const isPlaylistPlayingList = (playlist: LX.Netease.Playlist) => {
+  return playInfo.playerListId == LIST_IDS.TEMP && tempListMeta.id == getPlaylistTempListId(playlist)
+}
 
 const playlistNoItemText = computed(() => {
   if (isLoadingPlaylists.value) return '推荐歌单加载中...'
@@ -149,6 +211,41 @@ const playlistNoItemText = computed(() => {
   if (!recommendPlaylists.value.length) return '暂时没有拿到推荐歌单'
   return ''
 })
+
+const recommendPlaylistCacheKey = computed(() => `${playlistLimit.value}:${isExploreMode.value ? 'explore' : 'home'}:${isLoggedIn.value ? 'login' : 'guest'}`)
+
+const getRecommendPlaylistCache = () => {
+  const cache = recommendPlaylistCache.get(recommendPlaylistCacheKey.value)
+  if (!cache || Date.now() - cache.updatedAt > RECOMMEND_CACHE_TTL) return null
+  return cache.list
+}
+
+const setRecommendPlaylistCache = (list: LX.Netease.Playlist[]) => {
+  recommendPlaylistCache.set(recommendPlaylistCacheKey.value, {
+    list,
+    updatedAt: Date.now(),
+  })
+}
+
+const calculateHomePlaylistLimit = () => {
+  const el = playlistPageRef.value
+  const width = Math.max(el?.clientWidth ?? window.innerWidth, 360)
+  const height = Math.max(el?.clientHeight ?? window.innerHeight, 360)
+  const columns = Math.max(1, Math.floor((width - 48 + HOME_GRID_COLUMN_GAP) / (HOME_GRID_MIN_COLUMN_WIDTH + HOME_GRID_COLUMN_GAP)))
+  const contentHeight = Math.max(240, height - 108)
+  const rows = Math.max(MIN_HOME_PLAYLIST_ROWS, Math.floor(contentHeight / HOME_GRID_ROW_HEIGHT))
+  const maxRows = Math.max(MIN_HOME_PLAYLIST_ROWS, Math.floor(MAX_HOME_PLAYLIST_LIMIT / columns))
+  return columns * Math.min(rows, maxRows)
+}
+
+const syncHomePlaylistLimit = () => {
+  if (isExploreMode.value) return false
+  const nextLimit = calculateHomePlaylistLimit()
+  if (nextLimit == homePlaylistLimit.value) return false
+  const isIncrease = nextLimit > homePlaylistLimit.value
+  homePlaylistLimit.value = nextLimit
+  return isIncrease
+}
 
 const clearQrTimer = () => {
   if (qrTimer == null) return
@@ -184,7 +281,7 @@ const checkLoginStatus = async() => {
 
     qrStatusText.value = status.code == 802
       ? '已扫码，请在手机上确认登录'
-      : status.message ?? '请使用网易云音乐 App 扫码登录'
+      : status.message ?? '请使用 WY App 扫码登录'
 
     if (LOGIN_QR_PENDING_CODES.has(status.code)) scheduleQrCheck()
   } catch (err: any) {
@@ -202,7 +299,7 @@ const handleCreateLoginQr = async() => {
 
   try {
     qrInfo.value = await createNeteaseLoginQr()
-    qrStatusText.value = '请使用网易云音乐 App 扫码登录'
+    qrStatusText.value = '请使用 WY App 扫码登录'
     scheduleQrCheck()
   } catch (err: any) {
     qrStatusText.value = err?.message ?? '二维码生成失败'
@@ -225,17 +322,36 @@ const handleCloseLogin = () => {
   clearQrTimer()
 }
 
-const loadRecommendPlaylists = async() => {
+const loadRecommendPlaylists = async(forceRefresh = false) => {
+  const cachedList = forceRefresh ? null : getRecommendPlaylistCache()
+  if (cachedList) {
+    recommendPlaylists.value = cachedList
+    playlistLoadError.value = ''
+    if (!isExploreMode.value && isLoggedIn.value && !isPrivateFmMode.value) {
+      void loadDailyRecommendSongs(false).catch(err => {
+        console.warn('Load daily recommend failed:', err)
+      })
+      void preparePrivateFmQueue(false).catch(err => {
+        console.warn('Load private FM failed:', err)
+      })
+    }
+    return
+  }
+
   isLoadingPlaylists.value = true
   playlistLoadError.value = ''
   try {
     const tasks: Array<Promise<unknown>> = [
       getNeteaseRecommendPlaylists(playlistLimit.value, isExploreMode.value).then(list => {
         recommendPlaylists.value = list
+        setRecommendPlaylistCache(list)
       }),
     ]
     if (!isExploreMode.value && isLoggedIn.value) {
-      tasks.push(refreshPrivateFmQueue().catch(err => {
+      tasks.push(loadDailyRecommendSongs(forceRefresh).catch(err => {
+        console.warn('Load daily recommend failed:', err)
+      }))
+      tasks.push(preparePrivateFmQueue(forceRefresh && !isPrivateFmMode.value).catch(err => {
         console.warn('Load private FM failed:', err)
       }))
     }
@@ -251,7 +367,7 @@ const loadRecommendPlaylists = async() => {
 }
 
 const handleRefresh = () => {
-  void loadRecommendPlaylists()
+  void loadRecommendPlaylists(true)
 }
 
 const handleShowAll = () => {
@@ -263,7 +379,7 @@ const handleShowAll = () => {
   })
 }
 
-const handleOpenPlaylist = (playlist: LX.Netease.Playlist & { isPrivateFm?: boolean }) => {
+const handleOpenPlaylist = (playlist: RecommendCard) => {
   if (playlist.isPrivateFm) {
     void handleTogglePrivateFm()
     return
@@ -277,6 +393,51 @@ const handleOpenPlaylist = (playlist: LX.Netease.Playlist & { isPrivateFm?: bool
       fromName: route.name as string,
     },
   })
+}
+
+const isCardPlaying = (playlist: RecommendCard) => {
+  if (playlist.isPrivateFm) return isPrivateFmPlaying.value
+  if (playlist.isDailyRecommend) return isDailyRecommendPlaying.value
+  if (playlist.isPrivateRadar) return isPlaylistPlayingList(playlist) && isPlay.value
+  return false
+}
+
+const getCardPlayLabel = (playlist: RecommendCard) => {
+  if (playlist.isPrivateFm) return isPrivateFmPlaying.value ? '暂停私人 FM' : '播放私人 FM'
+  if (playlist.isDailyRecommend) return isDailyRecommendPlaying.value ? '暂停每日推荐' : '播放每日推荐'
+  if (playlist.isPrivateRadar) return isCardPlaying(playlist) ? '暂停私人雷达' : '播放私人雷达'
+  return '播放'
+}
+
+const handleToggleCardPlay = (playlist: RecommendCard) => {
+  if (playlist.isPrivateFm) {
+    void handleTogglePrivateFm()
+    return
+  }
+  if (playlist.isDailyRecommend) {
+    void handleToggleDailyRecommend()
+    return
+  }
+  if (playlist.isPrivateRadar) {
+    void handleTogglePrivateRadar(playlist)
+  }
+}
+
+const handleToggleDailyRecommend = async() => {
+  if (isDailyRecommendPlaying.value) {
+    pause()
+    return
+  }
+  if (isDailyRecommendPlayingList.value) {
+    play()
+    return
+  }
+  if (isLoadingDailyRecommend.value) return
+  try {
+    await playDailyRecommend()
+  } catch (err: any) {
+    playlistLoadError.value = err?.message ?? '每日推荐加载失败'
+  }
 }
 
 const handleTogglePrivateFm = async() => {
@@ -296,7 +457,21 @@ const handleTogglePrivateFm = async() => {
   }
 }
 
+const handleTogglePrivateRadar = async(playlist: LX.Netease.Playlist) => {
+  if (isPlaylistPlayingList(playlist)) {
+    if (isPlay.value) pause()
+    else play()
+    return
+  }
+  try {
+    await playSongListDetail(playlist.id, playlist.source)
+  } catch (err: any) {
+    playlistLoadError.value = err?.message ?? '私人雷达加载失败'
+  }
+}
+
 watch(isExploreMode, () => {
+  syncHomePlaylistLimit()
   void loadRecommendPlaylists()
 })
 
@@ -314,6 +489,13 @@ const handleAccountLoginRequest = () => {
 
 onMounted(() => {
   window.addEventListener('show-netease-login', handleAccountLoginRequest)
+  syncHomePlaylistLimit()
+  playlistResizeObserver = new ResizeObserver(() => {
+    if (syncHomePlaylistLimit() && !isLoadingPlaylists.value) {
+      void loadRecommendPlaylists()
+    }
+  })
+  if (playlistPageRef.value) playlistResizeObserver.observe(playlistPageRef.value)
   void initNeteaseAccount()
     .then(() => {
       void loadRecommendPlaylists()
@@ -325,6 +507,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('show-netease-login', handleAccountLoginRequest)
+  playlistResizeObserver?.disconnect()
+  playlistResizeObserver = null
   clearQrTimer()
 })
 </script>
@@ -356,7 +540,7 @@ onBeforeUnmount(() => {
 
 .sectionHead {
   flex: none;
-  padding: 22px 24px 8px;
+  padding: 20px 24px 6px;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -402,14 +586,14 @@ onBeforeUnmount(() => {
   flex: auto;
   min-height: 0;
   overflow: auto;
-  padding: 18px 24px 36px;
+  padding: 16px 24px 26px;
   box-sizing: border-box;
 }
 
 .playlistGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
-  gap: 34px 28px;
+  grid-template-columns: repeat(auto-fill, minmax(174px, 1fr));
+  gap: 26px 24px;
   align-items: start;
 }
 
@@ -430,7 +614,7 @@ onBeforeUnmount(() => {
   }
 }
 
-.privateFmCard {
+.playerCard {
   .coverWrap {
     box-shadow: 0 12px 28px rgba(0, 0, 0, .16);
 
@@ -456,7 +640,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 2px 0 rgba(0, 0, 0, .18);
 }
 
-.fmPlayBtn {
+.cardPlayBtn {
   position: absolute;
   z-index: 2;
   right: 10px;
@@ -526,10 +710,10 @@ onBeforeUnmount(() => {
 .playlistName {
   display: -webkit-box;
   overflow: hidden;
-  margin-top: 11px;
+  margin-top: 9px;
   color: var(--color-font);
-  font-size: 16px;
-  line-height: 1.24;
+  font-size: 15px;
+  line-height: 1.22;
   font-weight: 700;
   word-break: break-all;
   -webkit-line-clamp: 2;
@@ -538,7 +722,7 @@ onBeforeUnmount(() => {
 
 .playlistDesc {
   display: block;
-  margin-top: 4px;
+  margin-top: 3px;
   color: var(--color-font-label);
   font-size: 12px;
   line-height: 1.25;

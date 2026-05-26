@@ -2,6 +2,8 @@
 import { deduplicationList, toNewMusicInfo } from '@renderer/utils'
 import musicSdk from '@renderer/utils/musicSdk'
 import { getNeteasePlaylistDetail } from '@renderer/utils/ipc'
+import { getDailyRecommendPlaylistDetail, loadDailyRecommendSongs } from '@renderer/store/dailyRecommend/action'
+import { DAILY_RECOMMEND_TEMP_LIST_ID } from '@renderer/store/dailyRecommend/state'
 import { markRaw, markRawList } from '@common/utils/vueTools'
 import {
   tags,
@@ -25,8 +27,17 @@ const isNeteasePrivateRadarPlaylist = (id: string, source: LX.OnlineSource) => {
   return source == 'wy' && id == neteasePrivateRadarPlaylistId
 }
 
+const isNeteaseDailyRecommendPlaylist = (id: string, source: LX.OnlineSource) => {
+  return source == 'wy' && id == DAILY_RECOMMEND_TEMP_LIST_ID
+}
+
 const getListDetailCacheKey = (id: string, source: LX.OnlineSource, page: number) => {
-  return `${isNeteasePrivateRadarPlaylist(id, source) ? 'netease_user_sdetail' : 'sdetail'}__${source}__${id}__${page}`
+  const detailType = isNeteaseDailyRecommendPlaylist(id, source)
+    ? 'netease_daily_recommend'
+    : isNeteasePrivateRadarPlaylist(id, source)
+      ? 'netease_user_sdetail'
+      : 'sdetail'
+  return `${detailType}__${source}__${id}__${page}`
 }
 
 const normalizeMusicSdkListDetail = (result: ListDetailInfo): ListDetailInfo => {
@@ -51,9 +62,11 @@ const loadListDetail = async(id: string, source: LX.OnlineSource, page: number, 
   if (isRefresh && cache.has(key)) cache.delete(key)
   if (!isRefresh && cache.has(key)) return cache.get(key)
 
-  const result = isNeteasePrivateRadarPlaylist(id, source)
-    ? normalizeNeteaseListDetail(await getNeteasePlaylistDetail(id, page))
-    : normalizeMusicSdkListDetail(await musicSdk[source]?.songList.getListDetail(id, page))
+  const result = isNeteaseDailyRecommendPlaylist(id, source)
+    ? normalizeNeteaseListDetail(await getDailyRecommendPlaylistDetail(isRefresh))
+    : isNeteasePrivateRadarPlaylist(id, source)
+      ? normalizeNeteaseListDetail(await getNeteasePlaylistDetail(id, page))
+      : normalizeMusicSdkListDetail(await musicSdk[source]?.songList.getListDetail(id, page))
 
   cache.set(key, result)
   return result
@@ -181,6 +194,10 @@ export const getListDetail = async(id: string, source: LX.OnlineSource, page: nu
  */
 export const getListDetailAll = async(id: string, source: LX.OnlineSource, isRefresh = false): Promise<LX.Music.MusicInfoOnline[]> => {
   // console.log(source, id)
+  if (isNeteaseDailyRecommendPlaylist(id, source)) {
+    return deduplicationList(await loadDailyRecommendSongs(isRefresh))
+  }
+
   // eslint-disable-next-line @typescript-eslint/promise-function-async
   const loadData = (id: string, page: number): Promise<ListDetailInfo> => {
     return loadListDetail(id, source, page, isRefresh)

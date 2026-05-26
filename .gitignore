@@ -61,6 +61,7 @@ typings/
 # Local agent/tooling state
 .claude/
 .codegraph/
+API_CHANGES.local.md
 
 # next.js build output
 .next

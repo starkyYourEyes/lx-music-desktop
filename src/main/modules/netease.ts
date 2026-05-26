@@ -3,10 +3,10 @@ import { formatPlayTime, sizeFormate } from '@common/utils/common'
 import getStore from '@main/utils/store'
 import { filterPublicRecommendPlaylists, normalizePlaylistList } from './neteasePlaylist'
 
-// NeteaseCloudMusicApi is CommonJS and dynamically loads module files internally.
+// @neteasecloudmusicapienhanced/api is CommonJS and dynamically loads module files internally.
 // Keep it as a runtime dependency instead of bundling it into the main process.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const neteaseApi = require('NeteaseCloudMusicApi') as {
+const neteaseApi = require('@neteasecloudmusicapienhanced/api') as {
   login_qr_key: (params?: Record<string, any>) => Promise<any>
   login_qr_create: (params: Record<string, any>) => Promise<any>
   login_qr_check: (params: Record<string, any>) => Promise<any>

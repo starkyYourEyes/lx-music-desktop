@@ -25,6 +25,7 @@ import {
   // resetPlayerMusicInfo,
 } from '@renderer/store/player/action'
 import { addRecentPlayMusic, initRecentPlayList } from '@renderer/store/recentPlay/action'
+import { initListeningTimeStats, saveListeningTimeStatsNow } from '@renderer/store/listeningTime/action'
 
 import { appSetting } from '@renderer/store/setting'
 
@@ -55,6 +56,7 @@ export default () => {
   useWatchList()
   usePreloadNextMusic()
   void initRecentPlayList()
+  void initListeningTimeStats()
 
   const handlePlayNext = () => {
     void playNext()
@@ -77,6 +79,7 @@ export default () => {
     setPlay(false)
     if (window.lx.isPlayedStop) pause()
     removePowerSaveBlocker()
+    saveListeningTimeStatsNow()
   }
 
   const handleUpdatePlayInfo = () => {
@@ -137,6 +140,7 @@ export default () => {
     setAllStatus('')
     setStop()
     removePowerSaveBlocker()
+    saveListeningTimeStatsNow()
   }
 
   watch(() => appSetting['player.togglePlayMethod'], newValue => {

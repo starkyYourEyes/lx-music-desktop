@@ -5,10 +5,12 @@ import { savePlayInfo } from '@renderer/utils/ipc'
 import { onTimeupdate, getCurrentTime, getDuration, setCurrentTime, onVisibilityChange } from '@renderer/plugins/player'
 import { playProgress, setNowPlayTime, setMaxplayTime } from '@renderer/store/player/playProgress'
 import { musicInfo, playMusicInfo, playInfo } from '@renderer/store/player/state'
+import { isPlay } from '@renderer/store/player/state'
 // import { getList } from '@renderer/store/utils'
 import { appSetting } from '@renderer/store/setting'
 import { playNext } from '@renderer/core/player'
 import { updateListMusics } from '@renderer/store/list/action'
+import { addCurrentListeningTime } from '@renderer/store/listeningTime/action'
 
 const delaySavePlayInfo = throttle(savePlayInfo, 2000)
 
@@ -143,6 +145,8 @@ export default () => {
 
   watch(() => playProgress.nowPlayTime, (newValue, oldValue) => {
     if (Math.abs(newValue - oldValue) > 2) window.app_event.activePlayProgressTransition()
+    const playDelta = newValue - oldValue
+    if (isPlay.value && playDelta > 0 && playDelta <= 2) addCurrentListeningTime(playDelta)
     if (appSetting['player.isSavePlayTime'] && !playMusicInfo.isTempPlay) {
       delaySavePlayInfo({
         time: newValue,

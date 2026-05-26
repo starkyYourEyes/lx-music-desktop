@@ -110,7 +110,7 @@ const options = {
     'node_modules/node-gyp-build',
     'node_modules/bufferutil',
     'node_modules/utf-8-validate',
-    ...getPackageFiles('NeteaseCloudMusicApi'),
+    ...getPackageFiles('@neteasecloudmusicapienhanced/api'),
     'build/Release/qrc_decode.node',
     'dist/**/*',
   ],

@@ -39,7 +39,6 @@
         <SettingOdc />
         <SettingBackup />
         <SettingOther />
-        <SettingUpdate />
         <SettingAbout /> -->
       </dl>
     </div>
@@ -66,7 +65,7 @@ import SettingNetwork from './components/SettingNetwork.vue'
 import SettingOdc from './components/SettingOdc.vue'
 import SettingBackup from './components/SettingBackup.vue'
 import SettingOther from './components/SettingOther.vue'
-import SettingUpdate from './components/SettingUpdate.vue'
+import SettingListeningTime from './components/SettingListeningTime.vue'
 import SettingAbout from './components/SettingAbout.vue'
 
 export default {
@@ -86,7 +85,7 @@ export default {
     SettingOdc,
     SettingBackup,
     SettingOther,
-    SettingUpdate,
+    SettingListeningTime,
     SettingAbout,
   },
   setup() {
@@ -111,7 +110,7 @@ export default {
         { id: 'SettingOdc', title: t('setting__odc') },
         { id: 'SettingBackup', title: t('setting__backup') },
         { id: 'SettingOther', title: t('setting__other') },
-        { id: 'SettingUpdate', title: t('setting__update') },
+        { id: 'SettingListeningTime', title: '听歌时间' },
         { id: 'SettingAbout', title: t('setting__about') },
       ]
     })
@@ -229,7 +228,7 @@ export default {
 // }
 
 .setting {
-  padding: 0 15px 15px;
+  padding: 14px 20px 22px;
   font-size: 14px;
   box-sizing: border-box;
   overflow-y: auto;
@@ -238,31 +237,67 @@ export default {
   width: 100%;
 
   :global {
+    dl {
+      max-width: 980px;
+      margin: 0;
+    }
+
     dt {
-      border-left: 5px solid var(--color-primary-alpha-700);
-      padding: 3px 7px;
-      margin: 15px 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--color-font);
+      font-size: 20px;
+      font-weight: 750;
+      line-height: 1.2;
+      padding: 0;
+      margin: 12px 0 12px;
 
       + dd h3 {
         margin-top: 0;
       }
+
+      &::before {
+        content: '';
+        display: block;
+        width: 5px;
+        height: 24px;
+        border-radius: 999px;
+        background: linear-gradient(180deg, var(--color-primary), var(--color-primary-light-300));
+      }
     }
 
     dd {
-      // margin-left: 15px;
-      // font-size: 13px;
+      margin: 0 0 14px;
+      padding: 26px 30px;
+      border: 1px solid var(--color-primary-alpha-800);
+      border-radius: 8px;
+      background: var(--color-surface-background);
+      box-shadow: var(--shadow-soft);
+      box-sizing: border-box;
+      transition: @transition-fast;
+      transition-property: border-color, background-color, box-shadow;
+
+      &:hover {
+        border-color: var(--color-primary-alpha-700);
+        background: var(--color-surface-background-hover);
+      }
+
       > div {
-        padding: 0 15px;
+        padding: 0;
       }
 
     }
     h3 {
-      font-size: 12px;
-      margin: 25px 0 15px;
+      color: var(--color-font);
+      font-size: 16px;
+      line-height: 1.35;
+      font-weight: 720;
+      margin: 0 0 22px;
     }
     .p {
-      padding: 3px 0;
-      line-height: 1.3;
+      padding: 5px 0;
+      line-height: 1.55;
       .btn {
         + .btn {
           margin-left: 10px;

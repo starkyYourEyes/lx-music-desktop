@@ -55,6 +55,7 @@ declare namespace LX {
     deeplink?: string | null
     cmdParams: CmdParams
     workAreaSize?: Electron.Size
+    screenSize?: Electron.Size
   }
 
   interface HotKey {

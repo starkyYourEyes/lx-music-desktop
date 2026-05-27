@@ -420,6 +420,12 @@ declare global {
        */
       'desktopLyric.style.lineGap': number
 
+      'desktopLyric.style.lineHeight': number
+
+      'desktopLyric.style.paddingTop': number
+
+      'desktopLyric.style.paddingBottom': number
+
       /**
        * 桌面歌词未播放字体颜色
        */

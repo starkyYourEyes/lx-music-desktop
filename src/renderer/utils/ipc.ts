@@ -507,6 +507,14 @@ export const onPlayerAction = (listener: LX.IpcRendererEventListenerParams<{
     rendererOff(WIN_MAIN_RENDERER_EVENT_NAME.player_action_on_button_click, listener)
   }
 }
+export const onTrayMenuNavigate = (listener: LX.IpcRendererEventListenerParams<{
+  path: string
+}>): RemoveListener => {
+  rendererOn(WIN_MAIN_RENDERER_EVENT_NAME.tray_menu_navigate, listener)
+  return () => {
+    rendererOff(WIN_MAIN_RENDERER_EVENT_NAME.tray_menu_navigate, listener)
+  }
+}
 // export const setTaskbarThumbnailClip = async(clip: Electron.Rectangle) => {
 //   await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.taskbar_set_thumbnail_clip, clip)
 // }
@@ -739,6 +747,13 @@ export const getNeteaseRecommendPlaylists = async(limit: number, removePrivateRe
   return rendererInvoke<{ limit: number, removePrivateRecommend: boolean }, LX.Netease.Playlist[]>(
     WIN_MAIN_RENDERER_EVENT_NAME.netease_get_recommend_playlists,
     { limit, removePrivateRecommend },
+  )
+}
+
+export const getNeteaseHomeRecommendation = async(params: LX.Netease.HomeRecommendationParams = {}) => {
+  return rendererInvoke<LX.Netease.HomeRecommendationParams, LX.Netease.HomeRecommendation>(
+    WIN_MAIN_RENDERER_EVENT_NAME.netease_get_home_recommendation,
+    params,
   )
 }
 

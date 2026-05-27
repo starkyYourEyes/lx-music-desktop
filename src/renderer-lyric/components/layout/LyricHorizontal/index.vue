@@ -36,7 +36,10 @@ export default {
       fontSize: Math.trunc(setting['desktopLyric.style.fontSize']) + 'px',
       opacity: setting['desktopLyric.style.opacity'] / 100,
       textAlign: setting['desktopLyric.style.align'],
+      '--line-height': Math.max(18, setting['desktopLyric.style.lineHeight']) + 'px',
       '--line-extended-gap': Math.max(2, setting['desktopLyric.style.lineGap'] / 3).toFixed(2) + 'px',
+      '--lyric-padding-top': Math.max(0, setting['desktopLyric.style.paddingTop']) + 'px',
+      '--lyric-padding-bottom': Math.max(0, setting['desktopLyric.style.paddingBottom']) + 'px',
     }))
     const {
       dom_lyric,
@@ -76,7 +79,7 @@ export default {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 9px 12px;
+  padding: var(--lyric-padding-top) 12px var(--lyric-padding-bottom);
   box-sizing: border-box;
   // font-weight: bold;
 
@@ -96,7 +99,7 @@ export default {
       // margin-left: -0.14em;
     }
     .line-content {
-      line-height: 1.2;
+      line-height: var(--line-height);
       margin: 0;
       overflow-wrap: break-word;
 

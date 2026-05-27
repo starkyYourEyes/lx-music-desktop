@@ -67,6 +67,51 @@ dd
       base-btn.btn(min @click="changeLineGap(-1)") {{ $t('setting__desktop_lyric_line_gap_dec') }}
       base-btn.btn(min @click="changeLineGap(1)") {{ $t('setting__desktop_lyric_line_gap_add') }}
 dd
+  h3#desktop_lyric_line_height {{ $t('setting__desktop_lyric_line_height', { num: appSetting['desktopLyric.style.lineHeight'] }) }}
+  div
+    .p(:class="$style.numberControl")
+      base-btn.btn(min @click="changeLineHeight(-1)") {{ $t('setting__desktop_lyric_line_height_dec') }}
+      input(
+        :class="$style.numberRange" type="range" min="18" max="80" step="1"
+        :value="appSetting['desktopLyric.style.lineHeight']"
+        @input="handleLineHeightChange")
+      base-input.gap-left(
+        :class="$style.numberInput" type="number"
+        :model-value="appSetting['desktopLyric.style.lineHeight']"
+        @change="handleLineHeightChange")
+      span(:class="$style.numberUnit") px
+      base-btn.btn(min @click="changeLineHeight(1)") {{ $t('setting__desktop_lyric_line_height_add') }}
+dd
+  h3#desktop_lyric_padding_top {{ $t('setting__desktop_lyric_padding_top', { num: appSetting['desktopLyric.style.paddingTop'] }) }}
+  div
+    .p(:class="$style.numberControl")
+      base-btn.btn(min @click="changePaddingTop(-1)") {{ $t('setting__desktop_lyric_padding_top_dec') }}
+      input(
+        :class="$style.numberRange" type="range" min="0" max="48" step="1"
+        :value="appSetting['desktopLyric.style.paddingTop']"
+        @input="handlePaddingTopChange")
+      base-input.gap-left(
+        :class="$style.numberInput" type="number"
+        :model-value="appSetting['desktopLyric.style.paddingTop']"
+        @change="handlePaddingTopChange")
+      span(:class="$style.numberUnit") px
+      base-btn.btn(min @click="changePaddingTop(1)") {{ $t('setting__desktop_lyric_padding_top_add') }}
+dd
+  h3#desktop_lyric_padding_bottom {{ $t('setting__desktop_lyric_padding_bottom', { num: appSetting['desktopLyric.style.paddingBottom'] }) }}
+  div
+    .p(:class="$style.numberControl")
+      base-btn.btn(min @click="changePaddingBottom(-1)") {{ $t('setting__desktop_lyric_padding_bottom_dec') }}
+      input(
+        :class="$style.numberRange" type="range" min="0" max="48" step="1"
+        :value="appSetting['desktopLyric.style.paddingBottom']"
+        @input="handlePaddingBottomChange")
+      base-input.gap-left(
+        :class="$style.numberInput" type="number"
+        :model-value="appSetting['desktopLyric.style.paddingBottom']"
+        @change="handlePaddingBottomChange")
+      span(:class="$style.numberUnit") px
+      base-btn.btn(min @click="changePaddingBottom(1)") {{ $t('setting__desktop_lyric_padding_bottom_add') }}
+dd
   h3#desktop_lyric_color {{ $t('setting__desktop_lyric_color') }}
   div
     .p.gap-top
@@ -127,6 +172,17 @@ const defaultPlayedColors = [
 const defaultShadowColors = [
   'rgba(0, 0, 0, 0.15)',
 ]
+
+const normalizeLineHeight = value => {
+  const rawValue = Number(value)
+  const num = Number.isFinite(rawValue) ? Math.round(rawValue) : 30
+  return Math.min(Math.max(num, 18), 80)
+}
+const normalizePadding = value => {
+  const rawValue = Number(value)
+  const num = Number.isFinite(rawValue) ? Math.round(rawValue) : 14
+  return Math.min(Math.max(num, 0), 48)
+}
 
 const useLyricUnplayColor = () => {
   const lyric_unplay_color_ref = ref(null)
@@ -262,6 +318,24 @@ export default {
       let gap = appSetting['desktopLyric.style.lineGap'] + step
       updateSetting({ 'desktopLyric.style.lineGap': Math.min(Math.max(gap, 0), 25) })
     }
+    const changeLineHeight = (step) => {
+      updateSetting({ 'desktopLyric.style.lineHeight': normalizeLineHeight(appSetting['desktopLyric.style.lineHeight'] + step) })
+    }
+    const changePaddingTop = (step) => {
+      updateSetting({ 'desktopLyric.style.paddingTop': normalizePadding(appSetting['desktopLyric.style.paddingTop'] + step) })
+    }
+    const changePaddingBottom = (step) => {
+      updateSetting({ 'desktopLyric.style.paddingBottom': normalizePadding(appSetting['desktopLyric.style.paddingBottom'] + step) })
+    }
+    const handleLineHeightChange = value => {
+      updateSetting({ 'desktopLyric.style.lineHeight': normalizeLineHeight(value?.target ? value.target.value : value) })
+    }
+    const handlePaddingTopChange = value => {
+      updateSetting({ 'desktopLyric.style.paddingTop': normalizePadding(value?.target ? value.target.value : value) })
+    }
+    const handlePaddingBottomChange = value => {
+      updateSetting({ 'desktopLyric.style.paddingBottom': normalizePadding(value?.target ? value.target.value : value) })
+    }
 
     const {
       lyric_unplay_color_ref,
@@ -291,6 +365,12 @@ export default {
       appSetting,
       updateSetting,
       changeLineGap,
+      changeLineHeight,
+      changePaddingTop,
+      changePaddingBottom,
+      handleLineHeightChange,
+      handlePaddingTopChange,
+      handlePaddingBottomChange,
       lyric_unplay_color_ref,
       lyric_played_color_ref,
       lyric_shadow_color_ref,
@@ -336,6 +416,22 @@ export default {
   padding-top: 10px;
   text-align: center;
   line-height: 1.1;
+}
+.numberControl {
+  display: flex;
+  align-items: center;
+  flex-flow: row wrap;
+  gap: 8px;
+}
+.numberRange {
+  width: min(260px, 36vw);
+  accent-color: var(--color-primary);
+}
+.numberInput {
+  width: 72px;
+}
+.numberUnit {
+  color: var(--color-font-label);
 }
 
 </style>

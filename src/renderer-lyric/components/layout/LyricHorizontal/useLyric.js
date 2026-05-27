@@ -5,7 +5,6 @@ import { setWindowBounds, setWindowResizeable } from '@lyric/utils/ipc'
 import { isWin } from '@common/utils'
 
 const MIN_WINDOW_HEIGHT = 38
-const HEIGHT_PADDING = 18
 const MAX_EXTENDED_LINES = 1
 
 export default () => {
@@ -38,7 +37,9 @@ export default () => {
     heightRaf = window.requestAnimationFrame(() => {
       heightRaf = null
       const contentHeight = dom_lyric_text.value.scrollHeight
-      const targetHeight = Math.max(MIN_WINDOW_HEIGHT, Math.ceil(contentHeight + HEIGHT_PADDING))
+      const paddingTop = Math.max(0, setting['desktopLyric.style.paddingTop'])
+      const paddingBottom = Math.max(0, setting['desktopLyric.style.paddingBottom'])
+      const targetHeight = Math.max(MIN_WINDOW_HEIGHT, Math.ceil(contentHeight + paddingTop + paddingBottom))
       if (Math.abs(window.innerHeight - targetHeight) < 2) return
       setWindowBounds({
         x: 0,
@@ -120,6 +121,9 @@ export default () => {
     setting['desktopLyric.style.font'],
     setting['desktopLyric.style.fontSize'],
     setting['desktopLyric.style.lineGap'],
+    setting['desktopLyric.style.lineHeight'],
+    setting['desktopLyric.style.paddingTop'],
+    setting['desktopLyric.style.paddingBottom'],
     setting['desktopLyric.style.isZoomActiveLrc'],
     setting['desktopLyric.style.isFontWeightFont'],
     setting['desktopLyric.style.isFontWeightLine'],

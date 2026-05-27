@@ -145,6 +145,7 @@ const modules = {
     player_action_set_buttons: 'player_action_set_buttons',
     // player_action_set_thumbnail_clip: 'player_action_set_thumbnail_clip',
     player_action_on_button_click: 'player_action_on_button_click',
+    tray_menu_navigate: 'tray_menu_navigate',
 
     get_themes: 'get_themes',
     save_theme: 'save_theme',
@@ -169,6 +170,7 @@ const modules = {
     netease_get_recommend_songs: 'netease_get_recommend_songs',
     netease_get_private_fm: 'netease_get_private_fm',
     netease_get_recommend_playlists: 'netease_get_recommend_playlists',
+    netease_get_home_recommendation: 'netease_get_home_recommendation',
     netease_get_playlist_detail: 'netease_get_playlist_detail',
     netease_get_music_url: 'netease_get_music_url',
     netease_like_music: 'netease_like_music',

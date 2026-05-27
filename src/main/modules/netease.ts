@@ -16,12 +16,18 @@ const neteaseApi = require('@neteasecloudmusicapienhanced/api') as {
   personal_fm: (params: Record<string, any>) => Promise<any>
   personal_fm_mode: (params: Record<string, any>) => Promise<any>
   personalized: (params: Record<string, any>) => Promise<any>
+  personalized_newsong: (params: Record<string, any>) => Promise<any>
   recommend_resource: (params: Record<string, any>) => Promise<any>
+  homepage_block_page: (params: Record<string, any>) => Promise<any>
+  batch: (params: Record<string, any>) => Promise<any>
+  toplist_detail: (params: Record<string, any>) => Promise<any>
+  album_songsaleboard: (params: Record<string, any>) => Promise<any>
   playlist_detail: (params: Record<string, any>) => Promise<any>
   song_detail: (params: Record<string, any>) => Promise<any>
   like: (params: Record<string, any>) => Promise<any>
   fm_trash: (params: Record<string, any>) => Promise<any>
   song_url_v1: (params: Record<string, any>) => Promise<any>
+  api: (params: Record<string, any>) => Promise<any>
 }
 
 interface NeteaseAccountData {
@@ -196,7 +202,7 @@ const normalizeSong = (song: any, privilege?: any): LX.Music.MusicInfoOnline => 
       songId: song.id,
       albumName: song.al?.name ?? song.album?.name ?? '',
       albumId: song.al?.id ?? song.album?.id,
-      picUrl: song.al?.picUrl ?? song.album?.picUrl ?? '',
+      picUrl: song.al?.picUrl ?? song.album?.picUrl ?? song.album?.blurPicUrl ?? song.picUrl ?? '',
       qualitys,
       _qualitys,
     },
@@ -370,6 +376,365 @@ const mergePlaylists = (playlists: LX.Netease.Playlist[]): LX.Netease.Playlist[]
   return list
 }
 
+const formatPlayCount = (count: unknown): string => {
+  const value = Number(count)
+  if (!Number.isFinite(value) || value <= 0) return ''
+  if (value >= 100000000) return `${Math.round(value / 10000000) / 10}亿`
+  if (value >= 10000) return `${Math.round(value / 1000) / 10}万`
+  return String(Math.floor(value))
+}
+
+const HOMEPAGE_BATCH_API = '/api/homepage/block/page'
+const PC_CUSTOMIZE_BATCH_API = '/api/pc/customize/block/page'
+const HOME_BLOCK_CODES = {
+  radarPlaylists: 'PC_CUSTOMIZE_PLAYLIST_SLIDE_PAPE',
+  similarSongs: 'HOMEPAGE_BLOCK_RED_SIMILAR_SONG',
+  recommendPlaylists: 'PC_CUSTOMIZE_PLAYLIST_SELF_PAPE',
+  legacyRadarPlaylists: 'HOMEPAGE_BLOCK_MGC_PLAYLIST',
+  legacyRecommendPlaylists: 'HOMEPAGE_BLOCK_PLAYLIST_RCMD',
+} as const
+
+const getHomeBlockResources = (blocks: any[], blockCode: string): any[] => {
+  const block = blocks.find(block => block?.blockCode == blockCode || block?.showType == blockCode)
+  if (!block) return []
+
+  const resources: any[] = []
+  for (const creative of block.creatives ?? []) {
+    if (Array.isArray(creative?.resources)) {
+      for (const resource of creative.resources) {
+        resources.push({
+          ...resource,
+          creativeId: resource?.resourceId ?? creative.creativeId,
+          uiElement: resource?.uiElement ?? creative.uiElement,
+        })
+      }
+    } else if (creative) resources.push(creative)
+  }
+  return resources
+}
+
+const normalizeHomepagePlaylistResource = (resource: any): LX.Netease.Playlist | null => {
+  const id = resource?.resourceId ?? resource?.creativeId ?? resource?.id ?? resource?.playlistId
+  if (id == null || Number(id) < 0) return null
+
+  return {
+    id: String(id),
+    name: resource?.uiElement?.mainTitle?.title ?? resource?.name ?? '',
+    img: resource?.uiElement?.image?.imageUrl ?? resource?.picUrl ?? resource?.coverImgUrl ?? resource?.coverUrl ?? '',
+    author: resource?.resourceExtInfo?.creator?.nickname ?? resource?.creator?.nickname ?? '',
+    play_count: formatPlayCount(resource?.resourceExtInfo?.playCount ?? resource?.playCount),
+    desc: resource?.uiElement?.subTitle?.title ?? resource?.copywriter ?? resource?.description ?? null,
+    source: 'wy',
+    total: resource?.resourceExtInfo?.trackCount == null ? undefined : String(resource.resourceExtInfo.trackCount),
+  }
+}
+
+const parseHomepagePlaylistBlock = (blocks: any[], blockCode: string, limit: number): LX.Netease.Playlist[] => {
+  return mergePlaylists(
+    getHomeBlockResources(blocks, blockCode)
+      .map(normalizeHomepagePlaylistResource)
+      .filter((playlist: LX.Netease.Playlist | null): playlist is LX.Netease.Playlist => !!playlist && !!playlist.name && !!playlist.img),
+  ).slice(0, limit)
+}
+
+const getHomepageBlocks = async(cookie: string, forceRefresh = false, blockCodes?: string[]) => {
+  const cursor = blockCodes?.length
+    ? JSON.stringify({ offset: 0, blockCodeOrderList: blockCodes })
+    : undefined
+  const params = {
+    cookie,
+    refresh: forceRefresh,
+    cursor,
+    extInfo: JSON.stringify({ abInfo: { 'hp-new-homepageV3.1': 't3' } }),
+    newStyle: 'true',
+    timestamp: Date.now(),
+  }
+  const result = cursor
+    ? await neteaseApi.api({
+      cookie,
+      uri: '/api/homepage/block/page',
+      data: {
+        refresh: forceRefresh,
+        cursor,
+        extInfo: params.extInfo,
+        newStyle: params.newStyle,
+      },
+      crypto: 'weapi',
+      timestamp: Date.now(),
+    })
+    : await neteaseApi.homepage_block_page(params)
+  if (result.body?.code != 200) throw new Error(result.body?.message ?? 'Failed to load homepage blocks')
+  return result.body?.data?.blocks ?? []
+}
+
+const getHomepageBatchBlocks = async(cookie: string, forceRefresh = false, blockCodes: string[] = []) => {
+  const result = await neteaseApi.batch({
+    cookie,
+    [HOMEPAGE_BATCH_API]: JSON.stringify({
+      refresh: forceRefresh,
+      cursor: JSON.stringify({ offset: 0, blockCodeOrderList: blockCodes }),
+      extInfo: JSON.stringify({ abInfo: { 'hp-new-homepageV3.1': 't3' } }),
+      newStyle: 'true',
+    }),
+  })
+  const body = result.body?.[HOMEPAGE_BATCH_API] ?? result.body
+  if (body?.code != 200) throw new Error(body?.message ?? result.body?.message ?? 'Failed to load homepage batch blocks')
+  return body?.data?.blocks ?? []
+}
+
+const getPcCustomizeBatchBlocks = async(cookie: string, forceRefresh = false, showType: string) => {
+  const result = await neteaseApi.batch({
+    cookie,
+    [PC_CUSTOMIZE_BATCH_API]: JSON.stringify({
+      showType,
+      refresh: forceRefresh,
+      offset: 0,
+      limit: 20,
+    }),
+  })
+  const body = result.body?.[PC_CUSTOMIZE_BATCH_API] ?? result.body
+  if (body?.code != 200) throw new Error(body?.message ?? result.body?.message ?? 'Failed to load pc customize batch blocks')
+  return body?.data?.blocks ?? []
+}
+
+const getPlaylistSummary = async(id: string, cookie: string): Promise<LX.Netease.Playlist | null> => {
+  const result = await neteaseApi.playlist_detail({
+    cookie,
+    id,
+    timestamp: Date.now(),
+  }).catch(() => null)
+  return normalizePlaylistList(result?.body?.playlist ? [result.body.playlist] : [])[0] ?? null
+}
+
+const hydratePlaylistCovers = async(playlists: LX.Netease.Playlist[], cookie: string): Promise<LX.Netease.Playlist[]> => {
+  const details = await Promise.all(playlists.map(async playlist => getPlaylistSummary(playlist.id, cookie)))
+  return playlists.map((playlist, index) => {
+    const detail = details[index]
+    if (!detail) return playlist
+    return {
+      ...playlist,
+      name: playlist.name || detail.name,
+      img: playlist.img || detail.img,
+      author: playlist.author || detail.author,
+      play_count: playlist.play_count || detail.play_count,
+      desc: playlist.desc ?? detail.desc,
+      total: playlist.total ?? detail.total,
+    }
+  })
+}
+
+const parsePcCustomizePlaylistBlock = async(
+  blocks: any[],
+  blockCode: string,
+  limit: number,
+  cookie: string,
+): Promise<LX.Netease.Playlist[]> => {
+  const playlists = mergePlaylists(
+    getHomeBlockResources(blocks, blockCode)
+      .map(normalizeHomepagePlaylistResource)
+      .filter((playlist: LX.Netease.Playlist | null): playlist is LX.Netease.Playlist => !!playlist && !!playlist.name),
+  ).slice(0, limit)
+  return hydratePlaylistCovers(playlists, cookie)
+}
+
+const getFallbackRadarPlaylists = async(cookie: string): Promise<LX.Netease.Playlist[]> => {
+  const ids = ['2829883282', '5320167908', '5362359247', '5327906368', '5300458264']
+  const playlists = await Promise.all(ids.map(async id => getPlaylistSummary(id, cookie)))
+  return playlists.filter((playlist: LX.Netease.Playlist | null): playlist is LX.Netease.Playlist => !!playlist)
+}
+
+const addHomeSong = (
+  songs: LX.Music.MusicInfoOnline[],
+  ids: Set<string>,
+  song: any,
+  privilege?: any,
+) => {
+  if (!song?.id || !song?.name || ids.has(String(song.id))) return
+  const musicInfo = normalizeSong(song, privilege)
+  ids.add(String(song.id))
+  songs.push(musicInfo)
+}
+
+const isHomepageSongData = (value: any) => {
+  return !!(
+    value?.id != null &&
+    value.name &&
+    !value.resourceId &&
+    !value.resourceType &&
+    (Array.isArray(value.ar) || Array.isArray(value.artists)) &&
+    (value.al || value.album)
+  )
+}
+
+const collectHomeSongs = (value: any, songs: LX.Music.MusicInfoOnline[], ids: Set<string>) => {
+  if (!value || typeof value != 'object') return
+  if (Array.isArray(value)) {
+    for (const item of value) collectHomeSongs(item, songs, ids)
+    return
+  }
+
+  const embeddedSong = value.songData ?? value.song ?? value.resourceExtInfo?.songData ?? value.resourceExtInfo?.song
+  if (embeddedSong) {
+    addHomeSong(songs, ids, embeddedSong, value.privilege ?? value.resourceExtInfo?.songPrivilege ?? value.resourceExtInfo?.privilege)
+    return
+  }
+
+  if (isHomepageSongData(value)) {
+    addHomeSong(songs, ids, value, value.privilege)
+    return
+  }
+
+  for (const child of Object.values(value)) collectHomeSongs(child, songs, ids)
+}
+
+const parseHomepageSongBlock = (blocks: any[], blockCode: string, limit: number): LX.Music.MusicInfoOnline[] => {
+  const songs: LX.Music.MusicInfoOnline[] = []
+  const ids = new Set<string>()
+  for (const resource of getHomeBlockResources(blocks, blockCode)) {
+    collectHomeSongs(resource, songs, ids)
+    if (songs.length >= limit) break
+  }
+  return songs.slice(0, limit)
+}
+
+const getPersonalizedNewSongs = async(cookie: string, limit: number): Promise<LX.Music.MusicInfoOnline[]> => {
+  const result = await neteaseApi.personalized_newsong({ cookie, limit })
+  if (result.body?.code != 200) return []
+  return (result.body?.result ?? [])
+    .map((item: any) => item?.song ?? item)
+    .filter(Boolean)
+    .slice(0, limit)
+    .map((song: any) => normalizeSong(song))
+}
+
+const getHomeSimilarSongs = async(blocks: any[], cookie: string, limit: number, forceRefresh = false): Promise<LX.Music.MusicInfoOnline[]> => {
+  let blockSongs = parseHomepageSongBlock(blocks, HOME_BLOCK_CODES.similarSongs, limit)
+  if (!blockSongs.length) {
+    const redSongBlocks = await getHomepageBatchBlocks(cookie, forceRefresh, [HOME_BLOCK_CODES.similarSongs]).catch(() => [])
+    blockSongs = parseHomepageSongBlock(redSongBlocks, HOME_BLOCK_CODES.similarSongs, limit)
+  }
+  if (!blockSongs.length) {
+    const redSongBlocks = await getHomepageBlocks(cookie, forceRefresh, [HOME_BLOCK_CODES.similarSongs]).catch(() => [])
+    blockSongs = parseHomepageSongBlock(redSongBlocks, HOME_BLOCK_CODES.similarSongs, limit)
+  }
+  if (blockSongs.length) return blockSongs
+
+  if (cookie) {
+    const dailySongs = await getRecommendSongs().catch(() => [])
+    if (dailySongs.length) return dailySongs.slice(0, limit)
+  }
+
+  return getPersonalizedNewSongs(cookie, limit).catch(() => [])
+}
+
+const getHomeRecommendPlaylists = async(
+  blocks: any[],
+  cookie: string,
+  limit: number,
+  forceRefresh = false,
+): Promise<LX.Netease.Playlist[]> => {
+  let recommendPlaylists = await parsePcCustomizePlaylistBlock(blocks, HOME_BLOCK_CODES.recommendPlaylists, limit, cookie)
+  if (!recommendPlaylists.length) {
+    const recommendBlocks = await getPcCustomizeBatchBlocks(cookie, forceRefresh, HOME_BLOCK_CODES.recommendPlaylists).catch(() => [])
+    recommendPlaylists = await parsePcCustomizePlaylistBlock(recommendBlocks, HOME_BLOCK_CODES.recommendPlaylists, limit, cookie)
+  }
+  if (!recommendPlaylists.length) {
+    const recommendBlocks = await getHomepageBlocks(cookie, forceRefresh, [HOME_BLOCK_CODES.legacyRecommendPlaylists]).catch(() => [])
+    recommendPlaylists = parseHomepagePlaylistBlock(recommendBlocks, HOME_BLOCK_CODES.legacyRecommendPlaylists, limit)
+  }
+  if (recommendPlaylists.length) return recommendPlaylists
+
+  return getRecommendPlaylists(limit, true).catch(() => [])
+}
+
+const chartConfigs = [
+  { id: '19723756', name: '飙升榜' },
+  { id: '3778678', name: '热歌榜' },
+  { id: '7785066739', name: '黑胶VIP热歌榜' },
+  { id: '5453912201', name: '黑胶VIP爱听榜' },
+]
+
+const getPlaylistChart = async(
+  config: typeof chartConfigs[number],
+  cookie: string,
+  toplistMap: Map<string, any>,
+): Promise<LX.Netease.HomeChart | null> => {
+  const meta = toplistMap.get(config.id)
+  const result = await neteaseApi.playlist_detail({
+    cookie,
+    id: config.id,
+    timestamp: Date.now(),
+  }).catch(() => null)
+
+  const playlist = result?.body?.playlist
+  const normalized = normalizePlaylistList(playlist ? [playlist] : [])[0]
+  const tracks = (playlist?.tracks ?? [])
+    .slice(0, 3)
+    .map((song: any, index: number) => normalizeSong(song, result?.body?.privileges?.[index]))
+
+  if (!normalized && !meta) return null
+
+  return {
+    id: config.id,
+    name: normalized?.name ?? meta?.name ?? config.name,
+    img: normalized?.img ?? meta?.coverImgUrl ?? '',
+    desc: normalized?.desc ?? meta?.description ?? null,
+    play_count: normalized?.play_count ?? formatPlayCount(meta?.playCount),
+    updateFrequency: meta?.updateFrequency ?? playlist?.updateFrequency ?? '',
+    source: 'wy',
+    songs: tracks.length
+      ? tracks.map((song: LX.Music.MusicInfoOnline) => ({ name: song.name, singer: song.singer }))
+      : (meta?.tracks ?? []).slice(0, 3).map((song: any) => ({
+          name: song.first ?? song.name ?? '',
+          singer: song.second ?? song.singer ?? '',
+        })),
+  }
+}
+
+const getSalesChart = async(cookie: string): Promise<LX.Netease.HomeChart | null> => {
+  const result = await neteaseApi.album_songsaleboard({
+    cookie,
+    albumType: 1,
+    type: 'daily',
+  }).catch(() => null)
+  const products = result?.body?.products ?? []
+  if (!products.length) return null
+
+  return {
+    id: 'song_sales_daily',
+    name: '歌曲畅销指数榜',
+    img: products[0]?.coverUrl ?? '',
+    desc: '数字单曲销量趋势',
+    play_count: products[0]?.saleNum ? `${products[0].saleNum}` : '',
+    updateFrequency: '每日更新',
+    source: 'wy',
+    isSales: true,
+    songs: products.slice(0, 3).map((product: any) => ({
+      name: product.albumName ?? '',
+      singer: product.artistName ?? '',
+    })),
+  }
+}
+
+const getHomeCharts = async(cookie: string): Promise<LX.Netease.HomeChart[]> => {
+  const toplistResult = await neteaseApi.toplist_detail({ cookie }).catch(() => null)
+  const toplistMap = new Map<string, any>()
+  for (const chart of toplistResult?.body?.list ?? []) {
+    if (chart?.id == null) continue
+    toplistMap.set(String(chart.id), chart)
+  }
+
+  const [playlistCharts, salesChart] = await Promise.all([
+    Promise.all(chartConfigs.map(async config => getPlaylistChart(config, cookie, toplistMap))),
+    getSalesChart(cookie),
+  ])
+
+  return [
+    ...playlistCharts,
+    salesChart,
+  ].filter((chart: LX.Netease.HomeChart | null): chart is LX.Netease.HomeChart => !!chart)
+}
+
 export const getRecommendPlaylists = async(limit = 10, removePrivateRecommend = false): Promise<LX.Netease.Playlist[]> => {
   const account = getAccountData()
 
@@ -396,6 +761,38 @@ export const getRecommendPlaylists = async(limit = 10, removePrivateRecommend = 
     ...dailyRecommend,
     ...filterPublicRecommendPlaylists(normalizePlaylistList(publicResult.body?.result ?? [])),
   ]).slice(0, limit)
+}
+
+export const getHomeRecommendation = async(params: LX.Netease.HomeRecommendationParams = {}): Promise<LX.Netease.HomeRecommendation> => {
+  const account = getAccountData()
+  const cookie = account.cookie
+  const blockCodes = [
+    HOME_BLOCK_CODES.similarSongs,
+  ]
+  const [blocks, pcCustomizeBlocks] = await Promise.all([
+    getHomepageBatchBlocks(cookie, !!params.forceRefresh, blockCodes).catch(() => []),
+    getPcCustomizeBatchBlocks(cookie, !!params.forceRefresh, HOME_BLOCK_CODES.radarPlaylists).catch(() => []),
+  ])
+  const playlistLimit = Math.max(6, params.playlistLimit ?? 12)
+  const songLimit = Math.max(6, params.songLimit ?? 12)
+
+  let radarPlaylists = await parsePcCustomizePlaylistBlock(pcCustomizeBlocks, HOME_BLOCK_CODES.radarPlaylists, playlistLimit, cookie)
+  if (!radarPlaylists.length) {
+    const radarBlocks = await getHomepageBlocks(cookie, !!params.forceRefresh, [HOME_BLOCK_CODES.legacyRadarPlaylists]).catch(() => [])
+    radarPlaylists = parseHomepagePlaylistBlock(radarBlocks, HOME_BLOCK_CODES.legacyRadarPlaylists, playlistLimit)
+  }
+  if (!radarPlaylists.length) radarPlaylists = await getFallbackRadarPlaylists(cookie)
+
+  const recommendPlaylists = await getHomeRecommendPlaylists(pcCustomizeBlocks, cookie, playlistLimit, !!params.forceRefresh)
+  const similarSongs = await getHomeSimilarSongs(blocks, cookie, songLimit, !!params.forceRefresh)
+  const charts = await getHomeCharts(cookie).catch(() => [])
+
+  return {
+    radarPlaylists,
+    similarSongs,
+    recommendPlaylists,
+    charts,
+  }
 }
 
 export const likeMusic = async(musicInfo: LX.Music.MusicInfo) => {

@@ -1,4 +1,4 @@
-import { Tray, Menu, nativeImage } from 'electron'
+import { BrowserWindow, Tray, Menu, nativeImage, screen } from 'electron'
 import { isMac, isWin } from '@common/utils'
 import path from 'node:path'
 import {
@@ -6,12 +6,15 @@ import {
   isExistWindow as isExistMainWindow,
   isShowWindow as isShowMainWindow,
   sendTaskbarButtonClick,
+  sendEvent,
   showWindow as showMainWindow,
 } from './winMain'
 import { quitApp } from '@main/app'
 import { TRAY_AUTO_ID } from '@common/constants'
+import { WIN_MAIN_RENDERER_EVENT_NAME } from '@common/ipcNames'
 
 let tray: Electron.Tray | null
+let trayMenuWindow: Electron.BrowserWindow | null
 let isEnableTray: boolean = false
 let themeId: number
 let isShowStatusBarLyric: boolean = false
@@ -132,6 +135,22 @@ const i18n = {
   },
 }
 
+type TrayMenuAction =
+  | 'prev'
+  | 'play-toggle'
+  | 'next'
+  | 'collect-toggle'
+  | 'volume'
+  | 'mute-toggle'
+  | 'toggle-desktop-lyric'
+  | 'settings'
+  | 'quit'
+
+const trayMenuWindowSize = {
+  width: 190,
+  height: 275,
+}
+
 const getIconPath = (id: number) => {
   let theme = id == TRAY_AUTO_ID
     ? global.lx.theme.shouldUseDarkColors
@@ -154,10 +173,14 @@ export const createTray = () => {
     tray.on('click', () => {
       showMainWindow()
     })
+    tray.on('right-click', () => {
+      showTrayMenuWindow()
+    })
   }
 }
 
 export const destroyTray = () => {
+  destroyTrayMenuWindow()
   if (!tray) return
   tray.destroy()
   isEnableTray = false
@@ -167,6 +190,238 @@ export const destroyTray = () => {
 
 const handleUpdateConfig = (setting: Partial<LX.AppSetting>) => {
   global.lx.event_app.update_config(setting)
+}
+
+const closeTrayMenuWindow = () => {
+  if (!trayMenuWindow || trayMenuWindow.isDestroyed()) return
+  trayMenuWindow.hide()
+}
+
+const destroyTrayMenuWindow = () => {
+  if (!trayMenuWindow) return
+  if (!trayMenuWindow.isDestroyed()) trayMenuWindow.destroy()
+  trayMenuWindow = null
+}
+
+const escapeHtml = (value: string) => {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+const getTrayMenuTitle = () => {
+  const name = global.lx.player_status.name?.trim()
+  if (!name) return 'LX Music'
+  return name.length > 18 ? `${name.substring(0, 18)} ...` : name
+}
+
+const normalizeTrayVolume = (volume: number) => {
+  if (!Number.isFinite(volume)) return 100
+  if (volume <= 1) return Math.trunc(volume * 100)
+  return Math.trunc(volume)
+}
+
+const refreshTrayMenuWindow = () => {
+  if (!trayMenuWindow || trayMenuWindow.isDestroyed() || !trayMenuWindow.isVisible()) return
+  void trayMenuWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(getTrayMenuHtml())}`)
+}
+
+const getTrayMenuHtml = () => {
+  const isDesktopLyricEnabled = global.lx.appSetting['desktopLyric.enable']
+  const title = escapeHtml(getTrayMenuTitle())
+  const sourceVolume = global.lx.player_status.volume || global.lx.appSetting['player.volume']
+  const volume = Math.max(0, Math.min(100, normalizeTrayVolume(sourceVolume)))
+  const isMute = global.lx.player_status.mute || volume == 0
+  const playIcon = playerState.play
+    ? '<path d="M9 7h4v18H9zM19 7h4v18h-4z"/>'
+    : '<path d="M10 7.5v17l14-8.5z"/>'
+  const loveIcon = playerState.collect
+    ? '<path d="M16 27s-9-5.6-11.6-11.3C2.5 11.6 4.9 8 9 8c2.5 0 4.2 1.3 5 3 0.8-1.7 2.5-3 5-3 4.1 0 6.5 3.6 4.6 7.7C21 21.4 16 27 16 27z"/>'
+    : '<path d="M16 27s-9-5.6-11.6-11.3C2.5 11.6 4.9 8 9 8c2.5 0 4.2 1.3 5 3 0.8-1.7 2.5-3 5-3 4.1 0 6.5 3.6 4.6 7.7C21 21.4 16 27 16 27z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>'
+  const lyricLabel = isDesktopLyricEnabled ? '关闭桌面歌词' : '打开桌面歌词'
+  const volumeIcon = isMute
+    ? '<path d="M6 13h5l7-6v18l-7-6H6zM23.4 12.2l1.4 1.4-2.4 2.4 2.4 2.4-1.4 1.4-2.4-2.4-2.4 2.4-1.4-1.4 2.4-2.4-2.4-2.4 1.4-1.4 2.4 2.4z" fill="currentColor"/>'
+    : '<path d="M6 13h5l7-6v18l-7-6H6zm16.5-2.4a7.5 7.5 0 0 1 0 10.8l-1.4-1.4a5.5 5.5 0 0 0 0-8.2zm2.9-2.9a11.5 11.5 0 0 1 0 16.6L24 22.9a9.5 9.5 0 0 0 0-13.8z" fill="currentColor"/>'
+
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+*{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden;background:transparent;font-family:"Microsoft YaHei UI","Microsoft YaHei",Segoe UI,sans-serif;color:#73788c}
+body{padding:0}
+.menu{width:190px;height:275px;border:1px solid rgba(123,128,148,.16);border-radius:7px;background:rgba(255,255,255,.98);box-shadow:0 10px 24px rgba(24,31,43,.16);overflow:hidden}
+.title{height:42px;padding:0 15px;display:flex;align-items:center;gap:9px;border-bottom:1px solid #edf0f5;font-size:13px;color:#6d7289;white-space:nowrap}
+.title svg{width:17px;height:17px;flex:none;color:#6b7286}.title span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.controls{height:56px;padding:0 12px;display:grid;grid-template-columns:repeat(4,1fr);align-items:center;border-bottom:1px solid #edf0f5}
+button{border:0;background:transparent;margin:0;padding:0;color:#6e7588;font:inherit;cursor:pointer;outline:none}
+button:hover{color:#3f4657;background:#f6f7fa}.ctrl{width:40px;height:40px;border-radius:7px;display:flex;align-items:center;justify-content:center}.ctrl svg{width:25px;height:25px;fill:currentColor}
+.volume-row{height:44px;padding:0 15px;display:flex;align-items:center;gap:11px;border-bottom:1px solid #edf0f5;position:relative}
+.volume-btn{width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;flex:none}.volume-btn svg{width:18px;height:18px}
+.volume-slider{flex:auto;min-width:0;height:4px;appearance:none;background:linear-gradient(to right,#6f7b91 0%,#6f7b91 ${volume}%,#e5e8ef ${volume}%,#e5e8ef 100%);border-radius:999px;outline:none}
+.volume-slider::-webkit-slider-thumb{appearance:none;width:12px;height:12px;border:2px solid #fff;border-radius:50%;background:#6f7b91;box-shadow:0 1px 5px rgba(36,44,59,.28);cursor:pointer}
+.volume-slider::-webkit-slider-runnable-track{height:4px;border-radius:999px}
+.volume-tip{position:absolute;right:14px;top:-18px;min-width:34px;height:20px;padding:0 7px;border-radius:6px;background:rgba(58,66,82,.94);box-shadow:0 4px 12px rgba(24,31,43,.2);color:#fff;font-size:12px;line-height:20px;text-align:center;pointer-events:none;opacity:0;transform:translateY(3px);transition:opacity .12s ease,transform .12s ease}.volume-row:hover .volume-tip{opacity:1;transform:translateY(0)}
+.row{height:44px;padding:0 15px;display:flex;align-items:center;gap:9px;border-bottom:1px solid #edf0f5;font-size:13px;text-align:left;width:100%}.row svg{width:17px;height:17px;flex:none;color:#737b91}.row span{flex:auto;text-align:left}.row .arrow{width:13px;height:13px;margin-left:auto}
+.row.exit{border-bottom:0}.separator{height:0}
+</style>
+</head>
+<body>
+<div class="menu">
+  <div class="title">
+    <svg viewBox="0 0 32 32"><path d="M22 4v16.2a4.4 4.4 0 1 1-2-3.7V9.2l-10 2.1v12.9a4.4 4.4 0 1 1-2-3.7V8.6L22 5.6z" fill="currentColor"/></svg>
+    <span>${title}</span>
+  </div>
+  <div class="controls">
+    <button class="ctrl" data-action="collect-toggle" title="${playerState.collect ? '取消收藏' : '收藏'}"><svg viewBox="0 0 32 32">${loveIcon}</svg></button>
+    <button class="ctrl" data-action="prev" title="上一曲"><svg viewBox="0 0 32 32"><path d="M8 7h3v18H8zM12 16l14 9V7z"/></svg></button>
+    <button class="ctrl" data-action="play-toggle" title="${playerState.play ? '暂停' : '播放'}"><svg viewBox="0 0 32 32">${playIcon}</svg></button>
+    <button class="ctrl" data-action="next" title="下一曲"><svg viewBox="0 0 32 32"><path d="M21 7h3v18h-3zM6 25l14-9L6 7z"/></svg></button>
+  </div>
+  <div class="volume-row">
+    <button class="volume-btn" data-action="mute-toggle" title="${isMute ? '取消静音' : '静音'}"><svg viewBox="0 0 32 32">${volumeIcon}</svg></button>
+    <input class="volume-slider" data-volume-slider type="range" min="0" max="100" step="1" value="${volume}" aria-label="volume">
+    <span class="volume-tip" data-volume-tip>${volume}%</span>
+  </div>
+  <button class="row" data-action="toggle-desktop-lyric"><svg viewBox="0 0 32 32"><path d="M8 6h16v3H8zm0 8h16v2H8zm0 6h9v2H8zm14-2h2v5h4v2h-6zM4 5h2v22H4zm4 20h10v2H8z" fill="currentColor"/></svg><span>${lyricLabel}</span></button>
+  <button class="row" data-action="settings"><svg viewBox="0 0 32 32"><path d="M16 5l9 5v12l-9 5-9-5V10zm0 3.2L10 11.5v9l6 3.3 6-3.3v-9zm0 5.3a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z" fill="currentColor"/></svg><span>设置</span></button>
+  <button class="row exit" data-action="quit"><svg viewBox="0 0 32 32"><path d="M15 5h2v10h-2zM10.2 8.9A9 9 0 1 0 21.8 9.1l-1.3 1.5A7 7 0 1 1 11.5 10.4z" fill="currentColor"/></svg><span>退出</span></button>
+</div>
+<script>
+const { ipcRenderer } = require('electron')
+document.addEventListener('click', event => {
+  const button = event.target.closest('[data-action]')
+  if (!button) return
+  ipcRenderer.send('tray-menu-action', button.dataset.action)
+})
+const volumeSlider = document.querySelector('[data-volume-slider]')
+const volumeTip = document.querySelector('[data-volume-tip]')
+if (volumeSlider) {
+  volumeSlider.addEventListener('input', event => {
+    const value = Number(event.target.value)
+    event.target.style.background = 'linear-gradient(to right,#6f7b91 0%,#6f7b91 ' + value + '%,#e5e8ef ' + value + '%,#e5e8ef 100%)'
+    if (volumeTip) volumeTip.textContent = Math.round(value) + '%'
+    ipcRenderer.send('tray-menu-action', 'volume', value / 100)
+  })
+}
+</script>
+</body>
+</html>`
+}
+
+const getTrayMenuBounds = () => {
+  const cursor = screen.getCursorScreenPoint()
+  const display = screen.getDisplayNearestPoint(cursor)
+  const workArea = display.workArea
+  let x = cursor.x + 8
+  let y = cursor.y - trayMenuWindowSize.height - 8
+
+  x = Math.min(Math.max(x, workArea.x + 4), workArea.x + workArea.width - trayMenuWindowSize.width - 4)
+  y = Math.min(Math.max(y, workArea.y + 4), workArea.y + workArea.height - trayMenuWindowSize.height - 4)
+  return {
+    ...trayMenuWindowSize,
+    x: Math.round(x),
+    y: Math.round(y),
+  }
+}
+
+const keepTrayMenuOpenActions = new Set<TrayMenuAction>([
+  'prev',
+  'play-toggle',
+  'next',
+  'collect-toggle',
+  'volume',
+  'mute-toggle',
+])
+
+const handleTrayMenuAction = (action: TrayMenuAction, data?: unknown) => {
+  if (!keepTrayMenuOpenActions.has(action)) closeTrayMenuWindow()
+  switch (action) {
+    case 'prev':
+      sendTaskbarButtonClick('prev')
+      break
+    case 'play-toggle':
+      sendTaskbarButtonClick(playerState.play ? 'pause' : 'play')
+      break
+    case 'next':
+      sendTaskbarButtonClick('next')
+      break
+    case 'collect-toggle':
+      sendTaskbarButtonClick(playerState.collect ? 'unCollect' : 'collect')
+      break
+    case 'volume': {
+      let volume = data as number
+      if (!Number.isFinite(volume)) return
+      if (volume < 0) volume = 0
+      else if (volume > 1) volume = 1
+      global.lx.player_status.volume = Math.trunc(volume * 100)
+      sendTaskbarButtonClick('volume', volume)
+      break
+    }
+    case 'mute-toggle':
+      global.lx.player_status.mute = !global.lx.player_status.mute
+      sendTaskbarButtonClick('mute', global.lx.player_status.mute)
+      refreshTrayMenuWindow()
+      break
+    case 'toggle-desktop-lyric':
+      handleUpdateConfig({ 'desktopLyric.enable': !global.lx.appSetting['desktopLyric.enable'] })
+      break
+    case 'settings':
+      showMainWindow()
+      sendEvent(WIN_MAIN_RENDERER_EVENT_NAME.tray_menu_navigate, { path: '/setting' })
+      break
+    case 'quit':
+      quitApp()
+      break
+  }
+}
+
+const createTrayMenuWindow = () => {
+  if (trayMenuWindow && !trayMenuWindow.isDestroyed()) return trayMenuWindow
+
+  trayMenuWindow = new BrowserWindow({
+    ...trayMenuWindowSize,
+    show: false,
+    frame: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    transparent: true,
+    hasShadow: false,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+      sandbox: false,
+    },
+  })
+  trayMenuWindow.setMenu(null)
+  trayMenuWindow.on('blur', closeTrayMenuWindow)
+  trayMenuWindow.on('closed', () => {
+    trayMenuWindow = null
+  })
+  trayMenuWindow.webContents.on('ipc-message', (event, channel, action: TrayMenuAction, data?: unknown) => {
+    if (channel != 'tray-menu-action') return
+    handleTrayMenuAction(action, data)
+  })
+  return trayMenuWindow
+}
+
+const showTrayMenuWindow = () => {
+  if (!tray) return
+  const win = createTrayMenuWindow()
+  win.setBounds(getTrayMenuBounds())
+  void win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(getTrayMenuHtml())}`).then(() => {
+    if (!trayMenuWindow || trayMenuWindow.isDestroyed()) return
+    trayMenuWindow.show()
+    trayMenuWindow.focus()
+  })
 }
 
 const createPlayerMenu = () => {
@@ -210,6 +465,10 @@ const createPlayerMenu = () => {
 
 export const createMenu = () => {
   if (!tray) return
+  if (isWin) {
+    tray.setContextMenu(null)
+    return
+  }
   let menu: Electron.MenuItemConstructorOptions[] = createPlayerMenu()
   if (playerState.empty) for (const m of menu) m.enabled = false
   menu.push({ type: 'separator' })
@@ -418,6 +677,11 @@ export default () => {
       playerState.collect = status.collect
       updated = true
     }
-    if (updated) init()
+    if (updated) {
+      init()
+      refreshTrayMenuWindow()
+    } else if (status.name != null || status.singer != null || status.mute != null) {
+      refreshTrayMenuWindow()
+    }
   })
 }

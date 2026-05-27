@@ -31,11 +31,15 @@ const isNeteaseDailyRecommendPlaylist = (id: string, source: LX.OnlineSource) =>
   return source == 'wy' && id == DAILY_RECOMMEND_TEMP_LIST_ID
 }
 
+const shouldUseNeteasePlaylistDetail = (id: string, source: LX.OnlineSource) => {
+  return source == 'wy' && !isNeteaseDailyRecommendPlaylist(id, source)
+}
+
 const getListDetailCacheKey = (id: string, source: LX.OnlineSource, page: number) => {
   const detailType = isNeteaseDailyRecommendPlaylist(id, source)
     ? 'netease_daily_recommend'
-    : isNeteasePrivateRadarPlaylist(id, source)
-      ? 'netease_user_sdetail'
+    : shouldUseNeteasePlaylistDetail(id, source)
+      ? isNeteasePrivateRadarPlaylist(id, source) ? 'netease_user_sdetail' : 'netease_sdetail'
       : 'sdetail'
   return `${detailType}__${source}__${id}__${page}`
 }
@@ -57,6 +61,21 @@ const normalizeNeteaseListDetail = (result: LX.Netease.PlaylistDetailInfo): List
   }
 }
 
+const loadMusicSdkListDetail = async(id: string, source: LX.OnlineSource, page: number) => {
+  return normalizeMusicSdkListDetail(await musicSdk[source]?.songList.getListDetail(id, page))
+}
+
+const loadNeteasePlaylistDetail = async(id: string, source: LX.OnlineSource, page: number) => {
+  if (!shouldUseNeteasePlaylistDetail(id, source)) return loadMusicSdkListDetail(id, source, page)
+
+  return getNeteasePlaylistDetail(id, page)
+    .then(normalizeNeteaseListDetail)
+    .catch(err => {
+      console.warn('Load NetEase playlist detail failed, fallback to source sdk:', err)
+      return loadMusicSdkListDetail(id, source, page)
+    })
+}
+
 const loadListDetail = async(id: string, source: LX.OnlineSource, page: number, isRefresh = false): Promise<ListDetailInfo> => {
   const key = getListDetailCacheKey(id, source, page)
   if (isRefresh && cache.has(key)) cache.delete(key)
@@ -64,9 +83,7 @@ const loadListDetail = async(id: string, source: LX.OnlineSource, page: number, 
 
   const result = isNeteaseDailyRecommendPlaylist(id, source)
     ? normalizeNeteaseListDetail(await getDailyRecommendPlaylistDetail(isRefresh))
-    : isNeteasePrivateRadarPlaylist(id, source)
-      ? normalizeNeteaseListDetail(await getNeteasePlaylistDetail(id, page))
-      : normalizeMusicSdkListDetail(await musicSdk[source]?.songList.getListDetail(id, page))
+    : await loadNeteasePlaylistDetail(id, source, page)
 
   cache.set(key, result)
   return result

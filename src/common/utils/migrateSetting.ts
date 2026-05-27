@@ -140,6 +140,11 @@ export default (setting: any): Partial<LX.AppSetting> => {
     setting.version = '2.1.0'
   }
 
+  if (setting['desktopLyric.style.paddingY'] != null) {
+    setting['desktopLyric.style.paddingTop'] ??= setting['desktopLyric.style.paddingY']
+    setting['desktopLyric.style.paddingBottom'] ??= setting['desktopLyric.style.paddingY']
+    delete setting['desktopLyric.style.paddingY']
+  }
 
   return setting
 }

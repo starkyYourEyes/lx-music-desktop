@@ -223,7 +223,9 @@ export const listenerAppEvent = (startApp: () => void) => {
   })
 
   const initScreenParams = () => {
-    global.envParams.workAreaSize = screen.getPrimaryDisplay().workAreaSize
+    const primaryDisplay = screen.getPrimaryDisplay()
+    global.envParams.workAreaSize = primaryDisplay.workAreaSize
+    global.envParams.screenSize = primaryDisplay.size
   }
   app.on('ready', () => {
     screen.on('display-metrics-changed', initScreenParams)

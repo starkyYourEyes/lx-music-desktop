@@ -53,18 +53,16 @@
       <base-virtualized-list
         v-if="actionButtonsVisible" ref="listRef" v-slot="{ item, index }" :list="list" key-name="id"
         :item-height="listItemHeight" container-class="scroll" content-class="list"
-        @scroll="saveListPosition" @contextmenu.capture="handleListRightClick"
+        @scroll="handleListScroll" @contextmenu.capture="handleListRightClick"
       >
         <div
-          class="list-item" :class="[{ [$style.active]: playerInfo.isPlayList && playerInfo.playIndex === index }, { selected: selectedIndex == index || rightClickSelectedIndex == index }, { active: selectedList.includes(item) }, { disabled: !assertApiSupport(item.source) }]"
+          class="list-item" :class="[{ [$style.active]: playerInfo.isPlayList && playerInfo.playIndex === index }, { [$style.locatingCurrent]: locatingCurrentIndex === index }, { selected: selectedIndex == index || rightClickSelectedIndex == index }, { active: selectedList.includes(item) }, { disabled: !assertApiSupport(item.source) }]"
           @click="handleListItemClick($event, index)" @contextmenu="handleListItemRightClick($event, index)"
         >
           <div class="list-item-cell no-select" :class="$style.num" style="flex: 0 0 5%;">
             <transition name="play-active">
               <div v-if="playerInfo.isPlayList && playerInfo.playIndex === index" :class="$style.playIcon">
-                <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" height="50%" viewBox="0 0 512 512" space="preserve">
-                  <use xlink:href="#icon-play-outline" />
-                </svg>
+                <svg-icon name="headphones" :class="$style.headphoneIcon" />
               </div>
               <div v-else class="num">{{ index + 1 }}</div>
             </transition>
@@ -84,19 +82,17 @@
       <base-virtualized-list
         v-else ref="listRef" v-slot="{ item, index }" :list="list" key-name="id"
         :item-height="listItemHeight" container-class="scroll" content-class="list"
-        @scroll="saveListPosition" @contextmenu.capture="handleListRightClick"
+        @scroll="handleListScroll" @contextmenu.capture="handleListRightClick"
       >
         <div
           class="list-item"
-          :class="[{ [$style.active]: playerInfo.isPlayList && playerInfo.playIndex === index }, { selected: selectedIndex == index || rightClickSelectedIndex == index }, { active: selectedList.includes(item) }, { disabled: !assertApiSupport(item.source) }]"
+          :class="[{ [$style.active]: playerInfo.isPlayList && playerInfo.playIndex === index }, { [$style.locatingCurrent]: locatingCurrentIndex === index }, { selected: selectedIndex == index || rightClickSelectedIndex == index }, { active: selectedList.includes(item) }, { disabled: !assertApiSupport(item.source) }]"
           @click="handleListItemClick($event, index)" @contextmenu="handleListItemRightClick($event, index)"
         >
           <div class="list-item-cell no-select" :class="$style.num" style="flex: 0 0 5%;">
             <transition name="play-active">
               <div v-if="playerInfo.isPlayList && playerInfo.playIndex === index" :class="$style.playIcon">
-                <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" height="50%" viewBox="0 0 512 512" space="preserve">
-                  <use xlink:href="#icon-play-outline" />
-                </svg>
+                <svg-icon name="headphones" :class="$style.headphoneIcon" />
               </div>
               <div v-else class="num">{{ index + 1 }}</div>
             </transition>
@@ -114,6 +110,19 @@
     <div v-show="!list.length" :class="$style.noItem">
       <p v-text="$t('no_item')" />
     </div>
+    <transition name="play-active">
+      <button
+        v-if="showLocateCurrentBtn"
+        type="button"
+        :class="$style.locateCurrentBtn"
+        aria-label="Locate current music"
+        @click="handleLocateCurrent"
+      >
+        <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24 24" space="preserve">
+          <use xlink:href="#icon-fm-focus" />
+        </svg>
+      </button>
+    </transition>
     <common-list-add-modal
       v-model:show="isShowListAdd" :is-move="isMove" :from-list-id="listId"
       :music-info="selectedAddMusicInfo" :exclude-list-id="excludeListIds" teleport="#view"
@@ -140,7 +149,7 @@
 <script>
 import { clipboardWriteText } from '@common/utils/electron'
 import { encodePath } from '@common/utils/common'
-import { computed, ref } from '@common/utils/vueTools'
+import { computed, onBeforeUnmount, ref, watch } from '@common/utils/vueTools'
 import { assertApiSupport } from '@renderer/store/utils'
 import SearchList from './components/SearchList.vue'
 import MusicSortModal from './components/MusicSortModal.vue'
@@ -189,6 +198,11 @@ export default {
     const actionButtonsVisible = appSetting['list.actionButtonsVisible']
     const isShowProfileEditModal = ref(false)
     const userListProfiles = ref({})
+    const showLocateCurrentBtn = ref(false)
+    const locatingCurrentIndex = ref(-1)
+    let isLocatingCurrent = false
+    let locateCurrentTimer = null
+    let hideLocateCurrentTimer = null
     const playlistProfileStyle = computed(() => {
       const scale = Math.min(140, Math.max(60, Number(appSetting['list.playlistProfileScale']) || 85)) / 100
       return {
@@ -330,7 +344,7 @@ export default {
       listRef,
     })
 
-    const { saveListPosition, restoreScroll } = useListScroll({ props, listRef, list, handleRestoreScroll })
+    const { saveListPosition, restoreScroll, scrollToListIndex } = useListScroll({ props, listRef, list, handleRestoreScroll })
 
     const listInfo = computed(() => {
       if (props.listId == LIST_IDS.LOVE) return loveList
@@ -352,6 +366,63 @@ export default {
       const time = listProfile.value.createdAt ?? Number(String(props.listId).replace(/^userlist_/, ''))
       if (!Number.isFinite(time) || time <= 0) return ''
       return new Date(time).toLocaleDateString()
+    })
+
+    const clearLocateCurrentTimer = () => {
+      if (!locateCurrentTimer) return
+      clearTimeout(locateCurrentTimer)
+      locateCurrentTimer = null
+    }
+    const clearHideLocateCurrentTimer = () => {
+      if (!hideLocateCurrentTimer) return
+      clearTimeout(hideLocateCurrentTimer)
+      hideLocateCurrentTimer = null
+    }
+    const restartHideLocateCurrentTimer = () => {
+      clearHideLocateCurrentTimer()
+      hideLocateCurrentTimer = setTimeout(() => {
+        showLocateCurrentBtn.value = false
+        hideLocateCurrentTimer = null
+      }, 5000)
+    }
+    const markCurrentMusicLocated = (index = playerInfo.value.playIndex) => {
+      locatingCurrentIndex.value = index
+      clearLocateCurrentTimer()
+      locateCurrentTimer = setTimeout(() => {
+        locatingCurrentIndex.value = -1
+        locateCurrentTimer = null
+      }, 1600)
+    }
+    const handleListScroll = () => {
+      saveListPosition()
+      if (isLocatingCurrent) return
+      if (!playerInfo.value.isPlayList || playerInfo.value.playIndex < 0) return
+      showLocateCurrentBtn.value = true
+      restartHideLocateCurrentTimer()
+    }
+    const handleLocateCurrent = () => {
+      if (!playerInfo.value.isPlayList || playerInfo.value.playIndex < 0) return
+      const playIndex = playerInfo.value.playIndex
+      isLocatingCurrent = true
+      clearHideLocateCurrentTimer()
+      showLocateCurrentBtn.value = false
+      scrollToListIndex(playIndex, true, () => {
+        markCurrentMusicLocated(playIndex)
+      }).finally(() => {
+        isLocatingCurrent = false
+        showLocateCurrentBtn.value = false
+      })
+    }
+    watch(playerInfo, info => {
+      if (info.isPlayList && info.playIndex > -1) return
+      showLocateCurrentBtn.value = false
+      locatingCurrentIndex.value = -1
+      clearLocateCurrentTimer()
+      clearHideLocateCurrentTimer()
+    })
+    onBeforeUnmount(() => {
+      clearLocateCurrentTimer()
+      clearHideLocateCurrentTimer()
     })
 
 
@@ -471,6 +542,10 @@ export default {
       playerInfo,
 
       saveListPosition,
+      handleListScroll,
+      showLocateCurrentBtn,
+      locatingCurrentIndex,
+      handleLocateCurrent,
       isShowSource,
       handleRestoreScroll,
 
@@ -666,12 +741,56 @@ export default {
   color: var(--color-button-font);
   opacity: .7;
 }
+.headphoneIcon {
+  width: 1.25em;
+  height: 1.25em;
+  vertical-align: 0;
+}
 .content {
   min-height: 0;
   font-size: 14px;
   display: flex;
   flex-flow: column nowrap;
   flex: auto;
+}
+.locatingCurrent {
+  background-color: var(--color-secondary-bg-for-transparent, var(--color-primary-background-hover)) !important;
+  animation: locate-current-pulse 1.6s ease both;
+}
+.locateCurrentBtn {
+  position: absolute;
+  right: 26px;
+  bottom: 24px;
+  z-index: 2;
+  width: 42px;
+  height: 42px;
+  border: none;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-button-font);
+  background-color: var(--color-button-background);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .18), inset 0 0 0 1px rgba(255, 255, 255, .12);
+  cursor: pointer;
+  transition: transform .2s ease, background-color .2s ease, box-shadow .2s ease;
+
+  svg {
+    width: 22px;
+    height: 22px;
+    opacity: .9;
+  }
+
+  &:hover {
+    transform: translateY(-1px);
+    background-color: var(--color-button-background-hover);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, .22), inset 0 0 0 1px rgba(255, 255, 255, .16);
+  }
+
+  &:active {
+    transform: translateY(0);
+    background-color: var(--color-button-background-active);
+  }
 }
 
 .noItem {
@@ -685,6 +804,18 @@ export default {
   p {
     font-size: 24px;
     color: var(--color-font-label);
+  }
+}
+
+@keyframes locate-current-pulse {
+  0% {
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0), 0 0 0 rgba(0, 0, 0, 0);
+  }
+  28% {
+    box-shadow: inset 0 0 0 1px var(--color-primary-light-100-alpha-700), 0 0 18px var(--color-primary-alpha-600);
+  }
+  100% {
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0), 0 0 0 rgba(0, 0, 0, 0);
   }
 }
 

@@ -4,6 +4,7 @@ import {
   onFocus,
   onSettingChanged,
   onThemeChange,
+  onTrayMenuNavigate,
   openDevTools,
   quitApp,
   setFullScreen,
@@ -29,6 +30,7 @@ import { openUrl } from '@common/utils/electron'
 import { HOTKEY_COMMON } from '@common/hotKey'
 import { applyTheme, getThemes } from '@renderer/store/utils'
 import { clearDownKeys } from '@renderer/event'
+import { useRouter } from '@common/utils/vueRouter'
 
 const handle_key_down = ({ event, type, key }: LX.KeyDownEevent) => {
   // console.log(key)
@@ -70,6 +72,8 @@ const handle_selection = (event: LX.KeyDownEevent) => {
 }
 
 export default () => {
+  const router = useRouter()
+
   watch(isFullscreen, val => {
     if (val) {
       document.documentElement.classList.remove(window.dt ? 'disableTransparent' : 'transparent')
@@ -122,6 +126,10 @@ export default () => {
     })
   })
 
+  const rTrayMenuNavigate = onTrayMenuNavigate(({ params }) => {
+    void router.push({ path: params.path })
+  })
+
   window.key_event.on(HOTKEY_COMMON.min.action, minWindow)
   window.key_event.on(HOTKEY_COMMON.hide_toggle.action, showHideWindowToggle)
   window.key_event.on(HOTKEY_COMMON.close.action, quitApp)
@@ -145,5 +153,6 @@ export default () => {
     rSetConfig()
     rFocus()
     rThemeChange()
+    rTrayMenuNavigate()
   })
 }

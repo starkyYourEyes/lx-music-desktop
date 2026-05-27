@@ -41,6 +41,12 @@ declare namespace LX {
       page?: number
     }
 
+    interface HomeRecommendationParams {
+      forceRefresh?: boolean
+      playlistLimit?: number
+      songLimit?: number
+    }
+
     type PrivateFmModeId = 'DEFAULT' | 'FAMILIAR' | 'EXPLORE' | 'EXERCISE' | 'FOCUS' | 'NIGHT_EMO'
 
     interface PrivateFmParams {
@@ -58,6 +64,30 @@ declare namespace LX {
       desc: string | null
       source: 'wy'
       total?: string
+    }
+
+    interface HomeChartSong {
+      name: string
+      singer: string
+    }
+
+    interface HomeChart {
+      id: string
+      name: string
+      img: string
+      desc: string | null
+      play_count: string
+      updateFrequency: string
+      source: 'wy'
+      isSales?: boolean
+      songs: HomeChartSong[]
+    }
+
+    interface HomeRecommendation {
+      radarPlaylists: Playlist[]
+      similarSongs: LX.Music.MusicInfoOnline[]
+      recommendPlaylists: Playlist[]
+      charts: HomeChart[]
     }
 
     interface PlaylistDetailInfo {

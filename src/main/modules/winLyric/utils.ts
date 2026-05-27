@@ -19,15 +19,16 @@ export const getLyricWindowBounds = (bounds: Electron.Rectangle, { x, y, w, h }:
   if (h < minHeight) h = minHeight
 
   if (global.lx.appSetting['desktopLyric.isLockScreen']) {
-    if (!global.envParams.workAreaSize) return bounds
-    const maxWinW = global.envParams.workAreaSize.width
-    const maxWinH = global.envParams.workAreaSize.height
+    const limitSize = global.envParams.screenSize ?? global.envParams.workAreaSize
+    if (!limitSize) return bounds
+    const maxWinW = limitSize.width
+    const maxWinH = limitSize.height
 
     if (w > maxWinW) w = maxWinW
     if (h > maxWinH) h = maxWinH
 
-    const maxX = global.envParams.workAreaSize.width - w
-    const maxY = global.envParams.workAreaSize.height - h
+    const maxX = limitSize.width - w
+    const maxY = limitSize.height - h
 
     x += bounds.x
     y += bounds.y
@@ -71,6 +72,9 @@ export const watchConfigKeys = [
   'desktopLyric.style.font',
   'desktopLyric.style.fontSize',
   'desktopLyric.style.lineGap',
+  'desktopLyric.style.lineHeight',
+  'desktopLyric.style.paddingTop',
+  'desktopLyric.style.paddingBottom',
   // 'desktopLyric.style.fontWeight',
   'desktopLyric.style.opacity',
   'desktopLyric.style.ellipsis',
@@ -99,9 +103,10 @@ export const initWindowSize = (x: LX.AppSetting['desktopLyric.x'], y: LX.AppSett
   if (x == null || y == null) {
     if (width < minWidth) width = minWidth
     if (height < minHeight) height = minHeight
-    if (global.envParams.workAreaSize) {
-      x = global.envParams.workAreaSize.width - width
-      y = global.envParams.workAreaSize.height - height
+    const limitSize = global.envParams.screenSize ?? global.envParams.workAreaSize
+    if (limitSize) {
+      x = limitSize.width - width
+      y = limitSize.height - height
     } else {
       x = y = 0
     }

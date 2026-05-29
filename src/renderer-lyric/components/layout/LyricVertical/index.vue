@@ -39,7 +39,7 @@ export default {
       textAlign: setting['desktopLyric.style.align'],
       '--line-height': Math.max(18, setting['desktopLyric.style.lineHeight']) + 'px',
       '--line-gap': Math.ceil(setting['desktopLyric.style.lineGap'] * 1.06) + 'px',
-      '--line-extended-gap': Math.ceil(setting['desktopLyric.style.lineGap'] * 1.06 / 8).toFixed(2) + 'px',
+      '--line-extended-gap': Math.max(0, setting['desktopLyric.style.extendedLineGap']).toFixed(2) + 'px',
       '--lyric-padding-top': Math.max(0, setting['desktopLyric.style.paddingTop']) + 'px',
       '--lyric-padding-bottom': Math.max(0, setting['desktopLyric.style.paddingBottom']) + 'px',
     }))

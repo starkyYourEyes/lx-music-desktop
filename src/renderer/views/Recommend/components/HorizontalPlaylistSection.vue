@@ -183,12 +183,28 @@ defineExpose({
 .horizontalSection {
   position: relative;
   min-width: 0;
-  padding-right: 38px;
+  margin-left: calc(var(--recommend-carousel-gutter, 56px) * -1);
+  margin-right: calc(var(--recommend-carousel-gutter, 56px) * -1);
+  padding-left: var(--recommend-carousel-gutter, 56px);
+  padding-right: var(--recommend-carousel-gutter, 56px);
+
+  &::before {
+    content: '';
+    position: absolute;
+    z-index: 1;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: var(--recommend-carousel-gutter, 56px);
+  }
 
   &:hover {
     .scrollBtn {
       opacity: 1;
-      pointer-events: auto;
+    }
+
+    .scrollBtn:disabled {
+      opacity: .24;
     }
   }
 }
@@ -212,7 +228,7 @@ defineExpose({
 
 .scrollBtn {
   z-index: 3;
-  width: 22px;
+  width: 44px;
   height: 74px;
   padding: 0;
   border: 0;
@@ -224,7 +240,9 @@ defineExpose({
   cursor: pointer;
   transition: opacity @transition-fast, color @transition-fast;
 
-  &:hover {
+  &:hover,
+  &:focus-visible {
+    opacity: 1;
     color: var(--color-primary);
   }
 
@@ -243,7 +261,7 @@ defineExpose({
   position: absolute;
   top: clamp(69px, 7vw, 87px);
   opacity: 0;
-  pointer-events: none;
+  pointer-events: auto;
   transform: translateY(-50%);
 }
 
@@ -295,11 +313,11 @@ defineExpose({
 }
 
 .scrollBtnLeft {
-  left: -37px;
+  left: 4px;
 }
 
 .scrollBtnRight {
-  right: 8px;
+  right: 4px;
 }
 
 .verticalPlaylistCard,

@@ -628,19 +628,15 @@ const getHomeSimilarSongs = async(blocks: any[], cookie: string, limit: number, 
 }
 
 const getHomeRecommendPlaylists = async(
-  blocks: any[],
   cookie: string,
   limit: number,
   forceRefresh = false,
 ): Promise<LX.Netease.Playlist[]> => {
-  let recommendPlaylists = await parsePcCustomizePlaylistBlock(blocks, HOME_BLOCK_CODES.recommendPlaylists, limit, cookie)
+  const recommendBlocks = await getHomepageBatchBlocks(cookie, forceRefresh, [HOME_BLOCK_CODES.legacyRecommendPlaylists]).catch(() => [])
+  let recommendPlaylists = parseHomepagePlaylistBlock(recommendBlocks, HOME_BLOCK_CODES.legacyRecommendPlaylists, limit)
   if (!recommendPlaylists.length) {
-    const recommendBlocks = await getPcCustomizeBatchBlocks(cookie, forceRefresh, HOME_BLOCK_CODES.recommendPlaylists).catch(() => [])
-    recommendPlaylists = await parsePcCustomizePlaylistBlock(recommendBlocks, HOME_BLOCK_CODES.recommendPlaylists, limit, cookie)
-  }
-  if (!recommendPlaylists.length) {
-    const recommendBlocks = await getHomepageBlocks(cookie, forceRefresh, [HOME_BLOCK_CODES.legacyRecommendPlaylists]).catch(() => [])
-    recommendPlaylists = parseHomepagePlaylistBlock(recommendBlocks, HOME_BLOCK_CODES.legacyRecommendPlaylists, limit)
+    const fallbackBlocks = await getHomepageBlocks(cookie, forceRefresh, [HOME_BLOCK_CODES.legacyRecommendPlaylists]).catch(() => [])
+    recommendPlaylists = parseHomepagePlaylistBlock(fallbackBlocks, HOME_BLOCK_CODES.legacyRecommendPlaylists, limit)
   }
   if (recommendPlaylists.length) return recommendPlaylists
 
@@ -783,7 +779,7 @@ export const getHomeRecommendation = async(params: LX.Netease.HomeRecommendation
   }
   if (!radarPlaylists.length) radarPlaylists = await getFallbackRadarPlaylists(cookie)
 
-  const recommendPlaylists = await getHomeRecommendPlaylists(pcCustomizeBlocks, cookie, playlistLimit, !!params.forceRefresh)
+  const recommendPlaylists = await getHomeRecommendPlaylists(cookie, playlistLimit, !!params.forceRefresh)
   const similarSongs = await getHomeSimilarSongs(blocks, cookie, songLimit, !!params.forceRefresh)
   const charts = await getHomeCharts(cookie).catch(() => [])
 

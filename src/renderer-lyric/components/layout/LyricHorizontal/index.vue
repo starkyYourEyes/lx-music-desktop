@@ -37,7 +37,7 @@ export default {
       opacity: setting['desktopLyric.style.opacity'] / 100,
       textAlign: setting['desktopLyric.style.align'],
       '--line-height': Math.max(18, setting['desktopLyric.style.lineHeight']) + 'px',
-      '--line-extended-gap': Math.max(2, setting['desktopLyric.style.lineGap'] / 3).toFixed(2) + 'px',
+      '--line-extended-gap': Math.max(0, setting['desktopLyric.style.extendedLineGap']).toFixed(2) + 'px',
       '--lyric-padding-top': Math.max(0, setting['desktopLyric.style.paddingTop']) + 'px',
       '--lyric-padding-bottom': Math.max(0, setting['desktopLyric.style.paddingBottom']) + 'px',
     }))

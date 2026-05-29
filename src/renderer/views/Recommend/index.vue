@@ -306,7 +306,10 @@ onBeforeUnmount(() => {
 .playlistScroll {
   flex: auto;
   min-height: 0;
-  padding: 16px 24px 28px 34px;
+  --recommend-content-left: 34px;
+  --recommend-content-right: 34px;
+  --recommend-carousel-gutter: 56px;
+  padding: 16px var(--recommend-content-right) 28px var(--recommend-content-left);
   box-sizing: border-box;
   overflow-y: auto;
   overflow-x: hidden;
@@ -334,7 +337,10 @@ onBeforeUnmount(() => {
   }
 
   .playlistScroll {
-    padding: 14px 16px 22px 24px;
+    --recommend-content-left: 24px;
+    --recommend-content-right: 24px;
+    --recommend-carousel-gutter: 42px;
+    padding: 14px var(--recommend-content-right) 22px var(--recommend-content-left);
   }
 }
 </style>

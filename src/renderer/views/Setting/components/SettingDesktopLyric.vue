@@ -67,6 +67,21 @@ dd
       base-btn.btn(min @click="changeLineGap(-1)") {{ $t('setting__desktop_lyric_line_gap_dec') }}
       base-btn.btn(min @click="changeLineGap(1)") {{ $t('setting__desktop_lyric_line_gap_add') }}
 dd
+  h3#desktop_lyric_extended_line_gap {{ $t('setting__desktop_lyric_extended_line_gap', { num: appSetting['desktopLyric.style.extendedLineGap'] }) }}
+  div
+    .p(:class="$style.numberControl")
+      base-btn.btn(min @click="changeExtendedLineGap(-1)") {{ $t('setting__desktop_lyric_extended_line_gap_dec') }}
+      input(
+        :class="$style.numberRange" type="range" min="0" max="40" step="1"
+        :value="appSetting['desktopLyric.style.extendedLineGap']"
+        @input="handleExtendedLineGapChange")
+      base-input.gap-left(
+        :class="$style.numberInput" type="number"
+        :model-value="appSetting['desktopLyric.style.extendedLineGap']"
+        @change="handleExtendedLineGapChange")
+      span(:class="$style.numberUnit") px
+      base-btn.btn(min @click="changeExtendedLineGap(1)") {{ $t('setting__desktop_lyric_extended_line_gap_add') }}
+dd
   h3#desktop_lyric_line_height {{ $t('setting__desktop_lyric_line_height', { num: appSetting['desktopLyric.style.lineHeight'] }) }}
   div
     .p(:class="$style.numberControl")
@@ -177,6 +192,11 @@ const normalizeLineHeight = value => {
   const rawValue = Number(value)
   const num = Number.isFinite(rawValue) ? Math.round(rawValue) : 30
   return Math.min(Math.max(num, 18), 80)
+}
+const normalizeExtendedLineGap = value => {
+  const rawValue = Number(value)
+  const num = Number.isFinite(rawValue) ? Math.round(rawValue) : 5
+  return Math.min(Math.max(num, 0), 40)
 }
 const normalizePadding = value => {
   const rawValue = Number(value)
@@ -321,6 +341,9 @@ export default {
     const changeLineHeight = (step) => {
       updateSetting({ 'desktopLyric.style.lineHeight': normalizeLineHeight(appSetting['desktopLyric.style.lineHeight'] + step) })
     }
+    const changeExtendedLineGap = (step) => {
+      updateSetting({ 'desktopLyric.style.extendedLineGap': normalizeExtendedLineGap(appSetting['desktopLyric.style.extendedLineGap'] + step) })
+    }
     const changePaddingTop = (step) => {
       updateSetting({ 'desktopLyric.style.paddingTop': normalizePadding(appSetting['desktopLyric.style.paddingTop'] + step) })
     }
@@ -329,6 +352,9 @@ export default {
     }
     const handleLineHeightChange = value => {
       updateSetting({ 'desktopLyric.style.lineHeight': normalizeLineHeight(value?.target ? value.target.value : value) })
+    }
+    const handleExtendedLineGapChange = value => {
+      updateSetting({ 'desktopLyric.style.extendedLineGap': normalizeExtendedLineGap(value?.target ? value.target.value : value) })
     }
     const handlePaddingTopChange = value => {
       updateSetting({ 'desktopLyric.style.paddingTop': normalizePadding(value?.target ? value.target.value : value) })
@@ -366,9 +392,11 @@ export default {
       updateSetting,
       changeLineGap,
       changeLineHeight,
+      changeExtendedLineGap,
       changePaddingTop,
       changePaddingBottom,
       handleLineHeightChange,
+      handleExtendedLineGapChange,
       handlePaddingTopChange,
       handlePaddingBottomChange,
       lyric_unplay_color_ref,

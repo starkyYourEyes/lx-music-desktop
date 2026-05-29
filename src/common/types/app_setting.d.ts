@@ -420,6 +420,8 @@ declare global {
        */
       'desktopLyric.style.lineGap': number
 
+      'desktopLyric.style.extendedLineGap': number
+
       'desktopLyric.style.lineHeight': number
 
       'desktopLyric.style.paddingTop': number

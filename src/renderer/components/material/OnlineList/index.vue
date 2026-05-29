@@ -31,7 +31,14 @@
                 class="list-item" :class="[{ selected: rightClickSelectedIndex == index }, { active: selectedList.includes(item) }]"
                 @click="handleListItemClick($event, index)" @contextmenu="handleListItemRightClick($event, index)"
               >
-                <div class="list-item-cell no-select num" style="flex: 0 0 5%;" @click.stop>{{ index + 1 }}</div>
+                <div class="list-item-cell no-select num" style="flex: 0 0 5%;" @click.stop>
+                  <transition name="play-active">
+                    <div v-if="isCurrentPlayingRow(item, index)" :class="$style.playIcon">
+                      <svg-icon name="headphones" :class="$style.headphoneIcon" />
+                    </div>
+                    <div v-else class="num">{{ index + 1 }}</div>
+                  </transition>
+                </div>
                 <div class="list-item-cell auto name">
                   <span class="select name" :aria-label="item.name">{{ item.name }}</span>
                   <span v-if="item.meta._qualitys.flac24bit" class="no-select badge badge-theme-primary">{{ $t('tag__lossless_24bit') }}</span>
@@ -59,7 +66,14 @@
                 class="list-item" :class="[{ selected: rightClickSelectedIndex == index }, { active: selectedList.includes(item) }]"
                 @click="handleListItemClick($event, index)" @contextmenu="handleListItemRightClick($event, index)"
               >
-                <div class="list-item-cell no-select num" style="flex: 0 0 5%;" @click.stop>{{ index + 1 }}</div>
+                <div class="list-item-cell no-select num" style="flex: 0 0 5%;" @click.stop>
+                  <transition name="play-active">
+                    <div v-if="isCurrentPlayingRow(item, index)" :class="$style.playIcon">
+                      <svg-icon name="headphones" :class="$style.headphoneIcon" />
+                    </div>
+                    <div v-else class="num">{{ index + 1 }}</div>
+                  </transition>
+                </div>
                 <div class="list-item-cell auto name">
                   <span class="select name" :aria-label="item.name">{{ item.name }}</span>
                   <span v-if="item.meta._qualitys.flac24bit" class="no-select badge badge-theme-primary">{{ $t('tag__lossless_24bit') }}</span>
@@ -101,7 +115,7 @@
 <script>
 import { clipboardWriteText } from '@common/utils/electron'
 import { assertApiSupport } from '@renderer/store/utils'
-import { ref } from '@common/utils/vueTools'
+import { computed, ref } from '@common/utils/vueTools'
 import useList from './useList'
 import useMenu from './useMenu'
 import usePlay from './usePlay'
@@ -109,6 +123,16 @@ import useMusicDownload from './useMusicDownload'
 import useMusicAdd from './useMusicAdd'
 import useMusicActions from './useMusicActions'
 import { appSetting } from '@renderer/store/setting'
+import { playInfo, playMusicInfo } from '@renderer/store/player/state'
+import { tempListMeta } from '@renderer/store/list/state'
+import { LIST_IDS } from '@common/constants'
+
+const createMusicIdentity = musicInfo => {
+  if (!musicInfo) return ''
+  const targetMusicInfo = 'progress' in musicInfo ? musicInfo.metadata.musicInfo : musicInfo
+  return `${targetMusicInfo.source}:${targetMusicInfo.id}`
+}
+
 export default {
   name: 'MaterialOnlineList',
   props: {
@@ -150,6 +174,10 @@ export default {
       type: Boolean,
       default: false,
     },
+    listContextId: {
+      type: String,
+      default: '',
+    },
   },
   emits: ['show-menu', 'play-list', 'togglePage', 'list-add'],
   setup(props, { emit }) {
@@ -157,6 +185,12 @@ export default {
     const rightClickSelectedIndex = ref(-1)
     const dom_listContent = ref(null)
     const listRef = ref(null)
+    const currentMusicIdentity = computed(() => createMusicIdentity(playMusicInfo.musicInfo))
+    const isCurrentTempList = computed(() => {
+      return playInfo.playerListId == LIST_IDS.TEMP &&
+        !!props.listContextId &&
+        tempListMeta.id == props.listContextId
+    })
 
     const {
       selectedList,
@@ -274,6 +308,11 @@ export default {
     const scrollToTop = () => {
       listRef.value.scrollTo(0, true)
     }
+    const isCurrentPlayingRow = (musicInfo, index) => {
+      if (isCurrentTempList.value && playInfo.playerPlayIndex === index) return true
+      if (!currentMusicIdentity.value) return false
+      return createMusicIdentity(musicInfo) == currentMusicIdentity.value
+    }
 
     return {
       listItemHeight,
@@ -304,6 +343,7 @@ export default {
 
       scrollToTop,
       actionButtonsVisible,
+      isCurrentPlayingRow,
     }
   },
 }
@@ -360,6 +400,19 @@ export default {
     font-size: 24px;
     color: var(--color-font-label);
   }
+}
+.playIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 1em;
+}
+.headphoneIcon {
+  width: 15px;
+  height: 15px;
+  color: var(--color-primary);
+  vertical-align: middle;
 }
 
 </style>

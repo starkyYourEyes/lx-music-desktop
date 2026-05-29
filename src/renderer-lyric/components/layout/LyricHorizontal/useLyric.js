@@ -121,6 +121,7 @@ export default () => {
     setting['desktopLyric.style.font'],
     setting['desktopLyric.style.fontSize'],
     setting['desktopLyric.style.lineGap'],
+    setting['desktopLyric.style.extendedLineGap'],
     setting['desktopLyric.style.lineHeight'],
     setting['desktopLyric.style.paddingTop'],
     setting['desktopLyric.style.paddingBottom'],

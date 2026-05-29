@@ -93,6 +93,7 @@ const defaultSetting: LX.AppSetting = {
   'desktopLyric.style.fontSize': 20,
   'desktopLyric.style.lineHeight': 30,
   'desktopLyric.style.lineGap': 15,
+  'desktopLyric.style.extendedLineGap': 5,
   'desktopLyric.style.paddingTop': 14,
   'desktopLyric.style.paddingBottom': 14,
   'desktopLyric.style.lyricUnplayColor': 'rgba(255, 255, 255, 1)',

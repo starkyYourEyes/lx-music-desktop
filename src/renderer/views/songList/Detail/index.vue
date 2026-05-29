@@ -34,6 +34,7 @@
         :total="listDetailInfo.total"
         :list="listDetailInfo.list"
         :no-item="listDetailInfo.noItemLabel"
+        :list-context-id="listContextId"
         @play-list="handlePlayList"
         @toggle-page="togglePage"
       />
@@ -49,6 +50,7 @@ import { useRouter } from '@common/utils/vueRouter'
 import { addSongListDetail, playSongListDetail } from './action'
 import useList from './useList'
 import useKeyBack from './useKeyBack'
+import { DAILY_RECOMMEND_TEMP_LIST_ID } from '@renderer/store/dailyRecommend/state'
 
 
 const source = ref<LX.OnlineSource>('kw')
@@ -56,6 +58,10 @@ const id = ref<string>('')
 const page = ref<number>(1)
 const picUrl = ref<string>('')
 const refresh = ref<boolean>(false)
+
+const getTempListId = (id: string, source: LX.OnlineSource) => source == 'wy' && id == DAILY_RECOMMEND_TEMP_LIST_ID
+  ? DAILY_RECOMMEND_TEMP_LIST_ID
+  : `${source}__${id}`
 
 
 interface Query {
@@ -108,6 +114,7 @@ export default {
   beforeRouteUpdate: verifyQueryParams,
   setup() {
     const router = useRouter()
+    const listContextId = ref('')
 
     const {
       listRef,
@@ -131,6 +138,7 @@ export default {
 
     watch([source, id, page, refresh], async([_source, _id, _page, _refresh]) => {
       if (!_source || !_id) return router.replace({ path: '/songList/list' })
+      listContextId.value = getTempListId(_id, _source)
       // console.log(_source, _id, _page, _refresh, picUrl.value)
       // source.value = _source
       // id.value = _id
@@ -147,6 +155,7 @@ export default {
       page,
       picUrl,
       listDetailInfo,
+      listContextId,
       listRef,
       togglePage,
       addSongListDetail,

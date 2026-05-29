@@ -47,7 +47,9 @@
             @toggle-card-play="handleToggleCardPlay"
           />
 
+          <template v-for="section in homeSectionOrder" :key="section">
           <horizontal-playlist-section
+            v-if="section == 'radarPlaylists'"
             title="雷达歌单"
             desc="从你的听歌偏好延展出的专属歌单"
             card-type="radar"
@@ -59,17 +61,56 @@
           />
 
           <similar-songs-section
+            v-else-if="section == 'styleSongs'"
+            :title="homeStyleSongsTitle"
+            desc="从最近偏好里延展出的宝藏旋律"
+            :songs="homeStyleSongs"
+            refreshable
+            :refreshing="isRefreshingStyleSongs"
+            refresh-label="刷新风格推荐歌曲"
+            :is-section-playing="isStyleSongsPlaying()"
+            :is-home-song-playing="isStyleSongPlaying"
+            :is-home-song-loved="isHomeSongLoved"
+            @refresh="handleRefreshStyleSongs"
+            @play-all="handleToggleStyleSongs"
+            @play="handlePlayStyleSongs"
+            @toggle-love="handleToggleHomeSongLove"
+          />
+
+          <horizontal-playlist-section
+            v-else-if="section == 'dailySongCategories'"
+            title="风格日推"
+            desc="按你选择的标签生成的每日歌单"
+            card-type="strip"
+            :playlists="homeDailySongCategoryPlaylists"
+            settings-label="设置风格日推标签"
+            :is-playlist-playing-list="isPlaylistPlayingList"
+            :get-playlist-play-label="getPlaylistPlayLabel"
+            @open="handleOpenPlaylist"
+            @toggle-play="handleTogglePlaylistPlay"
+            @settings="handleOpenRecommendSetting"
+          />
+
+          <similar-songs-section
+            v-else-if="section == 'similarSongs'"
+            title="红心相似歌曲"
+            desc="从你的偏好里挑出的相近旋律"
             :songs="homeSimilarSongs"
+            refreshable
             :refreshing="isRefreshingSimilarSongs"
+            refresh-label="刷新红心相似歌曲"
+            :is-section-playing="isHomeSongsPlaying()"
             :is-home-song-playing="isHomeSongPlaying"
             :is-home-song-loved="isHomeSongLoved"
             @refresh="handleRefreshSimilarSongs"
+            @play-all="handleToggleHomeSongs"
             @play="handlePlayHomeSongs"
             @toggle-love="handleToggleHomeSongLove"
           />
 
           <horizontal-playlist-section
-            ref="recommendSectionRef"
+            v-else-if="section == 'recommendPlaylists'"
+            :ref="setRecommendSectionRef"
             title="推荐歌单"
             desc="今天更适合继续听这些"
             card-type="strip"
@@ -84,9 +125,11 @@
           />
 
           <charts-section
+            v-else-if="section == 'charts'"
             :charts="homeCharts"
             @open="handleOpenChart"
           />
+          </template>
         </div>
       </div>
     </div>
@@ -95,8 +138,10 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from '@common/utils/vueTools'
-import { useRoute } from '@common/utils/vueRouter'
+import { useRoute, useRouter } from '@common/utils/vueRouter'
 import { initNeteaseAccount, isLoggedIn, profile } from '@renderer/store/netease'
+import { appSetting } from '@renderer/store/setting'
+import { normalizeRecommendHomeSectionOrder } from '@renderer/utils/recommendSectionOrder'
 import ChartsSection from './components/ChartsSection.vue'
 import ExplorePlaylistGrid from './components/ExplorePlaylistGrid.vue'
 import HorizontalPlaylistSection from './components/HorizontalPlaylistSection.vue'
@@ -114,13 +159,18 @@ interface HorizontalPlaylistSectionExpose {
 }
 
 const route = useRoute()
+const router = useRouter()
 const playlistScrollRef = ref<HTMLElement | null>(null)
 const recommendSectionRef = ref<HorizontalPlaylistSectionExpose | null>(null)
+const setRecommendSectionRef = (instance: HorizontalPlaylistSectionExpose | null) => {
+  recommendSectionRef.value = instance
+}
 
 const profileNickname = computed(() => profile.value?.nickname ? profile.value.nickname : 'WY')
 const isExploreMode = computed(() => route.query.category === 'playlists')
 const pageTitle = computed(() => isExploreMode.value ? '更多推荐' : '推荐')
 const pageSubTitle = computed(() => isLoggedIn.value ? `${profileNickname.value} 的音乐首页` : '登录后获取每日推荐、私人漫游与雷达歌单')
+const homeSectionOrder = computed(() => normalizeRecommendHomeSectionOrder(appSetting['recommend.homeSectionOrder']))
 
 const recommendData = useRecommendData({
   isExploreMode,
@@ -134,18 +184,27 @@ const {
   recommendPlaylists,
   displayedPlaylists,
   homeRadarPlaylists,
+  homeStyleSongsTitle,
+  homeStyleSongs,
+  homeDailySongCategoryPlaylists,
   homeSimilarSongs,
   homeRecommendPlaylists,
   homeCharts,
   playlistNoItemText,
+  isRefreshingStyleSongs,
   isRefreshingSimilarSongs,
   isRefreshingRecommendPlaylists,
   loadRecommendPlaylists,
   handleRefresh,
+  handleRefreshStyleSongs,
   handleRefreshSimilarSongs,
 } = recommendData
 
-const { specialCards, getSpecialCardKicker } = useRecommendCards(recommendPlaylists)
+const specialSourcePlaylists = computed(() => [
+  ...recommendPlaylists.value,
+  ...homeRadarPlaylists.value,
+])
+const { specialCards, getSpecialCardKicker } = useRecommendCards(specialSourcePlaylists)
 const specialCardIds = computed(() => new Set(specialCards.value.map(playlist => playlist.id)))
 const hasSpecialHomeContent = computed(() => specialCards.value.some(playlist => !playlist.isPlaceholder))
 const effectivePlaylistNoItemText = computed(() => {
@@ -155,7 +214,11 @@ const effectivePlaylistNoItemText = computed(() => {
 const filteredHomeRadarPlaylists = computed(() => homeRadarPlaylists.value)
 const filteredHomeRecommendPlaylists = computed(() => homeRecommendPlaylists.value.filter(playlist => !specialCardIds.value.has(playlist.id)))
 
-const recommendLove = useRecommendLove(homeSimilarSongs)
+const recommendSongsForLove = computed(() => [
+  ...homeStyleSongs.value,
+  ...homeSimilarSongs.value,
+])
+const recommendLove = useRecommendLove(recommendSongsForLove)
 const {
   updateHomeSongLoveStatuses,
   isHomeSongLoved,
@@ -164,17 +227,24 @@ const {
 
 const {
   isPlaylistPlayingList,
+  isStyleSongsPlaying,
+  isHomeSongsPlaying,
+  isStyleSongPlaying,
   isHomeSongPlaying,
   isCardPlaying,
   getCardPlayLabel,
   getPlaylistPlayLabel,
   handleToggleCardPlay,
   handleTogglePlaylistPlay,
+  handleToggleStyleSongs,
+  handleToggleHomeSongs,
+  handlePlayStyleSongs,
   handlePlayHomeSongs,
   handleOpenPlaylist,
   handleOpenChart,
   handleShowAll,
 } = useRecommendPlayback({
+  homeStyleSongs,
   homeSimilarSongs,
   setError: message => {
     playlistLoadError.value = message
@@ -199,11 +269,15 @@ const handleRefreshRecommendPlaylists = async() => {
   recommendSectionRef.value?.scrollToStart()
 }
 
+const handleOpenRecommendSetting = () => {
+  void router.push({ path: '/setting', query: { name: 'SettingRecommend' } })
+}
+
 watch(isExploreMode, () => {
   void loadRecommendPlaylists()
 })
 
-watch(homeSimilarSongs, () => {
+watch(recommendSongsForLove, () => {
   void updateHomeSongLoveStatuses()
 })
 

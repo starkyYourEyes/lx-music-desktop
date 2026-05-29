@@ -171,6 +171,7 @@ const modules = {
     netease_get_private_fm: 'netease_get_private_fm',
     netease_get_recommend_playlists: 'netease_get_recommend_playlists',
     netease_get_home_recommendation: 'netease_get_home_recommendation',
+    netease_get_daily_song_categories: 'netease_get_daily_song_categories',
     netease_get_playlist_detail: 'netease_get_playlist_detail',
     netease_get_music_url: 'netease_get_music_url',
     netease_like_music: 'netease_like_music',

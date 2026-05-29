@@ -35,6 +35,12 @@ export const parseEnvParams = (argv = process.argv): { cmdParams: LX.CmdParams, 
 
 const primitiveType = ['string', 'boolean', 'number']
 const checkPrimitiveType = (val: any): boolean => val === null || primitiveType.includes(typeof val)
+const checkSettingValueType = (val: any): boolean => checkPrimitiveType(val) || Array.isArray(val)
+const checkSameSettingValue = (a: any, b: any): boolean => {
+  if (!Array.isArray(a) || !Array.isArray(b)) return a == b
+  if (a.length != b.length) return false
+  return a.every((value, index) => value == b[index])
+}
 // const handleMergeSetting = (defaultSetting: LX.AppSetting, currentSetting: Partial<LX.AppSetting>) => {
 //   const updatedSettingKeys: Array<keyof LX.AppSetting> = []
 //   for (const key of Object.keys(defaultSetting) as Array<keyof LX.AppSetting>) {
@@ -72,9 +78,9 @@ export const mergeSetting = (originSetting: LX.AppSetting, targetSetting?: Parti
     if (originSettingKeys.length > targetSettingKeys.length) {
       for (const key of targetSettingKeys as Array<keyof LX.AppSetting>) {
         const targetValue: any = targetSetting[key]
-        const isPrimitive = checkPrimitiveType(targetValue)
+        const isValidSettingValue = checkSettingValueType(targetValue)
         // if (checkPrimitiveType(value)) {
-        if (!isPrimitive || targetValue == originSettingCopy[key] || originSettingCopy[key] === undefined) continue
+        if (!isValidSettingValue || checkSameSettingValue(targetValue, originSettingCopy[key]) || originSettingCopy[key] === undefined) continue
         updatedSettingKeys.push(key)
         updatedSetting[key] = targetValue
         // @ts-expect-error
@@ -86,9 +92,9 @@ export const mergeSetting = (originSetting: LX.AppSetting, targetSetting?: Parti
     } else {
       for (const key of originSettingKeys as Array<keyof LX.AppSetting>) {
         const targetValue: any = targetSetting[key]
-        const isPrimitive = checkPrimitiveType(targetValue)
+        const isValidSettingValue = checkSettingValueType(targetValue)
         // if (checkPrimitiveType(value)) {
-        if (!isPrimitive || targetValue == originSettingCopy[key]) continue
+        if (!isValidSettingValue || checkSameSettingValue(targetValue, originSettingCopy[key])) continue
         updatedSettingKeys.push(key)
         updatedSetting[key] = targetValue
         // @ts-expect-error

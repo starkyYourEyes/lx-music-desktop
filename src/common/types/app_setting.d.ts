@@ -4,6 +4,7 @@ declare global {
 
   declare namespace LX {
     type AddMusicLocationType = 'top' | 'bottom'
+    type RecommendHomeSectionId = 'radarPlaylists' | 'styleSongs' | 'dailySongCategories' | 'similarSongs' | 'recommendPlaylists' | 'charts'
 
     interface AppSetting {
       version: string
@@ -627,6 +628,16 @@ declare global {
        * 软件启动时是否自动聚焦搜索框
        */
       'search.isFocusSearchBox': boolean
+
+      /**
+       * 推荐页首页区块顺序
+       */
+      'recommend.homeSectionOrder': LX.RecommendHomeSectionId[]
+
+      /**
+       * 推荐页每日分类歌单标签顺序，null 表示使用默认标签，空数组表示隐藏
+       */
+      'recommend.dailySongCategoryTagKeys': string[] | null
 
       /**
        * 是否启用代理

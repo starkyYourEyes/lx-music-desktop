@@ -45,6 +45,7 @@ declare namespace LX {
       forceRefresh?: boolean
       playlistLimit?: number
       songLimit?: number
+      sections?: LX.RecommendHomeSectionId[]
     }
 
     type PrivateFmModeId = 'DEFAULT' | 'FAMILIAR' | 'EXPLORE' | 'EXERCISE' | 'FOCUS' | 'NIGHT_EMO'
@@ -66,6 +67,19 @@ declare namespace LX {
       total?: string
     }
 
+    interface DailySongTag {
+      categoryId: string
+      categoryName: string
+      tagId: string
+      tagName: string
+    }
+
+    interface DailySongCategory {
+      categoryId: string
+      categoryName: string
+      tags: DailySongTag[]
+    }
+
     interface HomeChartSong {
       name: string
       singer: string
@@ -85,6 +99,9 @@ declare namespace LX {
 
     interface HomeRecommendation {
       radarPlaylists: Playlist[]
+      styleSongsTitle: string
+      styleSongs: LX.Music.MusicInfoOnline[]
+      dailySongCategoryPlaylists: Playlist[]
       similarSongs: LX.Music.MusicInfoOnline[]
       recommendPlaylists: Playlist[]
       charts: HomeChart[]

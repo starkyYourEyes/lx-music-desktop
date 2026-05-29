@@ -7,11 +7,22 @@
       </div>
       <section-refresh-button
         v-if="refreshable"
-        :class="$style.refreshBtn"
+        :class="$style.actionBtn"
         label="刷新推荐歌单"
         :disabled="refreshing"
         @click="$emit('refresh')"
       />
+      <button
+        v-if="settingsLabel"
+        :class="[$style.settingsBtn, $style.actionBtn]"
+        type="button"
+        :aria-label="settingsLabel"
+        @click="$emit('settings')"
+      >
+        <svg viewBox="0 0 32 32" aria-hidden="true">
+          <path d="M17.5 4l1 3.2c.7.2 1.4.5 2 .8l3-1.5 2.4 4.2-2.8 2.1c.1.7.1 1.4 0 2.1l2.8 2.1-2.4 4.2-3-1.5c-.6.4-1.3.6-2 .8l-1 3.2h-4.9l-1-3.2c-.7-.2-1.4-.5-2-.8l-3 1.5-2.4-4.2 2.8-2.1a8.5 8.5 0 0 1 0-2.1L4.2 10.7l2.4-4.2 3 1.5c.6-.4 1.3-.6 2-.8l1-3.2zm-2.4 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z" fill="currentColor" />
+        </svg>
+      </button>
     </div>
     <div :class="$style.horizontalSection">
       <button
@@ -73,18 +84,21 @@ const props = withDefaults(defineProps<{
   cardType?: 'radar' | 'strip'
   refreshable?: boolean
   refreshing?: boolean
+  settingsLabel?: string
   isPlaylistPlayingList: (playlist: LX.Netease.Playlist) => boolean
   getPlaylistPlayLabel: (playlist: LX.Netease.Playlist) => string
 }>(), {
   cardType: 'strip',
   refreshable: false,
   refreshing: false,
+  settingsLabel: '',
 })
 
 defineEmits<{
   open: [playlist: LX.Netease.Playlist]
   'toggle-play': [playlist: LX.Netease.Playlist]
   refresh: []
+  settings: []
 }>()
 
 const scrollRef = ref<HTMLElement | null>(null)
@@ -176,8 +190,38 @@ defineExpose({
   min-width: 0;
 }
 
-.refreshBtn {
+.actionBtn {
   margin-left: auto;
+}
+
+.actionBtn + .actionBtn {
+  margin-left: 0;
+}
+
+.settingsBtn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  color: var(--color-font-label);
+  background-color: rgba(128, 128, 128, .08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color @transition-fast, background-color @transition-fast, transform @transition-fast;
+
+  svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  &:hover {
+    color: var(--color-primary);
+    background-color: var(--color-primary-background-hover);
+    transform: translateY(-1px);
+  }
 }
 
 .horizontalSection {

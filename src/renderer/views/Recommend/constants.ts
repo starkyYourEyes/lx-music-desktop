@@ -5,5 +5,6 @@ export const EXPLORE_PLAYLIST_LIMIT = 100
 export const PRIVATE_FM_CARD_ID = 'private_fm'
 export const PRIVATE_RADAR_PLAYLIST_ID = '3136952023'
 export const SPECIAL_PLACEHOLDER_ID = 'special_placeholder'
+export const HOME_STYLE_SONGS_TEMP_LIST_ID = 'wy__home_style_songs'
 export const HOME_SIMILAR_SONGS_TEMP_LIST_ID = 'wy__home_similar_songs'
 export const RECOMMEND_CACHE_TTL = Number.POSITIVE_INFINITY

@@ -4,6 +4,7 @@ import {
   checkLoginQr,
   createLoginQr,
   getAccountStatus,
+  getDailySongCategories,
   getHomeRecommendation,
   getMusicUrl,
   getPrivateFmSongs,
@@ -46,6 +47,10 @@ export default () => {
 
   mainHandle<LX.Netease.HomeRecommendationParams, LX.Netease.HomeRecommendation>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_home_recommendation, async({ params }) => {
     return getHomeRecommendation(params)
+  })
+
+  mainHandle<LX.Netease.DailySongCategory[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_daily_song_categories, async() => {
+    return getDailySongCategories()
   })
 
   mainHandle<LX.Netease.PlaylistDetailParams, LX.Netease.PlaylistDetailInfo>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_playlist_detail, async({ params }) => {

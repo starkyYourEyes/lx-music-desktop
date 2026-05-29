@@ -150,6 +150,7 @@ const trayMenuWindowSize = {
   width: 190,
   height: 275,
 }
+const trayMenuWindowOffset = 6
 
 const getIconPath = (id: number) => {
   let theme = id == TRAY_AUTO_ID
@@ -256,9 +257,9 @@ body{padding:0}
 .menu{width:190px;height:275px;border:1px solid rgba(123,128,148,.16);border-radius:7px;background:rgba(255,255,255,.98);box-shadow:0 10px 24px rgba(24,31,43,.16);overflow:hidden}
 .title{height:42px;padding:0 15px;display:flex;align-items:center;gap:9px;border-bottom:1px solid #edf0f5;font-size:13px;color:#6d7289;white-space:nowrap}
 .title svg{width:17px;height:17px;flex:none;color:#6b7286}.title span{min-width:0;overflow:hidden;text-overflow:ellipsis}
-.controls{height:56px;padding:0 12px;display:grid;grid-template-columns:repeat(4,1fr);align-items:center;border-bottom:1px solid #edf0f5}
+.controls{height:56px;padding:0 8px;display:grid;grid-template-columns:repeat(4,1fr);align-items:center;border-bottom:1px solid #edf0f5}
 button{border:0;background:transparent;margin:0;padding:0;color:#6e7588;font:inherit;cursor:pointer;outline:none}
-button:hover{color:#3f4657;background:#f6f7fa}.ctrl{width:40px;height:40px;border-radius:7px;display:flex;align-items:center;justify-content:center}.ctrl svg{width:25px;height:25px;fill:currentColor}
+button:hover{color:#3f4657;background:#f6f7fa}.ctrl{width:42px;height:42px;border-radius:7px;display:flex;align-items:center;justify-content:center}.ctrl svg{width:29px;height:29px;fill:currentColor}
 .volume-row{height:44px;padding:0 15px;display:flex;align-items:center;gap:11px;border-bottom:1px solid #edf0f5;position:relative}
 .volume-btn{width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;flex:none}.volume-btn svg{width:18px;height:18px}
 .volume-slider{flex:auto;min-width:0;height:4px;appearance:none;background:linear-gradient(to right,#6f7b91 0%,#6f7b91 ${volume}%,#e5e8ef ${volume}%,#e5e8ef 100%);border-radius:999px;outline:none}
@@ -315,12 +316,12 @@ if (volumeSlider) {
 const getTrayMenuBounds = () => {
   const cursor = screen.getCursorScreenPoint()
   const display = screen.getDisplayNearestPoint(cursor)
-  const workArea = display.workArea
-  let x = cursor.x + 8
-  let y = cursor.y - trayMenuWindowSize.height - 8
+  const bounds = display.bounds
+  let x = cursor.x + trayMenuWindowOffset
+  let y = cursor.y - trayMenuWindowSize.height - trayMenuWindowOffset
 
-  x = Math.min(Math.max(x, workArea.x + 4), workArea.x + workArea.width - trayMenuWindowSize.width - 4)
-  y = Math.min(Math.max(y, workArea.y + 4), workArea.y + workArea.height - trayMenuWindowSize.height - 4)
+  x = Math.min(Math.max(x, bounds.x + 4), bounds.x + bounds.width - trayMenuWindowSize.width - 4)
+  y = Math.min(Math.max(y, bounds.y + 4), bounds.y + bounds.height - trayMenuWindowSize.height - 4)
   return {
     ...trayMenuWindowSize,
     x: Math.round(x),

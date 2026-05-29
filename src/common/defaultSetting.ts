@@ -1,5 +1,6 @@
 import path from 'node:path'
 import os from 'node:os'
+import { RECOMMEND_HOME_SECTION_IDS } from './constants'
 
 const isMac = process.platform == 'darwin'
 const isWin = process.platform == 'win32'
@@ -136,6 +137,9 @@ const defaultSetting: LX.AppSetting = {
   'search.isShowHotSearch': false,
   'search.isShowHistorySearch': false,
   'search.isFocusSearchBox': false,
+
+  'recommend.homeSectionOrder': [...RECOMMEND_HOME_SECTION_IDS],
+  'recommend.dailySongCategoryTagKeys': null,
 
   'network.proxy.enable': false,
   'network.proxy.host': '',

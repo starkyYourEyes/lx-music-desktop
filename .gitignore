@@ -64,6 +64,7 @@ typings/
 API_CHANGES.local.md
 USER_PLAYLIST_RESPONSE.local.json
 DAILY_SONG_CATEGORY_API.local.md
+NETEASE_STYLE_RCMD_API.local.md
 
 # next.js build output
 .next

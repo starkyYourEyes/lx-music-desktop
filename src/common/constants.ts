@@ -51,6 +51,15 @@ export const DATA_KEYS = {
   lastStartInfo: 'lastStartInfo',
 } as const
 
+export const RECOMMEND_HOME_SECTION_IDS = [
+  'radarPlaylists',
+  'styleSongs',
+  'dailySongCategories',
+  'similarSongs',
+  'recommendPlaylists',
+  'charts',
+] as const
+
 export const DEFAULT_SETTING = {
   leaderboard: {
     source: 'kw',

@@ -757,6 +757,13 @@ export const getNeteaseHomeRecommendation = async(params: LX.Netease.HomeRecomme
   )
 }
 
+export const getNeteaseDailySongCategories = async() => {
+  return rendererInvoke<undefined, LX.Netease.DailySongCategory[]>(
+    WIN_MAIN_RENDERER_EVENT_NAME.netease_get_daily_song_categories,
+    undefined,
+  )
+}
+
 export const getNeteasePlaylistDetail = async(id: string, page = 1) => {
   return rendererInvoke<LX.Netease.PlaylistDetailParams, LX.Netease.PlaylistDetailInfo>(
     WIN_MAIN_RENDERER_EVENT_NAME.netease_get_playlist_detail,

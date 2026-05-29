@@ -4,6 +4,7 @@ import {
   getNeteaseRecommendPlaylists,
 } from '@renderer/utils/ipc'
 import { isLoggedIn } from '@renderer/store/netease'
+import { appSetting } from '@renderer/store/setting'
 import { isPrivateFmMode } from '@renderer/store/privateFm/state'
 import { preparePrivateFmQueue } from '@renderer/store/privateFm/action'
 import { loadDailyRecommendSongs } from '@renderer/store/dailyRecommend/action'
@@ -13,6 +14,9 @@ import {
   HOME_SONG_LIMIT,
   RECOMMEND_CACHE_TTL,
 } from './constants'
+
+const CORE_HOME_SECTIONS: LX.Netease.HomeRecommendationParams['sections'] = ['radarPlaylists', 'styleSongs', 'dailySongCategories', 'similarSongs', 'recommendPlaylists']
+const CHART_HOME_SECTIONS: LX.Netease.HomeRecommendationParams['sections'] = ['charts']
 
 const recommendPlaylistCache = new Map<string, {
   list: LX.Netease.Playlist[]
@@ -37,11 +41,15 @@ export const useRecommendData = ({
   const playlistLoadError = ref('')
   const recommendPlaylists = ref<LX.Netease.Playlist[]>([])
   const homeRecommendation = shallowRef<LX.Netease.HomeRecommendation | null>(null)
+  const isRefreshingStyleSongs = ref(false)
   const isRefreshingSimilarSongs = ref(false)
   const isRefreshingRecommendPlaylists = ref(false)
 
   const recommendPlaylistCacheKey = computed(() => `${isExploreMode.value ? 'explore' : 'home'}:${isLoggedIn.value ? 'login' : 'guest'}`)
-  const homeRecommendationCacheKey = computed(() => `${isLoggedIn.value ? 'login' : 'guest'}`)
+  const homeRecommendationCacheKey = computed(() => {
+    const dailySongCategoryTagKeys = appSetting['recommend.dailySongCategoryTagKeys']
+    return `${isLoggedIn.value ? 'login' : 'guest'}:${JSON.stringify(dailySongCategoryTagKeys)}`
+  })
 
   const getRecommendPlaylistCache = (key = recommendPlaylistCacheKey.value) => {
     const cache = recommendPlaylistCache.get(key)
@@ -69,14 +77,29 @@ export const useRecommendData = ({
     })
   }
 
+  const hasCoreHomeContent = (data: LX.Netease.HomeRecommendation | null) => {
+    return !!(
+      data?.radarPlaylists.length ||
+      data?.styleSongs.length ||
+      data?.dailySongCategoryPlaylists.length ||
+      data?.similarSongs.length ||
+      data?.recommendPlaylists.length
+    )
+  }
+
   const displayedPlaylists = computed(() => recommendPlaylists.value.slice(0, EXPLORE_PLAYLIST_LIMIT))
   const homeRadarPlaylists = computed(() => homeRecommendation.value?.radarPlaylists ?? [])
+  const homeStyleSongsTitle = computed(() => homeRecommendation.value?.styleSongsTitle || '多元旋律之旅')
+  const homeStyleSongs = computed(() => (homeRecommendation.value?.styleSongs ?? []).slice(0, HOME_SONG_LIMIT))
+  const homeDailySongCategoryPlaylists = computed(() => homeRecommendation.value?.dailySongCategoryPlaylists ?? [])
   const homeSimilarSongs = computed(() => (homeRecommendation.value?.similarSongs ?? []).slice(0, HOME_SONG_LIMIT))
   const homeRecommendPlaylists = computed(() => homeRecommendation.value?.recommendPlaylists ?? [])
   const homeCharts = computed(() => homeRecommendation.value?.charts ?? [])
   const hasHomeContent = computed(() => {
     return !!(
       homeRadarPlaylists.value.length ||
+      homeStyleSongs.value.length ||
+      homeDailySongCategoryPlaylists.value.length ||
       homeSimilarSongs.value.length ||
       homeRecommendPlaylists.value.length ||
       homeCharts.value.length
@@ -110,17 +133,22 @@ export const useRecommendData = ({
     return list
   }
 
-  const fetchHomeRecommendation = async(forceRefresh = false) => {
+  const fetchHomeRecommendation = async(
+    forceRefresh = false,
+    sections?: LX.Netease.HomeRecommendationParams['sections'],
+  ) => {
     const cacheKey = homeRecommendationCacheKey.value
-    const cachedData = forceRefresh ? null : getHomeRecommendationCache(cacheKey)
+    const isFullHomeRequest = !sections?.length
+    const cachedData = isFullHomeRequest && !forceRefresh ? getHomeRecommendationCache(cacheKey) : null
     if (cachedData) return cachedData
 
     const data = await getNeteaseHomeRecommendation({
       forceRefresh,
       playlistLimit: HOME_RECOMMEND_PLAYLIST_LIMIT,
       songLimit: HOME_SONG_LIMIT,
+      sections,
     })
-    setHomeRecommendationCache(data, cacheKey)
+    if (isFullHomeRequest) setHomeRecommendationCache(data, cacheKey)
     return data
   }
 
@@ -129,17 +157,48 @@ export const useRecommendData = ({
     const cachedHome = forceRefresh || isExploreMode.value ? null : getHomeRecommendationCache()
     if (cachedList) recommendPlaylists.value = cachedList
     if (cachedHome) homeRecommendation.value = cachedHome
-    if (!forceRefresh && cachedList && (isExploreMode.value || cachedHome)) return
+    if (!forceRefresh && cachedList && (isExploreMode.value || hasCoreHomeContent(cachedHome))) return
 
     isLoadingPlaylists.value = true
     playlistLoadError.value = ''
 
     const errors: any[] = []
     const baseTask = fetchBaseRecommendPlaylists(forceRefresh)
+      .then(list => {
+        recommendPlaylists.value = list
+        return null
+      }).catch(err => {
+        errors.push(err)
+        return null
+      })
 
     const homeTask = !isExploreMode.value
-      ? fetchHomeRecommendation(forceRefresh)
+      ? fetchHomeRecommendation(forceRefresh, CORE_HOME_SECTIONS).then(data => {
+        mergeHomeRecommendation({
+          radarPlaylists: data.radarPlaylists,
+          styleSongsTitle: data.styleSongsTitle,
+          styleSongs: data.styleSongs,
+          dailySongCategoryPlaylists: data.dailySongCategoryPlaylists,
+          similarSongs: data.similarSongs,
+          recommendPlaylists: data.recommendPlaylists,
+        })
+        onHomeSongsUpdated()
+        return null
+      }).catch(err => {
+        errors.push(err)
+        return null
+      })
       : Promise.resolve<LX.Netease.HomeRecommendation | null>(null)
+
+    const chartTask = !isExploreMode.value
+      ? fetchHomeRecommendation(forceRefresh, CHART_HOME_SECTIONS).then(data => {
+        mergeHomeRecommendation({ charts: data.charts })
+        return null
+      }).catch(err => {
+        console.warn('Load home charts failed:', err)
+        return null
+      })
+      : Promise.resolve(null)
 
     const warmupTasks: Array<Promise<unknown>> = []
     if (!isExploreMode.value && isLoggedIn.value) {
@@ -152,20 +211,15 @@ export const useRecommendData = ({
     }
 
     try {
-      const [baseResult, homeResult] = await Promise.all([
-        baseTask.catch(err => {
-          errors.push(err)
-          return null
-        }),
-        homeTask.catch(err => {
-          errors.push(err)
-          return null
-        }),
-      ])
-      await Promise.all(warmupTasks)
-      if (baseResult) recommendPlaylists.value = baseResult
-      if (homeResult) homeRecommendation.value = homeResult
-      onHomeSongsUpdated()
+      const blockingTasks: Array<Promise<unknown>> = isExploreMode.value
+        ? [baseTask]
+        : [homeTask]
+      const backgroundTasks = isExploreMode.value
+        ? warmupTasks
+        : [baseTask, chartTask, ...warmupTasks]
+
+      await Promise.all(blockingTasks)
+      void Promise.all(backgroundTasks)
       if (errors.length && (isExploreMode.value ? !recommendPlaylists.value.length : !hasHomeContent.value)) {
         playlistLoadError.value = errors[0]?.message ?? '推荐内容加载失败'
       }
@@ -182,6 +236,9 @@ export const useRecommendData = ({
   const mergeHomeRecommendation = (partial: Partial<LX.Netease.HomeRecommendation>) => {
     const nextData: LX.Netease.HomeRecommendation = {
       radarPlaylists: homeRecommendation.value?.radarPlaylists ?? [],
+      styleSongsTitle: homeRecommendation.value?.styleSongsTitle ?? '',
+      styleSongs: homeRecommendation.value?.styleSongs ?? [],
+      dailySongCategoryPlaylists: homeRecommendation.value?.dailySongCategoryPlaylists ?? [],
       similarSongs: homeRecommendation.value?.similarSongs ?? [],
       recommendPlaylists: homeRecommendation.value?.recommendPlaylists ?? [],
       charts: homeRecommendation.value?.charts ?? [],
@@ -189,6 +246,28 @@ export const useRecommendData = ({
     }
     homeRecommendation.value = nextData
     setHomeRecommendationCache(nextData)
+  }
+
+  const handleRefreshStyleSongs = async() => {
+    if (isRefreshingStyleSongs.value) return
+    isRefreshingStyleSongs.value = true
+    playlistLoadError.value = ''
+    try {
+      const data = await getNeteaseHomeRecommendation({
+        forceRefresh: true,
+        playlistLimit: HOME_RECOMMEND_PLAYLIST_LIMIT,
+        songLimit: HOME_SONG_LIMIT,
+        sections: ['styleSongs'],
+      })
+      mergeHomeRecommendation({
+        styleSongsTitle: data.styleSongsTitle,
+        styleSongs: data.styleSongs,
+      })
+    } catch (err: any) {
+      playlistLoadError.value = err?.message ?? '风格推荐歌曲刷新失败'
+    } finally {
+      isRefreshingStyleSongs.value = false
+    }
   }
 
   const handleRefreshSimilarSongs = async() => {
@@ -200,6 +279,7 @@ export const useRecommendData = ({
         forceRefresh: true,
         playlistLimit: HOME_RECOMMEND_PLAYLIST_LIMIT,
         songLimit: HOME_SONG_LIMIT,
+        sections: ['similarSongs'],
       })
       mergeHomeRecommendation({ similarSongs: data.similarSongs })
       onHomeSongsUpdated()
@@ -219,6 +299,7 @@ export const useRecommendData = ({
         forceRefresh: true,
         playlistLimit: HOME_RECOMMEND_PLAYLIST_LIMIT,
         songLimit: HOME_SONG_LIMIT,
+        sections: ['recommendPlaylists'],
       })
       mergeHomeRecommendation({ recommendPlaylists: data.recommendPlaylists })
     } catch (err: any) {
@@ -234,15 +315,20 @@ export const useRecommendData = ({
     recommendPlaylists,
     displayedPlaylists,
     homeRadarPlaylists,
+    homeStyleSongsTitle,
+    homeStyleSongs,
+    homeDailySongCategoryPlaylists,
     homeSimilarSongs,
     homeRecommendPlaylists,
     homeCharts,
     hasHomeContent,
     playlistNoItemText,
+    isRefreshingStyleSongs,
     isRefreshingSimilarSongs,
     isRefreshingRecommendPlaylists,
     loadRecommendPlaylists,
     handleRefresh: async() => loadRecommendPlaylists(true),
+    handleRefreshStyleSongs,
     handleRefreshSimilarSongs,
     handleRefreshRecommendPlaylists,
   }

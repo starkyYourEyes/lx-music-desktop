@@ -56,6 +56,7 @@ import SettingPlay from './components/SettingPlay.vue'
 import SettingPlayDetail from './components/SettingPlayDetail.vue'
 import SettingDesktopLyric from './components/SettingDesktopLyric.vue'
 import SettingSearch from './components/SettingSearch.vue'
+import SettingRecommend from './components/SettingRecommend.vue'
 import SettingList from './components/SettingList.vue'
 import SettingDownload from './components/SettingDownload.vue'
 import SettingSync from './components/SettingSync/index.vue'
@@ -76,6 +77,7 @@ export default {
     SettingPlayDetail,
     SettingDesktopLyric,
     SettingSearch,
+    SettingRecommend,
     SettingList,
     SettingDownload,
     SettingSync,
@@ -101,6 +103,7 @@ export default {
         { id: 'SettingPlayDetail', title: t('setting__play_detail') },
         { id: 'SettingDesktopLyric', title: t('setting__desktop_lyric') },
         { id: 'SettingSearch', title: t('setting__search') },
+        { id: 'SettingRecommend', title: t('setting__recommend') },
         { id: 'SettingList', title: t('setting__list') },
         { id: 'SettingDownload', title: t('setting__download') },
         { id: 'SettingHotKey', title: t('setting__hot_key') },

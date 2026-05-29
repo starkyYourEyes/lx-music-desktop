@@ -23,6 +23,7 @@ declare namespace LX {
       albumName: string // 歌曲专辑名称
       picUrl?: string | null // 歌曲图片链接
       toggleMusicInfo?: MusicInfoOnline | null
+      recommendTag?: string | null
     }
 
     interface MusicInfoMeta_online extends MusicInfoMetaBase {

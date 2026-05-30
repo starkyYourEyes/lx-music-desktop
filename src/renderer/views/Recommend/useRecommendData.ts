@@ -1,4 +1,4 @@
-import { computed, ref, shallowRef, type ComputedRef } from '@common/utils/vueTools'
+import { computed, nextTick, ref, shallowRef, type ComputedRef } from '@common/utils/vueTools'
 import {
   getNeteaseHomeRecommendation,
   getNeteaseRecommendPlaylists,
@@ -28,6 +28,8 @@ const homeRecommendationCache = new Map<string, {
   updatedAt: number
 }>()
 
+const recommendScrollCache = new Map<string, number>()
+
 export const useRecommendData = ({
   isExploreMode,
   playlistScrollRef,
@@ -49,6 +51,9 @@ export const useRecommendData = ({
   const homeRecommendationCacheKey = computed(() => {
     const dailySongCategoryTagKeys = appSetting['recommend.dailySongCategoryTagKeys']
     return `${isLoggedIn.value ? 'login' : 'guest'}:${JSON.stringify(dailySongCategoryTagKeys)}`
+  })
+  const scrollCacheKey = computed(() => {
+    return `${recommendPlaylistCacheKey.value}:${homeRecommendationCacheKey.value}`
   })
 
   const getRecommendPlaylistCache = (key = recommendPlaylistCacheKey.value) => {
@@ -74,6 +79,19 @@ export const useRecommendData = ({
     homeRecommendationCache.set(key, {
       data,
       updatedAt: Date.now(),
+    })
+  }
+
+  const saveScrollPosition = () => {
+    recommendScrollCache.set(scrollCacheKey.value, playlistScrollRef.value?.scrollTop ?? 0)
+  }
+
+  const restoreScrollPosition = async() => {
+    const scrollTop = recommendScrollCache.get(scrollCacheKey.value)
+    if (scrollTop == null) return
+    await nextTick()
+    requestAnimationFrame(() => {
+      if (playlistScrollRef.value) playlistScrollRef.value.scrollTop = scrollTop
     })
   }
 
@@ -157,7 +175,10 @@ export const useRecommendData = ({
     const cachedHome = forceRefresh || isExploreMode.value ? null : getHomeRecommendationCache()
     if (cachedList) recommendPlaylists.value = cachedList
     if (cachedHome) homeRecommendation.value = cachedHome
-    if (!forceRefresh && cachedList && (isExploreMode.value || hasCoreHomeContent(cachedHome))) return
+    if (!forceRefresh && (isExploreMode.value ? !!cachedList : hasCoreHomeContent(cachedHome))) {
+      await restoreScrollPosition()
+      return
+    }
 
     isLoadingPlaylists.value = true
     playlistLoadError.value = ''
@@ -227,6 +248,8 @@ export const useRecommendData = ({
         setTimeout(() => {
           playlistScrollRef.value?.scrollTo({ top: 0 })
         })
+      } else {
+        await restoreScrollPosition()
       }
     } finally {
       isLoadingPlaylists.value = false
@@ -331,5 +354,7 @@ export const useRecommendData = ({
     handleRefreshStyleSongs,
     handleRefreshSimilarSongs,
     handleRefreshRecommendPlaylists,
+    saveScrollPosition,
+    restoreScrollPosition,
   }
 }

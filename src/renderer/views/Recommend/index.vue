@@ -138,7 +138,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from '@common/utils/vueTools'
-import { useRoute, useRouter } from '@common/utils/vueRouter'
+import { onBeforeRouteLeave, useRoute, useRouter } from '@common/utils/vueRouter'
 import { initNeteaseAccount, isLoggedIn, profile } from '@renderer/store/netease'
 import { appSetting } from '@renderer/store/setting'
 import { normalizeRecommendHomeSectionOrder } from '@renderer/utils/recommendSectionOrder'
@@ -198,6 +198,7 @@ const {
   handleRefresh,
   handleRefreshStyleSongs,
   handleRefreshSimilarSongs,
+  saveScrollPosition,
 } = recommendData
 
 const specialSourcePlaylists = computed(() => [
@@ -285,7 +286,8 @@ watch(() => route.query.login, login => {
   if (login == '1' && !isLoggedIn.value) handleShowLogin()
 }, { immediate: true })
 
-watch(isLoggedIn, () => {
+watch(isLoggedIn, (value, oldValue) => {
+  if (oldValue == null || value == oldValue) return
   void loadRecommendPlaylists(true)
 })
 
@@ -306,6 +308,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('show-netease-login', handleAccountLoginRequest)
+})
+
+onBeforeRouteLeave(() => {
+  saveScrollPosition()
 })
 </script>
 

@@ -10,6 +10,8 @@ Add one-way synchronization for desktop custom music APIs, also called custom so
 - The feature is independent from playlist sync and dislike sync.
 - Desktop-to-mobile is the only supported direction in this phase.
 - The desktop app sends custom sources only after the custom source list changes, plus during initial feature sync when the remote data is out of date.
+- Mobile app startup should trigger sync by connecting to the desktop/server and running the normal initial `userApi` comparison.
+- Desktop app shutdown may trigger a best-effort `userApi` sync broadcast if connected clients exist. This is optional and must not block or delay app exit.
 - The transmitted script is the original JavaScript text, not the desktop `user_api.json` compressed `gz_...` storage string.
 - Mobile clients that do not advertise `userApi` support receive no custom source data.
 - The mobile project should treat the received payload as "desktop overwrites desktop-managed mobile custom sources" and run its own custom source import/update logic.
@@ -60,6 +62,28 @@ server asks client for enabled features
 -> if different, server sends full desktop payload
 -> both sides mark userApi module ready
 ```
+
+Mobile startup flow:
+
+```text
+mobile app opens
+-> mobile starts or restores sync connection
+-> mobile advertises userApi support
+-> desktop/server runs the same initial md5 comparison
+-> desktop/server sends full decoded payload only when md5 differs
+```
+
+Desktop shutdown flow:
+
+```text
+desktop app begins shutdown
+-> if sync server is running and userApi-ready clients are connected
+-> build current decoded payload
+-> send user_api_data_overwrite as a best-effort broadcast
+-> continue shutdown without waiting indefinitely
+```
+
+The shutdown trigger is intentionally best-effort because Electron app shutdown may not leave enough time for network delivery. Correctness still depends on mobile startup and normal initial sync.
 
 ## Desktop Code Changes
 
@@ -562,7 +586,7 @@ Using `remoteId` lets mobile update desktop-managed sources without deleting unr
 
 ## Change Triggering
 
-Only trigger realtime sync after successful desktop custom source persistence.
+Trigger realtime sync after successful desktop custom source persistence, and trigger initial comparison whenever a mobile client opens and reconnects.
 
 Trigger points:
 
@@ -570,12 +594,21 @@ Trigger points:
 - remove custom source
 - change update alert flag
 - future edit/update of a source script or metadata
+- mobile app startup/reconnect, handled by the existing initial feature sync flow
+- optional desktop app shutdown best-effort broadcast
 
 Do not trigger when:
 
 - the app only reads `user_api.json`
-- a sync connection starts and performs initial comparison
 - a remote overwrite is applied for a future desktop-to-desktop scenario
+
+Desktop shutdown implementation notes:
+
+- Hook an app shutdown path that already runs before process exit, such as the existing main-window/app close flow.
+- Reuse the same broadcast helper as normal `user_api_changed` events.
+- Apply a short timeout if awaiting delivery is necessary.
+- Never prevent app shutdown if sync fails, no client is connected, or the network is slow.
+- Do not persist extra "pending source sync" state in this phase.
 
 ## Error Handling
 
@@ -598,6 +631,8 @@ Desktop integration checks:
 - importing a custom source emits `user_api_changed`.
 - removing a custom source emits `user_api_changed`.
 - a connected `userApi`-ready client receives one `user_api_data_overwrite` action after a change.
+- a mobile startup/reconnect runs initial `userApi` md5 comparison.
+- desktop shutdown attempts a best-effort broadcast when a `userApi`-ready client is connected, without blocking exit.
 - clients without `userApi` support receive no source payload.
 - initial sync sends data when MD5 differs and sends nothing when MD5 matches.
 

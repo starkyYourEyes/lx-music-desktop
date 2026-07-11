@@ -1,6 +1,6 @@
 <template lang="pug">
 div(:class="$style.stage")
-  div(:class="$style.tonearm" aria-hidden="true")
+  div(:class="[$style.tonearm, { [$style.tonearmPlaying]: isPlay }]" aria-hidden="true")
     span(:class="$style.pivot")
     span(:class="$style.arm")
     span(:class="$style.head")
@@ -144,6 +144,11 @@ const handleImageError = () => {
   filter: drop-shadow(0 3px 5px rgba(0, 0, 0, .2));
   transform: rotate(4deg);
   transform-origin: 0 0;
+  transition: transform 360ms cubic-bezier(.2, .75, .25, 1);
+}
+
+.tonearmPlaying {
+  transform: rotate(18deg);
 }
 
 .pivot {
@@ -216,6 +221,10 @@ const handleImageError = () => {
 @media (prefers-reduced-motion: reduce) {
   .record {
     animation: none;
+  }
+
+  .tonearm {
+    transition: none;
   }
 }
 </style>

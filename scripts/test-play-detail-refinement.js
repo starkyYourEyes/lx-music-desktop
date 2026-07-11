@@ -92,14 +92,20 @@ const getRule = (source, selector) => {
 }
 
 const getDirectDeclarations = rule => {
-  const declarations = []
+  const declarations = new Map()
   const sanitizedRule = maskCommentsAndStrings(rule)
   let statementStart = 0
 
   for (let index = 0; index < sanitizedRule.length; index++) {
     const char = sanitizedRule[index]
     if (char === ';') {
-      declarations.push(sanitizedRule.slice(statementStart, index + 1))
+      const statement = sanitizedRule.slice(statementStart, index).trim()
+      const separatorIndex = statement.indexOf(':')
+      if (separatorIndex !== -1) {
+        const property = statement.slice(0, separatorIndex).trim()
+        const value = statement.slice(separatorIndex + 1).replace(/\s+/g, ' ').trim()
+        declarations.set(property, value)
+      }
       statementStart = index + 1
     } else if (char === '{') {
       const closeIndex = findClosingBrace(sanitizedRule, index)
@@ -108,7 +114,12 @@ const getDirectDeclarations = rule => {
     }
   }
 
-  return declarations.join('\n')
+  return declarations
+}
+
+const hasDeclaration = (declarations, property, value) => declarations.get(property) === value
+const expectDeclaration = (declarations, property, value, message) => {
+  assert.strictEqual(declarations.get(property), value, message)
 }
 
 const extractionFixture = `
@@ -120,16 +131,24 @@ const extractionFixture = `
 `
 const fixtureRule = getRule(extractionFixture, '.target')
 const fixtureDeclarations = getDirectDeclarations(fixtureRule)
-assert.match(fixtureDeclarations, /width:\s*100%;/, 'Rule extraction should retain direct declarations')
-assert.doesNotMatch(fixtureDeclarations, /50%|25%/, 'Rule extraction should exclude descendant and nested declarations')
+expectDeclaration(fixtureDeclarations, 'width', '100%', 'Rule extraction should retain direct declarations')
+assert.strictEqual(fixtureDeclarations.size, 1, 'Rule extraction should exclude descendant and nested declarations')
 
 const commentDeclarations = getDirectDeclarations('/* width: 100%; */ color: red;')
-assert.match(commentDeclarations, /color:\s*red;/, 'Declaration extraction should retain declarations after comments')
-assert.doesNotMatch(commentDeclarations, /width:\s*100%;/, 'Comments should not satisfy declaration contracts')
+expectDeclaration(commentDeclarations, 'color', 'red', 'Declaration extraction should retain declarations after comments')
+assert(!commentDeclarations.has('width'), 'Comments should not satisfy declaration contracts')
 
 const stringDeclarations = getDirectDeclarations(String.raw`content: "escaped quote: \"; width: 100%"; color: red;`)
-assert.match(stringDeclarations, /color:\s*red;/, 'Declaration extraction should retain declarations after strings')
-assert.doesNotMatch(stringDeclarations, /width:\s*100%/, 'Strings should not satisfy declaration contracts')
+expectDeclaration(stringDeclarations, 'color', 'red', 'Declaration extraction should retain declarations after strings')
+assert(!stringDeclarations.has('width'), 'Strings should not satisfy declaration contracts')
+
+const prefixedSizeDeclarations = getDirectDeclarations('min-width: 100%; min-height: 42px;')
+assert(!hasDeclaration(prefixedSizeDeclarations, 'width', '100%'), 'min-width should not satisfy a width contract')
+assert(!hasDeclaration(prefixedSizeDeclarations, 'height', '42px'), 'min-height should not satisfy a height contract')
+
+const exactSizeDeclarations = getDirectDeclarations('width: 100%; height: 42px;')
+assert(hasDeclaration(exactSizeDeclarations, 'width', '100%'), 'Exact width declarations should satisfy width contracts')
+assert(hasDeclaration(exactSizeDeclarations, 'height', '42px'), 'Exact height declarations should satisfy height contracts')
 
 const turntable = read('src/renderer/components/layout/PlayDetail/Turntable.vue')
 const playDetail = read('src/renderer/components/layout/PlayDetail/index.vue')
@@ -147,48 +166,50 @@ assert.match(
 )
 
 const tonearm = getDirectDeclarations(getRule(turntableStyle, '.tonearm'))
-assert.match(tonearm, /transform:\s*rotate\(4deg\);/, 'Tonearm should rest away from the record')
-assert.match(tonearm, /transform-origin:\s*0\s+0;/, 'Tonearm should rotate around its pivot')
-assert.match(
+expectDeclaration(tonearm, 'transform', 'rotate(4deg)', 'Tonearm should rest away from the record')
+expectDeclaration(tonearm, 'transform-origin', '0 0', 'Tonearm should rotate around its pivot')
+expectDeclaration(
   tonearm,
-  /transition:\s*transform\s+360ms\s+cubic-bezier\(\.2,\s*\.75,\s*\.25,\s*1\);/,
+  'transition',
+  'transform 360ms cubic-bezier(.2, .75, .25, 1)',
   'Tonearm movement should use the intended transition',
 )
 
 const tonearmPlaying = getDirectDeclarations(getRule(turntableStyle, '.tonearmPlaying'))
-assert.match(
+expectDeclaration(
   tonearmPlaying,
-  /transform:\s*rotate\(18deg\);/,
+  'transform',
+  'rotate(18deg)',
   'Playing tonearm should rotate onto the outer groove',
 )
 
 const reducedMotion = getRule(turntableStyle, '@media (prefers-reduced-motion: reduce)')
 const reducedRecord = getDirectDeclarations(getRule(reducedMotion, '.record'))
 const reducedTonearm = getDirectDeclarations(getRule(reducedMotion, '.tonearm'))
-assert.match(reducedRecord, /animation:\s*none;/, 'Reduced motion should disable record animation')
-assert.match(reducedTonearm, /transition:\s*none;/, 'Reduced motion should disable tonearm transition')
+expectDeclaration(reducedRecord, 'animation', 'none', 'Reduced motion should disable record animation')
+expectDeclaration(reducedTonearm, 'transition', 'none', 'Reduced motion should disable tonearm transition')
 
 const trackHeaderRule = getRule(playDetailStyle, '.trackHeader')
 const trackHeader = getDirectDeclarations(trackHeaderRule)
-assert.match(trackHeader, /align-items:\s*center;/, 'Track information should be horizontally centered')
-assert.match(trackHeader, /text-align:\s*center;/, 'Track information text should be centered')
+expectDeclaration(trackHeader, 'align-items', 'center', 'Track information should be horizontally centered')
+expectDeclaration(trackHeader, 'text-align', 'center', 'Track information text should be centered')
 
 const trackTitle = getDirectDeclarations(getRule(trackHeaderRule, 'h1'))
-assert.match(trackTitle, /width:\s*100%;/, 'Centered track title should use the full header width')
-assert.match(trackTitle, /overflow:\s*hidden;/, 'Track title should hide overflow')
-assert.match(trackTitle, /text-overflow:\s*ellipsis;/, 'Track title should retain ellipsis truncation')
-assert.match(trackTitle, /white-space:\s*nowrap;/, 'Track title should remain on one line')
+expectDeclaration(trackTitle, 'width', '100%', 'Centered track title should use the full header width')
+expectDeclaration(trackTitle, 'overflow', 'hidden', 'Track title should hide overflow')
+expectDeclaration(trackTitle, 'text-overflow', 'ellipsis', 'Track title should retain ellipsis truncation')
+expectDeclaration(trackTitle, 'white-space', 'nowrap', 'Track title should remain on one line')
 
 const trackMetaRule = getRule(playDetailStyle, '.trackMeta')
 const trackMeta = getDirectDeclarations(trackMetaRule)
-assert.match(trackMeta, /width:\s*100%;/, 'Singer and album row should use the full width')
-assert.match(trackMeta, /justify-content:\s*center;/, 'Singer and album row should be centered')
+expectDeclaration(trackMeta, 'width', '100%', 'Singer and album row should use the full width')
+expectDeclaration(trackMeta, 'justify-content', 'center', 'Singer and album row should be centered')
 
 const trackMetaSpan = getDirectDeclarations(getRule(trackMetaRule, 'span'))
-assert.match(trackMetaSpan, /min-width:\s*0;/, 'Track metadata should be allowed to shrink')
-assert.match(trackMetaSpan, /overflow:\s*hidden;/, 'Track metadata should hide overflow')
-assert.match(trackMetaSpan, /text-overflow:\s*ellipsis;/, 'Track metadata should retain ellipsis truncation')
-assert.match(trackMetaSpan, /white-space:\s*nowrap;/, 'Track metadata should remain on one line')
+expectDeclaration(trackMetaSpan, 'min-width', '0', 'Track metadata should be allowed to shrink')
+expectDeclaration(trackMetaSpan, 'overflow', 'hidden', 'Track metadata should hide overflow')
+expectDeclaration(trackMetaSpan, 'text-overflow', 'ellipsis', 'Track metadata should retain ellipsis truncation')
+expectDeclaration(trackMetaSpan, 'white-space', 'nowrap', 'Track metadata should remain on one line')
 
 assert.match(
   lyricPlayer,
@@ -197,34 +218,34 @@ assert.match(
 )
 
 const footer = getDirectDeclarations(getRule(playBarStyle, '.footer'))
-assert.match(footer, /flex:\s*0\s+0\s+72px;/, 'Play detail footer should be 72px high')
-assert.match(footer, /padding:\s*10px\s+28px\s+4px;/, 'Play detail footer should use compact padding')
+expectDeclaration(footer, 'flex', '0 0 72px', 'Play detail footer should be 72px high')
+expectDeclaration(footer, 'padding', '10px 28px 4px', 'Play detail footer should use compact padding')
 
 const progressTrack = getDirectDeclarations(getRule(playBarStyle, '.progressTrack'))
-assert.match(progressTrack, /height:\s*10px;/, 'Progress track should be 10px high')
-assert.match(progressTrack, /padding-top:\s*4px;/, 'Progress track should use 4px top padding')
+expectDeclaration(progressTrack, 'height', '10px', 'Progress track should be 10px high')
+expectDeclaration(progressTrack, 'padding-top', '4px', 'Progress track should use 4px top padding')
 
 const partyBtn = getDirectDeclarations(getRule(playBarStyle, '.partyBtn'))
-assert.match(partyBtn, /min-height:\s*30px;/, 'Party button should be 30px high')
-assert.match(partyBtn, /padding:\s*6px\s+10px;/, 'Party button should use compact padding')
+expectDeclaration(partyBtn, 'min-height', '30px', 'Party button should be 30px high')
+expectDeclaration(partyBtn, 'padding', '6px 10px', 'Party button should use compact padding')
 
 const playBtn = getDirectDeclarations(getRule(playBarStyle, '.playBtn'))
-assert.match(playBtn, /width:\s*32px;/, 'Playback buttons should be 32px wide')
-assert.match(playBtn, /height:\s*32px;/, 'Playback buttons should be 32px high')
-assert.match(playBtn, /padding:\s*6px;/, 'Playback buttons should use compact padding')
+expectDeclaration(playBtn, 'width', '32px', 'Playback buttons should be 32px wide')
+expectDeclaration(playBtn, 'height', '32px', 'Playback buttons should be 32px high')
+expectDeclaration(playBtn, 'padding', '6px', 'Playback buttons should use compact padding')
 
 const playBtnPrimary = getDirectDeclarations(getRule(playBarStyle, '.playBtnPrimary'))
-assert.match(playBtnPrimary, /width:\s*42px;/, 'Primary play button should be 42px wide')
-assert.match(playBtnPrimary, /height:\s*42px;/, 'Primary play button should be 42px high')
-assert.match(playBtnPrimary, /padding:\s*11px;/, 'Primary play button should use compact padding')
+expectDeclaration(playBtnPrimary, 'width', '42px', 'Primary play button should be 42px wide')
+expectDeclaration(playBtnPrimary, 'height', '42px', 'Primary play button should be 42px high')
+expectDeclaration(playBtnPrimary, 'padding', '11px', 'Primary play button should use compact padding')
 
 const narrowPlayBar = getRule(playBarStyle, '@media (max-width: 900px)')
 const narrowPlayBtn = getDirectDeclarations(getRule(narrowPlayBar, '.playBtn'))
 const narrowPlayBtnPrimary = getDirectDeclarations(getRule(narrowPlayBar, '.playBtnPrimary'))
-assert.match(narrowPlayBtn, /width:\s*30px;/, 'Narrow playback buttons should be 30px wide')
-assert.match(narrowPlayBtn, /height:\s*30px;/, 'Narrow playback buttons should be 30px high')
-assert.match(narrowPlayBtnPrimary, /width:\s*38px;/, 'Narrow primary play button should be 38px wide')
-assert.match(narrowPlayBtnPrimary, /height:\s*38px;/, 'Narrow primary play button should be 38px high')
+expectDeclaration(narrowPlayBtn, 'width', '30px', 'Narrow playback buttons should be 30px wide')
+expectDeclaration(narrowPlayBtn, 'height', '30px', 'Narrow playback buttons should be 30px high')
+expectDeclaration(narrowPlayBtnPrimary, 'width', '38px', 'Narrow primary play button should be 38px wide')
+expectDeclaration(narrowPlayBtnPrimary, 'height', '38px', 'Narrow primary play button should be 38px high')
 
 assert.match(playBar, /@click="playPrev\(\)"/, 'Previous control should remain available')
 assert.match(playBar, /@click="togglePlay"/, 'Play and pause control should remain available')

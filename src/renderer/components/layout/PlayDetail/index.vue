@@ -274,6 +274,7 @@ export default {
 
   h1 {
     margin: 0;
+    width: 100%;
     overflow: hidden;
     color: var(--color-font);
     font-size: clamp(22px, 3vw, 34px);

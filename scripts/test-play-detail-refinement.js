@@ -22,6 +22,10 @@ assert(
   'Track title and metadata container should be centered',
 )
 assert(
+  /\.trackHeader\s*\{(?:(?!\n\}).)*?h1\s*\{[^}]*width:\s*100%;/s.test(playDetail),
+  'Centered track title should remain constrained to the full header width',
+)
+assert(
   /\.trackMeta\s*\{[^}]*width:\s*100%;[^}]*justify-content:\s*center;/s.test(playDetail),
   'Singer and album row should be centered',
 )

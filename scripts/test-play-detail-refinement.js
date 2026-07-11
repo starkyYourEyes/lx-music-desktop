@@ -32,6 +32,23 @@ const skipComment = (source, start) => {
   return start
 }
 
+const maskCommentsAndStrings = source => {
+  const sanitized = source.split('')
+
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index]
+    let end = index
+    if (char === '"' || char === "'") end = skipString(source, index)
+    else if (char === '/' && (source[index + 1] === '/' || source[index + 1] === '*')) end = skipComment(source, index)
+    else continue
+
+    sanitized.fill(' ', index, end + 1)
+    index = end
+  }
+
+  return sanitized.join('')
+}
+
 const findClosingBrace = (source, openIndex) => {
   let depth = 1
   for (let index = openIndex + 1; index < source.length; index++) {
@@ -76,19 +93,16 @@ const getRule = (source, selector) => {
 
 const getDirectDeclarations = rule => {
   const declarations = []
+  const sanitizedRule = maskCommentsAndStrings(rule)
   let statementStart = 0
 
-  for (let index = 0; index < rule.length; index++) {
-    const char = rule[index]
-    if (char === '"' || char === "'") {
-      index = skipString(rule, index)
-    } else if (char === '/' && (rule[index + 1] === '/' || rule[index + 1] === '*')) {
-      index = skipComment(rule, index)
-    } else if (char === ';') {
-      declarations.push(rule.slice(statementStart, index + 1))
+  for (let index = 0; index < sanitizedRule.length; index++) {
+    const char = sanitizedRule[index]
+    if (char === ';') {
+      declarations.push(sanitizedRule.slice(statementStart, index + 1))
       statementStart = index + 1
     } else if (char === '{') {
-      const closeIndex = findClosingBrace(rule, index)
+      const closeIndex = findClosingBrace(sanitizedRule, index)
       index = closeIndex
       statementStart = closeIndex + 1
     }
@@ -108,6 +122,14 @@ const fixtureRule = getRule(extractionFixture, '.target')
 const fixtureDeclarations = getDirectDeclarations(fixtureRule)
 assert.match(fixtureDeclarations, /width:\s*100%;/, 'Rule extraction should retain direct declarations')
 assert.doesNotMatch(fixtureDeclarations, /50%|25%/, 'Rule extraction should exclude descendant and nested declarations')
+
+const commentDeclarations = getDirectDeclarations('/* width: 100%; */ color: red;')
+assert.match(commentDeclarations, /color:\s*red;/, 'Declaration extraction should retain declarations after comments')
+assert.doesNotMatch(commentDeclarations, /width:\s*100%;/, 'Comments should not satisfy declaration contracts')
+
+const stringDeclarations = getDirectDeclarations(String.raw`content: "escaped quote: \"; width: 100%"; color: red;`)
+assert.match(stringDeclarations, /color:\s*red;/, 'Declaration extraction should retain declarations after strings')
+assert.doesNotMatch(stringDeclarations, /width:\s*100%/, 'Strings should not satisfy declaration contracts')
 
 const turntable = read('src/renderer/components/layout/PlayDetail/Turntable.vue')
 const playDetail = read('src/renderer/components/layout/PlayDetail/index.vue')
@@ -153,6 +175,7 @@ assert.match(trackHeader, /text-align:\s*center;/, 'Track information text shoul
 
 const trackTitle = getDirectDeclarations(getRule(trackHeaderRule, 'h1'))
 assert.match(trackTitle, /width:\s*100%;/, 'Centered track title should use the full header width')
+assert.match(trackTitle, /overflow:\s*hidden;/, 'Track title should hide overflow')
 assert.match(trackTitle, /text-overflow:\s*ellipsis;/, 'Track title should retain ellipsis truncation')
 assert.match(trackTitle, /white-space:\s*nowrap;/, 'Track title should remain on one line')
 
@@ -162,6 +185,8 @@ assert.match(trackMeta, /width:\s*100%;/, 'Singer and album row should use the f
 assert.match(trackMeta, /justify-content:\s*center;/, 'Singer and album row should be centered')
 
 const trackMetaSpan = getDirectDeclarations(getRule(trackMetaRule, 'span'))
+assert.match(trackMetaSpan, /min-width:\s*0;/, 'Track metadata should be allowed to shrink')
+assert.match(trackMetaSpan, /overflow:\s*hidden;/, 'Track metadata should hide overflow')
 assert.match(trackMetaSpan, /text-overflow:\s*ellipsis;/, 'Track metadata should retain ellipsis truncation')
 assert.match(trackMetaSpan, /white-space:\s*nowrap;/, 'Track metadata should remain on one line')
 

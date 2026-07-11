@@ -1,46 +1,47 @@
 <template>
   <div :class="$style.footer">
-    <div :class="$style.footerLeft">
-      <control-btns />
-      <div :class="$style.progressContainer">
-        <div :class="$style.progressContent">
-          <common-progress-bar
-            :class-name="$style.progress"
-            :progress="progress"
-            :handle-transition-end="handleTransitionEnd"
-            :is-active-transition="isActiveTransition"
-          />
-        </div>
-      </div>
-      <div :class="$style.timeLabel"><span :class="$style.status" style="margin-right: 15px">{{ status }}</span><span>{{ nowPlayTimeStr }}</span><span style="margin: 0 5px;">/</span><span>{{ maxPlayTimeStr }}</span></div>
+    <div :class="$style.progressTrack">
+      <common-progress-bar
+        :class-name="$style.progress"
+        :progress="progress"
+        :handle-transition-end="handleTransitionEnd"
+        :is-active-transition="isActiveTransition"
+      />
     </div>
-    <div :class="$style.playControl">
-      <div :class="[$style.playBtn, { [$style.playBtnActive]: isShowPlayQueue }]" :aria-label="$t('player__play_queue')" @click="isShowPlayQueue = !isShowPlayQueue">
-        <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" height="100%" viewBox="0 0 24 24" space="preserve">
-          <use xlink:href="#icon-play-queue" />
-        </svg>
-      </div>
-      <div :class="$style.playBtn" :aria-label="$t('player__prev')" @click="playPrev()">
-        <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" height="100%" viewBox="0 0 1024 1024" space="preserve">
+    <div :class="$style.footerLeft">
+      <span :class="$style.status">{{ status }}</span>
+      <span :class="$style.time">{{ nowPlayTimeStr }} / {{ maxPlayTimeStr }}</span>
+    </div>
+    <div :class="$style.footerCenter">
+      <button type="button" :class="$style.playBtn" :aria-label="$t('player__prev')" @click="playPrev()">
+        <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024" space="preserve">
           <use xlink:href="#icon-prevMusic" />
         </svg>
-      </div>
-      <div :class="$style.playBtn" :aria-label="isPlay ? $t('player__pause') : $t('player__play')" @click="togglePlay">
-        <svg v-if="isPlay" version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" height="100%" viewBox="0 0 1024 1024" space="preserve">
+      </button>
+      <button type="button" :class="[$style.playBtn, $style.playBtnPrimary]" :aria-label="isPlay ? $t('player__pause') : $t('player__play')" @click="togglePlay">
+        <svg v-if="isPlay" version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024" space="preserve">
           <use xlink:href="#icon-pause" />
         </svg>
-        <svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" height="100%" viewBox="0 0 1024 1024" space="preserve">
+        <svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024" space="preserve">
           <use xlink:href="#icon-play" />
         </svg>
-      </div>
-      <div :class="$style.playBtn" :aria-label="$t('player__next')" @click="playNext()">
-        <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" height="100%" viewBox="0 0 1024 1024" space="preserve">
+      </button>
+      <button type="button" :class="$style.playBtn" :aria-label="$t('player__next')" @click="playNext()">
+        <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024" space="preserve">
           <use xlink:href="#icon-nextMusic" />
         </svg>
-      </div>
+      </button>
+      <button type="button" :class="[$style.playBtn, $style.queueBtn, { [$style.playBtnActive]: isShowPlayQueue }]" :aria-label="$t('player__play_queue')" @click="isShowPlayQueue = !isShowPlayQueue">
+        <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24 24" space="preserve">
+          <use xlink:href="#icon-play-queue" />
+        </svg>
+      </button>
+    </div>
+    <div :class="$style.footerRight">
+      <control-btns />
       <button type="button" :class="[$style.partyBtn, {[$style.partyBtnActive]: !!party.room}]" @click="party.isShowModal = true">
         <span :class="$style.partyDot" />
-        <span>{{ party.room ? `房间 ${party.room.roomCode}` : '一起听' }}</span>
+        <span :class="$style.partyLabel">{{ party.room ? `房间 ${party.room.roomCode}` : '一起听' }}</span>
       </button>
     </div>
     <play-queue v-model:show="isShowPlayQueue" />
@@ -72,131 +73,209 @@ const {
 @import '@renderer/assets/styles/layout.less';
 
 .footer {
-  flex: 0 0 100px;
-  overflow: hidden;
-  display: flex;
+  position: relative;
+  z-index: 2;
+  flex: 0 0 92px;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 1fr);
   align-items: center;
-}
-.footerLeft {
-  flex: auto;
-  display: flex;
-  flex-flow: column nowrap;
-  padding: 13px 13px 13px 30px;
-  overflow: hidden;
-}
+  gap: 20px;
+  padding: 14px 28px 8px;
 
-.progressContainer {
-  width: 100%;
-  position: relative;
-  padding: 3px 0;
-}
-
-.progressContent {
-  position: relative;
-  height: 16px;
-  padding: 5px 0;
-  width: 100%;
-}
-.progress {
-  height: 100%;
-}
-
-.barTransition {
-  transition-property: transform;
-  transition-timing-function: ease-out;
-  transition-duration: 0.2s;
-}
-.timeLabel {
-  width: 100%;
-  height: 18px;
-  display: flex;
-  span {
-    font-size: 13px;
+  &::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-top: 1px solid rgba(128, 128, 128, .14);
+    background: var(--color-surface-background, var(--color-content-background));
+    backdrop-filter: saturate(160%) blur(22px);
   }
 }
-.status {
-  flex: auto;
+
+.progressTrack {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 12px;
+  padding-top: 5px;
 }
 
-.playControl {
-  flex: none;
-  height: 100%;
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  padding: 0 25px;
-  color: var(--color-button-font);
+.progress {
+  height: 3px;
 }
+
+.footerLeft {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.status {
+  overflow: hidden;
+  color: var(--color-font);
+  font-size: 13px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.time {
+  color: var(--color-font-label);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.footerCenter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.footerRight {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
 .partyBtn {
-  margin-left: 14px;
-  border: none;
-  outline: none;
+  flex: none;
+  min-height: 32px;
   display: inline-flex;
   align-items: center;
-  gap: 9px;
-  padding: 10px 16px;
-  border-radius: 999px;
-  cursor: pointer;
+  gap: 7px;
+  padding: 7px 11px;
+  border: none;
+  border-radius: 6px;
+  outline: none;
   color: var(--color-button-font);
-  background:
-    linear-gradient(135deg, var(--color-primary-light-100-alpha-800), var(--color-main-background));
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.12);
-  transition: transform 0.2s ease, opacity 0.2s ease, box-shadow 0.2s ease;
-  font-size: 13px;
+  background: var(--color-primary-light-900-alpha-500);
+  cursor: pointer;
+  font-size: 12px;
   white-space: nowrap;
+  transition: background-color .2s ease, opacity .2s ease;
 
   &:hover {
-    opacity: 0.92;
-    transform: translateY(-1px);
+    background: var(--color-primary-light-900-alpha-700);
   }
 
   &:active {
-    opacity: 0.84;
-    transform: translateY(0);
+    opacity: .72;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 }
 
 .partyBtnActive {
-  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.18);
+  color: var(--color-primary);
 }
 
 .partyDot {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #19c37d, #47d1ff);
-  box-shadow: 0 0 0 4px rgba(25, 195, 125, 0.14);
+  background: currentColor;
+  box-shadow: 0 0 0 3px var(--color-primary-alpha-100);
 }
-.playBtn {
-  height: 40%;
-  padding: 5px;
-  cursor: pointer;
-  flex: none;
-  // transition: @transition-normal;
-  // transition-property: color;
-  color: var(--color-button-font);
-  transition: opacity 0.2s ease;
-  opacity: 1;
-  cursor: pointer;
 
-  +.playBtn {
-    margin-left: 10px;
-  }
+.playBtn {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 7px;
+  border: none;
+  border-radius: 50%;
+  color: var(--color-button-font);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color .2s ease, color .2s ease, opacity .2s ease;
+
   svg {
+    width: 100%;
+    height: 100%;
     fill: currentColor;
-    filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.2));
   }
+
   &:hover {
-    opacity: 0.8;
+    background: var(--color-button-background-hover);
   }
+
   &:active {
-    opacity: 0.6;
+    opacity: .65;
   }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+}
+
+.playBtnPrimary {
+  width: 48px;
+  height: 48px;
+  padding: 13px;
+  color: var(--color-button-font-selected);
+  background: var(--color-primary-alpha-200);
+
+  &:hover {
+    background: var(--color-primary-alpha-300);
+  }
+}
+
+.queueBtn {
+  margin-left: 2px;
 }
 
 .playBtnActive {
-  opacity: 1;
   color: var(--color-primary);
+}
+
+@media (max-width: 1100px) {
+  .footer {
+    grid-template-columns: minmax(140px, 1fr) auto minmax(220px, 1fr);
+    gap: 14px;
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+
+  .partyLabel {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .footer {
+    grid-template-columns: minmax(100px, 1fr) auto minmax(200px, 1fr);
+    gap: 10px;
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  .footerRight {
+    gap: 5px;
+  }
+
+  .playBtn {
+    width: 32px;
+    height: 32px;
+  }
+
+  .playBtnPrimary {
+    width: 44px;
+    height: 44px;
+  }
 }
 
 </style>

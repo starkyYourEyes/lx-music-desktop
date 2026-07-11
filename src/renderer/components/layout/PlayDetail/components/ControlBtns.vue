@@ -113,28 +113,34 @@ export default {
   flex-flow: row nowrap;
   justify-content: flex-end;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 
   button {
-    width: 20px;
+    width: 28px;
+    height: 28px;
     color: var(--color-font);
   }
 
   .footerLeftControlBtn {
-    // width: 18px;
-    // height: 18px;
-    opacity: .5;
+    border-radius: 4px;
+    opacity: .56;
     cursor: pointer;
-    transition: opacity @transition-normal;
+    transition: opacity @transition-normal, background-color @transition-normal;
     display: flex;
     align-items: center;
     justify-content: center;
     background-color: transparent;
     border: none;
-    padding: 0;
+    padding: 5px;
 
     &:hover {
-      opacity: .9;
+      background: var(--color-button-background-hover);
+      opacity: .92;
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 1px;
     }
 
     &.active {
@@ -144,7 +150,20 @@ export default {
   }
 
   .lrcBtn {
-    width: 20px;
+    width: 28px;
+  }
+}
+
+@media (max-width: 900px) {
+  .footerLeftControlBtns {
+    gap: 1px;
+
+    button,
+    .lrcBtn {
+      width: 25px;
+      height: 25px;
+      padding: 4px;
+    }
   }
 }
 

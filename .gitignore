@@ -61,6 +61,8 @@ typings/
 # Local agent/tooling state
 .claude/
 .codegraph/
+.superpowers/
+.worktrees/
 API_CHANGES.local.md
 USER_PLAYLIST_RESPONSE.local.json
 DAILY_SONG_CATEGORY_API.local.md

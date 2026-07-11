@@ -33,6 +33,7 @@ const handleImageError = () => {
   min-height: 0;
   padding: clamp(46px, 7vh, 76px) 8px 8px;
   isolation: isolate;
+  container-type: size;
 }
 
 .deck {
@@ -191,6 +192,20 @@ const handleImageError = () => {
 @media (max-width: 900px), (max-height: 650px) {
   .stage {
     padding-top: 24px;
+  }
+
+  .tonearm {
+    display: none;
+  }
+}
+
+@container (max-width: 260px) {
+  .stage {
+    padding-top: 8px;
+  }
+
+  .deck {
+    width: 96%;
   }
 
   .tonearm {

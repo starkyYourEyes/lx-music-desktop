@@ -7,17 +7,15 @@ transition(enter-active-class="animated slideInRight" leave-active-class="animat
     ControlBtnsLeftHeader(v-if="appSetting['common.controlBtnPosition'] == 'left'")
     ControlBtnsRightHeader(v-else)
     div(:class="[$style.main, {[$style.showComment]: isShowPlayComment}]")
-      div.left(:class="$style.left")
-        //- div(:class="$style.info")
-        div(:class="$style.info")
-          img(v-if="musicInfo.pic" :class="$style.img" :src="musicInfo.pic")
-          div.description(:class="['scroll', $style.description]")
-            p {{ $t('player__music_name') }}{{ musicInfo.name }}
-            p {{ $t('player__music_singer') }}{{ musicInfo.singer }}
-            p(v-if="musicInfo.album") {{ $t('player__music_album') }}{{ musicInfo.album }}
-
-      transition(enter-active-class="animated fadeIn" leave-active-class="animated fadeOut")
-        LyricPlayer(v-if="visibled")
+      Turntable(:class="$style.turntable")
+      section(:class="$style.lyricPanel")
+        header(:class="$style.trackHeader")
+          h1(:title="musicInfo.name") {{ musicInfo.name || 'LX Music' }}
+          div(:class="$style.trackMeta")
+            span(v-if="musicInfo.singer" :title="musicInfo.singer") {{ musicInfo.singer }}
+            span(v-if="musicInfo.album" :title="musicInfo.album") {{ musicInfo.album }}
+        transition(enter-active-class="animated fadeIn" leave-active-class="animated fadeOut")
+          LyricPlayer(v-if="visibled" :class="$style.lyricPlayer")
       music-comment(v-if="visibled" :class="$style.comment" :show="isShowPlayComment" :music-info="playMusicInfo.musicInfo" @close="hideComment")
     transition(enter-active-class="animated fadeIn" leave-active-class="animated fadeOut")
       play-bar(v-if="visibled")
@@ -43,6 +41,7 @@ import {
 } from '@renderer/store/player/action'
 import LyricPlayer from './LyricPlayer.vue'
 import PlayBar from './PlayBar.vue'
+import Turntable from './Turntable.vue'
 import PartyModal from './PartyModal.vue'
 import MusicComment from './components/MusicComment/index.vue'
 import ControlBtnsLeftHeader from './ControlBtnsLeftHeader.vue'
@@ -58,6 +57,7 @@ export default {
     ControlBtnsRightHeader,
     LyricPlayer,
     PlayBar,
+    Turntable,
     PartyModal,
     MusicComment,
   },
@@ -173,7 +173,8 @@ export default {
   background-size: var(--background-image-size);
   // background-size: 110% 110%;
   // filter: blur(60px);
-  opacity: .7;
+  opacity: .82;
+  filter: saturate(.78);
   z-index: -1;
   &:before {
     content: '';
@@ -208,78 +209,147 @@ export default {
   min-height: 0;
   overflow: hidden;
   display: flex;
-  margin: 0 30px;
+  gap: clamp(18px, 3vw, 52px);
+  margin: 0 clamp(20px, 4vw, 68px);
   position: relative;
 
   &.showComment {
-    :global {
-      .left {
-        flex-basis: 18%;
-        .description p {
-          font-size: 12px;
-        }
+    gap: 16px;
+
+    .turntable {
+      flex-basis: 18%;
+    }
+
+    .lyricPanel {
+      flex: 0 0 30%;
+    }
+
+    .trackHeader {
+      h1 {
+        font-size: clamp(16px, 2vw, 22px);
       }
-      .right {
-        flex-basis: 30%;
-        .lyricSelectContent {
-          font-size: 14px;
-        }
-      }
-      .comment {
-        opacity: 1;
-        transform: scaleX(1);
-      }
+    }
+
+    .comment {
+      opacity: 1;
+      pointer-events: auto;
+      transform: scaleX(1);
+    }
+
+    :global(.lyricSelectContent) {
+      font-size: 14px;
     }
   }
 }
-.left {
-  flex: 0 0 40%;
+
+.turntable {
+  flex: 0 1 40%;
+  min-width: 0;
+  transition: flex-basis @transition-normal;
+}
+
+.lyricPanel {
+  flex: 1 1 60%;
   display: flex;
-  flex-flow: column nowrap;
-  align-items: center;
-  padding: 13px;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
   overflow: hidden;
   transition: flex-basis @transition-normal;
 }
 
-.info {
+.trackHeader {
+  flex: none;
   display: flex;
-  flex-flow: column nowrap;
-  justify-content: flex-start;
-  max-width: 300px;
-  min-height: 0;
-}
-.img {
-  max-width: 100%;
-  max-height: 80%;
-  min-width: 100%;
-  box-shadow: 0 0 6px var(--color-primary-alpha-500);
-  border-radius: 6px;
-  opacity: .8;
-}
-.description {
-  max-width: 300px;
-  margin-top: 15px;
-  padding-bottom: 15px;
-  min-height: 0;
-  p {
-    line-height: 1.5;
-    font-size: 14px;
-    overflow-wrap: break-word;
+  flex-direction: column;
+  gap: 9px;
+  padding: clamp(8px, 2vh, 20px) 20px clamp(12px, 2vh, 22px);
+
+  h1 {
+    margin: 0;
+    overflow: hidden;
+    color: var(--color-font);
+    font-size: clamp(22px, 3vw, 34px);
+    font-weight: 650;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 
+.trackMeta {
+  display: flex;
+  min-width: 0;
+  gap: 18px;
+  color: var(--color-font-label);
+
+  span {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 13px;
+    line-height: 1.4;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+
+    + span::before {
+      content: '·';
+      margin-right: 18px;
+      opacity: .6;
+    }
+  }
+}
+
+.lyricPlayer {
+  flex: auto;
+  min-height: 0;
+}
 
 .comment {
   position: absolute;
   right: 0;
   top: 0;
-  width: 50%;
+  width: calc(50% - 12px);
   height: 100%;
-  opacity: 1;
-  margin-left: 10px;
+  opacity: 0;
+  pointer-events: none;
   transform: scaleX(0);
 }
 
+@media (max-width: 900px) {
+  .main {
+    gap: 16px;
+    margin: 0 18px;
+  }
+
+  .turntable {
+    flex-basis: 36%;
+  }
+
+  .lyricPanel {
+    flex-basis: 64%;
+  }
+
+  .trackMeta {
+    gap: 8px;
+
+    span + span::before {
+      margin-right: 8px;
+    }
+  }
+}
+
+@media (max-height: 650px) {
+  .trackHeader {
+    gap: 5px;
+    padding-top: 0;
+    padding-bottom: 8px;
+  }
+}
+
+:global(.fullscreen) {
+  .main {
+    margin: 0 clamp(28px, 6vw, 110px);
+  }
+}
 
 </style>

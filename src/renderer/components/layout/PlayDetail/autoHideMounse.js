@@ -1,6 +1,6 @@
 import { debounce } from '@common/utils/common'
 let isAutoHide = false
-let isLockedPointer = false
+let isCursorHidden = false
 // let dom = null
 let event = null
 let isMouseDown = false
@@ -12,25 +12,25 @@ const isControl = dom => {
   return isControl(dom.parentNode)
 }
 
-const lockPointer = () => {
+const hidePointer = () => {
   if (!isAutoHide || isMouseDown) return
   if (event && isControl(document.elementFromPoint(event.clientX, event.clientY))) return
 
-  document.body.requestPointerLock()
-  isLockedPointer = true
+  document.body.classList.add('auto-hide-cursor')
+  isCursorHidden = true
 }
-const unLockPointer = () => {
-  if (!isLockedPointer) return
-  document.exitPointerLock()
-  isLockedPointer = false
+const showPointer = () => {
+  if (!isCursorHidden) return
+  document.body.classList.remove('auto-hide-cursor')
+  isCursorHidden = false
 }
 
-const startTimeout = debounce(lockPointer, 3000)
+const startTimeout = debounce(hidePointer, 3000)
 
 const handleMouseMove = (_event) => {
   event = _event
   startTimeout()
-  unLockPointer()
+  showPointer()
 }
 
 const handleMouseDown = () => {
@@ -58,5 +58,5 @@ export const unregisterAutoHideMounse = () => {
   document.body.removeEventListener('mousemove', handleMouseMove)
   document.body.removeEventListener('mousedown', handleMouseDown)
   document.body.removeEventListener('mouseup', handleMouseUp)
-  unLockPointer()
+  showPointer()
 }

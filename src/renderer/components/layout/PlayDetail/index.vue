@@ -139,6 +139,11 @@ export default {
 
 @control-btn-width: @height-toolbar * .26;
 
+:global(.auto-hide-cursor),
+:global(.auto-hide-cursor *) {
+  cursor: none !important;
+}
+
 .container {
   position: absolute;
   display: flex;

@@ -267,6 +267,8 @@ export default {
   flex: none;
   display: flex;
   flex-direction: column;
+  align-items: center;
+  text-align: center;
   gap: 9px;
   padding: clamp(8px, 2vh, 20px) 20px clamp(12px, 2vh, 22px);
 
@@ -285,6 +287,8 @@ export default {
 .trackMeta {
   display: flex;
   min-width: 0;
+  width: 100%;
+  justify-content: center;
   gap: 18px;
   color: var(--color-font-label);
 

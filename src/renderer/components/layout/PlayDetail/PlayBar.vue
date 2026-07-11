@@ -75,12 +75,12 @@ const {
 .footer {
   position: relative;
   z-index: 2;
-  flex: 0 0 92px;
+  flex: 0 0 72px;
   display: grid;
   grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 1fr);
   align-items: center;
   gap: 20px;
-  padding: 14px 28px 8px;
+  padding: 10px 28px 4px;
 
   &::before {
     content: '';
@@ -98,8 +98,8 @@ const {
   top: 0;
   left: 0;
   width: 100%;
-  height: 12px;
-  padding-top: 5px;
+  height: 10px;
+  padding-top: 4px;
 }
 
 .progress {
@@ -147,11 +147,11 @@ const {
 
 .partyBtn {
   flex: none;
-  min-height: 32px;
+  min-height: 30px;
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 7px 11px;
+  padding: 6px 10px;
   border: none;
   border-radius: 6px;
   outline: none;
@@ -190,11 +190,11 @@ const {
 
 .playBtn {
   flex: none;
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   display: grid;
   place-items: center;
-  padding: 7px;
+  padding: 6px;
   border: none;
   border-radius: 50%;
   color: var(--color-button-font);
@@ -223,9 +223,9 @@ const {
 }
 
 .playBtnPrimary {
-  width: 48px;
-  height: 48px;
-  padding: 13px;
+  width: 42px;
+  height: 42px;
+  padding: 11px;
   color: var(--color-button-font-selected);
   background: var(--color-primary-alpha-200);
 
@@ -268,13 +268,13 @@ const {
   }
 
   .playBtn {
-    width: 32px;
-    height: 32px;
+    width: 30px;
+    height: 30px;
   }
 
   .playBtnPrimary {
-    width: 44px;
-    height: 44px;
+    width: 38px;
+    height: 38px;
   }
 }
 

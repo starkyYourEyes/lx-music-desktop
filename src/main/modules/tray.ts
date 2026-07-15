@@ -15,6 +15,9 @@ import { WIN_MAIN_RENDERER_EVENT_NAME } from '@common/ipcNames'
 
 let tray: Electron.Tray | null
 let trayMenuWindow: Electron.BrowserWindow | null
+let trayMenuWindowLoadPromise: Promise<void> | null = null
+let isTrayMenuWindowReady = false
+let isTrayMenuShowPending = false
 let isEnableTray: boolean = false
 let themeId: number
 let isShowStatusBarLyric: boolean = false
@@ -146,6 +149,15 @@ type TrayMenuAction =
   | 'settings'
   | 'quit'
 
+interface TrayMenuState {
+  title: string
+  volume: number
+  isMute: boolean
+  isPlaying: boolean
+  isCollected: boolean
+  isDesktopLyricEnabled: boolean
+}
+
 const trayMenuWindowSize = {
   width: 190,
   height: 275,
@@ -177,6 +189,7 @@ export const createTray = () => {
     tray.on('right-click', () => {
       showTrayMenuWindow()
     })
+    void preloadTrayMenuWindow()
   }
 }
 
@@ -202,6 +215,9 @@ const destroyTrayMenuWindow = () => {
   if (!trayMenuWindow) return
   if (!trayMenuWindow.isDestroyed()) trayMenuWindow.destroy()
   trayMenuWindow = null
+  trayMenuWindowLoadPromise = null
+  isTrayMenuWindowReady = false
+  isTrayMenuShowPending = false
 }
 
 const escapeHtml = (value: string) => {
@@ -225,24 +241,40 @@ const normalizeTrayVolume = (volume: number) => {
   return Math.trunc(volume)
 }
 
+const getTrayMenuState = (): TrayMenuState => {
+  const sourceVolume = global.lx.player_status.volume || global.lx.appSetting['player.volume']
+  const volume = Math.max(0, Math.min(100, normalizeTrayVolume(sourceVolume)))
+  return {
+    title: getTrayMenuTitle(),
+    volume,
+    isMute: global.lx.player_status.mute || volume == 0,
+    isPlaying: playerState.play,
+    isCollected: playerState.collect,
+    isDesktopLyricEnabled: global.lx.appSetting['desktopLyric.enable'],
+  }
+}
+
+const sendTrayMenuState = () => {
+  if (!trayMenuWindow || trayMenuWindow.isDestroyed() || !isTrayMenuWindowReady) return
+  if (trayMenuWindow.webContents.isDestroyed()) return
+  trayMenuWindow.webContents.send('tray-menu-state', getTrayMenuState())
+}
+
 const refreshTrayMenuWindow = () => {
-  if (!trayMenuWindow || trayMenuWindow.isDestroyed() || !trayMenuWindow.isVisible()) return
-  void trayMenuWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(getTrayMenuHtml())}`)
+  sendTrayMenuState()
 }
 
 const getTrayMenuHtml = () => {
-  const isDesktopLyricEnabled = global.lx.appSetting['desktopLyric.enable']
-  const title = escapeHtml(getTrayMenuTitle())
-  const sourceVolume = global.lx.player_status.volume || global.lx.appSetting['player.volume']
-  const volume = Math.max(0, Math.min(100, normalizeTrayVolume(sourceVolume)))
-  const isMute = global.lx.player_status.mute || volume == 0
-  const playIcon = playerState.play
+  const state = getTrayMenuState()
+  const title = escapeHtml(state.title)
+  const { volume, isMute } = state
+  const playIcon = state.isPlaying
     ? '<path d="M9 7h4v18H9zM19 7h4v18h-4z"/>'
     : '<path d="M10 7.5v17l14-8.5z"/>'
-  const loveIcon = playerState.collect
+  const loveIcon = state.isCollected
     ? '<path d="M16 27s-9-5.6-11.6-11.3C2.5 11.6 4.9 8 9 8c2.5 0 4.2 1.3 5 3 0.8-1.7 2.5-3 5-3 4.1 0 6.5 3.6 4.6 7.7C21 21.4 16 27 16 27z"/>'
     : '<path d="M16 27s-9-5.6-11.6-11.3C2.5 11.6 4.9 8 9 8c2.5 0 4.2 1.3 5 3 0.8-1.7 2.5-3 5-3 4.1 0 6.5 3.6 4.6 7.7C21 21.4 16 27 16 27z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>'
-  const lyricLabel = isDesktopLyricEnabled ? '关闭桌面歌词' : '打开桌面歌词'
+  const lyricLabel = state.isDesktopLyricEnabled ? '关闭桌面歌词' : '打开桌面歌词'
   const volumeIcon = isMute
     ? '<path d="M6 13h5l7-6v18l-7-6H6zM23.4 12.2l1.4 1.4-2.4 2.4 2.4 2.4-1.4 1.4-2.4-2.4-2.4 2.4-1.4-1.4 2.4-2.4-2.4-2.4 1.4-1.4 2.4 2.4z" fill="currentColor"/>'
     : '<path d="M6 13h5l7-6v18l-7-6H6zm16.5-2.4a7.5 7.5 0 0 1 0 10.8l-1.4-1.4a5.5 5.5 0 0 0 0-8.2zm2.9-2.9a11.5 11.5 0 0 1 0 16.6L24 22.9a9.5 9.5 0 0 0 0-13.8z" fill="currentColor"/>'
@@ -274,12 +306,12 @@ button:hover{color:#3f4657;background:#f6f7fa}.ctrl{width:42px;height:42px;borde
 <div class="menu">
   <div class="title">
     <svg viewBox="0 0 32 32"><path d="M22 4v16.2a4.4 4.4 0 1 1-2-3.7V9.2l-10 2.1v12.9a4.4 4.4 0 1 1-2-3.7V8.6L22 5.6z" fill="currentColor"/></svg>
-    <span>${title}</span>
+    <span data-tray-title>${title}</span>
   </div>
   <div class="controls">
-    <button class="ctrl" data-action="collect-toggle" title="${playerState.collect ? '取消收藏' : '收藏'}"><svg viewBox="0 0 32 32">${loveIcon}</svg></button>
+    <button class="ctrl" data-action="collect-toggle" title="${state.isCollected ? '取消收藏' : '收藏'}"><svg viewBox="0 0 32 32">${loveIcon}</svg></button>
     <button class="ctrl" data-action="prev" title="上一曲"><svg viewBox="0 0 32 32"><path d="M8 7h3v18H8zM12 16l14 9V7z"/></svg></button>
-    <button class="ctrl" data-action="play-toggle" title="${playerState.play ? '暂停' : '播放'}"><svg viewBox="0 0 32 32">${playIcon}</svg></button>
+    <button class="ctrl" data-action="play-toggle" title="${state.isPlaying ? '暂停' : '播放'}"><svg viewBox="0 0 32 32">${playIcon}</svg></button>
     <button class="ctrl" data-action="next" title="下一曲"><svg viewBox="0 0 32 32"><path d="M21 7h3v18h-3zM6 25l14-9L6 7z"/></svg></button>
   </div>
   <div class="volume-row">
@@ -293,18 +325,44 @@ button:hover{color:#3f4657;background:#f6f7fa}.ctrl{width:42px;height:42px;borde
 </div>
 <script>
 const { ipcRenderer } = require('electron')
+const playIcon = '<path d="M10 7.5v17l14-8.5z"/>'
+const pauseIcon = '<path d="M9 7h4v18H9zM19 7h4v18h-4z"/>'
+const collectedIcon = '<path d="M16 27s-9-5.6-11.6-11.3C2.5 11.6 4.9 8 9 8c2.5 0 4.2 1.3 5 3 0.8-1.7 2.5-3 5-3 4.1 0 6.5 3.6 4.6 7.7C21 21.4 16 27 16 27z"/>'
+const uncollectedIcon = '<path d="M16 27s-9-5.6-11.6-11.3C2.5 11.6 4.9 8 9 8c2.5 0 4.2 1.3 5 3 0.8-1.7 2.5-3 5-3 4.1 0 6.5 3.6 4.6 7.7C21 21.4 16 27 16 27z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>'
+const volumeIcon = '<path d="M6 13h5l7-6v18l-7-6H6zm16.5-2.4a7.5 7.5 0 0 1 0 10.8l-1.4-1.4a5.5 5.5 0 0 0 0-8.2zm2.9-2.9a11.5 11.5 0 0 1 0 16.6L24 22.9a9.5 9.5 0 0 0 0-13.8z" fill="currentColor"/>'
+const mutedIcon = '<path d="M6 13h5l7-6v18l-7-6H6zM23.4 12.2l1.4 1.4-2.4 2.4 2.4 2.4-1.4 1.4-2.4-2.4-2.4 2.4-1.4-1.4 2.4-2.4-2.4-2.4 1.4-1.4 2.4 2.4z" fill="currentColor"/>'
+const title = document.querySelector('[data-tray-title]')
+const collectButton = document.querySelector('[data-action="collect-toggle"]')
+const playButton = document.querySelector('[data-action="play-toggle"]')
+const muteButton = document.querySelector('[data-action="mute-toggle"]')
+const lyricButton = document.querySelector('[data-action="toggle-desktop-lyric"]')
+const volumeSlider = document.querySelector('[data-volume-slider]')
+const volumeTip = document.querySelector('[data-volume-tip]')
+const setVolume = value => {
+  volumeSlider.value = String(value)
+  volumeSlider.style.background = 'linear-gradient(to right,#6f7b91 0%,#6f7b91 ' + value + '%,#e5e8ef ' + value + '%,#e5e8ef 100%)'
+  volumeTip.textContent = Math.round(value) + '%'
+}
+ipcRenderer.on('tray-menu-state', (_event, state) => {
+  title.textContent = state.title
+  collectButton.title = state.isCollected ? '取消收藏' : '收藏'
+  collectButton.querySelector('svg').innerHTML = state.isCollected ? collectedIcon : uncollectedIcon
+  playButton.title = state.isPlaying ? '暂停' : '播放'
+  playButton.querySelector('svg').innerHTML = state.isPlaying ? pauseIcon : playIcon
+  muteButton.title = state.isMute ? '取消静音' : '静音'
+  muteButton.querySelector('svg').innerHTML = state.isMute ? mutedIcon : volumeIcon
+  lyricButton.querySelector('span').textContent = state.isDesktopLyricEnabled ? '关闭桌面歌词' : '打开桌面歌词'
+  setVolume(state.volume)
+})
 document.addEventListener('click', event => {
   const button = event.target.closest('[data-action]')
   if (!button) return
   ipcRenderer.send('tray-menu-action', button.dataset.action)
 })
-const volumeSlider = document.querySelector('[data-volume-slider]')
-const volumeTip = document.querySelector('[data-volume-tip]')
 if (volumeSlider) {
   volumeSlider.addEventListener('input', event => {
     const value = Number(event.target.value)
-    event.target.style.background = 'linear-gradient(to right,#6f7b91 0%,#6f7b91 ' + value + '%,#e5e8ef ' + value + '%,#e5e8ef 100%)'
-    if (volumeTip) volumeTip.textContent = Math.round(value) + '%'
+    setVolume(value)
     ipcRenderer.send('tray-menu-action', 'volume', value / 100)
   })
 }
@@ -406,6 +464,9 @@ const createTrayMenuWindow = () => {
   trayMenuWindow.on('blur', closeTrayMenuWindow)
   trayMenuWindow.on('closed', () => {
     trayMenuWindow = null
+    trayMenuWindowLoadPromise = null
+    isTrayMenuWindowReady = false
+    isTrayMenuShowPending = false
   })
   trayMenuWindow.webContents.on('ipc-message', (event, channel, action: TrayMenuAction, data?: unknown) => {
     if (channel != 'tray-menu-action') return
@@ -414,15 +475,43 @@ const createTrayMenuWindow = () => {
   return trayMenuWindow
 }
 
+const showLoadedTrayMenuWindow = (win: Electron.BrowserWindow) => {
+  if (!tray || trayMenuWindow !== win || win.isDestroyed() || !isTrayMenuWindowReady) return
+  sendTrayMenuState()
+  win.show()
+  win.focus()
+}
+
+const preloadTrayMenuWindow = async() => {
+  const win = createTrayMenuWindow()
+  if (isTrayMenuWindowReady) return
+  if (trayMenuWindowLoadPromise) return trayMenuWindowLoadPromise
+
+  trayMenuWindowLoadPromise = win.loadURL(
+    `data:text/html;charset=utf-8,${encodeURIComponent(getTrayMenuHtml())}`,
+  ).then(() => {
+    if (trayMenuWindow !== win || win.isDestroyed()) return
+    isTrayMenuWindowReady = true
+    sendTrayMenuState()
+    if (!isTrayMenuShowPending) return
+    isTrayMenuShowPending = false
+    showLoadedTrayMenuWindow(win)
+  }).catch(() => {
+    if (trayMenuWindow === win && !win.isDestroyed()) win.destroy()
+  })
+  return trayMenuWindowLoadPromise
+}
+
 const showTrayMenuWindow = () => {
   if (!tray) return
   const win = createTrayMenuWindow()
   win.setBounds(getTrayMenuBounds())
-  void win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(getTrayMenuHtml())}`).then(() => {
-    if (!trayMenuWindow || trayMenuWindow.isDestroyed()) return
-    trayMenuWindow.show()
-    trayMenuWindow.focus()
-  })
+  if (isTrayMenuWindowReady) {
+    showLoadedTrayMenuWindow(win)
+    return
+  }
+  isTrayMenuShowPending = true
+  void preloadTrayMenuWindow()
 }
 
 const createPlayerMenu = () => {

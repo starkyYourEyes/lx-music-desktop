@@ -39,7 +39,8 @@ export const initQQMusicAccount = async(force = false) => {
       return accountStatus.value
     })
     .catch(err => {
-      setQQMusicAccountStatus({ ...emptyStatus })
+      accountStatus.value = { ...emptyStatus }
+      isQQMusicAccountInited.value = false
       throw err
     })
     .finally(() => {

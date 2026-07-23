@@ -25,6 +25,37 @@ const deferred = () => {
   return { promise, resolve, reject }
 }
 
+const testAccountInitRetry = async() => {
+  let getCount = 0
+  const getResults = [
+    new Error('status unavailable'),
+    { isLoggedIn: true, profile: { uin: 'retry', nickname: '重试账号' } },
+  ]
+  const store = loadTsModule(path.join(__dirname, '../src/renderer/store/qqMusic.ts'), {
+    '@common/utils/vueTools': { ref, shallowRef: ref, computed },
+    '@renderer/utils/ipc': {
+      getQQMusicAccountStatus: async() => {
+        getCount++
+        const result = getResults.shift()
+        if (result instanceof Error) throw result
+        return result
+      },
+      logoutQQMusic: async() => {},
+    },
+  })
+
+  await assert.rejects(store.initQQMusicAccount(), /status unavailable/)
+  assert.strictEqual(getCount, 1)
+  assert.deepStrictEqual(store.accountStatus.value, { isLoggedIn: false, profile: null })
+  assert.strictEqual(store.isQQMusicAccountInited.value, false)
+  assert.strictEqual(store.isInitingQQMusicAccount.value, false)
+
+  await store.initQQMusicAccount()
+  assert.strictEqual(getCount, 2)
+  assert.strictEqual(store.isQQMusicAccountInited.value, true)
+  assert.strictEqual(store.profile.value.uin, 'retry')
+}
+
 const testAccountStore = async() => {
   let getCount = 0
   let logoutCount = 0
@@ -69,17 +100,6 @@ const testAccountStore = async() => {
   await store.initQQMusicAccount(true)
   assert.strictEqual(getCount, 2)
   assert.strictEqual(store.isLoggedIn.value, false)
-
-  getResults.push(new Error('status unavailable'))
-  await assert.rejects(store.initQQMusicAccount(true), /status unavailable/)
-  assert.deepStrictEqual(store.accountStatus.value, { isLoggedIn: false, profile: null })
-  assert.strictEqual(store.isInitingQQMusicAccount.value, false)
-  assert.strictEqual(store.isQQMusicAccountInited.value, true)
-
-  getResults.push({ isLoggedIn: true, profile: { uin: '789', nickname: '重试账号' } })
-  await store.initQQMusicAccount(true)
-  assert.strictEqual(getCount, 4)
-  assert.strictEqual(store.profile.value.uin, '789')
 
   await store.logoutQQMusicAccount()
   assert.strictEqual(logoutCount, 1)
@@ -261,6 +281,7 @@ const testQrPolling = async() => {
 }
 
 const main = async() => {
+  await testAccountInitRetry()
   await testAccountStore()
   await testQrPolling()
   console.log('QQ Music renderer account tests passed')

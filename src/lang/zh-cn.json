@@ -505,6 +505,7 @@
   "setting__list_my_list_sidebar_scale": "我的列表侧边栏缩放",
   "setting__list_playlist_profile_scale": "歌单详情头部缩放",
   "setting__recommend": "推荐页",
+  "setting__recommend_qq_guess_like_logged_out_visible": "未登录 QQ 音乐时显示“猜你喜欢”登录入口",
   "setting__recommend_home_section_order": "推荐页区块顺序",
   "setting__recommend_home_section_order_tip": "调整后会立即影响推荐页中雷达歌单、歌曲推荐、推荐歌单与榜单的位置。",
   "setting__recommend_section_radar": "雷达歌单",

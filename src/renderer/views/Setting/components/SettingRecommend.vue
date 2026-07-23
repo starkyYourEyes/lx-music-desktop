@@ -1,6 +1,12 @@
 <template lang="pug">
 dt#recommend {{ $t('setting__recommend') }}
 dd
+  base-checkbox(
+    id="setting_recommend_qq_guess_like_logged_out_visible"
+    :model-value="appSetting['recommend.qqGuessLikeLoggedOutVisible']"
+    :label="$t('setting__recommend_qq_guess_like_logged_out_visible')"
+    @update:model-value="updateSetting({ 'recommend.qqGuessLikeLoggedOutVisible': $event })")
+dd
   h3#recommend_home_section_order {{ $t('setting__recommend_home_section_order') }}
   div(:class="$style.orderPanel")
     p(:class="$style.orderDesc") {{ $t('setting__recommend_home_section_order_tip') }}
@@ -163,6 +169,8 @@ export default {
     })
 
     return {
+      appSetting,
+      updateSetting,
       sectionOrder,
       dailySongCategories,
       isLoadingDailySongCategories,

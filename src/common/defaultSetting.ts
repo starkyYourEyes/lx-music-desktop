@@ -140,6 +140,7 @@ const defaultSetting: LX.AppSetting = {
 
   'recommend.homeSectionOrder': [...RECOMMEND_HOME_SECTION_IDS],
   'recommend.dailySongCategoryTagKeys': null,
+  'recommend.qqGuessLikeLoggedOutVisible': true,
 
   'network.proxy.enable': false,
   'network.proxy.host': '',

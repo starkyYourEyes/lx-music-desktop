@@ -505,6 +505,7 @@
   "setting__list_my_list_sidebar_scale": "Your Library sidebar scale",
   "setting__list_playlist_profile_scale": "Playlist detail header scale",
   "setting__recommend": "Recommend Page",
+  "setting__recommend_qq_guess_like_logged_out_visible": "Show the Guess You Like login entry when QQ Music is signed out",
   "setting__recommend_home_section_order": "Recommend page section order",
   "setting__recommend_home_section_order_tip": "Changes immediately affect the position of radar playlists, song recommendations, recommended playlists, and charts on the recommend page.",
   "setting__recommend_section_radar": "Radar playlists",

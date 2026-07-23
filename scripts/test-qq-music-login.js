@@ -77,6 +77,7 @@ const main = async() => {
       ok: false,
       status: 302,
       location: 'https://y.qq.com/portal/wx_redirect.html?code=oauth-code',
+      setCookie: ['graph_session=authorize-value; Path=/'],
     }),
     response({
       setCookie: [
@@ -100,7 +101,7 @@ const main = async() => {
   assert.deepStrictEqual(result, {
     state: 'success',
     message: '登录成功',
-    cookie: 'uin=o123; p_skey=p-value; qqmusic_key=music=value; qqmusic_uin=123',
+    cookie: 'uin=o123; p_skey=p-value; graph_session=authorize-value; qqmusic_key=music=value; qqmusic_uin=123',
   })
   assert.strictEqual(calls.length, 5)
 
@@ -127,22 +128,42 @@ const main = async() => {
   assert.strictEqual(calls[3].init.redirect, 'manual')
   assert.strictEqual(calls[3].init.headers.Cookie, 'uin=o123; p_skey=p-value')
   const authorizeBody = calls[3].init.body
-  assert.strictEqual(authorizeBody.get('g_tk'), String(auth.getGtk('p-value')))
+  assert.strictEqual(authorizeBody.get('response_type'), 'code')
   assert.strictEqual(authorizeBody.get('client_id'), '100497308')
   assert.strictEqual(
     authorizeBody.get('redirect_uri'),
     'https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https://y.qq.com/',
   )
   assert.strictEqual(authorizeBody.get('scope'), 'get_user_info,get_app_friends')
+  assert.strictEqual(authorizeBody.get('state'), 'state')
+  assert.strictEqual(authorizeBody.get('switch'), '')
+  assert.strictEqual(authorizeBody.get('from_ptlogin'), '1')
+  assert.strictEqual(authorizeBody.get('src'), '1')
+  assert.strictEqual(authorizeBody.get('update_auth'), '1')
+  assert.strictEqual(authorizeBody.get('openapi'), '1010_1030')
+  assert.strictEqual(authorizeBody.get('g_tk'), String(auth.getGtk('p-value')))
+  const authTime = authorizeBody.get('auth_time')
+  assert.strictEqual(typeof authTime, 'string')
+  assert.ok(authTime.length > 0)
+  assert.strictEqual(Number.isNaN(Date.parse(authTime)), false)
+  assert.match(authorizeBody.get('ui'), /^[0-9A-F]{8}-[0-9A-F]{4}-[1-5][0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$/)
 
   assert.strictEqual(calls[4].input, 'https://u.y.qq.com/cgi-bin/musicu.fcg')
   assert.strictEqual(calls[4].init.method, 'POST')
-  assert.strictEqual(calls[4].init.headers.Cookie, 'uin=o123; p_skey=p-value')
+  assert.strictEqual(
+    calls[4].init.headers.Cookie,
+    'uin=o123; p_skey=p-value; graph_session=authorize-value',
+  )
   assert.strictEqual(calls[4].init.headers['Content-Type'], 'application/x-www-form-urlencoded')
   const loginBody = JSON.parse(calls[4].init.body)
-  assert.strictEqual(loginBody.req.module, 'QQConnectLogin.LoginServer')
-  assert.strictEqual(loginBody.req.method, 'QQLogin')
-  assert.strictEqual(loginBody.req.param.code, 'oauth-code')
+  assert.deepStrictEqual(loginBody, {
+    comm: { g_tk: auth.getGtk('p-value'), platform: 'yqq', ct: 24, cv: 0 },
+    req: {
+      module: 'QQConnectLogin.LoginServer',
+      method: 'QQLogin',
+      param: { code: 'oauth-code' },
+    },
+  })
 
   const callCount = calls.length
   assert.deepStrictEqual(await service.checkLoginQr(qr.key), {

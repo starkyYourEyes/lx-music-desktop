@@ -119,6 +119,42 @@ const testAccountMutationsInvalidateOlderInit = async() => {
   assert.strictEqual(qrStore.profile.value.uin, 'qr-login')
 }
 
+const testPendingLogoutPermanentlyInvalidatesOlderInit = async() => {
+  const initResult = deferred()
+  const logoutResult = deferred()
+  let getCount = 0
+  const store = loadAccountStore(
+    async() => {
+      getCount++
+      return initResult.promise
+    },
+    async() => logoutResult.promise,
+  )
+  const baselineStatus = {
+    isLoggedIn: true,
+    profile: { uin: 'baseline', nickname: '退出前账号' },
+  }
+  store.setQQMusicAccountStatus(baselineStatus)
+
+  const pendingInit = store.initQQMusicAccount(true)
+  const pendingLogout = store.logoutQQMusicAccount()
+  const expectedLogoutFailure = assert.rejects(pendingLogout, /logout failed/)
+  initResult.resolve({
+    isLoggedIn: true,
+    profile: { uin: 'stale-during-logout', nickname: '旧初始化账号' },
+  })
+  await pendingInit
+  assert.deepStrictEqual(store.accountStatus.value, baselineStatus)
+
+  logoutResult.reject(new Error('logout failed'))
+  await expectedLogoutFailure
+  assert.deepStrictEqual(store.accountStatus.value, baselineStatus)
+
+  await store.initQQMusicAccount()
+  assert.strictEqual(getCount, 1)
+  assert.deepStrictEqual(store.accountStatus.value, baselineStatus)
+}
+
 const testAccountInitRetry = async() => {
   let getCount = 0
   const getResults = [
@@ -378,6 +414,7 @@ const main = async() => {
   await testLatestForcedInitWins()
   await testOlderInitCannotClearNewerBookkeeping()
   await testAccountMutationsInvalidateOlderInit()
+  await testPendingLogoutPermanentlyInvalidatesOlderInit()
   await testAccountInitRetry()
   await testAccountStore()
   await testQrPolling()

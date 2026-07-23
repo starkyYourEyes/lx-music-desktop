@@ -1,6 +1,6 @@
 const assert = require('node:assert')
 const path = require('node:path')
-const loadTsModule = require('./test-utils/load-ts-module')
+const loadTsModule = require('./qq-music-test-loader')
 
 const headers = ({ setCookie = [], location = null } = {}) => ({
   getSetCookie: () => setCookie,

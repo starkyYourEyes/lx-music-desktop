@@ -1,7 +1,36 @@
 const assert = require('node:assert')
 const fs = require('node:fs')
+const Module = require('node:module')
 const path = require('node:path')
-const loadTsModule = require('./test-utils/load-ts-module')
+const babel = require('@babel/core')
+
+const loadTsModule = (filePath, mocks = {}) => {
+  const filename = path.resolve(filePath)
+  const source = fs.readFileSync(filename, 'utf8')
+  const { code } = babel.transformSync(source, {
+    babelrc: false,
+    configFile: false,
+    filename,
+    presets: [[require.resolve('@babel/preset-typescript'), { allowDeclareFields: true }]],
+    plugins: [require.resolve('@babel/plugin-transform-modules-commonjs')],
+  })
+
+  const loadedModule = new Module(filename, module)
+  loadedModule.filename = filename
+  loadedModule.paths = Module._nodeModulePaths(path.dirname(filename))
+
+  const originalLoad = Module._load
+  Module._load = (request, parent, isMain) => {
+    if (Object.prototype.hasOwnProperty.call(mocks, request)) return mocks[request]
+    return originalLoad(request, parent, isMain)
+  }
+  try {
+    loadedModule._compile(code, filename)
+  } finally {
+    Module._load = originalLoad
+  }
+  return loadedModule.exports
+}
 
 const ref = value => ({ value })
 
@@ -86,7 +115,7 @@ const testStaticWiring = () => {
 
   assert.match(defaultSetting, /'recommend\.qqGuessLikeLoggedOutVisible':\s*true/)
   assert.match(appSettingType, /'recommend\.qqGuessLikeLoggedOutVisible':\s*boolean/)
-  const qqGuessLikeSetting = settingRecommend.match(/dt#recommend[^\n]*\n([\s\S]*?)(?=dd\n\s+h3#recommend_home_section_order)/)?.[1] || ''
+  const qqGuessLikeSetting = settingRecommend.match(/dt#recommend[^\r\n]*\r?\n([\s\S]*?)(?=dd\r?\n\s+h3#recommend_home_section_order)/)?.[1] || ''
   assert.match(qqGuessLikeSetting, /base-checkbox\(/)
   assert.match(qqGuessLikeSetting, /id="setting_recommend_qq_guess_like_logged_out_visible"/)
   assert.match(qqGuessLikeSetting, /:model-value="appSetting\['recommend\.qqGuessLikeLoggedOutVisible'\]"/)
@@ -138,7 +167,7 @@ const testStaticWiring = () => {
   assert.match(qqGuessLikeSection, /暂无猜你喜欢歌曲/)
 }
 
-const loadGuessLikeData = ({ isLoggedIn, profile, getSongs, initAccount = async() => {} }) => {
+const loadGuessLikeModule = ({ isLoggedIn, profile, getSongs, initAccount = async() => {} }) => {
   return loadTsModule(path.join(root, 'src/renderer/views/Recommend/useQQGuessLikeData.ts'), {
     '@common/utils/vueTools': { ref },
     '@renderer/store/qqMusic': {
@@ -147,7 +176,11 @@ const loadGuessLikeData = ({ isLoggedIn, profile, getSongs, initAccount = async(
       initQQMusicAccount: initAccount,
     },
     '@renderer/utils/ipc': { getQQMusicGuessLikeSongs: getSongs },
-  }).useQQGuessLikeData()
+  })
+}
+
+const loadGuessLikeData = options => {
+  return loadGuessLikeModule(options).useQQGuessLikeData()
 }
 
 const testLoggedOutClearsWithoutRequest = async() => {
@@ -203,6 +236,33 @@ const testAccountScopedCache = async() => {
   await state.load()
   assert.strictEqual(requestCount, 2)
   assert.deepStrictEqual(state.songs.value, [song('A-1')])
+}
+
+const testModuleLevelCacheAcrossComposableInstances = async() => {
+  const isLoggedIn = ref(true)
+  const profile = ref({ uin: 'shared-account' })
+  const responses = [[song('shared')], [song('after-clear')]]
+  let requestCount = 0
+  const guessLikeModule = loadGuessLikeModule({
+    isLoggedIn,
+    profile,
+    getSongs: async() => responses[requestCount++],
+  })
+
+  const firstState = guessLikeModule.useQQGuessLikeData()
+  await firstState.load()
+  assert.strictEqual(requestCount, 1)
+
+  const secondState = guessLikeModule.useQQGuessLikeData()
+  await secondState.load()
+  assert.strictEqual(requestCount, 1)
+  assert.deepStrictEqual(secondState.songs.value, [song('shared')])
+
+  firstState.clear()
+  const stateAfterClear = guessLikeModule.useQQGuessLikeData()
+  await stateAfterClear.load()
+  assert.strictEqual(requestCount, 2)
+  assert.deepStrictEqual(stateAfterClear.songs.value, [song('after-clear')])
 }
 
 const testForceFailureAndEmptyCache = async() => {
@@ -375,6 +435,7 @@ const main = async() => {
   testStaticWiring()
   await testLoggedOutClearsWithoutRequest()
   await testAccountScopedCache()
+  await testModuleLevelCacheAcrossComposableInstances()
   await testForceFailureAndEmptyCache()
   await testAccountRaceAndLoadingOwnership()
   await testStaleFailureDoesNotRefreshCurrentAccount()

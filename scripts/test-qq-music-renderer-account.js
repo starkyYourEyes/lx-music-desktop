@@ -1,0 +1,272 @@
+const assert = require('node:assert')
+const path = require('node:path')
+const loadTsModule = require('./test-utils/load-ts-module')
+
+const ref = value => ({ value })
+const computed = getter => ({
+  get value() {
+    return getter()
+  },
+})
+
+const settle = async() => {
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+}
+
+const deferred = () => {
+  let resolve
+  let reject
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+const testAccountStore = async() => {
+  let getCount = 0
+  let logoutCount = 0
+  const getResults = [
+    { isLoggedIn: true, profile: { uin: 'o123', nickname: 'QQ 音乐账号' } },
+  ]
+
+  const store = loadTsModule(path.join(__dirname, '../src/renderer/store/qqMusic.ts'), {
+    '@common/utils/vueTools': { ref, shallowRef: ref, computed },
+    '@renderer/utils/ipc': {
+      getQQMusicAccountStatus: async() => {
+        getCount++
+        const result = getResults.shift()
+        if (result instanceof Error) throw result
+        return result
+      },
+      logoutQQMusic: async() => { logoutCount++ },
+    },
+  })
+
+  await Promise.all([store.initQQMusicAccount(), store.initQQMusicAccount()])
+  assert.strictEqual(getCount, 1)
+  assert.strictEqual(store.isLoggedIn.value, true)
+  assert.strictEqual(store.profile.value.uin, 'o123')
+  assert.strictEqual(store.isInitingQQMusicAccount.value, false)
+  assert.strictEqual(store.isQQMusicAccountInited.value, true)
+
+  await store.initQQMusicAccount()
+  assert.strictEqual(getCount, 1)
+
+  store.setQQMusicAccountStatus({
+    isLoggedIn: true,
+    profile: { uin: '456', nickname: '新账号' },
+    cookie: 'must-not-be-copied',
+  })
+  assert.deepStrictEqual(store.accountStatus.value, {
+    isLoggedIn: true,
+    profile: { uin: '456', nickname: '新账号' },
+  })
+
+  getResults.push({ isLoggedIn: false, profile: null })
+  await store.initQQMusicAccount(true)
+  assert.strictEqual(getCount, 2)
+  assert.strictEqual(store.isLoggedIn.value, false)
+
+  getResults.push(new Error('status unavailable'))
+  await assert.rejects(store.initQQMusicAccount(true), /status unavailable/)
+  assert.deepStrictEqual(store.accountStatus.value, { isLoggedIn: false, profile: null })
+  assert.strictEqual(store.isInitingQQMusicAccount.value, false)
+  assert.strictEqual(store.isQQMusicAccountInited.value, true)
+
+  getResults.push({ isLoggedIn: true, profile: { uin: '789', nickname: '重试账号' } })
+  await store.initQQMusicAccount(true)
+  assert.strictEqual(getCount, 4)
+  assert.strictEqual(store.profile.value.uin, '789')
+
+  await store.logoutQQMusicAccount()
+  assert.strictEqual(logoutCount, 1)
+  assert.deepStrictEqual(store.accountStatus.value, { isLoggedIn: false, profile: null })
+}
+
+const testQrPolling = async() => {
+  const timers = new Map()
+  const unmountCallbacks = []
+  let nextTimerId = 1
+  let createResults = []
+  let checkHandler
+  let checkKeys = []
+  let accountStatus = null
+  let loginSuccessCount = 0
+  const isLoggedIn = ref(false)
+  const originalWindow = global.window
+
+  global.window = {
+    setTimeout(callback, delay) {
+      assert.strictEqual(delay, 2000)
+      const id = nextTimerId++
+      timers.set(id, callback)
+      return id
+    },
+    clearTimeout(id) {
+      timers.delete(id)
+    },
+  }
+
+  const takeTimer = () => {
+    assert.strictEqual(timers.size, 1)
+    const [id, callback] = timers.entries().next().value
+    timers.delete(id)
+    callback()
+  }
+
+  const reset = () => {
+    timers.clear()
+    unmountCallbacks.length = 0
+    createResults = []
+    checkKeys = []
+    accountStatus = null
+    loginSuccessCount = 0
+    isLoggedIn.value = false
+  }
+
+  const { useQQMusicLoginQr } = loadTsModule(
+    path.join(__dirname, '../src/renderer/views/Recommend/useQQMusicLoginQr.ts'),
+    {
+      '@common/utils/vueTools': {
+        ref,
+        shallowRef: ref,
+        computed,
+        onBeforeUnmount: callback => unmountCallbacks.push(callback),
+      },
+      '@renderer/utils/ipc': {
+        createQQMusicLoginQr: async() => createResults.shift(),
+        checkQQMusicLoginQr: async key => {
+          checkKeys.push(key)
+          return checkHandler(key)
+        },
+      },
+      '@renderer/store/qqMusic': {
+        isLoggedIn,
+        setQQMusicAccountStatus: status => {
+          accountStatus = {
+            isLoggedIn: status.isLoggedIn,
+            profile: status.profile,
+          }
+          isLoggedIn.value = status.isLoggedIn
+        },
+      },
+    },
+  )
+
+  try {
+    reset()
+    createResults.push({ key: 'first', qrimg: 'data:first' })
+    const pendingResults = [
+      { state: 'waiting', message: '', isLoggedIn: false, profile: null },
+      { state: 'scanned', message: '', isLoggedIn: false, profile: null },
+      { state: 'success', message: '', isLoggedIn: true, profile: { uin: '123', nickname: 'QQ 账号' } },
+    ]
+    checkHandler = async() => pendingResults.shift()
+    const polling = useQQMusicLoginQr(async() => { loginSuccessCount++ })
+
+    await polling.handleCreateLoginQr()
+    assert.strictEqual(polling.showLoginPanel.value, true)
+    assert.strictEqual(polling.qrImg.value, 'data:first')
+    assert.strictEqual(polling.qrStatusText.value, '请使用手机 QQ 扫码登录')
+    assert.strictEqual(timers.size, 1)
+
+    takeTimer()
+    await settle()
+    assert.strictEqual(polling.qrStatusText.value, '请使用手机 QQ 扫码登录')
+    assert.strictEqual(timers.size, 1)
+
+    takeTimer()
+    await settle()
+    assert.strictEqual(polling.qrStatusText.value, '已扫码，请在手机上确认登录')
+    assert.strictEqual(timers.size, 1)
+
+    takeTimer()
+    await settle()
+    assert.deepStrictEqual(checkKeys, ['first', 'first', 'first'])
+    assert.deepStrictEqual(accountStatus, {
+      isLoggedIn: true,
+      profile: { uin: '123', nickname: 'QQ 账号' },
+    })
+    assert.strictEqual(polling.qrStatusText.value, '登录成功')
+    assert.strictEqual(loginSuccessCount, 1)
+    assert.strictEqual(timers.size, 0)
+
+    reset()
+    createResults.push({ key: 'close', qrimg: 'data:close' })
+    const closeCheck = deferred()
+    checkHandler = () => closeCheck.promise
+    const closing = useQQMusicLoginQr(async() => {})
+    await closing.handleCreateLoginQr()
+    takeTimer()
+    closing.handleCloseLogin()
+    closeCheck.resolve({ state: 'waiting', message: '', isLoggedIn: false, profile: null })
+    await settle()
+    assert.strictEqual(closing.showLoginPanel.value, false)
+    assert.strictEqual(timers.size, 0)
+
+    reset()
+    createResults.push(
+      { key: 'expired', qrimg: 'data:expired' },
+      { key: 'replacement', qrimg: 'data:replacement' },
+    )
+    checkHandler = async() => ({ state: 'expired', message: '', isLoggedIn: false, profile: null })
+    const expiring = useQQMusicLoginQr(async() => {})
+    await expiring.handleCreateLoginQr()
+    takeTimer()
+    await settle()
+    assert.strictEqual(expiring.qrStatusText.value, '二维码已过期，请重新获取')
+    assert.strictEqual(timers.size, 0)
+    expiring.handleShowLogin()
+    await settle()
+    assert.strictEqual(expiring.qrInfo.value.key, 'replacement')
+    assert.strictEqual(expiring.qrImg.value, 'data:replacement')
+    assert.strictEqual(timers.size, 1)
+
+    reset()
+    createResults.push(
+      { key: 'old', qrimg: 'data:old' },
+      { key: 'current', qrimg: 'data:current' },
+    )
+    const oldCheck = deferred()
+    checkHandler = key => key == 'old'
+      ? oldCheck.promise
+      : Promise.resolve({ state: 'waiting', message: '', isLoggedIn: false, profile: null })
+    const replacing = useQQMusicLoginQr(async() => {})
+    await replacing.handleCreateLoginQr()
+    takeTimer()
+    await replacing.handleCreateLoginQr()
+    assert.strictEqual(replacing.qrInfo.value.key, 'current')
+    assert.strictEqual(timers.size, 1)
+    oldCheck.resolve({
+      state: 'success',
+      message: '',
+      isLoggedIn: true,
+      profile: { uin: 'stale', nickname: '旧账号' },
+    })
+    await settle()
+    assert.strictEqual(replacing.qrInfo.value.key, 'current')
+    assert.strictEqual(replacing.qrStatusText.value, '请使用手机 QQ 扫码登录')
+    assert.strictEqual(accountStatus, null)
+    assert.strictEqual(timers.size, 1)
+
+    assert.strictEqual(unmountCallbacks.length, 1)
+    unmountCallbacks[0]()
+    assert.strictEqual(timers.size, 0)
+  } finally {
+    global.window = originalWindow
+  }
+}
+
+const main = async() => {
+  await testAccountStore()
+  await testQrPolling()
+  console.log('QQ Music renderer account tests passed')
+}
+
+main().catch(error => {
+  console.error(error)
+  process.exitCode = 1
+})

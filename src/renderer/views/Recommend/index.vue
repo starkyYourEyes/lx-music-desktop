@@ -3,6 +3,8 @@
     <div :class="$style.playlistPage">
       <login-panel
         v-if="showLoginPanel && !isLoggedIn"
+        title="登录网易云音乐"
+        instruction="请使用网易云音乐 App 扫码，并在手机上确认"
         :qr-img="qrImg"
         :qr-status-text="qrStatusText"
         :is-creating-qr="isCreatingQr"

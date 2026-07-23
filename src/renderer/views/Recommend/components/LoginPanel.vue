@@ -6,8 +6,9 @@
         <img v-if="qrImg" :src="qrImg" draggable="false">
         <span v-else>{{ isCreatingQr ? '生成中...' : '暂无二维码' }}</span>
       </div>
-      <h3>登录</h3>
-      <p>{{ qrStatusText }}</p>
+      <h3>{{ title }}</h3>
+      <p :class="$style.instruction">{{ instruction }}</p>
+      <p :class="$style.status">{{ qrStatusText }}</p>
       <base-btn min :disabled="isCreatingQr" @click="$emit('refresh')">重新获取二维码</base-btn>
     </div>
   </div>
@@ -15,6 +16,8 @@
 
 <script setup lang="ts">
 defineProps<{
+  title: string
+  instruction: string
   qrImg: string
   qrStatusText: string
   isCreatingQr: boolean
@@ -60,12 +63,21 @@ defineEmits<{
   }
 
   p {
-    margin: 0 0 16px;
     min-height: 20px;
     font-size: 13px;
     line-height: 1.5;
     color: var(--color-font-label);
   }
+}
+
+.instruction {
+  margin: 0 0 4px;
+  min-height: 40px;
+}
+
+.status {
+  margin: 0 0 16px;
+  min-height: 20px;
 }
 
 .closeBtn {

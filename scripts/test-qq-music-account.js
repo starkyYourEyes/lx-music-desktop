@@ -19,6 +19,7 @@ let loginResult = {
 let songError = null
 let pendingSongPromise = null
 let singletonGetCookie
+let storeFactoryCallCount = 0
 class QQMusicAuthError extends Error {}
 const loginService = {
   createLoginQr: async() => ({ key: 'opaque', qrimg: 'data:image/png;base64,AA==' }),
@@ -32,14 +33,21 @@ const songService = {
   },
 }
 
-const { createQQMusicAccountService } = loadTsModule(
+const {
+  createQQMusicAccountService,
+  getAccountStatus: getSingletonAccountStatus,
+  createLoginQr: createSingletonLoginQr,
+} = loadTsModule(
   path.join(__dirname, '../src/main/modules/qqMusic/index.ts'),
   {
     '@common/constants': {
       DATA_KEYS: { qqMusicAccount: 'qqMusicAccount' },
       STORE_NAMES: { DATA: 'data' },
     },
-    '@main/utils/store': () => store,
+    '@main/utils/store': () => {
+      storeFactoryCallCount++
+      return store
+    },
     './login': {
       createQQMusicLoginService: () => loginService,
     },
@@ -53,6 +61,7 @@ const { createQQMusicAccountService } = loadTsModule(
     },
   },
 )
+assert.strictEqual(storeFactoryCallCount, 0)
 
 const createFacade = () => createQQMusicAccountService({
   store,
@@ -62,6 +71,11 @@ const createFacade = () => createQQMusicAccountService({
 })
 
 const main = async() => {
+  getSingletonAccountStatus()
+  assert.strictEqual(storeFactoryCallCount, 1)
+  await createSingletonLoginQr()
+  assert.strictEqual(storeFactoryCallCount, 1)
+
   const service = createFacade()
   assert.deepStrictEqual(service.getAccountStatus(), {
     isLoggedIn: false,

@@ -144,15 +144,21 @@ export const createQQMusicAccountService = ({
   }
 }
 
-const store = getStore(STORE_NAMES.DATA)
-const loginService = createQQMusicLoginService()
-const songService = createQQMusicSongService({
-  getCookie: () => getAccountData(store).cookie,
-})
-const accountService = createQQMusicAccountService({ store, loginService, songService })
+let accountService: ReturnType<typeof createQQMusicAccountService> | undefined
 
-export const getAccountStatus = accountService.getAccountStatus
-export const createLoginQr = accountService.createLoginQr
-export const checkLoginQr = accountService.checkLoginQr
-export const logout = accountService.logout
-export const getGuessLikeSongs = accountService.getGuessLikeSongs
+const getAccountService = () => {
+  if (accountService) return accountService
+  const store = getStore(STORE_NAMES.DATA)
+  const loginService = createQQMusicLoginService()
+  const songService = createQQMusicSongService({
+    getCookie: () => getAccountData(store).cookie,
+  })
+  accountService = createQQMusicAccountService({ store, loginService, songService })
+  return accountService
+}
+
+export const getAccountStatus = () => getAccountService().getAccountStatus()
+export const createLoginQr = async() => getAccountService().createLoginQr()
+export const checkLoginQr = async(key: string) => getAccountService().checkLoginQr(key)
+export const logout = async() => getAccountService().logout()
+export const getGuessLikeSongs = async() => getAccountService().getGuessLikeSongs()

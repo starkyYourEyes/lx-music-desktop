@@ -9,17 +9,19 @@ import { playDailyRecommend } from '@renderer/store/dailyRecommend/action'
 import { isDailyRecommendPlayingList, isLoadingDailyRecommend } from '@renderer/store/dailyRecommend/state'
 import { pause, play, playList } from '@renderer/core/player'
 import { playSongListDetail } from '@renderer/views/songList/Detail/action'
-import { HOME_SIMILAR_SONGS_TEMP_LIST_ID, HOME_STYLE_SONGS_TEMP_LIST_ID } from './constants'
+import { HOME_SIMILAR_SONGS_TEMP_LIST_ID, HOME_STYLE_SONGS_TEMP_LIST_ID, QQ_GUESS_LIKE_TEMP_LIST_ID } from './constants'
 import { toCloneable } from './utils'
 import type { RecommendCard } from './types'
 
 export const useRecommendPlayback = ({
   homeStyleSongs,
   homeSimilarSongs,
+  qqGuessLikeSongs,
   setError,
 }: {
   homeStyleSongs: { value: LX.Music.MusicInfoOnline[] }
   homeSimilarSongs: { value: LX.Music.MusicInfoOnline[] }
+  qqGuessLikeSongs: { value: LX.Music.MusicInfoOnline[] }
   setError: (message: string) => void
 }) => {
   const route = useRoute()
@@ -30,8 +32,10 @@ export const useRecommendPlayback = ({
   const isSongSectionPlayingList = (tempListId: string) => playInfo.playerListId == LIST_IDS.TEMP && tempListMeta.id == tempListId
   const isStyleSongsPlayingList = () => isSongSectionPlayingList(HOME_STYLE_SONGS_TEMP_LIST_ID)
   const isHomeSongsPlayingList = () => isSongSectionPlayingList(HOME_SIMILAR_SONGS_TEMP_LIST_ID)
+  const isQQGuessLikePlayingList = () => isSongSectionPlayingList(QQ_GUESS_LIKE_TEMP_LIST_ID)
   const isStyleSongsPlaying = () => isStyleSongsPlayingList() && isPlay.value
   const isHomeSongsPlaying = () => isHomeSongsPlayingList() && isPlay.value
+  const isQQGuessLikePlaying = () => isQQGuessLikePlayingList() && isPlay.value
 
   const getPlaylistTempListId = (playlist: LX.Netease.Playlist) => `${playlist.source}__${playlist.id}`
 
@@ -44,6 +48,7 @@ export const useRecommendPlayback = ({
   }
   const isStyleSongPlaying = (song: LX.Music.MusicInfoOnline) => isSongSectionSongPlaying(HOME_STYLE_SONGS_TEMP_LIST_ID, song)
   const isHomeSongPlaying = (song: LX.Music.MusicInfoOnline) => isSongSectionSongPlaying(HOME_SIMILAR_SONGS_TEMP_LIST_ID, song)
+  const isQQGuessLikeSongPlaying = (song: LX.Music.MusicInfoOnline) => isSongSectionSongPlaying(QQ_GUESS_LIKE_TEMP_LIST_ID, song)
 
   const handleToggleDailyRecommend = async() => {
     if (isDailyRecommendPlaying()) {
@@ -126,13 +131,15 @@ export const useRecommendPlayback = ({
     }
 
     await setTempList(tempListId, toCloneable(songs.value))
-    playList(LIST_IDS.TEMP, Math.min(index, songs.value.length - 1))
+    playList(LIST_IDS.TEMP, Math.max(0, Math.min(index, songs.value.length - 1)))
   }
 
   const handleToggleStyleSongs = async() => handleToggleSongSection(HOME_STYLE_SONGS_TEMP_LIST_ID, homeStyleSongs)
   const handleToggleHomeSongs = async() => handleToggleSongSection(HOME_SIMILAR_SONGS_TEMP_LIST_ID, homeSimilarSongs)
+  const handleToggleQQGuessLikeSongs = async() => handleToggleSongSection(QQ_GUESS_LIKE_TEMP_LIST_ID, qqGuessLikeSongs)
   const handlePlayStyleSongs = async(index = 0) => handlePlaySongSection(HOME_STYLE_SONGS_TEMP_LIST_ID, homeStyleSongs, index)
   const handlePlayHomeSongs = async(index = 0) => handlePlaySongSection(HOME_SIMILAR_SONGS_TEMP_LIST_ID, homeSimilarSongs, index)
+  const handlePlayQQGuessLikeSongs = async(index = 0) => handlePlaySongSection(QQ_GUESS_LIKE_TEMP_LIST_ID, qqGuessLikeSongs, index)
 
   const handleOpenPlaylist = (playlist: RecommendCard | LX.Netease.Playlist) => {
     if ('isPlaceholder' in playlist && playlist.isPlaceholder) return
@@ -209,10 +216,13 @@ export const useRecommendPlayback = ({
     isPlaylistPlayingList,
     isStyleSongsPlayingList,
     isHomeSongsPlayingList,
+    isQQGuessLikePlayingList,
     isStyleSongsPlaying,
     isHomeSongsPlaying,
+    isQQGuessLikePlaying,
     isStyleSongPlaying,
     isHomeSongPlaying,
+    isQQGuessLikeSongPlaying,
     isCardPlaying,
     getCardPlayLabel,
     getPlaylistPlayLabel,
@@ -220,8 +230,10 @@ export const useRecommendPlayback = ({
     handleTogglePlaylistPlay,
     handleToggleStyleSongs,
     handleToggleHomeSongs,
+    handleToggleQQGuessLikeSongs,
     handlePlayStyleSongs,
     handlePlayHomeSongs,
+    handlePlayQQGuessLikeSongs,
     handleOpenPlaylist,
     handleOpenChart,
     handleShowAll,

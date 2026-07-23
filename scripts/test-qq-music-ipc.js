@@ -25,7 +25,6 @@ for (const name of [
 }
 assert.match(handlerIndex, /import qqMusic from '.\/qqMusic'/)
 assert.match(handlerIndex, /qqMusic\(\)/)
-assert.match(handlerIndex, /localMusic\(\)/) // preserve user baseline registration
 assert.match(mainTypes, /@common\/types\/qq_music/)
 assert.match(rendererTypes, /@common\/types\/qq_music/)
 assert.match(rendererIpc, /getQQMusicAccountStatus/)

@@ -350,7 +350,7 @@ export const useRecommendData = ({
     } finally {
       if (isContextLoading(context)) blockingLoadRevisions.delete(context.loadContextKey)
       if (isCurrentAccountRequest(context) && context.loadContextKey == scrollCacheKey.value) {
-        isLoadingPlaylists.value = isContextLoading(context)
+        isLoadingPlaylists.value = blockingLoadRevisions.has(context.loadContextKey)
       }
     }
   }

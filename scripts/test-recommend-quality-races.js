@@ -204,6 +204,51 @@ const testHomeExploreHomeTransitionsRetainOnlyCurrentContextResults = async() =>
   assert.strictEqual(state.isLoadingPlaylists.value, false)
 }
 
+const testStaleHomeCompletionKeepsReplacementHomeLoading = async() => {
+  const accountKey = ref('replacement-account')
+  const isExploreMode = ref(false)
+  const homeRequests = [
+    { base: deferred(), core: deferred(), charts: deferred() },
+    { base: deferred(), core: deferred(), charts: deferred() },
+  ]
+  const exploreBaseRequest = deferred()
+  let homeBaseIndex = 0
+  let homeCoreIndex = 0
+  let homeChartIndex = 0
+  const state = createRecommendState({
+    accountKey,
+    isExploreMode,
+    getPlaylists: async(_limit, isExplore) => isExplore
+      ? exploreBaseRequest.promise
+      : homeRequests[homeBaseIndex++].base.promise,
+    getHome: async({ sections }) => sections.includes('charts')
+      ? homeRequests[homeChartIndex++].charts.promise
+      : homeRequests[homeCoreIndex++].core.promise,
+  })
+
+  const loadingHome1 = state.loadRecommendPlaylists(true)
+  isExploreMode.value = true
+  const loadingExplore = state.loadRecommendPlaylists(true)
+  isExploreMode.value = false
+  const loadingHome2 = state.loadRecommendPlaylists(true)
+  assert.strictEqual(state.isLoadingPlaylists.value, true)
+
+  exploreBaseRequest.resolve([playlist('replacement-account-explore')])
+  await loadingExplore
+  homeRequests[0].base.resolve([playlist('replacement-account-stale-base')])
+  homeRequests[0].charts.resolve(home('replacement-account-stale-chart'))
+  homeRequests[0].core.resolve(home('replacement-account-stale'))
+  await loadingHome1
+  assert.strictEqual(state.isLoadingPlaylists.value, true)
+
+  homeRequests[1].base.resolve([playlist('replacement-account-current-base')])
+  homeRequests[1].charts.resolve(home('replacement-account-current-chart'))
+  homeRequests[1].core.resolve(home('replacement-account-current'))
+  await loadingHome2
+  await settle()
+  assert.strictEqual(state.isLoadingPlaylists.value, false)
+}
+
 const testLateAccountAResponsesCannotReplaceFailedAccountB = async() => {
   const accountKey = ref('A')
   const requests = {
@@ -482,6 +527,7 @@ const groups = {
     testSameAccountCacheHitRetainsPendingBackgroundOwnership,
     testCacheHitDuringSameAccountRefreshSettlesLoading,
     testHomeExploreHomeTransitionsRetainOnlyCurrentContextResults,
+    testStaleHomeCompletionKeepsReplacementHomeLoading,
     testLateAccountAResponsesCannotReplaceFailedAccountB,
     testAccountTransitionClearsVisibleRecommendationsImmediately,
     testRecommendationCachesAreAccountScopedAcrossRemounts,

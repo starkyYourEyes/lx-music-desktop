@@ -31,10 +31,12 @@ const homeRecommendationCache = new Map<string, {
 const recommendScrollCache = new Map<string, number>()
 
 export const useRecommendData = ({
+  accountKey,
   isExploreMode,
   playlistScrollRef,
   onHomeSongsUpdated,
 }: {
+  accountKey: ComputedRef<string | null>
   isExploreMode: ComputedRef<boolean>
   playlistScrollRef: { value: HTMLElement | null }
   onHomeSongsUpdated: () => void
@@ -47,10 +49,28 @@ export const useRecommendData = ({
   const isRefreshingSimilarSongs = ref(false)
   const isRefreshingRecommendPlaylists = ref(false)
 
-  const recommendPlaylistCacheKey = computed(() => `${isExploreMode.value ? 'explore' : 'home'}:${isLoggedIn.value ? 'login' : 'guest'}`)
+  let activeAccountKey = accountKey.value
+  let accountRevision = 0
+  let loadRevision = 0
+
+  interface AccountRequestContext {
+    accountKey: string | null
+    accountRevision: number
+    homeRecommendationCacheKey: string
+  }
+
+  interface LoadRequestContext extends AccountRequestContext {
+    loadRevision: number
+    isExploreMode: boolean
+    recommendPlaylistCacheKey: string
+    scrollCacheKey: string
+  }
+
+  const accountCacheKey = computed(() => accountKey.value == null ? 'guest' : `user:${accountKey.value}`)
+  const recommendPlaylistCacheKey = computed(() => `${isExploreMode.value ? 'explore' : 'home'}:${accountCacheKey.value}`)
   const homeRecommendationCacheKey = computed(() => {
     const dailySongCategoryTagKeys = appSetting['recommend.dailySongCategoryTagKeys']
-    return `${isLoggedIn.value ? 'login' : 'guest'}:${JSON.stringify(dailySongCategoryTagKeys)}`
+    return `${accountCacheKey.value}:${JSON.stringify(dailySongCategoryTagKeys)}`
   })
   const scrollCacheKey = computed(() => {
     return `${recommendPlaylistCacheKey.value}:${homeRecommendationCacheKey.value}`
@@ -86,11 +106,12 @@ export const useRecommendData = ({
     recommendScrollCache.set(scrollCacheKey.value, playlistScrollRef.value?.scrollTop ?? 0)
   }
 
-  const restoreScrollPosition = async() => {
-    const scrollTop = recommendScrollCache.get(scrollCacheKey.value)
+  const restoreScrollPosition = async(key = scrollCacheKey.value, context?: LoadRequestContext) => {
+    const scrollTop = recommendScrollCache.get(key)
     if (scrollTop == null) return
     await nextTick()
     requestAnimationFrame(() => {
+      if (context && !isCurrentRequest(context)) return
       if (playlistScrollRef.value) playlistScrollRef.value.scrollTop = scrollTop
     })
   }
@@ -138,24 +159,71 @@ export const useRecommendData = ({
     return ''
   })
 
-  const fetchBaseRecommendPlaylists = async(forceRefresh = false) => {
-    const cacheKey = recommendPlaylistCacheKey.value
+  const clearVisibleState = () => {
+    recommendPlaylists.value = []
+    homeRecommendation.value = null
+    playlistLoadError.value = ''
+    isLoadingPlaylists.value = false
+    isRefreshingStyleSongs.value = false
+    isRefreshingSimilarSongs.value = false
+    isRefreshingRecommendPlaylists.value = false
+  }
+
+  const handleAccountChange = () => {
+    if (activeAccountKey == accountKey.value) return
+    activeAccountKey = accountKey.value
+    accountRevision++
+    loadRevision++
+    clearVisibleState()
+  }
+
+  const createAccountRequestContext = (): AccountRequestContext => {
+    handleAccountChange()
+    return {
+      accountKey: accountKey.value,
+      accountRevision,
+      homeRecommendationCacheKey: homeRecommendationCacheKey.value,
+    }
+  }
+
+  const createLoadRequestContext = (): LoadRequestContext => {
+    const accountContext = createAccountRequestContext()
+    return {
+      ...accountContext,
+      loadRevision: ++loadRevision,
+      isExploreMode: isExploreMode.value,
+      recommendPlaylistCacheKey: recommendPlaylistCacheKey.value,
+      scrollCacheKey: scrollCacheKey.value,
+    }
+  }
+
+  const isCurrentAccountRequest = (context: AccountRequestContext) => {
+    return context.accountKey == accountKey.value && context.accountRevision == accountRevision
+  }
+
+  const isCurrentRequest = (context: LoadRequestContext) => {
+    return isCurrentAccountRequest(context) && context.loadRevision == loadRevision
+  }
+
+  const fetchBaseRecommendPlaylists = async(context: LoadRequestContext, forceRefresh = false) => {
+    const cacheKey = context.recommendPlaylistCacheKey
     const cachedList = forceRefresh ? null : getRecommendPlaylistCache(cacheKey)
     if (cachedList) return cachedList
 
     const list = await getNeteaseRecommendPlaylists(
-      isExploreMode.value ? EXPLORE_PLAYLIST_LIMIT : HOME_RECOMMEND_PLAYLIST_LIMIT,
-      isExploreMode.value,
+      context.isExploreMode ? EXPLORE_PLAYLIST_LIMIT : HOME_RECOMMEND_PLAYLIST_LIMIT,
+      context.isExploreMode,
     )
-    setRecommendPlaylistCache(list, cacheKey)
+    if (isCurrentRequest(context)) setRecommendPlaylistCache(list, cacheKey)
     return list
   }
 
   const fetchHomeRecommendation = async(
+    context: LoadRequestContext,
     forceRefresh = false,
     sections?: LX.Netease.HomeRecommendationParams['sections'],
   ) => {
-    const cacheKey = homeRecommendationCacheKey.value
+    const cacheKey = context.homeRecommendationCacheKey
     const isFullHomeRequest = !sections?.length
     const cachedData = isFullHomeRequest && !forceRefresh ? getHomeRecommendationCache(cacheKey) : null
     if (cachedData) return cachedData
@@ -166,17 +234,18 @@ export const useRecommendData = ({
       songLimit: HOME_SONG_LIMIT,
       sections,
     })
-    if (isFullHomeRequest) setHomeRecommendationCache(data, cacheKey)
+    if (isFullHomeRequest && isCurrentRequest(context)) setHomeRecommendationCache(data, cacheKey)
     return data
   }
 
   const loadRecommendPlaylists = async(forceRefresh = false) => {
-    const cachedList = forceRefresh ? null : getRecommendPlaylistCache()
-    const cachedHome = forceRefresh || isExploreMode.value ? null : getHomeRecommendationCache()
+    const context = createLoadRequestContext()
+    const cachedList = forceRefresh ? null : getRecommendPlaylistCache(context.recommendPlaylistCacheKey)
+    const cachedHome = forceRefresh || context.isExploreMode ? null : getHomeRecommendationCache(context.homeRecommendationCacheKey)
     if (cachedList) recommendPlaylists.value = cachedList
     if (cachedHome) homeRecommendation.value = cachedHome
-    if (!forceRefresh && (isExploreMode.value ? !!cachedList : hasCoreHomeContent(cachedHome))) {
-      await restoreScrollPosition()
+    if (!forceRefresh && (context.isExploreMode ? !!cachedList : hasCoreHomeContent(cachedHome))) {
+      await restoreScrollPosition(context.scrollCacheKey, context)
       return
     }
 
@@ -184,45 +253,48 @@ export const useRecommendData = ({
     playlistLoadError.value = ''
 
     const errors: any[] = []
-    const baseTask = fetchBaseRecommendPlaylists(forceRefresh)
+    const baseTask = fetchBaseRecommendPlaylists(context, forceRefresh)
       .then(list => {
+        if (!isCurrentRequest(context)) return null
         recommendPlaylists.value = list
         return null
       }).catch(err => {
-        errors.push(err)
+        if (isCurrentRequest(context)) errors.push(err)
         return null
       })
 
-    const homeTask = !isExploreMode.value
-      ? fetchHomeRecommendation(forceRefresh, CORE_HOME_SECTIONS).then(data => {
-        mergeHomeRecommendation({
+    const homeTask = !context.isExploreMode
+      ? fetchHomeRecommendation(context, forceRefresh, CORE_HOME_SECTIONS).then(data => {
+        if (!isCurrentRequest(context)) return null
+        const didMerge = mergeHomeRecommendation({
           radarPlaylists: data.radarPlaylists,
           styleSongsTitle: data.styleSongsTitle,
           styleSongs: data.styleSongs,
           dailySongCategoryPlaylists: data.dailySongCategoryPlaylists,
           similarSongs: data.similarSongs,
           recommendPlaylists: data.recommendPlaylists,
-        })
-        onHomeSongsUpdated()
+        }, context)
+        if (didMerge) onHomeSongsUpdated()
         return null
       }).catch(err => {
-        errors.push(err)
+        if (isCurrentRequest(context)) errors.push(err)
         return null
       })
       : Promise.resolve<LX.Netease.HomeRecommendation | null>(null)
 
-    const chartTask = !isExploreMode.value
-      ? fetchHomeRecommendation(forceRefresh, CHART_HOME_SECTIONS).then(data => {
-        mergeHomeRecommendation({ charts: data.charts })
+    const chartTask = !context.isExploreMode
+      ? fetchHomeRecommendation(context, forceRefresh, CHART_HOME_SECTIONS).then(data => {
+        if (!isCurrentRequest(context)) return null
+        mergeHomeRecommendation({ charts: data.charts }, context)
         return null
       }).catch(err => {
-        console.warn('Load home charts failed:', err)
+        if (isCurrentRequest(context)) console.warn('Load home charts failed:', err)
         return null
       })
       : Promise.resolve(null)
 
     const warmupTasks: Array<Promise<unknown>> = []
-    if (!isExploreMode.value && isLoggedIn.value) {
+    if (!context.isExploreMode && isLoggedIn.value) {
       warmupTasks.push(loadDailyRecommendSongs(forceRefresh).catch(err => {
         console.warn('Load daily recommend failed:', err)
       }))
@@ -232,16 +304,17 @@ export const useRecommendData = ({
     }
 
     try {
-      const blockingTasks: Array<Promise<unknown>> = isExploreMode.value
+      const blockingTasks: Array<Promise<unknown>> = context.isExploreMode
         ? [baseTask]
         : [homeTask]
-      const backgroundTasks = isExploreMode.value
+      const backgroundTasks = context.isExploreMode
         ? warmupTasks
         : [baseTask, chartTask, ...warmupTasks]
 
       await Promise.all(blockingTasks)
       void Promise.all(backgroundTasks)
-      if (errors.length && (isExploreMode.value ? !recommendPlaylists.value.length : !hasHomeContent.value)) {
+      if (!isCurrentRequest(context)) return
+      if (errors.length && (context.isExploreMode ? !recommendPlaylists.value.length : !hasHomeContent.value)) {
         playlistLoadError.value = errors[0]?.message ?? '推荐内容加载失败'
       }
       if (forceRefresh) {
@@ -249,14 +322,18 @@ export const useRecommendData = ({
           playlistScrollRef.value?.scrollTo({ top: 0 })
         })
       } else {
-        await restoreScrollPosition()
+        await restoreScrollPosition(context.scrollCacheKey, context)
       }
     } finally {
-      isLoadingPlaylists.value = false
+      if (isCurrentRequest(context)) isLoadingPlaylists.value = false
     }
   }
 
-  const mergeHomeRecommendation = (partial: Partial<LX.Netease.HomeRecommendation>) => {
+  const mergeHomeRecommendation = (
+    partial: Partial<LX.Netease.HomeRecommendation>,
+    context: AccountRequestContext,
+  ) => {
+    if (!isCurrentAccountRequest(context)) return false
     const nextData: LX.Netease.HomeRecommendation = {
       radarPlaylists: homeRecommendation.value?.radarPlaylists ?? [],
       styleSongsTitle: homeRecommendation.value?.styleSongsTitle ?? '',
@@ -268,11 +345,13 @@ export const useRecommendData = ({
       ...partial,
     }
     homeRecommendation.value = nextData
-    setHomeRecommendationCache(nextData)
+    setHomeRecommendationCache(nextData, context.homeRecommendationCacheKey)
+    return true
   }
 
   const handleRefreshStyleSongs = async() => {
     if (isRefreshingStyleSongs.value) return
+    const context = createAccountRequestContext()
     isRefreshingStyleSongs.value = true
     playlistLoadError.value = ''
     try {
@@ -285,16 +364,17 @@ export const useRecommendData = ({
       mergeHomeRecommendation({
         styleSongsTitle: data.styleSongsTitle,
         styleSongs: data.styleSongs,
-      })
+      }, context)
     } catch (err: any) {
-      playlistLoadError.value = err?.message ?? '风格推荐歌曲刷新失败'
+      if (isCurrentAccountRequest(context)) playlistLoadError.value = err?.message ?? '风格推荐歌曲刷新失败'
     } finally {
-      isRefreshingStyleSongs.value = false
+      if (isCurrentAccountRequest(context)) isRefreshingStyleSongs.value = false
     }
   }
 
   const handleRefreshSimilarSongs = async() => {
     if (isRefreshingSimilarSongs.value) return
+    const context = createAccountRequestContext()
     isRefreshingSimilarSongs.value = true
     playlistLoadError.value = ''
     try {
@@ -304,17 +384,17 @@ export const useRecommendData = ({
         songLimit: HOME_SONG_LIMIT,
         sections: ['similarSongs'],
       })
-      mergeHomeRecommendation({ similarSongs: data.similarSongs })
-      onHomeSongsUpdated()
+      if (mergeHomeRecommendation({ similarSongs: data.similarSongs }, context)) onHomeSongsUpdated()
     } catch (err: any) {
-      playlistLoadError.value = err?.message ?? '红心相似歌曲刷新失败'
+      if (isCurrentAccountRequest(context)) playlistLoadError.value = err?.message ?? '红心相似歌曲刷新失败'
     } finally {
-      isRefreshingSimilarSongs.value = false
+      if (isCurrentAccountRequest(context)) isRefreshingSimilarSongs.value = false
     }
   }
 
   const handleRefreshRecommendPlaylists = async() => {
     if (isRefreshingRecommendPlaylists.value) return
+    const context = createAccountRequestContext()
     isRefreshingRecommendPlaylists.value = true
     playlistLoadError.value = ''
     try {
@@ -324,11 +404,11 @@ export const useRecommendData = ({
         songLimit: HOME_SONG_LIMIT,
         sections: ['recommendPlaylists'],
       })
-      mergeHomeRecommendation({ recommendPlaylists: data.recommendPlaylists })
+      mergeHomeRecommendation({ recommendPlaylists: data.recommendPlaylists }, context)
     } catch (err: any) {
-      playlistLoadError.value = err?.message ?? '推荐歌单刷新失败'
+      if (isCurrentAccountRequest(context)) playlistLoadError.value = err?.message ?? '推荐歌单刷新失败'
     } finally {
-      isRefreshingRecommendPlaylists.value = false
+      if (isCurrentAccountRequest(context)) isRefreshingRecommendPlaylists.value = false
     }
   }
 
@@ -350,6 +430,7 @@ export const useRecommendData = ({
     isRefreshingSimilarSongs,
     isRefreshingRecommendPlaylists,
     loadRecommendPlaylists,
+    handleAccountChange,
     handleRefresh: async() => loadRecommendPlaylists(true),
     handleRefreshStyleSongs,
     handleRefreshSimilarSongs,

@@ -211,6 +211,7 @@ const pageSubTitle = computed(() => neteaseIsLoggedIn.value ? `${profileNickname
 const homeSectionOrder = computed(() => normalizeRecommendHomeSectionOrder(appSetting['recommend.homeSectionOrder']))
 
 const recommendData = useRecommendData({
+  accountKey: neteaseAccountKey,
   isExploreMode,
   playlistScrollRef,
   onHomeSongsUpdated: () => {},
@@ -418,6 +419,7 @@ watch(() => route.query.login, login => {
 
 watch(neteaseAccountKey, (value, oldValue) => {
   if (value == oldValue) return
+  recommendData.handleAccountChange()
   const suppressedKey = suppressNextNeteaseAccountWatchKey
   if (suppressedKey != null) {
     suppressNextNeteaseAccountWatchKey = null

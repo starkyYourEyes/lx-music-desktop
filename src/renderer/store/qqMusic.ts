@@ -14,44 +14,65 @@ export const isInitingQQMusicAccount = ref(false)
 export const isQQMusicAccountInited = ref(false)
 
 let initPromise: Promise<LX.QQMusic.AccountStatus> | null = null
+let initPromiseRevision = 0
+let accountRevision = 0
 
 export const profile = computed(() => accountStatus.value.profile)
 export const isLoggedIn = computed(() => accountStatus.value.isLoggedIn)
 
-export const setQQMusicAccountStatus = (status: LX.QQMusic.AccountStatus) => {
+const commitQQMusicAccountStatus = (status: LX.QQMusic.AccountStatus) => {
   accountStatus.value = {
     isLoggedIn: status.isLoggedIn,
     profile: status.profile,
   }
+}
+
+export const setQQMusicAccountStatus = (status: LX.QQMusic.AccountStatus) => {
+  accountRevision++
+  commitQQMusicAccountStatus(status)
   isQQMusicAccountInited.value = true
 }
 
 export const initQQMusicAccount = async(force = false) => {
   if (!force) {
-    if (initPromise) return initPromise
+    if (initPromise && initPromiseRevision == accountRevision) return initPromise
     if (isQQMusicAccountInited.value) return accountStatus.value
   }
 
+  const revision = ++accountRevision
   isInitingQQMusicAccount.value = true
-  initPromise = getQQMusicAccountStatus()
+  let request: Promise<LX.QQMusic.AccountStatus>
+  request = getQQMusicAccountStatus()
     .then(status => {
-      setQQMusicAccountStatus(status)
+      if (revision == accountRevision) {
+        commitQQMusicAccountStatus(status)
+        isQQMusicAccountInited.value = true
+      }
       return accountStatus.value
     })
     .catch(err => {
-      accountStatus.value = { ...emptyStatus }
-      isQQMusicAccountInited.value = false
+      if (revision == accountRevision) {
+        commitQQMusicAccountStatus(emptyStatus)
+        isQQMusicAccountInited.value = false
+      }
       throw err
     })
     .finally(() => {
+      if (initPromise != request) return
       isInitingQQMusicAccount.value = false
       initPromise = null
+      initPromiseRevision = 0
     })
 
-  return initPromise
+  initPromise = request
+  initPromiseRevision = revision
+  return request
 }
 
 export const logoutQQMusicAccount = async() => {
+  const revision = ++accountRevision
   await logoutQQMusic()
-  setQQMusicAccountStatus({ ...emptyStatus })
+  if (revision != accountRevision) return
+  commitQQMusicAccountStatus(emptyStatus)
+  isQQMusicAccountInited.value = true
 }

@@ -16,13 +16,107 @@ const settle = async() => {
 }
 
 const deferred = () => {
-  let resolve
-  let reject
-  const promise = new Promise((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise
-    reject = rejectPromise
+  let resolveDeferred
+  let rejectDeferred
+  const promise = new Promise((resolve, reject) => {
+    resolveDeferred = resolve
+    rejectDeferred = reject
   })
-  return { promise, resolve, reject }
+  return { promise, resolve: resolveDeferred, reject: rejectDeferred }
+}
+
+const loadAccountStore = (getQQMusicAccountStatus, logoutQQMusic = async() => {}) => {
+  return loadTsModule(path.join(__dirname, '../src/renderer/store/qqMusic.ts'), {
+    '@common/utils/vueTools': { ref, shallowRef: ref, computed },
+    '@renderer/utils/ipc': { getQQMusicAccountStatus, logoutQQMusic },
+  })
+}
+
+const testLatestForcedInitWins = async() => {
+  const olderResult = deferred()
+  const newerResult = deferred()
+  const results = [olderResult.promise, newerResult.promise]
+  let getCount = 0
+  const store = loadAccountStore(async() => results[getCount++])
+
+  const olderInit = store.initQQMusicAccount(true)
+  const newerInit = store.initQQMusicAccount(true)
+  newerResult.resolve({
+    isLoggedIn: true,
+    profile: { uin: 'newer', nickname: '较新账号' },
+  })
+  await newerInit
+  olderResult.resolve({
+    isLoggedIn: true,
+    profile: { uin: 'older', nickname: '较旧账号' },
+  })
+  await olderInit
+
+  assert.strictEqual(getCount, 2)
+  assert.strictEqual(store.profile.value.uin, 'newer')
+}
+
+const testOlderInitCannotClearNewerBookkeeping = async() => {
+  const olderResult = deferred()
+  const newerResult = deferred()
+  const results = [olderResult.promise, newerResult.promise]
+  let getCount = 0
+  const store = loadAccountStore(async() => results[getCount++])
+
+  const olderInit = store.initQQMusicAccount(true)
+  const newerInit = store.initQQMusicAccount(true)
+  olderResult.resolve({
+    isLoggedIn: true,
+    profile: { uin: 'older', nickname: '较旧账号' },
+  })
+  await olderInit
+  assert.strictEqual(store.isInitingQQMusicAccount.value, true)
+
+  let joinedInitResolved = false
+  const joinedInit = store.initQQMusicAccount().then(() => {
+    joinedInitResolved = true
+  })
+  await settle()
+  assert.strictEqual(getCount, 2)
+  assert.strictEqual(joinedInitResolved, false)
+
+  newerResult.resolve({
+    isLoggedIn: true,
+    profile: { uin: 'newer', nickname: '较新账号' },
+  })
+  await Promise.all([newerInit, joinedInit])
+  assert.strictEqual(store.isInitingQQMusicAccount.value, false)
+  assert.strictEqual(store.profile.value.uin, 'newer')
+}
+
+const testAccountMutationsInvalidateOlderInit = async() => {
+  const logoutInitResult = deferred()
+  const logoutStore = loadAccountStore(async() => logoutInitResult.promise)
+  const pendingLogoutInit = logoutStore.initQQMusicAccount()
+  await logoutStore.logoutQQMusicAccount()
+  logoutInitResult.resolve({
+    isLoggedIn: true,
+    profile: { uin: 'stale-after-logout', nickname: '旧账号' },
+  })
+  await pendingLogoutInit
+  assert.deepStrictEqual(logoutStore.accountStatus.value, {
+    isLoggedIn: false,
+    profile: null,
+  })
+
+  const qrInitResult = deferred()
+  const qrStore = loadAccountStore(async() => qrInitResult.promise)
+  const pendingQrInit = qrStore.initQQMusicAccount()
+  qrStore.setQQMusicAccountStatus({
+    isLoggedIn: true,
+    profile: { uin: 'qr-login', nickname: '扫码账号' },
+  })
+  qrInitResult.resolve({
+    isLoggedIn: true,
+    profile: { uin: 'stale-init', nickname: '旧账号' },
+  })
+  await pendingQrInit
+  assert.strictEqual(qrStore.profile.value.uin, 'qr-login')
 }
 
 const testAccountInitRetry = async() => {
@@ -281,6 +375,9 @@ const testQrPolling = async() => {
 }
 
 const main = async() => {
+  await testLatestForcedInitWins()
+  await testOlderInitCannotClearNewerBookkeeping()
+  await testAccountMutationsInvalidateOlderInit()
   await testAccountInitRetry()
   await testAccountStore()
   await testQrPolling()

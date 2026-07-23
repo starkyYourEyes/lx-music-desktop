@@ -234,12 +234,38 @@ const testStaticWiring = () => {
   assert.match(recommendIndex, /void initializeQQAccount\(\)[\s\S]*?void initializeNeteaseAccount\(\)/)
   assert.match(recommendIndex, /isHandlingQQQrLoginSuccess/)
   assert.match(recommendIndex, /handleCloseQQLogin\(\)[\s\S]*?loadQQGuessLikeSongs\(true\)/)
-  assert.match(recommendIndex, /if\s*\(qqAccountKey\.value\)\s*await loadQQGuessLikeSongs\(\)[\s\S]*?else clearQQGuessLikeSongs\(\)/)
   const qqAccountWatch = recommendIndex.match(/watch\(qqAccountKey,[\s\S]*?\n}\)/)?.[0] || ''
   const neteaseAccountWatch = recommendIndex.match(/watch\(neteaseIsLoggedIn,[\s\S]*?\n}\)/)?.[0] || ''
   assert.match(qqAccountWatch, /if\s*\(!value\)[\s\S]*?clearQQGuessLikeSongs\(\)[\s\S]*?loadQQGuessLikeSongs\(true\)/)
   assert.match(qqAccountWatch, /handleCloseQQLogin\(\)/)
   assert.match(neteaseAccountWatch, /if\s*\(value\)\s*handleCloseNeteaseLogin\(\)/)
+
+  assert.match(recommendIndex, /let qqLifecycleRevision\s*=\s*0/)
+  assert.match(recommendIndex, /let neteaseLifecycleRevision\s*=\s*0/)
+  assert.match(recommendIndex, /let forceQQLoadAfterInitialization\s*=\s*false/)
+  assert.match(recommendIndex, /let forceNeteaseLoadAfterInitialization\s*=\s*false/)
+
+  const qqQrSuccess = recommendIndex.match(/useQQMusicLoginQr\(async\(\)\s*=>\s*\{[\s\S]*?\n}\)/)?.[0] || ''
+  const neteaseQrSuccess = recommendIndex.match(/useNeteaseLoginQr\(async\(\)\s*=>\s*\{[\s\S]*?\n}\)/)?.[0] || ''
+  assert.match(qqQrSuccess, /isHandlingQQQrLoginSuccess\s*=\s*true[\s\S]*?qqLifecycleRevision\+\+[\s\S]*?forceQQLoadAfterInitialization\s*=\s*false[\s\S]*?loadQQGuessLikeSongs\(true\)/)
+  assert.match(neteaseQrSuccess, /isHandlingNeteaseQrLoginSuccess\s*=\s*true[\s\S]*?neteaseLifecycleRevision\+\+[\s\S]*?forceNeteaseLoadAfterInitialization\s*=\s*false[\s\S]*?loadRecommendPlaylists\(true\)/)
+
+  assert.match(qqAccountWatch, /qqLifecycleRevision\+\+[\s\S]*?forceQQLoadAfterInitialization\s*=\s*false[\s\S]*?clearQQGuessLikeSongs\(\)/)
+  assert.match(qqAccountWatch, /if\s*\(isHandlingQQQrLoginSuccess\)\s*return/)
+  assert.match(qqAccountWatch, /if\s*\(isInitializingQQAccount\)\s*\{[\s\S]*?forceQQLoadAfterInitialization\s*=\s*true[\s\S]*?return/)
+  assert.match(qqAccountWatch, /qqLifecycleRevision\+\+[\s\S]*?loadQQGuessLikeSongs\(true\)/)
+  assert.match(neteaseAccountWatch, /if\s*\(isHandlingNeteaseQrLoginSuccess\)\s*return/)
+  assert.match(neteaseAccountWatch, /if\s*\(isInitializingNeteaseAccount\)\s*\{[\s\S]*?forceNeteaseLoadAfterInitialization\s*=\s*true[\s\S]*?return/)
+  assert.match(neteaseAccountWatch, /neteaseLifecycleRevision\+\+[\s\S]*?loadRecommendPlaylists\(true\)/)
+
+  const initializeQQ = recommendIndex.match(/const initializeQQAccount\s*=\s*async\(\)\s*=>\s*\{[\s\S]*?\n}/)?.[0] || ''
+  const initializeNetease = recommendIndex.match(/const initializeNeteaseAccount\s*=\s*async\(\)\s*=>\s*\{[\s\S]*?\n}/)?.[0] || ''
+  assert.match(initializeQQ, /const revision\s*=\s*qqLifecycleRevision[\s\S]*?await initQQMusicAccount\(\)[\s\S]*?await nextTick\(\)[\s\S]*?if\s*\(revision\s*!=\s*qqLifecycleRevision\)\s*return/)
+  assert.match(initializeQQ, /force\s*=\s*forceQQLoadAfterInitialization[\s\S]*?forceQQLoadAfterInitialization\s*=\s*false[\s\S]*?loadQQGuessLikeSongs\(force\)/)
+  assert.match(initializeQQ, /forceQQLoadAfterInitialization\s*=\s*false[\s\S]*?isInitializingQQAccount\s*=\s*false[\s\S]*?loadQQGuessLikeSongs\(force\)/)
+  assert.match(initializeNetease, /const revision\s*=\s*neteaseLifecycleRevision[\s\S]*?await initNeteaseAccount\(\)[\s\S]*?await nextTick\(\)[\s\S]*?if\s*\(revision\s*!=\s*neteaseLifecycleRevision\)\s*return/)
+  assert.match(initializeNetease, /force\s*=\s*forceNeteaseLoadAfterInitialization[\s\S]*?forceNeteaseLoadAfterInitialization\s*=\s*false[\s\S]*?loadRecommendPlaylists\(force\)/)
+  assert.match(initializeNetease, /forceNeteaseLoadAfterInitialization\s*=\s*false[\s\S]*?isInitializingNeteaseAccount\s*=\s*false[\s\S]*?loadRecommendPlaylists\(force\)/)
   assert.match(
     recommendIndex,
     /if\s*\(!isExploreMode\.value\s*&&\s*\([\s\S]*?qqIsLoggedIn\.value[\s\S]*?appSetting\['recommend\.qqGuessLikeLoggedOutVisible'\][\s\S]*?\)\)\s*return ''/,

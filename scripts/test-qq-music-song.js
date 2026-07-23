@@ -7,7 +7,9 @@ const { getCookieValue } = loadTsModule(
 )
 
 let request
+let fetchCalls = 0
 const fetchImpl = async(url, options) => {
+  fetchCalls++
   request = { url, options }
   return {
     ok: true,
@@ -41,7 +43,12 @@ const fetchImpl = async(url, options) => {
   }
 }
 
-const { createQQMusicSongService, QQMusicAuthError } = loadTsModule(
+const {
+  createQQMusicSongService,
+  isQQMusicAuthError,
+  normalizeGuessLikeSongs,
+  QQMusicAuthError,
+} = loadTsModule(
   path.join(__dirname, '../src/main/modules/qqMusic/song.ts'),
   {
     '@common/utils/common': {
@@ -57,10 +64,15 @@ const service = createQQMusicSongService({
   getCookie: () => 'uin=o123; qqmusic_key=secret',
 })
 
-service.getGuessLikeSongs().then(songs => {
+service.getGuessLikeSongs().then(async songs => {
   assert.match(String(request.url), /musicu\.fcg/)
+  assert.strictEqual(new URL(request.url).searchParams.get('loginUin'), '123')
+  assert.strictEqual(request.options.method, 'POST')
+  assert.strictEqual(request.options.headers['Content-Type'], 'application/json')
+  assert.strictEqual(request.options.headers.Referer, 'https://y.qq.com/')
   assert.strictEqual(request.options.headers.Cookie, 'uin=o123; qqmusic_key=secret')
   const body = JSON.parse(request.options.body)
+  assert.deepStrictEqual(body.comm, { ct: 24, cv: 0 })
   assert.strictEqual(body.songlist.module, 'mb_track_radio_svr')
   assert.strictEqual(body.songlist.method, 'get_radio_track')
   assert.deepStrictEqual(body.songlist.param, { id: 99, firstplay: 1, num: 15 })
@@ -92,8 +104,40 @@ service.getGuessLikeSongs().then(songs => {
     },
   })
 
+  const malformedSingerSongs = normalizeGuessLikeSongs({
+    songlist: {
+      data: {
+        tracks: [{ id: 20, mid: 'null-singer', name: 'No Singer', singer: null, file: {} }],
+      },
+    },
+  })
+  assert.strictEqual(malformedSingerSongs.length, 1)
+  assert.strictEqual(malformedSingerSongs[0].singer, '')
+
+  assert.strictEqual(fetchCalls, 1)
   const noCookie = createQQMusicSongService({ fetchImpl, getCookie: () => '' })
-  return assert.rejects(noCookie.getGuessLikeSongs(), QQMusicAuthError)
+  await assert.rejects(noCookie.getGuessLikeSongs(), QQMusicAuthError)
+  assert.strictEqual(fetchCalls, 1)
+
+  const createFetchWithPayload = payload => async() => ({
+    ok: true,
+    json: async() => payload,
+  })
+  const expired = createQQMusicSongService({
+    fetchImpl: createFetchWithPayload({ code: 0, songlist: { code: 1000 } }),
+    getCookie: () => 'uin=o123; qqmusic_key=secret',
+  })
+  await assert.rejects(expired.getGuessLikeSongs(), QQMusicAuthError)
+
+  const failed = createQQMusicSongService({
+    fetchImpl: createFetchWithPayload({ code: 1, songlist: { code: 500 } }),
+    getCookie: () => 'uin=o123; qqmusic_key=secret',
+  })
+  await assert.rejects(failed.getGuessLikeSongs(), error => {
+    assert.strictEqual(isQQMusicAuthError(error), false)
+    return true
+  })
+  assert.strictEqual(isQQMusicAuthError({ name: 'QQMusicAuthError' }), true)
 }).then(() => {
   console.log('QQ Music song tests passed')
 }).catch(err => {

@@ -17,7 +17,10 @@ const getTracks = (payload: any): any[] | null => {
   return Array.isArray(tracks) ? tracks : null
 }
 
-const getSinger = (singers: any[] = []) => singers.map(singer => singer?.name).filter(Boolean).join('、')
+const getSinger = (singers: any) => {
+  if (!Array.isArray(singers)) return ''
+  return singers.map(singer => singer?.name).filter(Boolean).join('、')
+}
 
 const getArtwork = (song: any) => {
   const albumMid = song?.album?.mid ?? ''

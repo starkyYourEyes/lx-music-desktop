@@ -22,6 +22,25 @@ const response = ({
   arrayBuffer: async() => Uint8Array.from(bytes).buffer,
 })
 
+const pendingUntilAbort = signal => new Promise((resolve, reject) => {
+  const onAbort = () => {
+    const error = new Error('aborted')
+    error.name = 'AbortError'
+    reject(error)
+  }
+  if (signal.aborted) onAbort()
+  else signal.addEventListener('abort', onAbort, { once: true })
+})
+
+const withTestDeadline = (promise, timeoutMs = 200) => new Promise((resolve, reject) => {
+  const timer = setTimeout(() => {
+    reject(new Error('test deadline exceeded'))
+  }, timeoutMs)
+  promise.then(resolve, reject).finally(() => {
+    clearTimeout(timer)
+  })
+})
+
 const auth = loadTsModule(
   path.join(__dirname, '../src/main/modules/qqMusic/auth.ts'),
 )
@@ -60,16 +79,154 @@ const runStatus = async(code, expectedState) => {
   assert.strictEqual(Object.hasOwn(result, 'cookie'), false)
 }
 
+const assertSafeCheckFailure = error => {
+  assert.strictEqual(error.message, 'QQ Music login check failed')
+  assert.strictEqual(String(error).includes('evil.example'), false)
+  assert.strictEqual(String(error).includes('oauth-code'), false)
+  return true
+}
+
+const testRejectedCheckSigRedirect = async() => {
+  const calls = []
+  const queue = [
+    response({ setCookie: ['qrsig=qr-evil-check-sig; Path=/'] }),
+    response({
+      text: "ptuiCB('0','0','https://evil.example/check_sig','0','status','')",
+      setCookie: ['uin=o123; Path=/'],
+    }),
+  ]
+  const service = createQQMusicLoginService({
+    fetchImpl: async(input, init = {}) => {
+      calls.push({ input, init })
+      return queue.shift()
+    },
+  })
+  const qr = await service.createLoginQr()
+  await assert.rejects(service.checkLoginQr(qr.key), assertSafeCheckFailure)
+  assert.strictEqual(calls.length, 2)
+  assert.strictEqual(calls.some(call => String(call.input).includes('evil.example')), false)
+  assert.deepStrictEqual(await service.checkLoginQr(qr.key), {
+    state: 'expired',
+    message: '二维码已过期',
+  })
+  assert.strictEqual(calls.length, 2)
+}
+
+const testRejectedOAuthCallback = async() => {
+  const calls = []
+  const queue = [
+    response({ setCookie: ['qrsig=qr-evil-callback; Path=/'] }),
+    response({
+      text: "ptuiCB('0','0','https://ssl.ptlogin2.graph.qq.com/check_sig','0','status','')",
+      setCookie: ['uin=o123; Path=/'],
+    }),
+    response({ ok: false, status: 302, setCookie: ['p_skey=p-value; Path=/'] }),
+    response({
+      ok: false,
+      status: 302,
+      location: 'https://evil.example/callback?code=oauth-code',
+    }),
+  ]
+  const service = createQQMusicLoginService({
+    fetchImpl: async(input, init = {}) => {
+      calls.push({ input, init })
+      return queue.shift()
+    },
+  })
+  const qr = await service.createLoginQr()
+  await assert.rejects(service.checkLoginQr(qr.key), assertSafeCheckFailure)
+  assert.strictEqual(calls.length, 4)
+  assert.strictEqual(calls.some(call => String(call.input).includes('evil.example')), false)
+  assert.deepStrictEqual(await service.checkLoginQr(qr.key), {
+    state: 'expired',
+    message: '二维码已过期',
+  })
+  assert.strictEqual(calls.length, 4)
+}
+
+const testRejectedIncompleteCredential = async() => {
+  const queue = [
+    response({ setCookie: ['qrsig=qr-incomplete; Path=/'] }),
+    response({
+      text: "ptuiCB('0','0','https://ssl.ptlogin2.graph.qq.com/check_sig','0','status','')",
+    }),
+    response({ ok: false, status: 302, setCookie: ['p_skey=p-value; Path=/'] }),
+    response({
+      ok: false,
+      status: 302,
+      location: 'https://y.qq.com/portal/wx_redirect.html?code=oauth-code',
+    }),
+    response({ setCookie: ['qqmusic_key=key-without-uin; Path=/'] }),
+  ]
+  const service = createQQMusicLoginService({
+    fetchImpl: async() => queue.shift(),
+  })
+  const qr = await service.createLoginQr()
+  await assert.rejects(service.checkLoginQr(qr.key), assertSafeCheckFailure)
+  assert.deepStrictEqual(await service.checkLoginQr(qr.key), {
+    state: 'expired',
+    message: '二维码已过期',
+  })
+}
+
+const testPollingBodyTimeout = async() => {
+  const queue = [
+    async() => response({ setCookie: ['qrsig=qr-stalled-status; Path=/'] }),
+    async(input, init) => ({
+      ...response(),
+      text: () => pendingUntilAbort(init.signal),
+    }),
+    async() => response({ text: "ptuiCB('66','0','','0','status','')" }),
+  ]
+  const service = createQQMusicLoginService({
+    requestTimeoutMs: 10,
+    fetchImpl: async(input, init = {}) => queue.shift()(input, init),
+  })
+  const qr = await service.createLoginQr()
+  await assert.rejects(withTestDeadline(service.checkLoginQr(qr.key)), error => {
+    assert.strictEqual(error.message, 'QQ Music login check failed')
+    return true
+  })
+  assert.deepStrictEqual(await service.checkLoginQr(qr.key), {
+    state: 'waiting',
+    message: '等待扫码',
+  })
+}
+
+const testQrBodyTimeout = async() => {
+  const sessions = auth.createQrSessionStore({
+    idFactory: () => 'stalled-qr-session',
+  })
+  const service = createQQMusicLoginService({
+    sessions,
+    requestTimeoutMs: 10,
+    fetchImpl: async(input, init = {}) => ({
+      ...response({ setCookie: ['qrsig=qr-stalled-image; Path=/'] }),
+      arrayBuffer: () => pendingUntilAbort(init.signal),
+    }),
+  })
+  await assert.rejects(withTestDeadline(service.createLoginQr()), error => {
+    assert.strictEqual(error.message, 'QQ Music login QR creation failed')
+    return true
+  })
+  assert.strictEqual(sessions.size(), 0)
+}
+
 const main = async() => {
   await runStatus('66', 'waiting')
   await runStatus('67', 'scanned')
   await runStatus('65', 'expired')
+  await testRejectedCheckSigRedirect()
+  await testRejectedOAuthCallback()
+  await testRejectedIncompleteCredential()
+  await testQrBodyTimeout()
+  await testPollingBodyTimeout()
 
   const calls = []
   const queue = [
     response({ bytes: [1, 2], setCookie: ['qrsig=qr-success; Path=/; HttpOnly'] }),
     response({
-      text: "ptuiCB('0','0','https://graph.qq.com/check-sig','0','登录成功！','')",
+      text: "ptuiCB('0','0','https://ssl.ptlogin2.graph.qq.com/check_sig','0','登录成功！','')",
       setCookie: ['uin=o123; Path=/'],
     }),
     response({ ok: false, status: 302, setCookie: ['p_skey=p-value; Path=/; HttpOnly'] }),
@@ -119,7 +276,7 @@ const main = async() => {
   assert.strictEqual(statusUrl.searchParams.get('pt_3rd_aid'), '100497308')
   assert.deepStrictEqual(calls[1].init.headers, { Cookie: 'qrsig=qr-success' })
 
-  assert.strictEqual(calls[2].input, 'https://graph.qq.com/check-sig')
+  assert.strictEqual(calls[2].input, 'https://ssl.ptlogin2.graph.qq.com/check_sig')
   assert.strictEqual(calls[2].init.redirect, 'manual')
   assert.strictEqual(calls[2].init.headers.Cookie, 'uin=o123')
 

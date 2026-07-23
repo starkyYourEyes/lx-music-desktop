@@ -3,6 +3,7 @@ import {
   getCookieValue,
   getGtk,
   getGuid,
+  getQQMusicAccountUin,
   getSetCookieValues,
   hash33,
   mergeCookieValues,
@@ -33,11 +34,44 @@ export const parseQQQrStatus = (text: string): { code: string, redirectUrl: stri
   }
 }
 
-const fetchWithTimeout = async(
+const getTrustedCheckSigUrl = (value: string): string => {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error(CHECK_ERROR)
+  }
+  const hasTrustedOrigin = url.protocol == 'https:' && !url.username && !url.password &&
+    (!url.port || url.port == '443')
+  const hasTrustedTarget =
+    (url.hostname == 'ssl.ptlogin2.graph.qq.com' && url.pathname == '/check_sig') ||
+    (url.hostname == 'graph.qq.com' && ['/oauth2.0/login_jump', '/check-sig'].includes(url.pathname))
+  if (!hasTrustedOrigin || !hasTrustedTarget) throw new Error(CHECK_ERROR)
+  return url.toString()
+}
+
+const getTrustedOAuthCode = (value: string): string => {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error(CHECK_ERROR)
+  }
+  const isTrusted = url.protocol == 'https:' && !url.username && !url.password &&
+    (!url.port || url.port == '443') && url.hostname == 'y.qq.com' &&
+    url.pathname == '/portal/wx_redirect.html'
+  const code = isTrusted ? url.searchParams.get('code') ?? '' : ''
+  if (!code) throw new Error(CHECK_ERROR)
+  return code
+}
+
+const fetchWithTimeout = async<Result>(
   fetchImpl: typeof fetch,
   input: RequestInfo | URL,
   init: RequestInit = {},
-): Promise<Response> => {
+  consume: (response: Response) => Result | Promise<Result>,
+  timeoutMs: number,
+): Promise<Result> => {
   const controller = new AbortController()
   const suppliedSignal = init.signal
   const abortFromSuppliedSignal = () => {
@@ -47,9 +81,10 @@ const fetchWithTimeout = async(
   else suppliedSignal?.addEventListener('abort', abortFromSuppliedSignal, { once: true })
   const timer = setTimeout(() => {
     controller.abort()
-  }, REQUEST_TIMEOUT_MS)
+  }, timeoutMs)
   try {
-    return await fetchImpl(input, { ...init, signal: controller.signal })
+    const response = await fetchImpl(input, { ...init, signal: controller.signal })
+    return await consume(response)
   } finally {
     clearTimeout(timer)
     suppliedSignal?.removeEventListener('abort', abortFromSuppliedSignal)
@@ -90,9 +125,11 @@ const getLoginBody = (pSkey: string, code: string) => JSON.stringify({
 export const createQQMusicLoginService = ({
   fetchImpl = fetch,
   sessions = createQrSessionStore(),
+  requestTimeoutMs = REQUEST_TIMEOUT_MS,
 }: {
   fetchImpl?: typeof fetch
   sessions?: QQQrSessionStore
+  requestTimeoutMs?: number
 } = {}) => {
   const createLoginQr = async(): Promise<QQMusicLoginQr> => {
     try {
@@ -107,13 +144,14 @@ export const createQQMusicLoginService = ({
       url.searchParams.set('daid', '383')
       url.searchParams.set('pt_3rd_aid', '100497308')
       url.searchParams.set('u1', LOGIN_JUMP_URL)
-      const response = await fetchWithTimeout(fetchImpl, url)
-      if (!response.ok) throw new Error(CREATE_ERROR)
-      const cookie = mergeCookieValues(getSetCookieValues(response.headers))
-      const qrsig = getCookieValue(cookie, 'qrsig')
-      if (!qrsig) throw new Error(CREATE_ERROR)
+      const { qrsig, bytes } = await fetchWithTimeout(fetchImpl, url, {}, async response => {
+        if (!response.ok) throw new Error(CREATE_ERROR)
+        const cookie = mergeCookieValues(getSetCookieValues(response.headers))
+        const qrsig = getCookieValue(cookie, 'qrsig')
+        if (!qrsig) throw new Error(CREATE_ERROR)
+        return { qrsig, bytes: await response.arrayBuffer() }
+      }, requestTimeoutMs)
       const key = sessions.create({ qrsig, ptqrtoken: hash33(qrsig) })
-      const bytes = await response.arrayBuffer()
       return {
         key,
         qrimg: `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`,
@@ -130,7 +168,7 @@ export const createQQMusicLoginService = ({
     const checkSigResponse = await fetchWithTimeout(fetchImpl, redirectUrl, {
       redirect: 'manual',
       headers: { Cookie: getCookie() },
-    })
+    }, response => response, requestTimeoutMs)
     cookieValues.push(...getResponseCookies(checkSigResponse))
     const pSkey = getCookieValue(getCookie(), 'p_skey')
     if (!pSkey) throw new Error(CHECK_ERROR)
@@ -140,17 +178,13 @@ export const createQQMusicLoginService = ({
       redirect: 'manual',
       headers: { Cookie: getCookie() },
       body: createAuthorizeData(pSkey),
-    })
+    }, response => response, requestTimeoutMs)
     cookieValues.push(...getResponseCookies(authorizeResponse))
     const location = authorizeResponse.headers.get('location')
     if (authorizeResponse.status < 300 || authorizeResponse.status >= 400 || !location) {
       throw new Error(CHECK_ERROR)
     }
-    let code = ''
-    try {
-      code = new URL(location).searchParams.get('code') ?? ''
-    } catch {}
-    if (!code) throw new Error(CHECK_ERROR)
+    const code = getTrustedOAuthCode(location)
 
     const loginResponse = await fetchWithTimeout(fetchImpl, 'https://u.y.qq.com/cgi-bin/musicu.fcg', {
       method: 'POST',
@@ -159,12 +193,11 @@ export const createQQMusicLoginService = ({
         Cookie: getCookie(),
       },
       body: getLoginBody(pSkey, code),
-    })
+    }, response => response, requestTimeoutMs)
     if (!loginResponse.ok) throw new Error(CHECK_ERROR)
     cookieValues.push(...getResponseCookies(loginResponse))
     const cookie = getCookie()
-    const credential = getCookieValue(cookie, 'qqmusic_key') || getCookieValue(cookie, 'qm_keyst')
-    if (!cookie || !credential) throw new Error(CHECK_ERROR)
+    if (!getQQMusicAccountUin(cookie)) throw new Error(CHECK_ERROR)
     return cookie
   }
 
@@ -194,11 +227,14 @@ export const createQQMusicLoginService = ({
       url.searchParams.set('pt_3rd_aid', '100497308')
       url.searchParams.set('o1vId', '3674fc47871e9c407d8838690b355408')
       url.searchParams.set('pt_js_version', 'v1.48.1')
-      response = await fetchWithTimeout(fetchImpl, url, {
+      const pollResult = await fetchWithTimeout(fetchImpl, url, {
         headers: { Cookie: `qrsig=${session.qrsig}` },
-      })
-      if (!response.ok) throw new Error(CHECK_ERROR)
-      status = parseQQQrStatus(await response.text())
+      }, async response => {
+        if (!response.ok) throw new Error(CHECK_ERROR)
+        return { response, text: await response.text() }
+      }, requestTimeoutMs)
+      response = pollResult.response
+      status = parseQQQrStatus(pollResult.text)
     } catch {
       throw new Error(CHECK_ERROR)
     }
@@ -215,7 +251,7 @@ export const createQQMusicLoginService = ({
     }
 
     try {
-      const cookie = await completeOAuth(response, status.redirectUrl)
+      const cookie = await completeOAuth(response, getTrustedCheckSigUrl(status.redirectUrl))
       sessions.delete(key)
       return { state: 'success', message: '登录成功', cookie }
     } catch {

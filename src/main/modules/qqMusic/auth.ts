@@ -61,6 +61,12 @@ export const getCookieValue = (cookie: string, name: string): string => {
   return result
 }
 
+export const getQQMusicAccountUin = (cookie: string): string => {
+  const key = getCookieValue(cookie, 'qqmusic_key') || getCookieValue(cookie, 'qm_keyst')
+  const uin = getCookieValue(cookie, 'uin') || getCookieValue(cookie, 'qqmusic_uin')
+  return key && uin ? uin : ''
+}
+
 export const redactQQMusicSecret = (value: unknown): string => {
   return String(value)
     .replace(/("Cookie"\s*:\s*")(?:\\.|[^"\\\r\n])*"/gi, '$1[REDACTED]"')

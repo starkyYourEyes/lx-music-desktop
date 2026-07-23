@@ -2,6 +2,10 @@ const assert = require('node:assert')
 const path = require('node:path')
 const loadTsModule = require('./test-utils/load-ts-module')
 
+const { getQQMusicAccountUin } = loadTsModule(
+  path.join(__dirname, '../src/main/modules/qqMusic/auth.ts'),
+)
+
 const data = new Map([['neteaseAccount', { cookie: 'keep-netease' }]])
 const store = {
   get: key => data.get(key),
@@ -13,6 +17,8 @@ let loginResult = {
   cookie: 'uin=o123; qqmusic_key=secret',
 }
 let songError = null
+let pendingSongPromise = null
+let singletonGetCookie
 class QQMusicAuthError extends Error {}
 const loginService = {
   createLoginQr: async() => ({ key: 'opaque', qrimg: 'data:image/png;base64,AA==' }),
@@ -20,6 +26,7 @@ const loginService = {
 }
 const songService = {
   getGuessLikeSongs: async() => {
+    if (pendingSongPromise) return pendingSongPromise
     if (songError) throw songError
     return [{ id: 'tx_mid' }]
   },
@@ -36,8 +43,12 @@ const { createQQMusicAccountService } = loadTsModule(
     './login': {
       createQQMusicLoginService: () => loginService,
     },
+    './auth': { getQQMusicAccountUin },
     './song': {
-      createQQMusicSongService: () => songService,
+      createQQMusicSongService: options => {
+        singletonGetCookie = options.getCookie
+        return songService
+      },
       isQQMusicAuthError: error => error instanceof QQMusicAuthError,
     },
   },
@@ -109,6 +120,72 @@ const main = async() => {
     profile: null,
   })
   assert.deepStrictEqual(data.get('neteaseAccount'), { cookie: 'keep-netease' })
+
+  loginResult = {
+    state: 'success',
+    message: '登录成功',
+    cookie: 'qqmusic_key=key-without-uin',
+  }
+  await assert.rejects(restarted.checkLoginQr('missing-uin'), error => {
+    assert.strictEqual(error.message, 'QQ Music login check failed')
+    assert.strictEqual(Object.hasOwn(error, 'cookie'), false)
+    assert.strictEqual(String(error).includes('key-without-uin'), false)
+    return true
+  })
+  assert.deepStrictEqual(restarted.getAccountStatus(), {
+    isLoggedIn: false,
+    profile: null,
+  })
+  assert.strictEqual(data.get('qqMusicAccount').cookie, '')
+
+  data.set('qqMusicAccount', {
+    cookie: 'qqmusic_key=stored-key-without-uin',
+    profile: { uin: 'o999', nickname: 'QQ 音乐账号' },
+    updatedAt: 200,
+  })
+  assert.deepStrictEqual(createFacade().getAccountStatus(), {
+    isLoggedIn: false,
+    profile: null,
+  })
+  assert.strictEqual(singletonGetCookie(), '')
+
+  data.set('qqMusicAccount', {
+    cookie: 'uin=o123; qqmusic_key=stored-mismatch',
+    profile: { uin: 'o456', nickname: 'QQ 音乐账号' },
+    updatedAt: 201,
+  })
+  assert.deepStrictEqual(createFacade().getAccountStatus(), {
+    isLoggedIn: false,
+    profile: null,
+  })
+  assert.strictEqual(singletonGetCookie(), '')
+  assert.deepStrictEqual(data.get('neteaseAccount'), { cookie: 'keep-netease' })
+
+  data.set('qqMusicAccount', {
+    cookie: 'uin=oA; qqmusic_key=account-a',
+    profile: { uin: 'oA', nickname: 'QQ 音乐账号' },
+    updatedAt: 301,
+  })
+  let rejectAccountA
+  pendingSongPromise = new Promise((resolve, reject) => {
+    rejectAccountA = reject
+  })
+  const raceFacade = createFacade()
+  const accountARequest = raceFacade.getGuessLikeSongs()
+  const accountB = {
+    cookie: 'uin=oB; qqmusic_key=account-b',
+    profile: { uin: 'oB', nickname: 'QQ 音乐账号' },
+    updatedAt: 302,
+  }
+  data.set('qqMusicAccount', accountB)
+  rejectAccountA(new QQMusicAuthError('account A expired'))
+  await assert.rejects(accountARequest, QQMusicAuthError)
+  pendingSongPromise = null
+  assert.deepStrictEqual(raceFacade.getAccountStatus(), {
+    isLoggedIn: true,
+    profile: accountB.profile,
+  })
+  assert.deepStrictEqual(data.get('qqMusicAccount'), accountB)
 }
 
 main().then(() => {

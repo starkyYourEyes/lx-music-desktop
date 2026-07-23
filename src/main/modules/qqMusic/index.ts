@@ -5,7 +5,10 @@ import {
   type QQMusicInternalLoginCheck,
   type QQMusicLoginQr,
 } from './login'
+import { getQQMusicAccountUin } from './auth'
 import { createQQMusicSongService, isQQMusicAuthError } from './song'
+
+const CHECK_ERROR = 'QQ Music login check failed'
 
 interface QQMusicProfile {
   uin: string
@@ -55,17 +58,10 @@ const getAccountData = (store: AccountStore): QQMusicAccountData => {
     (value.profile !== null && !isProfile(value.profile)) || typeof value.updatedAt != 'number') {
     return emptyAccount()
   }
+  if (!value.cookie) return value.profile === null ? value : emptyAccount()
+  const uin = getQQMusicAccountUin(value.cookie)
+  if (!uin || !value.profile || value.profile.uin != uin) return emptyAccount()
   return value
-}
-
-const getCookieValue = (cookie: string, name: string) => {
-  let result = ''
-  for (const item of cookie.split(';')) {
-    const separator = item.indexOf('=')
-    if (separator < 1 || item.slice(0, separator).trim() != name) continue
-    result = item.slice(separator + 1).trim()
-  }
-  return result
 }
 
 export const createQQMusicAccountService = ({
@@ -101,8 +97,10 @@ export const createQQMusicAccountService = ({
         profile: null,
       }
     }
+    const uin = getQQMusicAccountUin(result.cookie)
+    if (!uin) throw new Error(CHECK_ERROR)
     const profile: QQMusicProfile = {
-      uin: getCookieValue(result.cookie, 'uin') || getCookieValue(result.cookie, 'qqmusic_uin'),
+      uin,
       nickname: 'QQ 音乐账号',
     }
     store.set(DATA_KEYS.qqMusicAccount, {
@@ -123,10 +121,16 @@ export const createQQMusicAccountService = ({
   }
 
   const getGuessLikeSongs = async() => {
+    const account = getAccountData(store)
     try {
       return await songService.getGuessLikeSongs()
     } catch (error) {
-      if (isQQMusicAuthError(error)) clearAccount()
+      if (isQQMusicAuthError(error)) {
+        const currentAccount = getAccountData(store)
+        if (currentAccount.cookie == account.cookie && currentAccount.updatedAt == account.updatedAt) {
+          clearAccount()
+        }
+      }
       throw error
     }
   }

@@ -181,6 +181,7 @@ import LoginPanel from './components/LoginPanel.vue'
 import QQGuessLikeSection from './components/QQGuessLikeSection.vue'
 import SimilarSongsSection from './components/SimilarSongsSection.vue'
 import SpecialCards from './components/SpecialCards.vue'
+import { createLatestLoadCoordinator } from './accountLoadCoordinator'
 import { useNeteaseLoginQr } from './useNeteaseLoginQr'
 import { useQQGuessLikeData } from './useQQGuessLikeData'
 import { useQQMusicLoginQr } from './useQQMusicLoginQr'
@@ -203,6 +204,7 @@ const setRecommendSectionRef = (instance: HorizontalPlaylistSectionExpose | null
 
 const profileNickname = computed(() => neteaseProfile.value?.nickname ? neteaseProfile.value.nickname : 'WY')
 const qqAccountKey = computed(() => qqIsLoggedIn.value ? qqProfile.value?.uin ?? null : null)
+const neteaseAccountKey = computed(() => neteaseIsLoggedIn.value ? String(neteaseProfile.value?.userId ?? '') || null : null)
 const isExploreMode = computed(() => route.query.category === 'playlists')
 const pageTitle = computed(() => isExploreMode.value ? '更多推荐' : '推荐')
 const pageSubTitle = computed(() => neteaseIsLoggedIn.value ? `${profileNickname.value} 的音乐首页` : '登录后获取每日推荐、私人漫游与雷达歌单')
@@ -307,14 +309,26 @@ const {
   },
 })
 
-let isHandlingQQQrLoginSuccess = false
-let isHandlingNeteaseQrLoginSuccess = false
 let isInitializingQQAccount = false
 let isInitializingNeteaseAccount = false
-let qqLifecycleRevision = 0
-let neteaseLifecycleRevision = 0
 let forceQQLoadAfterInitialization = false
 let forceNeteaseLoadAfterInitialization = false
+let suppressNextQQAccountWatchKey: string | null = null
+let suppressNextNeteaseAccountWatchKey: string | null = null
+let initializationHandledQQKey: string | null = null
+let initializationHandledNeteaseKey: string | null = null
+
+const qqLoadCoordinator = createLatestLoadCoordinator(async force => {
+  if (!qqAccountKey.value) {
+    clearQQGuessLikeSongs()
+    return
+  }
+  await loadQQGuessLikeSongs(force)
+})
+
+const neteaseLoadCoordinator = createLatestLoadCoordinator(async force => {
+  await loadRecommendPlaylists(force)
+})
 
 const {
   qrStatusText: qqQrStatusText,
@@ -325,15 +339,14 @@ const {
   handleShowLogin: openQQLoginPanel,
   handleCloseLogin: handleCloseQQLogin,
 } = useQQMusicLoginQr(async() => {
-  isHandlingQQQrLoginSuccess = true
-  qqLifecycleRevision++
-  forceQQLoadAfterInitialization = false
-  try {
-    handleCloseQQLogin()
-    await loadQQGuessLikeSongs(true)
-  } finally {
-    isHandlingQQQrLoginSuccess = false
-  }
+  const handledKey = qqAccountKey.value
+  suppressNextQQAccountWatchKey = handledKey
+  if (isInitializingQQAccount) initializationHandledQQKey = handledKey
+  handleCloseQQLogin()
+  const request = qqLoadCoordinator.request(true)
+  await nextTick()
+  if (suppressNextQQAccountWatchKey == handledKey) suppressNextQQAccountWatchKey = null
+  await request
 })
 
 const {
@@ -345,15 +358,14 @@ const {
   handleShowLogin: openNeteaseLoginPanel,
   handleCloseLogin: handleCloseNeteaseLogin,
 } = useNeteaseLoginQr(async() => {
-  isHandlingNeteaseQrLoginSuccess = true
-  neteaseLifecycleRevision++
-  forceNeteaseLoadAfterInitialization = false
-  try {
-    handleCloseNeteaseLogin()
-    await loadRecommendPlaylists(true)
-  } finally {
-    isHandlingNeteaseQrLoginSuccess = false
-  }
+  const handledKey = neteaseAccountKey.value
+  suppressNextNeteaseAccountWatchKey = handledKey
+  if (isInitializingNeteaseAccount) initializationHandledNeteaseKey = handledKey
+  handleCloseNeteaseLogin()
+  const request = neteaseLoadCoordinator.request(true)
+  await nextTick()
+  if (suppressNextNeteaseAccountWatchKey == handledKey) suppressNextNeteaseAccountWatchKey = null
+  await request
 })
 
 const handleShowQQLogin = () => {
@@ -369,7 +381,7 @@ const handleShowNeteaseLogin = () => {
 }
 
 const handleRefreshQQGuessLike = async() => {
-  await loadQQGuessLikeSongs(true)
+  await qqLoadCoordinator.request(true)
 }
 
 const handleRefreshRecommendPlaylists = async() => {
@@ -404,34 +416,41 @@ watch(() => route.query.login, login => {
   }
 }, { immediate: true })
 
-watch(neteaseIsLoggedIn, (value, oldValue) => {
-  if (oldValue == null || value == oldValue) return
+watch(neteaseAccountKey, (value, oldValue) => {
+  if (value == oldValue) return
+  const suppressedKey = suppressNextNeteaseAccountWatchKey
+  if (suppressedKey != null) {
+    suppressNextNeteaseAccountWatchKey = null
+    if (value == suppressedKey) return
+  }
   if (value) handleCloseNeteaseLogin()
-  if (isHandlingNeteaseQrLoginSuccess) return
   if (isInitializingNeteaseAccount) {
     forceNeteaseLoadAfterInitialization = true
     return
   }
-  neteaseLifecycleRevision++
-  void loadRecommendPlaylists(true)
+  void neteaseLoadCoordinator.request(true)
 })
 
 watch(qqAccountKey, (value, oldValue) => {
   if (value == oldValue) return
+  const suppressedKey = suppressNextQQAccountWatchKey
+  if (suppressedKey != null) {
+    suppressNextQQAccountWatchKey = null
+    if (value == suppressedKey) return
+  }
   if (!value) {
-    qqLifecycleRevision++
     forceQQLoadAfterInitialization = false
+    qqLoadCoordinator.invalidate()
     clearQQGuessLikeSongs()
     return
   }
   handleCloseQQLogin()
-  if (isHandlingQQQrLoginSuccess) return
+  clearQQGuessLikeSongs()
   if (isInitializingQQAccount) {
     forceQQLoadAfterInitialization = true
     return
   }
-  qqLifecycleRevision++
-  void loadQQGuessLikeSongs(true)
+  void qqLoadCoordinator.request(true)
 })
 
 const handleQQMusicLoginRequest = () => {
@@ -443,38 +462,48 @@ const handleNeteaseLoginRequest = () => {
 }
 
 const initializeQQAccount = async() => {
-  const revision = qqLifecycleRevision
+  let currentKey: string | null = null
   let force = false
-  let hasAccount = false
+  let handledKey: string | null = null
   isInitializingQQAccount = true
   try {
     await initQQMusicAccount().catch(() => null)
     await nextTick()
-    if (revision != qqLifecycleRevision) return
+    currentKey = qqAccountKey.value
     force = forceQQLoadAfterInitialization
+    handledKey = initializationHandledQQKey
     forceQQLoadAfterInitialization = false
-    hasAccount = qqAccountKey.value != null
+    initializationHandledQQKey = null
   } finally {
     isInitializingQQAccount = false
   }
-  if (hasAccount) await loadQQGuessLikeSongs(force)
-  else clearQQGuessLikeSongs()
+  if (!currentKey) {
+    qqLoadCoordinator.invalidate()
+    clearQQGuessLikeSongs()
+    return
+  }
+  if (handledKey == currentKey && !force) return
+  await qqLoadCoordinator.request(force || handledKey != null)
 }
 
 const initializeNeteaseAccount = async() => {
-  const revision = neteaseLifecycleRevision
+  let currentKey: string | null = null
   let force = false
+  let handledKey: string | null = null
   isInitializingNeteaseAccount = true
   try {
     await initNeteaseAccount().catch(() => null)
     await nextTick()
-    if (revision != neteaseLifecycleRevision) return
+    currentKey = neteaseAccountKey.value
     force = forceNeteaseLoadAfterInitialization
+    handledKey = initializationHandledNeteaseKey
     forceNeteaseLoadAfterInitialization = false
+    initializationHandledNeteaseKey = null
   } finally {
     isInitializingNeteaseAccount = false
   }
-  await loadRecommendPlaylists(force)
+  if (handledKey == currentKey && handledKey != null && !force) return
+  await neteaseLoadCoordinator.request(force || handledKey != null)
 }
 
 onMounted(() => {

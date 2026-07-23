@@ -48,6 +48,63 @@ const song = id => ({ id, name: id, singer: 'Singer', source: 'tx', interval: nu
 
 const root = path.resolve(__dirname, '..')
 
+const testLatestLoadCoordinator = async() => {
+  const { createLatestLoadCoordinator } = loadTsModule(
+    path.join(root, 'src/renderer/views/Recommend/accountLoadCoordinator.ts'),
+  )
+
+  const firstLoad = deferred()
+  const latestLoad = deferred()
+  const calls = []
+  let currentAccount = 'A'
+  const coordinator = createLatestLoadCoordinator(async force => {
+    calls.push([currentAccount, force])
+    await (calls.length == 1 ? firstLoad.promise : latestLoad.promise)
+  })
+
+  const requestA = coordinator.request()
+  await Promise.resolve()
+  assert.deepStrictEqual(calls, [['A', false]])
+
+  currentAccount = 'B'
+  const requestB = coordinator.request(true)
+  currentAccount = 'C'
+  const requestC = coordinator.request(false)
+  firstLoad.resolve()
+  await requestA
+  await requestB
+  await Promise.resolve()
+  assert.deepStrictEqual(calls, [['A', false], ['C', true]])
+  latestLoad.resolve()
+  await requestC
+
+  const invalidatedLoad = deferred()
+  const invalidationCalls = []
+  const invalidationCoordinator = createLatestLoadCoordinator(async force => {
+    invalidationCalls.push(force)
+    if (invalidationCalls.length == 1) await invalidatedLoad.promise
+  })
+  const runningRequest = invalidationCoordinator.request()
+  await Promise.resolve()
+  const invalidatedRequest = invalidationCoordinator.request(true)
+  invalidationCoordinator.invalidate()
+  invalidatedLoad.resolve()
+  await runningRequest
+  await invalidatedRequest
+  assert.deepStrictEqual(invalidationCalls, [false])
+  await invalidationCoordinator.request(false)
+  assert.deepStrictEqual(invalidationCalls, [false, false])
+
+  const recoveryCalls = []
+  const recoveryCoordinator = createLatestLoadCoordinator(async force => {
+    recoveryCalls.push(force)
+    if (recoveryCalls.length == 1) throw new Error('load failed')
+  })
+  await assert.rejects(recoveryCoordinator.request(true), /load failed/)
+  await recoveryCoordinator.request(false)
+  assert.deepStrictEqual(recoveryCalls, [true, false])
+}
+
 const testStaticWiring = () => {
   const aside = fs.readFileSync(path.join(root, 'src/renderer/components/layout/Aside/index.vue'), 'utf8')
   const defaultSetting = fs.readFileSync(path.join(root, 'src/common/defaultSetting.ts'), 'utf8')
@@ -232,40 +289,31 @@ const testStaticWiring = () => {
   assert.match(recommendIndex, /window\.removeEventListener\('show-qq-music-login',\s*handleQQMusicLoginRequest\)/)
   assert.match(recommendIndex, /window\.removeEventListener\('show-netease-login',\s*handleNeteaseLoginRequest\)/)
   assert.match(recommendIndex, /void initializeQQAccount\(\)[\s\S]*?void initializeNeteaseAccount\(\)/)
-  assert.match(recommendIndex, /isHandlingQQQrLoginSuccess/)
-  assert.match(recommendIndex, /handleCloseQQLogin\(\)[\s\S]*?loadQQGuessLikeSongs\(true\)/)
+  assert.match(recommendIndex, /import { createLatestLoadCoordinator } from '.\/accountLoadCoordinator'/)
+  assert.doesNotMatch(recommendIndex, /isHandling(?:QQ|Netease)QrLoginSuccess|(?:qq|netease)LifecycleRevision/)
+  assert.match(recommendIndex, /const neteaseAccountKey\s*=\s*computed\(\(\)\s*=>\s*neteaseIsLoggedIn\.value\s*\?[\s\S]*?neteaseProfile\.value\?\.userId/)
   const qqAccountWatch = recommendIndex.match(/watch\(qqAccountKey,[\s\S]*?\n}\)/)?.[0] || ''
-  const neteaseAccountWatch = recommendIndex.match(/watch\(neteaseIsLoggedIn,[\s\S]*?\n}\)/)?.[0] || ''
-  assert.match(qqAccountWatch, /if\s*\(!value\)[\s\S]*?clearQQGuessLikeSongs\(\)[\s\S]*?loadQQGuessLikeSongs\(true\)/)
-  assert.match(qqAccountWatch, /handleCloseQQLogin\(\)/)
-  assert.match(neteaseAccountWatch, /if\s*\(value\)\s*handleCloseNeteaseLogin\(\)/)
-
-  assert.match(recommendIndex, /let qqLifecycleRevision\s*=\s*0/)
-  assert.match(recommendIndex, /let neteaseLifecycleRevision\s*=\s*0/)
-  assert.match(recommendIndex, /let forceQQLoadAfterInitialization\s*=\s*false/)
-  assert.match(recommendIndex, /let forceNeteaseLoadAfterInitialization\s*=\s*false/)
+  const neteaseAccountWatch = recommendIndex.match(/watch\(neteaseAccountKey,[\s\S]*?\n}\)/)?.[0] || ''
+  assert.match(qqAccountWatch, /suppressNextQQAccountWatchKey[\s\S]*?if\s*\(value\s*==\s*suppressedKey\)\s*return/)
+  assert.match(qqAccountWatch, /if\s*\(!value\)[\s\S]*?qqLoadCoordinator\.invalidate\(\)[\s\S]*?clearQQGuessLikeSongs\(\)/)
+  assert.match(qqAccountWatch, /clearQQGuessLikeSongs\(\)[\s\S]*?if\s*\(isInitializingQQAccount\)[\s\S]*?forceQQLoadAfterInitialization\s*=\s*true[\s\S]*?qqLoadCoordinator\.request\(true\)/)
+  assert.match(neteaseAccountWatch, /suppressNextNeteaseAccountWatchKey[\s\S]*?if\s*\(value\s*==\s*suppressedKey\)\s*return/)
+  assert.match(neteaseAccountWatch, /if\s*\(isInitializingNeteaseAccount\)[\s\S]*?forceNeteaseLoadAfterInitialization\s*=\s*true[\s\S]*?neteaseLoadCoordinator\.request\(true\)/)
 
   const qqQrSuccess = recommendIndex.match(/useQQMusicLoginQr\(async\(\)\s*=>\s*\{[\s\S]*?\n}\)/)?.[0] || ''
   const neteaseQrSuccess = recommendIndex.match(/useNeteaseLoginQr\(async\(\)\s*=>\s*\{[\s\S]*?\n}\)/)?.[0] || ''
-  assert.match(qqQrSuccess, /isHandlingQQQrLoginSuccess\s*=\s*true[\s\S]*?qqLifecycleRevision\+\+[\s\S]*?forceQQLoadAfterInitialization\s*=\s*false[\s\S]*?loadQQGuessLikeSongs\(true\)/)
-  assert.match(neteaseQrSuccess, /isHandlingNeteaseQrLoginSuccess\s*=\s*true[\s\S]*?neteaseLifecycleRevision\+\+[\s\S]*?forceNeteaseLoadAfterInitialization\s*=\s*false[\s\S]*?loadRecommendPlaylists\(true\)/)
-
-  assert.match(qqAccountWatch, /qqLifecycleRevision\+\+[\s\S]*?forceQQLoadAfterInitialization\s*=\s*false[\s\S]*?clearQQGuessLikeSongs\(\)/)
-  assert.match(qqAccountWatch, /if\s*\(isHandlingQQQrLoginSuccess\)\s*return/)
-  assert.match(qqAccountWatch, /if\s*\(isInitializingQQAccount\)\s*\{[\s\S]*?forceQQLoadAfterInitialization\s*=\s*true[\s\S]*?return/)
-  assert.match(qqAccountWatch, /qqLifecycleRevision\+\+[\s\S]*?loadQQGuessLikeSongs\(true\)/)
-  assert.match(neteaseAccountWatch, /if\s*\(isHandlingNeteaseQrLoginSuccess\)\s*return/)
-  assert.match(neteaseAccountWatch, /if\s*\(isInitializingNeteaseAccount\)\s*\{[\s\S]*?forceNeteaseLoadAfterInitialization\s*=\s*true[\s\S]*?return/)
-  assert.match(neteaseAccountWatch, /neteaseLifecycleRevision\+\+[\s\S]*?loadRecommendPlaylists\(true\)/)
+  assert.match(qqQrSuccess, /const handledKey\s*=\s*qqAccountKey\.value[\s\S]*?suppressNextQQAccountWatchKey\s*=\s*handledKey[\s\S]*?initializationHandledQQKey\s*=\s*handledKey[\s\S]*?qqLoadCoordinator\.request\(true\)[\s\S]*?await nextTick\(\)/)
+  assert.match(neteaseQrSuccess, /const handledKey\s*=\s*neteaseAccountKey\.value[\s\S]*?suppressNextNeteaseAccountWatchKey\s*=\s*handledKey[\s\S]*?initializationHandledNeteaseKey\s*=\s*handledKey[\s\S]*?neteaseLoadCoordinator\.request\(true\)[\s\S]*?await nextTick\(\)/)
 
   const initializeQQ = recommendIndex.match(/const initializeQQAccount\s*=\s*async\(\)\s*=>\s*\{[\s\S]*?\n}/)?.[0] || ''
   const initializeNetease = recommendIndex.match(/const initializeNeteaseAccount\s*=\s*async\(\)\s*=>\s*\{[\s\S]*?\n}/)?.[0] || ''
-  assert.match(initializeQQ, /const revision\s*=\s*qqLifecycleRevision[\s\S]*?await initQQMusicAccount\(\)[\s\S]*?await nextTick\(\)[\s\S]*?if\s*\(revision\s*!=\s*qqLifecycleRevision\)\s*return/)
-  assert.match(initializeQQ, /force\s*=\s*forceQQLoadAfterInitialization[\s\S]*?forceQQLoadAfterInitialization\s*=\s*false[\s\S]*?loadQQGuessLikeSongs\(force\)/)
-  assert.match(initializeQQ, /forceQQLoadAfterInitialization\s*=\s*false[\s\S]*?isInitializingQQAccount\s*=\s*false[\s\S]*?loadQQGuessLikeSongs\(force\)/)
-  assert.match(initializeNetease, /const revision\s*=\s*neteaseLifecycleRevision[\s\S]*?await initNeteaseAccount\(\)[\s\S]*?await nextTick\(\)[\s\S]*?if\s*\(revision\s*!=\s*neteaseLifecycleRevision\)\s*return/)
-  assert.match(initializeNetease, /force\s*=\s*forceNeteaseLoadAfterInitialization[\s\S]*?forceNeteaseLoadAfterInitialization\s*=\s*false[\s\S]*?loadRecommendPlaylists\(force\)/)
-  assert.match(initializeNetease, /forceNeteaseLoadAfterInitialization\s*=\s*false[\s\S]*?isInitializingNeteaseAccount\s*=\s*false[\s\S]*?loadRecommendPlaylists\(force\)/)
+  assert.match(initializeQQ, /await initQQMusicAccount\(\)[\s\S]*?await nextTick\(\)[\s\S]*?currentKey\s*=\s*qqAccountKey\.value[\s\S]*?handledKey\s*=\s*initializationHandledQQKey/)
+  assert.match(initializeQQ, /forceQQLoadAfterInitialization\s*=\s*false[\s\S]*?initializationHandledQQKey\s*=\s*null[\s\S]*?isInitializingQQAccount\s*=\s*false/)
+  assert.match(initializeQQ, /if\s*\(!currentKey\)[\s\S]*?qqLoadCoordinator\.invalidate\(\)[\s\S]*?clearQQGuessLikeSongs\(\)/)
+  assert.match(initializeQQ, /handledKey\s*==\s*currentKey\s*&&\s*!force[\s\S]*?qqLoadCoordinator\.request\(force\s*\|\|\s*handledKey\s*!=\s*null\)/)
+  assert.match(initializeNetease, /await initNeteaseAccount\(\)[\s\S]*?await nextTick\(\)[\s\S]*?currentKey\s*=\s*neteaseAccountKey\.value[\s\S]*?handledKey\s*=\s*initializationHandledNeteaseKey/)
+  assert.match(initializeNetease, /forceNeteaseLoadAfterInitialization\s*=\s*false[\s\S]*?initializationHandledNeteaseKey\s*=\s*null[\s\S]*?isInitializingNeteaseAccount\s*=\s*false/)
+  assert.match(initializeNetease, /handledKey\s*==\s*currentKey[\s\S]*?&&\s*!force[\s\S]*?neteaseLoadCoordinator\.request\(force\s*\|\|\s*handledKey\s*!=\s*null\)/)
   assert.match(
     recommendIndex,
     /if\s*\(!isExploreMode\.value\s*&&\s*\([\s\S]*?qqIsLoggedIn\.value[\s\S]*?appSetting\['recommend\.qqGuessLikeLoggedOutVisible'\][\s\S]*?\)\)\s*return ''/,
@@ -619,6 +667,7 @@ const testClearAfterProfileReset = async() => {
 }
 
 const main = async() => {
+  await testLatestLoadCoordinator()
   testStaticWiring()
   await testQQRecommendPlayback()
   await testLoggedOutClearsWithoutRequest()

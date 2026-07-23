@@ -50,6 +50,14 @@ assert.strictEqual(
   redactQQMusicSecret('{"Cookie":"uin=o123; qqmusic_key=secret","other":"x"}'),
   '{"Cookie":"[REDACTED]","other":"x"}',
 )
+assert.strictEqual(
+  redactQQMusicSecret('{"Cookie":"foo=\\"quoted\\"; qqmusic_key=music-secret","other":"x"}'),
+  '{"Cookie":"[REDACTED]","other":"x"}',
+)
+assert.strictEqual(
+  redactQQMusicSecret('Cookie: uin=o123; qrsig=qr-secret; qqmusic_key=music-secret\n    at fetch...'),
+  'Cookie: [REDACTED]\n    at fetch...',
+)
 
 let now = 1000
 let nextId = 0

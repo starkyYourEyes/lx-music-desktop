@@ -63,9 +63,9 @@ export const getCookieValue = (cookie: string, name: string): string => {
 
 export const redactQQMusicSecret = (value: unknown): string => {
   return String(value)
-    .replace(/("Cookie"\s*:\s*")[^"\r\n]*"/gi, '$1[REDACTED]"')
-    .replace(/('Cookie'\s*:\s*')[^'\r\n]*'/gi, "$1[REDACTED]'")
-    .replace(/Cookie:\s*[^\r\n]*?(?=\s+(?:qrsig|ptqrtoken|code)=|[\r\n]|$)/gi, 'Cookie: [REDACTED]')
+    .replace(/("Cookie"\s*:\s*")(?:\\.|[^"\\\r\n])*"/gi, '$1[REDACTED]"')
+    .replace(/('Cookie'\s*:\s*')(?:\\.|[^'\\\r\n])*'/gi, "$1[REDACTED]'")
+    .replace(/Cookie:\s*[^\r\n]*?(?=(?<![;\s])\s+(?:qrsig|ptqrtoken|code)=|[\r\n]|$)/gi, 'Cookie: [REDACTED]')
     .replace(/\b(qrsig|ptqrtoken|code)=([^\s&]+)/gi, '$1=[REDACTED]')
 }
 

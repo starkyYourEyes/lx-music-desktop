@@ -7,6 +7,7 @@ const {
   getGtk,
   getSetCookieValues,
   mergeCookieValues,
+  getCookieValue,
   redactQQMusicSecret,
   createQrSessionStore,
 } = loadTsModule(path.join(__dirname, '../src/main/modules/qqMusic/auth.ts'))
@@ -36,9 +37,18 @@ const fallbackHeaders = {
   get: () => 'a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT, b=2; Path=/',
 }
 assert.strictEqual(mergeCookieValues(getSetCookieValues(fallbackHeaders)), 'a=1; b=2')
+assert.strictEqual(getCookieValue('uin=old; uin=new', 'uin'), 'new')
 assert.strictEqual(
   redactQQMusicSecret('Cookie: uin=o123; qqmusic_key=secret qrsig=qr-value code=oauth-code'),
   'Cookie: [REDACTED] qrsig=[REDACTED] code=[REDACTED]',
+)
+assert.strictEqual(
+  redactQQMusicSecret('Cookie: uin=o123; qqmusic_key=secret\n    at fetch...'),
+  'Cookie: [REDACTED]\n    at fetch...',
+)
+assert.strictEqual(
+  redactQQMusicSecret('{"Cookie":"uin=o123; qqmusic_key=secret","other":"x"}'),
+  '{"Cookie":"[REDACTED]","other":"x"}',
 )
 
 let now = 1000

@@ -53,16 +53,19 @@ export const mergeCookieValues = (values: string[]): string => {
 }
 
 export const getCookieValue = (cookie: string, name: string): string => {
+  let result = ''
   for (const item of cookie.split(';')) {
     const pair = getCookiePair(item)
-    if (pair?.name == name) return pair.value
+    if (pair?.name == name) result = pair.value
   }
-  return ''
+  return result
 }
 
 export const redactQQMusicSecret = (value: unknown): string => {
   return String(value)
-    .replace(/Cookie:\s*[^\r\n]+?(?=\s+qrsig=|$)/gi, 'Cookie: [REDACTED]')
+    .replace(/("Cookie"\s*:\s*")[^"\r\n]*"/gi, '$1[REDACTED]"')
+    .replace(/('Cookie'\s*:\s*')[^'\r\n]*'/gi, "$1[REDACTED]'")
+    .replace(/Cookie:\s*[^\r\n]*?(?=\s+(?:qrsig|ptqrtoken|code)=|[\r\n]|$)/gi, 'Cookie: [REDACTED]')
     .replace(/\b(qrsig|ptqrtoken|code)=([^\s&]+)/gi, '$1=[REDACTED]')
 }
 

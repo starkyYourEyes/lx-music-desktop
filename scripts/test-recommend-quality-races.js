@@ -100,14 +100,108 @@ const loadRecommendComposable = ({ accountKey, getPlaylists, getHome }) => {
   }).useRecommendData
 }
 
-const createRecommendState = ({ accountKey, getPlaylists, getHome, onHomeSongsUpdated = () => {} }) => {
+const createRecommendState = ({
+  accountKey,
+  getPlaylists,
+  getHome,
+  isExploreMode = ref(false),
+  onHomeSongsUpdated = () => {},
+}) => {
   const useRecommendData = loadRecommendComposable({ accountKey, getPlaylists, getHome })
   return useRecommendData({
     accountKey,
-    isExploreMode: ref(false),
+    isExploreMode,
     playlistScrollRef: ref(null),
     onHomeSongsUpdated,
   })
+}
+
+const testSameAccountCacheHitRetainsPendingBackgroundOwnership = async() => {
+  const accountKey = ref('same-account')
+  const baseRequest = deferred()
+  const chartRequest = deferred()
+  const state = createRecommendState({
+    accountKey,
+    getPlaylists: async() => baseRequest.promise,
+    getHome: async({ sections }) => sections.includes('charts')
+      ? chartRequest.promise
+      : home('same-account'),
+  })
+
+  await state.loadRecommendPlaylists(true)
+  await state.loadRecommendPlaylists()
+
+  baseRequest.resolve([playlist('same-account-late-base')])
+  chartRequest.resolve(home('same-account-late-chart'))
+  await settle()
+
+  assert.deepStrictEqual(state.recommendPlaylists.value, [playlist('same-account-late-base')])
+  assert.deepStrictEqual(state.homeCharts.value, home('same-account-late-chart').charts)
+}
+
+const testCacheHitDuringSameAccountRefreshSettlesLoading = async() => {
+  const accountKey = ref('loading-account')
+  let refreshRequests = null
+  const state = createRecommendState({
+    accountKey,
+    getPlaylists: async() => refreshRequests?.base.promise ?? [playlist('loading-account-cached-base')],
+    getHome: async({ sections }) => {
+      if (!refreshRequests) return home('loading-account-cached')
+      return sections.includes('charts')
+        ? refreshRequests.charts.promise
+        : refreshRequests.core.promise
+    },
+  })
+  await state.loadRecommendPlaylists(true)
+  await settle()
+
+  refreshRequests = { base: deferred(), core: deferred(), charts: deferred() }
+  const refreshing = state.loadRecommendPlaylists(true)
+  await state.loadRecommendPlaylists()
+  assert.strictEqual(state.isLoadingPlaylists.value, true)
+
+  refreshRequests.base.resolve([playlist('loading-account-refreshed-base')])
+  refreshRequests.charts.resolve(home('loading-account-refreshed-chart'))
+  refreshRequests.core.resolve(home('loading-account-refreshed'))
+  await refreshing
+  await settle()
+
+  assert.strictEqual(state.isLoadingPlaylists.value, false)
+  assert.deepStrictEqual(state.recommendPlaylists.value, [playlist('loading-account-refreshed-base')])
+}
+
+const testHomeExploreHomeTransitionsRetainOnlyCurrentContextResults = async() => {
+  const accountKey = ref('mode-account')
+  const isExploreMode = ref(false)
+  const homeBaseRequest = deferred()
+  const homeChartRequest = deferred()
+  const exploreBaseRequest = deferred()
+  const state = createRecommendState({
+    accountKey,
+    isExploreMode,
+    getPlaylists: async(_limit, isExplore) => isExplore
+      ? exploreBaseRequest.promise
+      : homeBaseRequest.promise,
+    getHome: async({ sections }) => sections.includes('charts')
+      ? homeChartRequest.promise
+      : home('mode-account-home'),
+  })
+
+  await state.loadRecommendPlaylists(true)
+  isExploreMode.value = true
+  const loadingExplore = state.loadRecommendPlaylists(true)
+  isExploreMode.value = false
+  await state.loadRecommendPlaylists()
+
+  exploreBaseRequest.resolve([playlist('mode-account-explore')])
+  await loadingExplore
+  homeBaseRequest.resolve([playlist('mode-account-home')])
+  homeChartRequest.resolve(home('mode-account-home-chart'))
+  await settle()
+
+  assert.deepStrictEqual(state.recommendPlaylists.value, [playlist('mode-account-home')])
+  assert.deepStrictEqual(state.homeCharts.value, home('mode-account-home-chart').charts)
+  assert.strictEqual(state.isLoadingPlaylists.value, false)
 }
 
 const testLateAccountAResponsesCannotReplaceFailedAccountB = async() => {
@@ -385,6 +479,9 @@ const testUnmountInvalidatesInflightQrCheck = async() => {
 
 const groups = {
   recommend: [
+    testSameAccountCacheHitRetainsPendingBackgroundOwnership,
+    testCacheHitDuringSameAccountRefreshSettlesLoading,
+    testHomeExploreHomeTransitionsRetainOnlyCurrentContextResults,
     testLateAccountAResponsesCannotReplaceFailedAccountB,
     testAccountTransitionClearsVisibleRecommendationsImmediately,
     testRecommendationCachesAreAccountScopedAcrossRemounts,

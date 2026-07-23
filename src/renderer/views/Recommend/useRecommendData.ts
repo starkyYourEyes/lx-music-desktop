@@ -51,7 +51,8 @@ export const useRecommendData = ({
 
   let activeAccountKey = accountKey.value
   let accountRevision = 0
-  let loadRevision = 0
+  const loadRevisions = new Map<string, number>()
+  const blockingLoadRevisions = new Map<string, number>()
 
   interface AccountRequestContext {
     accountKey: string | null
@@ -61,6 +62,7 @@ export const useRecommendData = ({
 
   interface LoadRequestContext extends AccountRequestContext {
     loadRevision: number
+    loadContextKey: string
     isExploreMode: boolean
     recommendPlaylistCacheKey: string
     scrollCacheKey: string
@@ -173,7 +175,8 @@ export const useRecommendData = ({
     if (activeAccountKey == accountKey.value) return
     activeAccountKey = accountKey.value
     accountRevision++
-    loadRevision++
+    loadRevisions.clear()
+    blockingLoadRevisions.clear()
     clearVisibleState()
   }
 
@@ -188,21 +191,39 @@ export const useRecommendData = ({
 
   const createLoadRequestContext = (): LoadRequestContext => {
     const accountContext = createAccountRequestContext()
+    const loadContextKey = scrollCacheKey.value
     return {
       ...accountContext,
-      loadRevision: ++loadRevision,
+      loadRevision: loadRevisions.get(loadContextKey) ?? 0,
+      loadContextKey,
       isExploreMode: isExploreMode.value,
       recommendPlaylistCacheKey: recommendPlaylistCacheKey.value,
       scrollCacheKey: scrollCacheKey.value,
     }
   }
 
+  const claimLoadRequest = (context: LoadRequestContext) => {
+    const nextRevision = context.loadRevision + 1
+    loadRevisions.set(context.loadContextKey, nextRevision)
+    blockingLoadRevisions.set(context.loadContextKey, nextRevision)
+    return { ...context, loadRevision: nextRevision }
+  }
+
   const isCurrentAccountRequest = (context: AccountRequestContext) => {
     return context.accountKey == accountKey.value && context.accountRevision == accountRevision
   }
 
+  const isCurrentRequestOwner = (context: LoadRequestContext) => {
+    return isCurrentAccountRequest(context) &&
+      context.loadRevision == (loadRevisions.get(context.loadContextKey) ?? 0)
+  }
+
   const isCurrentRequest = (context: LoadRequestContext) => {
-    return isCurrentAccountRequest(context) && context.loadRevision == loadRevision
+    return isCurrentRequestOwner(context) && context.loadContextKey == scrollCacheKey.value
+  }
+
+  const isContextLoading = (context: LoadRequestContext) => {
+    return blockingLoadRevisions.get(context.loadContextKey) == context.loadRevision
   }
 
   const fetchBaseRecommendPlaylists = async(context: LoadRequestContext, forceRefresh = false) => {
@@ -214,7 +235,7 @@ export const useRecommendData = ({
       context.isExploreMode ? EXPLORE_PLAYLIST_LIMIT : HOME_RECOMMEND_PLAYLIST_LIMIT,
       context.isExploreMode,
     )
-    if (isCurrentRequest(context)) setRecommendPlaylistCache(list, cacheKey)
+    if (isCurrentRequestOwner(context)) setRecommendPlaylistCache(list, cacheKey)
     return list
   }
 
@@ -234,21 +255,23 @@ export const useRecommendData = ({
       songLimit: HOME_SONG_LIMIT,
       sections,
     })
-    if (isFullHomeRequest && isCurrentRequest(context)) setHomeRecommendationCache(data, cacheKey)
+    if (isFullHomeRequest && isCurrentRequestOwner(context)) setHomeRecommendationCache(data, cacheKey)
     return data
   }
 
   const loadRecommendPlaylists = async(forceRefresh = false) => {
-    const context = createLoadRequestContext()
+    let context = createLoadRequestContext()
     const cachedList = forceRefresh ? null : getRecommendPlaylistCache(context.recommendPlaylistCacheKey)
     const cachedHome = forceRefresh || context.isExploreMode ? null : getHomeRecommendationCache(context.homeRecommendationCacheKey)
     if (cachedList) recommendPlaylists.value = cachedList
     if (cachedHome) homeRecommendation.value = cachedHome
     if (!forceRefresh && (context.isExploreMode ? !!cachedList : hasCoreHomeContent(cachedHome))) {
+      isLoadingPlaylists.value = isContextLoading(context)
       await restoreScrollPosition(context.scrollCacheKey, context)
       return
     }
 
+    context = claimLoadRequest(context)
     isLoadingPlaylists.value = true
     playlistLoadError.value = ''
 
@@ -259,7 +282,7 @@ export const useRecommendData = ({
         recommendPlaylists.value = list
         return null
       }).catch(err => {
-        if (isCurrentRequest(context)) errors.push(err)
+        if (isCurrentRequestOwner(context)) errors.push(err)
         return null
       })
 
@@ -277,7 +300,7 @@ export const useRecommendData = ({
         if (didMerge) onHomeSongsUpdated()
         return null
       }).catch(err => {
-        if (isCurrentRequest(context)) errors.push(err)
+        if (isCurrentRequestOwner(context)) errors.push(err)
         return null
       })
       : Promise.resolve<LX.Netease.HomeRecommendation | null>(null)
@@ -325,7 +348,10 @@ export const useRecommendData = ({
         await restoreScrollPosition(context.scrollCacheKey, context)
       }
     } finally {
-      if (isCurrentRequest(context)) isLoadingPlaylists.value = false
+      if (isContextLoading(context)) blockingLoadRevisions.delete(context.loadContextKey)
+      if (isCurrentAccountRequest(context) && context.loadContextKey == scrollCacheKey.value) {
+        isLoadingPlaylists.value = isContextLoading(context)
+      }
     }
   }
 
@@ -333,20 +359,25 @@ export const useRecommendData = ({
     partial: Partial<LX.Netease.HomeRecommendation>,
     context: AccountRequestContext,
   ) => {
-    if (!isCurrentAccountRequest(context)) return false
+    const loadContext = 'loadContextKey' in context ? context as LoadRequestContext : null
+    if (loadContext ? !isCurrentRequestOwner(loadContext) : !isCurrentAccountRequest(context)) return false
+    const isVisible = !loadContext || isCurrentRequest(loadContext)
+    const currentData = loadContext
+      ? getHomeRecommendationCache(context.homeRecommendationCacheKey) ?? (isVisible ? homeRecommendation.value : null)
+      : homeRecommendation.value
     const nextData: LX.Netease.HomeRecommendation = {
-      radarPlaylists: homeRecommendation.value?.radarPlaylists ?? [],
-      styleSongsTitle: homeRecommendation.value?.styleSongsTitle ?? '',
-      styleSongs: homeRecommendation.value?.styleSongs ?? [],
-      dailySongCategoryPlaylists: homeRecommendation.value?.dailySongCategoryPlaylists ?? [],
-      similarSongs: homeRecommendation.value?.similarSongs ?? [],
-      recommendPlaylists: homeRecommendation.value?.recommendPlaylists ?? [],
-      charts: homeRecommendation.value?.charts ?? [],
+      radarPlaylists: currentData?.radarPlaylists ?? [],
+      styleSongsTitle: currentData?.styleSongsTitle ?? '',
+      styleSongs: currentData?.styleSongs ?? [],
+      dailySongCategoryPlaylists: currentData?.dailySongCategoryPlaylists ?? [],
+      similarSongs: currentData?.similarSongs ?? [],
+      recommendPlaylists: currentData?.recommendPlaylists ?? [],
+      charts: currentData?.charts ?? [],
       ...partial,
     }
-    homeRecommendation.value = nextData
     setHomeRecommendationCache(nextData, context.homeRecommendationCacheKey)
-    return true
+    if (isVisible) homeRecommendation.value = nextData
+    return isVisible
   }
 
   const handleRefreshStyleSongs = async() => {

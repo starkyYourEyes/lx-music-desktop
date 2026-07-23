@@ -176,6 +176,12 @@ const modules = {
     netease_get_music_url: 'netease_get_music_url',
     netease_like_music: 'netease_like_music',
     netease_trash_private_fm_music: 'netease_trash_private_fm_music',
+
+    qq_music_get_account_status: 'qq_music_get_account_status',
+    qq_music_login_qr_create: 'qq_music_login_qr_create',
+    qq_music_login_qr_check: 'qq_music_login_qr_check',
+    qq_music_logout: 'qq_music_logout',
+    qq_music_get_guess_like_songs: 'qq_music_get_guess_like_songs',
   },
   winLyric: {
     close: 'close',

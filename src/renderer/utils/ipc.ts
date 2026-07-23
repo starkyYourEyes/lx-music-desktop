@@ -716,6 +716,26 @@ export const getWebDAVMusicLyric = async(musicInfo: LX.Music.MusicInfoWebDAV) =>
   return rendererInvoke<LX.Music.MusicInfoWebDAV, LX.Music.LyricInfo | null>(WIN_MAIN_RENDERER_EVENT_NAME.webdav_get_music_lyric, musicInfo)
 }
 
+export const getQQMusicAccountStatus = async() => {
+  return rendererInvoke<LX.QQMusic.AccountStatus>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_account_status)
+}
+
+export const createQQMusicLoginQr = async() => {
+  return rendererInvoke<LX.QQMusic.LoginQr>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_login_qr_create)
+}
+
+export const checkQQMusicLoginQr = async(key: string) => {
+  return rendererInvoke<string, LX.QQMusic.LoginQrCheck>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_login_qr_check, key)
+}
+
+export const logoutQQMusic = async() => {
+  await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_logout)
+}
+
+export const getQQMusicGuessLikeSongs = async() => {
+  return rendererInvoke<LX.Music.MusicInfo_tx[]>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_guess_like_songs)
+}
+
 export const getNeteaseAccountStatus = async() => {
   return rendererInvoke<LX.Netease.AccountStatus>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_account_status)
 }

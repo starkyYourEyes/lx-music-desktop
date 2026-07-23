@@ -8,8 +8,36 @@
       </button>
       <transition enter-active-class="animated fadeIn" leave-active-class="animated fadeOut">
         <div v-if="isShowAccountPopover" :class="$style.accountPopover">
-          <div v-if="logoProfile?.nickname" :class="$style.accountName">{{ logoProfile.nickname }}</div>
-          <button type="button" @click="handleAccountAction">{{ isLoggedIn ? '退出登录' : '登录网易云' }}</button>
+          <div :class="$style.providerRow">
+            <span :class="$style.providerMarker" aria-hidden="true">Q</span>
+            <span :class="$style.providerInfo">
+              <span :class="$style.providerName">QQ 音乐</span>
+              <span :class="$style.providerAccount" :title="qqProfile?.nickname || ''">
+                {{ qqProfile?.nickname || (qqIsLoggedIn ? '已登录' : '未登录') }}
+              </span>
+            </span>
+            <button
+              type="button"
+              :class="$style.providerAction"
+              :aria-label="qqIsLoggedIn ? '退出 QQ 音乐账号' : '登录 QQ 音乐账号'"
+              @click="handleQQMusicAction"
+            >{{ qqIsLoggedIn ? '退出' : '登录' }}</button>
+          </div>
+          <div :class="$style.providerRow">
+            <span :class="$style.providerMarker" aria-hidden="true">N</span>
+            <span :class="$style.providerInfo">
+              <span :class="$style.providerName">网易云音乐</span>
+              <span :class="$style.providerAccount" :title="neteaseProfile?.nickname || ''">
+                {{ neteaseProfile?.nickname || (neteaseIsLoggedIn ? '已登录' : '未登录') }}
+              </span>
+            </span>
+            <button
+              type="button"
+              :class="$style.providerAction"
+              :aria-label="neteaseIsLoggedIn ? '退出网易云音乐账号' : '登录网易云音乐账号'"
+              @click="handleNeteaseAction"
+            >{{ neteaseIsLoggedIn ? '退出' : '登录' }}</button>
+          </div>
         </div>
       </transition>
     </div>
@@ -19,14 +47,16 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from '@common/utils/vueTools'
-import { useRouter } from '@common/utils/vueRouter'
+import { useRoute, useRouter } from '@common/utils/vueRouter'
 import { isFullscreen } from '@renderer/store'
 import { appSetting } from '@renderer/store/setting'
-import { initNeteaseAccount, isLoggedIn, logoutNeteaseAccount, profile as neteaseProfile } from '@renderer/store/netease'
+import { initNeteaseAccount, isLoggedIn as neteaseIsLoggedIn, logoutNeteaseAccount, profile as neteaseProfile } from '@renderer/store/netease'
+import { initQQMusicAccount, isLoggedIn as qqIsLoggedIn, logoutQQMusicAccount, profile as qqProfile } from '@renderer/store/qqMusic'
 
 import ControlBtns from './ControlBtns.vue'
 import NavBar from './NavBar.vue'
 
+const route = useRoute()
 const router = useRouter()
 const isAvatarLoadFailed = ref(false)
 const isShowAccountPopover = ref(false)
@@ -44,23 +74,41 @@ const handleLogoClick = () => {
   isShowAccountPopover.value = !isShowAccountPopover.value
 }
 
-const handleAccountAction = async() => {
+const handleQQMusicAction = async() => {
   isShowAccountPopover.value = false
-  if (isLoggedIn.value) {
-    await logoutNeteaseAccount()
+  if (qqIsLoggedIn.value) {
+    await logoutQQMusicAccount()
     return
   }
-  window.dispatchEvent(new Event('show-netease-login'))
+  if (route.path == '/recommend') window.dispatchEvent(new Event('show-qq-music-login'))
   void router.push({
     path: '/recommend',
     query: {
-      login: '1',
+      login: 'qq',
+    },
+  }).catch(_ => _)
+}
+
+const handleNeteaseAction = async() => {
+  isShowAccountPopover.value = false
+  if (neteaseIsLoggedIn.value) {
+    await logoutNeteaseAccount()
+    return
+  }
+  if (route.path == '/recommend') window.dispatchEvent(new Event('show-netease-login'))
+  void router.push({
+    path: '/recommend',
+    query: {
+      login: 'netease',
     },
   }).catch(_ => _)
 }
 
 onMounted(() => {
-  void initNeteaseAccount().catch(() => null)
+  void Promise.all([
+    initQQMusicAccount().catch(() => null),
+    initNeteaseAccount().catch(() => null),
+  ])
   window.addEventListener('click', handleWindowClick, true)
 })
 
@@ -150,7 +198,7 @@ onBeforeUnmount(() => {
   left: 68px;
   top: 4px;
   z-index: 8;
-  width: 132px;
+  width: 238px;
   padding: 8px;
   box-sizing: border-box;
   border-radius: 8px;
@@ -169,36 +217,83 @@ onBeforeUnmount(() => {
     transform: rotate(45deg);
   }
 
-  button {
-    position: relative;
-    width: 100%;
-    height: 32px;
-    border: 0;
-    border-radius: 6px;
-    background-color: transparent;
-    color: var(--color-font);
-    cursor: pointer;
-    font-size: 13px;
-    transition: background-color @transition-normal, color @transition-normal;
+}
 
-    &:hover {
-      color: var(--color-primary);
-      background-color: var(--color-button-background-hover);
-    }
+.providerRow {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 44px;
+  align-items: center;
+  column-gap: 8px;
+  height: 54px;
+  padding: 0 4px;
+  box-sizing: border-box;
 
-    &:active {
-      background-color: var(--color-button-background-active);
-    }
+  & + & {
+    border-top: 1px solid var(--color-button-background-hover);
   }
 }
 
-.accountName {
-  position: relative;
-  margin-bottom: 8px;
+.providerMarker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background-color: var(--color-button-background-hover);
+  color: var(--color-primary);
+  font-size: 13px;
+  font-weight: bold;
+}
+
+.providerInfo {
+  display: flex;
+  flex-flow: column nowrap;
+  justify-content: center;
+  min-width: 0;
+}
+
+.providerName,
+.providerAccount {
+  display: block;
+  min-width: 0;
+  .mixin-ellipsis-1();
+}
+
+.providerName {
+  color: var(--color-font);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.providerAccount {
   color: var(--color-font-label);
   font-size: 12px;
-  line-height: 1.3;
-  .mixin-ellipsis-1();
+  line-height: 18px;
+}
+
+.providerAction {
+  position: relative;
+  width: 44px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background-color: transparent;
+  color: var(--color-font);
+  cursor: pointer;
+  font-size: 13px;
+  transition: background-color @transition-normal, color @transition-normal;
+
+  &:hover {
+    color: var(--color-primary);
+    background-color: var(--color-button-background-hover);
+  }
+
+  &:active {
+    background-color: var(--color-button-background-active);
+  }
 }
 
 .avatar {

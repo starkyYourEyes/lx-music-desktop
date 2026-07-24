@@ -421,7 +421,7 @@ const testQQRecommendCards = () => {
   const qqCard = specialCards.value.at(-1)
   assert.strictEqual(qqCard.isQQGuessLike, true)
   assert.strictEqual(getSpecialCardKicker(qqCard), 'QQ Music')
-  assert.match(qqCard.desc, /加载中/)
+  assert.strictEqual(qqCard.desc, '正在从 QQ 音乐加载猜你喜欢...')
   assert.strictEqual(qqCard.img, qqSong.meta.picUrl)
 
   isQQGuessLikeLoading.value = false

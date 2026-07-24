@@ -7,5 +7,6 @@ export const PRIVATE_RADAR_PLAYLIST_ID = '3136952023'
 export const SPECIAL_PLACEHOLDER_ID = 'special_placeholder'
 export const HOME_STYLE_SONGS_TEMP_LIST_ID = 'wy__home_style_songs'
 export const HOME_SIMILAR_SONGS_TEMP_LIST_ID = 'wy__home_similar_songs'
+export const QQ_GUESS_LIKE_CARD_ID = 'qq_guess_like'
 export const QQ_GUESS_LIKE_TEMP_LIST_ID = 'tx__qq_guess_like'
 export const RECOMMEND_CACHE_TTL = Number.POSITIVE_INFINITY

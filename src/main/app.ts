@@ -12,6 +12,7 @@ import createWorkers from './worker'
 import { migrateDBData } from './utils/migrate'
 import { openDirInExplorer } from '@common/utils/electron'
 import { setProxyByHost } from '@common/utils/request'
+import { getWebContentsNavigationDecision } from '@main/utils/webContentsNavigationGuard'
 
 export const initGlobalData = () => {
   const envParams = parseEnvParams()
@@ -169,9 +170,13 @@ export const registerDeeplink = (startApp: () => void) => {
 export const listenerAppEvent = (startApp: () => void) => {
   app.on('web-contents-created', (event, contents) => {
     contents.on('will-navigate', (event, navigationUrl) => {
+      const managedNavigation = getWebContentsNavigationDecision(contents, navigationUrl)
+      if (managedNavigation !== undefined) {
+        if (!managedNavigation) event.preventDefault()
+        return
+      }
       if (process.env.NODE_ENV !== 'production') {
         console.log('navigation to url:', navigationUrl.length > 130 ? navigationUrl.substring(0, 130) + '...' : navigationUrl)
-        return
       }
       if (!navigationUrlWhiteList.some(url => url.test(navigationUrl))) {
         event.preventDefault()

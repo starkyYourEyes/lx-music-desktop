@@ -218,6 +218,7 @@ const testStaticWiring = () => {
   assert.match(recommendCards, /isQQGuessLikeLoading/)
   assert.match(recommendCards, /qqGuessLikeLoadError/)
   assert.match(recommendPlayback, /handleToggleQQGuessLikeCard/)
+  assert.match(recommendPlayback, /resetQQGuessLikePlayback/)
   assert.match(recommendPlayback, /getQQGuessLikeAccountKey/)
   assert.match(recommendPlayback, /onQQGuessLikeLoginRequired/)
   assert.ok(
@@ -255,7 +256,7 @@ const testStaticWiring = () => {
   assert.match(recommendPlaybackCall, /getQQGuessLikeAccountKey:\s*\(\)\s*=>\s*qqAccountKey\.value/)
   assert.match(recommendPlaybackCall, /onQQGuessLikeLoginRequired:\s*handleShowQQLogin/)
   const lazyQQPlaybackLoader = recommendIndex.match(/const\s+loadQQGuessLikeForPlayback\s*=\s*async\(\)\s*=>\s*\{[\s\S]*?\n\}/)?.[0] || ''
-  assert.match(lazyQQPlaybackLoader, /await\s+loadQQGuessLikeSongs\(\)/)
+  assert.match(lazyQQPlaybackLoader, /return\s+(?:await\s+)?loadQQGuessLikeSongs\(\)/)
   const playbackCallPosition = recommendIndex.indexOf('useRecommendPlayback({')
   assert.ok(recommendIndex.indexOf('const handleShowQQLogin') >= 0 && recommendIndex.indexOf('const handleShowQQLogin') < playbackCallPosition)
   assert.ok(recommendIndex.indexOf('const loadQQGuessLikeForPlayback') >= 0 && recommendIndex.indexOf('const loadQQGuessLikeForPlayback') < playbackCallPosition)
@@ -296,6 +297,7 @@ const testStaticWiring = () => {
   assert.doesNotMatch(recommendIndex, /isHandling(?:QQ|Netease)QrLoginSuccess|(?:qq|netease)LifecycleRevision/)
   assert.match(recommendIndex, /const neteaseAccountKey\s*=\s*computed\(\(\)\s*=>\s*neteaseIsLoggedIn\.value\s*\?[\s\S]*?neteaseProfile\.value\?\.userId/)
   const qqAccountWatch = recommendIndex.match(/watch\(qqAccountKey,[\s\S]*?\n}\)/)?.[0] || ''
+  assert.match(qqAccountWatch, /resetQQGuessLikePlayback\(\)[\s\S]*?clearQQGuessLikeSongs\(\)/)
   assert.match(qqAccountWatch, /clearQQGuessLikeSongs\(\)/)
   assert.match(qqAccountWatch, /if\s*\(value\)[\s\S]*?handleCloseQQLogin\(\)/)
   assert.doesNotMatch(qqAccountWatch, /loadQQGuessLikeSongs|loadQQGuessLikeForPlayback|qqLoadCoordinator/)
@@ -326,7 +328,7 @@ const testStaticWiring = () => {
   assert.match(onMountedBlock, /void initializeNeteaseAccount\(\)/)
 }
 
-const createQQPlaybackHarness = ({ accountKey = 'A', loadQQGuessLikeSongs }) => {
+const createQQPlaybackHarness = ({ accountKey = 'A', loadQQGuessLikeSongs, routerPush = async() => {} }) => {
   const constants = loadTsModule(path.join(root, 'src/renderer/views/Recommend/constants.ts'))
   assert.strictEqual(constants.QQ_GUESS_LIKE_TEMP_LIST_ID, 'tx__qq_guess_like')
 
@@ -346,7 +348,12 @@ const createQQPlaybackHarness = ({ accountKey = 'A', loadQQGuessLikeSongs }) => 
     '@common/constants': { LIST_IDS },
     '@common/utils/vueRouter': {
       useRoute: () => ({ name: 'recommend' }),
-      useRouter: () => ({ push: async location => { routerPushes.push(location) } }),
+      useRouter: () => ({
+        push: location => {
+          routerPushes.push(location)
+          return routerPush(location)
+        },
+      }),
     },
     '@renderer/store/player/state': { isPlay, playInfo, playMusicInfo },
     '@renderer/store/list/state': { tempListMeta },
@@ -382,7 +389,11 @@ const createQQPlaybackHarness = ({ accountKey = 'A', loadQQGuessLikeSongs }) => 
   return {
     playback,
     qqGuessLikeSongs,
-    setAccountKey: value => { currentAccountKey = value },
+    setAccountKey: value => {
+      if (currentAccountKey == value) return
+      currentAccountKey = value
+      playback.resetQQGuessLikePlayback()
+    },
     playInfo,
     tempListMeta,
     isPlay,
@@ -433,13 +444,15 @@ const testQQRecommendCards = () => {
 
 const testQQRecommendPlayback = async() => {
   const pendingLoad = deferred()
+  const loadedSongs = [song('qq-1'), song('qq-2')]
   let loadCalls = 0
   const qqCard = { id: 'qq_guess_like', source: 'tx', img: '', isQQGuessLike: true }
   const harness = createQQPlaybackHarness({
     loadQQGuessLikeSongs: async() => {
       loadCalls++
       await pendingLoad.promise
-      harness.qqGuessLikeSongs.value = [song('qq-1'), song('qq-2')]
+      harness.qqGuessLikeSongs.value = loadedSongs
+      return loadedSongs
     },
   })
 
@@ -451,7 +464,7 @@ const testQQRecommendPlayback = async() => {
   await Promise.all([firstActivation, secondActivation])
   await flushAsyncWork()
   assert.strictEqual(harness.setTempListCalls.length, 1)
-  assert.deepStrictEqual(harness.setTempListCalls[0], ['tx__qq_guess_like', harness.qqGuessLikeSongs.value])
+  assert.deepStrictEqual(harness.setTempListCalls[0], ['tx__qq_guess_like', loadedSongs])
   assert.deepStrictEqual(harness.playListCalls, [[harness.LIST_IDS.TEMP, 0]])
 
   harness.playInfo.playerListId = harness.LIST_IDS.TEMP
@@ -471,7 +484,11 @@ const testQQRecommendPlayback = async() => {
 const testQQCardEntryMethodsStartPlayback = async() => {
   const qqCard = { id: 'qq_guess_like', source: 'tx', img: '', isQQGuessLike: true }
   const openHarness = createQQPlaybackHarness({
-    loadQQGuessLikeSongs: async() => { openHarness.qqGuessLikeSongs.value = [song('open')] },
+    loadQQGuessLikeSongs: async() => {
+      const songs = [song('open')]
+      openHarness.qqGuessLikeSongs.value = songs
+      return songs
+    },
   })
   await openHarness.playback.handleOpenPlaylist(qqCard)
   await flushAsyncWork()
@@ -480,7 +497,11 @@ const testQQCardEntryMethodsStartPlayback = async() => {
   assert.deepStrictEqual(openHarness.routerPushes, [])
 
   const toggleHarness = createQQPlaybackHarness({
-    loadQQGuessLikeSongs: async() => { toggleHarness.qqGuessLikeSongs.value = [song('toggle')] },
+    loadQQGuessLikeSongs: async() => {
+      const songs = [song('toggle')]
+      toggleHarness.qqGuessLikeSongs.value = songs
+      return songs
+    },
   })
   await toggleHarness.playback.handleToggleCardPlay(qqCard)
   await flushAsyncWork()
@@ -489,11 +510,33 @@ const testQQCardEntryMethodsStartPlayback = async() => {
   assert.deepStrictEqual(toggleHarness.routerPushes, [])
 }
 
+const testNormalPlaylistOpenAwaitsNavigation = async() => {
+  const navigation = deferred()
+  const harness = createQQPlaybackHarness({
+    loadQQGuessLikeSongs: async() => [],
+    routerPush: async() => navigation.promise,
+  })
+
+  const opening = harness.playback.handleOpenPlaylist({ id: 'normal', source: 'wy', img: '' })
+  const outcome = await Promise.race([
+    opening.then(() => 'settled'),
+    flushAsyncWork().then(() => 'pending'),
+  ])
+  assert.strictEqual(outcome, 'pending', 'normal playlist open should await router navigation')
+
+  navigation.resolve()
+  await opening
+  assert.strictEqual(harness.routerPushes.length, 1)
+}
+
 const testQQCardLoggedOutRequiresLogin = async() => {
   let loadCalls = 0
   const harness = createQQPlaybackHarness({
     accountKey: null,
-    loadQQGuessLikeSongs: async() => { loadCalls++ },
+    loadQQGuessLikeSongs: async() => {
+      loadCalls++
+      return []
+    },
   })
   await harness.playback.handleToggleQQGuessLikeCard()
   assert.strictEqual(harness.loginRequiredCalls, 1)
@@ -526,7 +569,9 @@ const testQQCardAccountOwnership = async() => {
   const harness = createQQPlaybackHarness({
     loadQQGuessLikeSongs: async() => {
       loadCalls++
-      harness.qqGuessLikeSongs.value = [song(`qq-${loadCalls}`)]
+      const songs = [song(`qq-${loadCalls}`)]
+      harness.qqGuessLikeSongs.value = songs
+      return songs
     },
   })
   await harness.playback.handleToggleQQGuessLikeCard()
@@ -549,7 +594,9 @@ const testQQCardPausedAccountOwnership = async() => {
   const harness = createQQPlaybackHarness({
     loadQQGuessLikeSongs: async() => {
       loadCalls++
-      harness.qqGuessLikeSongs.value = [song(`qq-${loadCalls}`)]
+      const songs = [song(`qq-${loadCalls}`)]
+      harness.qqGuessLikeSongs.value = songs
+      return songs
     },
   })
   await harness.playback.handleToggleQQGuessLikeCard()
@@ -566,10 +613,108 @@ const testQQCardPausedAccountOwnership = async() => {
   assert.strictEqual(harness.playCalls, 0, 'account B must not resume paused account A queue')
 }
 
+const testQQCardAccountRoundTripInvalidatesInstalledQueue = async() => {
+  let loadCalls = 0
+  const qqCard = { id: 'qq_guess_like', source: 'tx', img: '', isQQGuessLike: true }
+  const harness = createQQPlaybackHarness({
+    loadQQGuessLikeSongs: async() => [song(`round-trip-${++loadCalls}`)],
+  })
+
+  await harness.playback.handleToggleQQGuessLikeCard()
+  harness.playInfo.playerListId = harness.LIST_IDS.TEMP
+  harness.tempListMeta.id = 'tx__qq_guess_like'
+  harness.isPlay.value = true
+  harness.setAccountKey('B')
+  harness.setAccountKey('A')
+
+  assert.strictEqual(harness.playback.isQQGuessLikePlayingList(), false)
+  assert.strictEqual(harness.playback.isCardPlaying(qqCard), false)
+  await harness.playback.handleToggleQQGuessLikeCard()
+  assert.strictEqual(loadCalls, 2, 'returning to A must activate a new queue generation')
+  assert.deepStrictEqual(harness.setTempListCalls.at(-1), ['tx__qq_guess_like', [song('round-trip-2')]])
+  assert.strictEqual(harness.pauseCalls, 0)
+  assert.strictEqual(harness.playCalls, 0)
+}
+
+const testQQCardAccountRoundTripInvalidatesPausedQueue = async() => {
+  let loadCalls = 0
+  const harness = createQQPlaybackHarness({
+    loadQQGuessLikeSongs: async() => [song(`paused-round-trip-${++loadCalls}`)],
+  })
+
+  await harness.playback.handleToggleQQGuessLikeCard()
+  harness.playInfo.playerListId = harness.LIST_IDS.TEMP
+  harness.tempListMeta.id = 'tx__qq_guess_like'
+  harness.isPlay.value = false
+  harness.setAccountKey('B')
+  harness.setAccountKey('A')
+
+  assert.strictEqual(harness.playback.isQQGuessLikePlayingList(), false)
+  await harness.playback.handleToggleQQGuessLikeCard()
+  assert.strictEqual(loadCalls, 2, 'returning to A must not resume its paused old generation')
+  assert.deepStrictEqual(harness.setTempListCalls.at(-1), ['tx__qq_guess_like', [song('paused-round-trip-2')]])
+  assert.strictEqual(harness.playCalls, 0)
+}
+
+const testQQPendingActivationCannotSurviveAccountRoundTrip = async() => {
+  const oldLoad = deferred()
+  const newLoad = deferred()
+  let loadCalls = 0
+  const harness = createQQPlaybackHarness({
+    loadQQGuessLikeSongs: async() => {
+      loadCalls++
+      return loadCalls == 1 ? oldLoad.promise : newLoad.promise
+    },
+  })
+
+  const oldActivation = harness.playback.handleToggleQQGuessLikeCard()
+  await Promise.resolve()
+  harness.setAccountKey('B')
+  harness.setAccountKey('A')
+  const newActivation = harness.playback.handleToggleQQGuessLikeCard()
+  await Promise.resolve()
+  assert.strictEqual(loadCalls, 2)
+
+  oldLoad.resolve([song('old-A')])
+  await oldActivation
+  assert.deepStrictEqual(harness.setTempListCalls, [], 'old A generation must not install after A-B-A')
+  assert.deepStrictEqual(harness.playListCalls, [])
+  const duplicateNewActivation = harness.playback.handleToggleQQGuessLikeCard()
+  await Promise.resolve()
+  assert.strictEqual(loadCalls, 2, 'old A cleanup must not detach or duplicate the new A activation')
+
+  newLoad.resolve([song('new-A')])
+  await Promise.all([newActivation, duplicateNewActivation])
+  assert.deepStrictEqual(harness.setTempListCalls, [['tx__qq_guess_like', [song('new-A')]]])
+  assert.deepStrictEqual(harness.playListCalls, [[harness.LIST_IDS.TEMP, 0]])
+}
+
+const testQQActivationUsesAccountScopedSnapshot = async() => {
+  const staleSongs = [song('stale-A')]
+  const currentSongs = [song('current-B')]
+  let loadCalls = 0
+  const harness = createQQPlaybackHarness({
+    accountKey: 'B',
+    loadQQGuessLikeSongs: async() => {
+      loadCalls++
+      return currentSongs
+    },
+  })
+  harness.qqGuessLikeSongs.value = staleSongs
+
+  await harness.playback.handleToggleQQGuessLikeCard()
+  assert.strictEqual(loadCalls, 1, 'B activation must load its account-scoped snapshot')
+  assert.deepStrictEqual(harness.setTempListCalls, [['tx__qq_guess_like', currentSongs]])
+  assert.notDeepStrictEqual(harness.setTempListCalls[0][1], staleSongs)
+}
+
 const testQQCardEmptyLoadsAreRetryable = async() => {
   let loadCalls = 0
   const harness = createQQPlaybackHarness({
-    loadQQGuessLikeSongs: async() => { loadCalls++ },
+    loadQQGuessLikeSongs: async() => {
+      loadCalls++
+      return []
+    },
   })
   await harness.playback.handleToggleQQGuessLikeCard()
   await harness.playback.handleToggleQQGuessLikeCard()
@@ -622,12 +767,14 @@ const testLoggedOutClearsWithoutRequest = async() => {
     },
   })
 
-  await state.load()
+  const initialSnapshot = await state.load()
   state.loadError.value = 'old error'
   isLoggedIn.value = false
   profile.value = null
-  await state.load()
+  const loggedOutSnapshot = await state.load()
 
+  assert.deepStrictEqual(initialSnapshot, [song('A-1')])
+  assert.deepStrictEqual(loggedOutSnapshot, [])
   assert.strictEqual(requestCount, 1)
   assert.deepStrictEqual(state.songs.value, [])
   assert.strictEqual(state.loadError.value, '')
@@ -646,20 +793,24 @@ const testAccountScopedCache = async() => {
     getSongs: async() => responses[requestCount++],
   })
 
-  await state.load()
+  const firstA = await state.load()
   assert.deepStrictEqual(state.songs.value, [song('A-1')])
-  await state.load()
+  const cachedA = await state.load()
+  assert.deepStrictEqual(firstA, [song('A-1')])
+  assert.deepStrictEqual(cachedA, [song('A-1')])
   assert.strictEqual(requestCount, 1)
 
   profile.value = { uin: 'B' }
   const loadingB = state.load()
   assert.deepStrictEqual(state.songs.value, [])
   assert.strictEqual(state.isLoading.value, true)
-  await loadingB
+  const loadedB = await loadingB
+  assert.deepStrictEqual(loadedB, [song('B-1')])
   assert.deepStrictEqual(state.songs.value, [song('B-1')])
 
   profile.value = { uin: 'A' }
-  await state.load()
+  const returnedA = await state.load()
+  assert.deepStrictEqual(returnedA, [song('A-1')])
   assert.strictEqual(requestCount, 2)
   assert.deepStrictEqual(state.songs.value, [song('A-1')])
 }
@@ -676,17 +827,17 @@ const testModuleLevelCacheAcrossComposableInstances = async() => {
   })
 
   const firstState = guessLikeModule.useQQGuessLikeData()
-  await firstState.load()
+  assert.deepStrictEqual(await firstState.load(), [song('shared')])
   assert.strictEqual(requestCount, 1)
 
   const secondState = guessLikeModule.useQQGuessLikeData()
-  await secondState.load()
+  assert.deepStrictEqual(await secondState.load(), [song('shared')])
   assert.strictEqual(requestCount, 1)
   assert.deepStrictEqual(secondState.songs.value, [song('shared')])
 
   firstState.clear()
   const stateAfterClear = guessLikeModule.useQQGuessLikeData()
-  await stateAfterClear.load()
+  assert.deepStrictEqual(await stateAfterClear.load(), [song('after-clear')])
   assert.strictEqual(requestCount, 2)
   assert.deepStrictEqual(stateAfterClear.songs.value, [song('after-clear')])
 }
@@ -715,17 +866,17 @@ const testForceFailureAndEmptyCache = async() => {
     },
   })
 
-  await state.load()
-  await state.load(true)
+  assert.deepStrictEqual(await state.load(), [song('old')])
+  assert.deepStrictEqual(await state.load(true), [])
   assert.deepStrictEqual(state.songs.value, [song('old')])
   assert.strictEqual(state.loadError.value, '猜你喜欢加载失败，请稍后重试')
   assert.doesNotMatch(state.loadError.value, /https|cookie|secret/)
   assert.deepStrictEqual(initCalls, [true])
 
-  await state.load(true)
+  assert.deepStrictEqual(await state.load(true), [])
   assert.deepStrictEqual(state.songs.value, [])
   assert.strictEqual(state.loadError.value, '')
-  await state.load()
+  assert.deepStrictEqual(await state.load(), [])
   assert.strictEqual(requestCount, 3)
   assert.deepStrictEqual(state.songs.value, [])
 }
@@ -747,12 +898,12 @@ const testAccountRaceAndLoadingOwnership = async() => {
   profile.value = { uin: 'B' }
   const loadingB = state.load()
   requestA.resolve([song('A-late')])
-  await loadingA
+  assert.deepStrictEqual(await loadingA, [])
   assert.deepStrictEqual(state.songs.value, [])
   assert.strictEqual(state.isLoading.value, true)
 
   requestB.resolve([song('B-current')])
-  await loadingB
+  assert.deepStrictEqual(await loadingB, [song('B-current')])
   assert.deepStrictEqual(state.songs.value, [song('B-current')])
   assert.strictEqual(state.isLoading.value, false)
 }
@@ -776,13 +927,13 @@ const testStaleFailureDoesNotRefreshCurrentAccount = async() => {
   profile.value = { uin: 'B' }
   const loadingB = state.load()
   requestA.reject(new Error('stale A failure'))
-  await loadingA
+  assert.deepStrictEqual(await loadingA, [])
   assert.strictEqual(initCount, 0)
   assert.strictEqual(state.loadError.value, '')
   assert.strictEqual(state.isLoading.value, true)
 
   requestB.resolve([song('B-current')])
-  await loadingB
+  assert.deepStrictEqual(await loadingB, [song('B-current')])
   assert.deepStrictEqual(state.songs.value, [song('B-current')])
 }
 
@@ -799,7 +950,7 @@ const testAuthLogoutStillFinishesOwnedLoading = async() => {
     },
   })
 
-  await state.load(true)
+  assert.deepStrictEqual(await state.load(true), [])
   assert.strictEqual(state.isRefreshing.value, false)
   assert.strictEqual(state.isLoading.value, false)
 }
@@ -820,9 +971,9 @@ const testLatestForceWins = async() => {
   const older = state.load(true)
   const newer = state.load(true)
   newRequest.resolve([song('newer')])
-  await newer
+  assert.deepStrictEqual(await newer, [song('newer')])
   oldRequest.resolve([song('older')])
-  await older
+  assert.deepStrictEqual(await older, [])
   assert.deepStrictEqual(state.songs.value, [song('newer')])
 }
 
@@ -838,7 +989,7 @@ const testClearAfterProfileReset = async() => {
     getSongs: async() => responses[requestCount++],
   })
 
-  await state.load()
+  assert.deepStrictEqual(await state.load(), [song('cached')])
   const refreshing = state.load(true)
   isLoggedIn.value = false
   profile.value = null
@@ -847,12 +998,12 @@ const testClearAfterProfileReset = async() => {
   assert.strictEqual(state.isRefreshing.value, false)
 
   pending.resolve([song('stale')])
-  await refreshing
+  assert.deepStrictEqual(await refreshing, [])
   assert.deepStrictEqual(state.songs.value, [])
 
   isLoggedIn.value = true
   profile.value = { uin: 'clear-account' }
-  await state.load()
+  assert.deepStrictEqual(await state.load(), [song('fresh')])
   assert.strictEqual(requestCount, 3)
   assert.deepStrictEqual(state.songs.value, [song('fresh')])
 }
@@ -863,10 +1014,15 @@ const main = async() => {
   testQQRecommendCards()
   await testQQRecommendPlayback()
   await testQQCardEntryMethodsStartPlayback()
+  await testNormalPlaylistOpenAwaitsNavigation()
   await testQQCardLoggedOutRequiresLogin()
   await testQQCardEntryMethodsRequireLoginWithoutRouting()
   await testQQCardAccountOwnership()
   await testQQCardPausedAccountOwnership()
+  await testQQCardAccountRoundTripInvalidatesInstalledQueue()
+  await testQQCardAccountRoundTripInvalidatesPausedQueue()
+  await testQQPendingActivationCannotSurviveAccountRoundTrip()
+  await testQQActivationUsesAccountScopedSnapshot()
   await testQQCardEmptyLoadsAreRetryable()
   await testQQCardRejectedLoadsAreRetryable()
   await testLoggedOutClearsWithoutRequest()

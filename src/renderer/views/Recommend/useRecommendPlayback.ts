@@ -16,7 +16,6 @@ import type { RecommendCard } from './types'
 export const useRecommendPlayback = ({
   homeStyleSongs,
   homeSimilarSongs,
-  qqGuessLikeSongs,
   loadQQGuessLikeSongs,
   getQQGuessLikeAccountKey,
   onQQGuessLikeLoginRequired,
@@ -25,15 +24,21 @@ export const useRecommendPlayback = ({
   homeStyleSongs: { value: LX.Music.MusicInfoOnline[] }
   homeSimilarSongs: { value: LX.Music.MusicInfoOnline[] }
   qqGuessLikeSongs: { value: LX.Music.MusicInfoOnline[] }
-  loadQQGuessLikeSongs: () => Promise<void>
+  loadQQGuessLikeSongs: () => Promise<LX.Music.MusicInfoOnline[]>
   getQQGuessLikeAccountKey: () => string | null
   onQQGuessLikeLoginRequired: () => void
   setError: (message: string) => void
 }) => {
   const route = useRoute()
   const router = useRouter()
-  let qqGuessLikeQueueAccountKey: string | null = null
-  let qqGuessLikeActivation: { accountKey: string, task: Promise<void> } | null = null
+  let qqGuessLikeGeneration = 0
+  let qqGuessLikeQueueOwner: { accountKey: string, generation: number } | null = null
+  let qqGuessLikeActivation: {
+    accountKey: string
+    generation: number
+    token: symbol
+    task: Promise<void>
+  } | null = null
 
   const isPrivateFmPlaying = () => isPrivateFmMode.value && isPlay.value
   const isDailyRecommendPlaying = () => isDailyRecommendPlayingList.value && isPlay.value
@@ -42,7 +47,10 @@ export const useRecommendPlayback = ({
   const isHomeSongsPlayingList = () => isSongSectionPlayingList(HOME_SIMILAR_SONGS_TEMP_LIST_ID)
   const isQQGuessLikePlayingList = () => {
     const accountKey = getQQGuessLikeAccountKey()
-    return accountKey != null && isSongSectionPlayingList(QQ_GUESS_LIKE_TEMP_LIST_ID) && qqGuessLikeQueueAccountKey == accountKey
+    return accountKey != null &&
+      isSongSectionPlayingList(QQ_GUESS_LIKE_TEMP_LIST_ID) &&
+      qqGuessLikeQueueOwner?.accountKey == accountKey &&
+      qqGuessLikeQueueOwner.generation == qqGuessLikeGeneration
   }
   const isStyleSongsPlaying = () => isStyleSongsPlayingList() && isPlay.value
   const isHomeSongsPlaying = () => isHomeSongsPlayingList() && isPlay.value
@@ -149,15 +157,29 @@ export const useRecommendPlayback = ({
   const handlePlayStyleSongs = async(index = 0) => handlePlaySongSection(HOME_STYLE_SONGS_TEMP_LIST_ID, homeStyleSongs, index)
   const handlePlayHomeSongs = async(index = 0) => handlePlaySongSection(HOME_SIMILAR_SONGS_TEMP_LIST_ID, homeSimilarSongs, index)
 
-  const startQQGuessLike = async(accountKey: string) => {
-    if (!qqGuessLikeSongs.value.length) await loadQQGuessLikeSongs()
-    if (getQQGuessLikeAccountKey() != accountKey || !qqGuessLikeSongs.value.length) return
+  const isCurrentQQGuessLikeActivation = (accountKey: string, generation: number, token: symbol) => {
+    return getQQGuessLikeAccountKey() == accountKey &&
+      qqGuessLikeGeneration == generation &&
+      qqGuessLikeActivation?.accountKey == accountKey &&
+      qqGuessLikeActivation.generation == generation &&
+      qqGuessLikeActivation.token == token
+  }
 
-    await setTempList(QQ_GUESS_LIKE_TEMP_LIST_ID, toCloneable(qqGuessLikeSongs.value))
-    if (getQQGuessLikeAccountKey() != accountKey) return
+  const startQQGuessLike = async(accountKey: string, generation: number, token: symbol) => {
+    const songs = await loadQQGuessLikeSongs()
+    if (!isCurrentQQGuessLikeActivation(accountKey, generation, token) || !songs.length) return
 
-    qqGuessLikeQueueAccountKey = accountKey
+    await setTempList(QQ_GUESS_LIKE_TEMP_LIST_ID, toCloneable(songs))
+    if (!isCurrentQQGuessLikeActivation(accountKey, generation, token)) return
+
+    qqGuessLikeQueueOwner = { accountKey, generation }
     playList(LIST_IDS.TEMP, 0)
+  }
+
+  const resetQQGuessLikePlayback = () => {
+    qqGuessLikeGeneration++
+    qqGuessLikeQueueOwner = null
+    qqGuessLikeActivation = null
   }
 
   const handleToggleQQGuessLikeCard = async() => {
@@ -171,14 +193,18 @@ export const useRecommendPlayback = ({
       else play()
       return
     }
-    if (qqGuessLikeActivation?.accountKey == accountKey) return qqGuessLikeActivation.task
+    const generation = qqGuessLikeGeneration
+    if (qqGuessLikeActivation?.accountKey == accountKey && qqGuessLikeActivation.generation == generation) {
+      return qqGuessLikeActivation.task
+    }
 
-    const task = startQQGuessLike(accountKey)
-    qqGuessLikeActivation = { accountKey, task }
+    const token = Symbol('qq-guess-like-activation')
+    const task = startQQGuessLike(accountKey, generation, token)
+    qqGuessLikeActivation = { accountKey, generation, token, task }
     try {
       await task
     } finally {
-      if (qqGuessLikeActivation?.task == task) qqGuessLikeActivation = null
+      if (qqGuessLikeActivation?.token == token) qqGuessLikeActivation = null
     }
   }
 
@@ -192,7 +218,7 @@ export const useRecommendPlayback = ({
       await handleTogglePrivateFm()
       return
     }
-    void router.push({
+    return router.push({
       path: '/songList/detail',
       query: {
         source: playlist.source,
@@ -281,6 +307,7 @@ export const useRecommendPlayback = ({
     handleToggleStyleSongs,
     handleToggleHomeSongs,
     handleToggleQQGuessLikeCard,
+    resetQQGuessLikePlayback,
     handlePlayStyleSongs,
     handlePlayHomeSongs,
     handleOpenPlaylist,

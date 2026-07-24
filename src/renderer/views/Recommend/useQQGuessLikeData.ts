@@ -41,7 +41,7 @@ export const useQQGuessLikeData = () => {
     if (!accountKey) {
       visibleAccountKey = null
       resetVisibleState()
-      return
+      return []
     }
 
     if (visibleAccountKey != accountKey) resetVisibleState()
@@ -49,11 +49,12 @@ export const useQQGuessLikeData = () => {
     lastVisibleAccountKey = accountKey
 
     if (!force && recommendCache.has(accountKey)) {
-      songs.value = recommendCache.get(accountKey)!
+      const cachedSongs = recommendCache.get(accountKey)!
+      songs.value = cachedSongs
       loadError.value = ''
       isLoading.value = false
       isRefreshing.value = false
-      return
+      return cachedSongs
     }
 
     loadError.value = ''
@@ -67,13 +68,15 @@ export const useQQGuessLikeData = () => {
 
     try {
       const nextSongs = await getQQMusicGuessLikeSongs()
-      if (!isCurrentRequest(revision, accountKey)) return
+      if (!isCurrentRequest(revision, accountKey)) return []
       recommendCache.set(accountKey, nextSongs)
       songs.value = nextSongs
+      return nextSongs
     } catch {
-      if (!isCurrentRequest(revision, accountKey)) return
+      if (!isCurrentRequest(revision, accountKey)) return []
       loadError.value = LOAD_ERROR
       await initQQMusicAccount(true).catch(() => null)
+      return []
     } finally {
       if (ownsLoadingState(revision, accountKey)) {
         isLoading.value = false

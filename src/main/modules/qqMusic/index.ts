@@ -75,7 +75,16 @@ export const createQQMusicAccountService = ({
   songService: SongService
   now?: () => number
 }) => {
+  let loginGeneration = 0
+
   const clearAccount = () => store.set(DATA_KEYS.qqMusicAccount, emptyAccount(now()))
+
+  const getExpiredLoginCheck = () => ({
+    state: 'expired' as const,
+    message: '二维码已过期',
+    isLoggedIn: false,
+    profile: null,
+  })
 
   const getAccountStatus = (): QQMusicAccountStatus => {
     const account = getAccountData(store)
@@ -85,10 +94,15 @@ export const createQQMusicAccountService = ({
     }
   }
 
-  const createLoginQr = async() => loginService.createLoginQr()
+  const createLoginQr = async() => {
+    loginGeneration++
+    return loginService.createLoginQr()
+  }
 
   const checkLoginQr = async(key: string) => {
+    const generation = loginGeneration
     const result = await loginService.checkLoginQr(key)
+    if (generation != loginGeneration) return getExpiredLoginCheck()
     if (result.state != 'success') {
       return {
         state: result.state,
@@ -117,6 +131,7 @@ export const createQQMusicAccountService = ({
   }
 
   const logout = async() => {
+    loginGeneration++
     clearAccount()
   }
 

@@ -18,12 +18,13 @@ let loginResult = {
 }
 let songError = null
 let pendingSongPromise = null
+let pendingLoginPromise = null
 let singletonGetCookie
 let storeFactoryCallCount = 0
 class QQMusicAuthError extends Error {}
 const loginService = {
   createLoginQr: async() => ({ key: 'opaque', qrimg: 'data:image/png;base64,AA==' }),
-  checkLoginQr: async() => loginResult,
+  checkLoginQr: async() => pendingLoginPromise ?? loginResult,
 }
 const songService = {
   getGuessLikeSongs: async() => {
@@ -134,6 +135,61 @@ const main = async() => {
     profile: null,
   })
   assert.deepStrictEqual(data.get('neteaseAccount'), { cookie: 'keep-netease' })
+
+  await restarted.createLoginQr()
+  let resolveStaleLogin
+  pendingLoginPromise = new Promise(resolve => {
+    resolveStaleLogin = resolve
+  })
+  const staleLoginCheck = restarted.checkLoginQr('opaque')
+  await restarted.logout()
+  resolveStaleLogin({
+    state: 'success',
+    message: '登录成功',
+    cookie: 'uin=oStale; qqmusic_key=stale-secret',
+  })
+  assert.deepStrictEqual(await staleLoginCheck, {
+    state: 'expired',
+    message: '二维码已过期',
+    isLoggedIn: false,
+    profile: null,
+  })
+  pendingLoginPromise = null
+  assert.deepStrictEqual(restarted.getAccountStatus(), {
+    isLoggedIn: false,
+    profile: null,
+  })
+
+  await restarted.createLoginQr()
+  let resolveAccountALogin
+  pendingLoginPromise = new Promise(resolve => {
+    resolveAccountALogin = resolve
+  })
+  const accountALoginCheck = restarted.checkLoginQr('opaque')
+  await restarted.createLoginQr()
+  pendingLoginPromise = null
+  loginResult = {
+    state: 'success',
+    message: '登录成功',
+    cookie: 'uin=oB; qqmusic_key=account-b',
+  }
+  await restarted.checkLoginQr('opaque')
+  resolveAccountALogin({
+    state: 'success',
+    message: '登录成功',
+    cookie: 'uin=oA; qqmusic_key=account-a',
+  })
+  assert.deepStrictEqual(await accountALoginCheck, {
+    state: 'expired',
+    message: '二维码已过期',
+    isLoggedIn: false,
+    profile: null,
+  })
+  assert.deepStrictEqual(restarted.getAccountStatus(), {
+    isLoggedIn: true,
+    profile: { uin: 'oB', nickname: 'QQ 音乐账号' },
+  })
+  await restarted.logout()
 
   loginResult = {
     state: 'success',

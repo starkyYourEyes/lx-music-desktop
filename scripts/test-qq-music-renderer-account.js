@@ -29,11 +29,13 @@ const loadAccountStore = (
   getQQMusicAccountStatus,
   logoutQQMusic = async() => {},
   resetQQGuessLikeQueue = () => {},
+  resetQQDailyRecommend = () => {},
 ) => {
   return loadTsModule(path.join(__dirname, '../src/renderer/store/qqMusic.ts'), {
     '@common/utils/vueTools': { ref, shallowRef: ref, computed },
     '@renderer/utils/ipc': { getQQMusicAccountStatus, logoutQQMusic },
     '@renderer/store/qqGuessLike/action': { resetQQGuessLikeQueue },
+    '@renderer/store/qqDailyRecommend/action': { resetQQDailyRecommend },
   })
 }
 

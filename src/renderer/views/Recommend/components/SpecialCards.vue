@@ -8,8 +8,8 @@
         role="button"
         :tabindex="playlist.isPlaceholder ? -1 : 0"
         @click="$emit('open', playlist)"
-        @keydown.enter="$emit('open', playlist)"
-        @keydown.space.prevent="$emit('open', playlist)"
+        @keydown.enter.self="$emit('open', playlist)"
+        @keydown.space.self.prevent="$emit('open', playlist)"
       >
         <span :class="$style.specialCover">
           <img v-if="playlist.img" :src="playlist.img" loading="lazy" decoding="async" draggable="false">

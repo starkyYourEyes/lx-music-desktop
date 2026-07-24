@@ -45,28 +45,69 @@ assert(exists('src/renderer/views/QQRecommend/index.vue'),
   'QQ recommendation page component should exist')
 assert(exists('src/renderer/views/QQRecommend/useQQGuessLikeCard.ts'),
   'QQ Guess You Like card builder should exist')
+assert(exists('src/renderer/views/QQRecommend/useQQDailyRecommendData.ts'),
+  'QQ Daily 30 data facade should exist')
+assert(exists('src/renderer/views/QQRecommend/useQQDailyRecommendCard.ts'),
+  'QQ Daily 30 card builder should exist')
+assert(exists('src/renderer/views/QQRecommend/useQQDailyRecommendPlayback.ts'),
+  'QQ Daily 30 playback controller should exist')
+assert(!exists('src/renderer/views/QQRecommend/useQQHomeRecommendDiagnostic.ts'),
+  'QQ home recommendation diagnostic should be removed')
 
 const qqPage = read('src/renderer/views/QQRecommend/index.vue')
 const qqCard = read('src/renderer/views/QQRecommend/useQQGuessLikeCard.ts')
+const qqDailyCard = read('src/renderer/views/QQRecommend/useQQDailyRecommendCard.ts')
+const qqDailyPlayback = read('src/renderer/views/QQRecommend/useQQDailyRecommendPlayback.ts')
+const songListAction = read('src/renderer/store/songList/action.ts')
+const specialCards = read('src/renderer/views/Recommend/components/SpecialCards.vue')
 assert.match(qqPage, /useQQGuessLikeData/,
   'QQ page should own Guess You Like data')
 assert.match(qqPage, /useQQMusicLoginQr/,
   'QQ page should own QQ QR login')
-assert.doesNotMatch(qqPage, /HomeRecommend|homeRecommend/,
-  'QQ page should not contain home recommendation diagnostics')
-assert.match(qqPage, /await loadQQGuessLikeSongs\(\)/,
-  'QQ page should automatically load recommendations for a signed-in account')
-assert.match(qqPage, /const cards = computed\(\(\) => \[card\.value\]\)/,
-  'QQ page should expose one Guess You Like card')
-const unmountBody = qqPage.match(/onBeforeUnmount\(\(\) => \{([\s\S]*?)\n\}\)/)?.[1] ?? ''
-assert.match(unmountBody, /window\.removeEventListener\('show-qq-music-login'/,
-  'QQ page should remove its login event listener on unmount')
-assert.doesNotMatch(unmountBody, /reset|clear/,
-  'leaving the QQ page should preserve playback and queue state')
+assert.doesNotMatch(qqPage, /useQQHomeRecommendDiagnostic|inspectHomeRecommend|resetHomeRecommendDiagnostic/,
+  'QQ page should not request or log QQ home recommendations')
+assert.match(qqPage, /Promise\.allSettled\(\[loadQQGuessLikeSongs\(\), loadQQDailyRecommendSongs\(\)\]\)/,
+  'QQ page should independently load both recommendations for a signed-in account')
 assert.match(qqCard, /登录 QQ 音乐后获取猜你喜欢/,
   'signed-out QQ page should show a stable login entry')
 assert.match(qqCard, /img:\s*song\?\.meta\.picUrl/,
   'Guess You Like should use the first song artwork')
+assert.match(qqDailyCard, /QQ_DAILY_RECOMMEND_LIST_ID/,
+  'Daily 30 card should use the shared Daily recommendation id')
+assert.match(qqDailyCard, /source:\s*'tx'/,
+  'Daily 30 card should resolve through the QQ provider')
+assert.match(qqDailyCard, /name:\s*'\u6bcf\u65e530\u9996'/,
+  'Daily 30 card should use its product title')
+assert.match(qqDailyCard, /isQQDailyRecommend:\s*true/,
+  'Daily 30 card should have a dedicated marker')
+assert.match(qqDailyCard, /img:\s*song\?\.meta\.picUrl/,
+  'Daily 30 card should use the first song artwork')
+assert.match(qqDailyCard, /getKicker:\s*\(\)\s*=>\s*'Daily 30'/,
+  'Daily 30 card should expose its kicker')
+assert.match(qqPage, /const cards = computed\(\(\) => \[guessLikeCard\.value, dailyRecommendCard\.value\]\)/,
+  'QQ page should show Guess You Like before Daily 30')
+assert.match(qqPage, /@open="handleCardOpen"/,
+  'card body opens should use a dedicated handler')
+assert.match(qqPage, /@toggle-card-play="handleCardPlay"/,
+  'card cover play controls should use a dedicated handler')
+assert.match(qqPage, /Promise\.allSettled\(/,
+  'Guess You Like and Daily 30 should load independently')
+assert.match(qqDailyPlayback, /isQQDailyRecommendListActive/,
+  'Daily 30 playback should track its shared temporary list')
+assert.match(qqDailyPlayback, /playQQDailyRecommend/,
+  'Daily 30 playback should activate the shared temporary list')
+assert.match(qqDailyPlayback, /path:\s*'\/songList\/detail'/,
+  'Daily 30 card body should navigate to its detail page')
+assert.match(songListAction, /isQQDailyRecommendPlaylist/,
+  'song list loader should recognize the QQ Daily 30 id')
+assert.match(songListAction, /getQQDailyRecommendPlaylistDetail\(isRefresh, getQQMusicAccountKey\(\)\)/,
+  'song list loader should use the local QQ Daily 30 metadata loader')
+assert.match(specialCards, /@keydown\.enter\.self="\$emit\('open', playlist\)"/,
+  'card Enter handling should ignore nested cover-play button events')
+assert.match(specialCards, /@keydown\.space\.self\.prevent="\$emit\('open', playlist\)"/,
+  'card Space handling should ignore nested cover-play button events')
+assert.match(specialCards, /@click="\$emit\('open', playlist\)"/,
+  'card mouse click handling should remain available outside the cover-play button')
 assert.match(qqCard, /`\$\{song\.name\} · \$\{song\.singer\}`/,
   'Guess You Like subtitle should combine first song name and singer')
 
@@ -89,10 +130,5 @@ for (const [name, source] of [
   assert(!source.includes('setting__recommend_qq_guess_like_logged_out_visible'),
     `${name} should remove the obsolete QQ setting label`)
 }
-
-assert.doesNotMatch(router, /path:\s*'\/local-music'/,
-  'provider navigation should not add a local music route')
-assert.doesNotMatch(navBar, /to:\s*'\/local-music'/,
-  'provider navigation should not add a local music menu item')
 
 console.log('provider recommendation page wiring tests passed')

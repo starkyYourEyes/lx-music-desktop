@@ -4,6 +4,7 @@ import {
   logoutQQMusic,
 } from '@renderer/utils/ipc'
 import { resetQQGuessLikeQueue } from '@renderer/store/qqGuessLike/action'
+import { resetQQDailyRecommend } from '@renderer/store/qqDailyRecommend/action'
 
 const emptyStatus: LX.QQMusic.AccountStatus = {
   isLoggedIn: false,
@@ -33,7 +34,10 @@ const commitQQMusicAccountStatus = (status: LX.QQMusic.AccountStatus) => {
     isLoggedIn: status.isLoggedIn,
     profile: status.profile,
   }
-  if (previousAccountKey != getQQMusicAccountKey()) resetQQGuessLikeQueue()
+  if (previousAccountKey != getQQMusicAccountKey()) {
+    resetQQGuessLikeQueue()
+    resetQQDailyRecommend()
+  }
 }
 
 export const setQQMusicAccountStatus = (status: LX.QQMusic.AccountStatus) => {

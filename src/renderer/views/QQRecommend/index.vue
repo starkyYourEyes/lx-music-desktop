@@ -17,8 +17,8 @@
         :is-card-playing="isCardPlaying"
         :get-card-play-label="getCardPlayLabel"
         :get-special-card-kicker="getKicker"
-        @open="handleCardAction"
-        @toggle-card-play="handleCardAction"
+        @open="handleCardOpen"
+        @toggle-card-play="handleCardPlay"
       />
     </div>
   </div>
@@ -34,10 +34,15 @@ import { useQQGuessLikeData } from '@renderer/views/Recommend/useQQGuessLikeData
 import { useQQMusicLoginQr } from '@renderer/views/Recommend/useQQMusicLoginQr'
 import { useQQGuessLikeCard } from './useQQGuessLikeCard'
 import { useQQGuessLikePlayback } from './useQQGuessLikePlayback'
+import { useQQDailyRecommendData } from './useQQDailyRecommendData'
+import { useQQDailyRecommendCard } from './useQQDailyRecommendCard'
+import { useQQDailyRecommendPlayback } from './useQQDailyRecommendPlayback'
+import type { RecommendCard } from '@renderer/views/Recommend/types'
 
 const route = useRoute()
 const router = useRouter()
 const accountKey = computed(() => qqIsLoggedIn.value ? qqProfile.value?.uin ?? null : null)
+let accountRevision = 0
 
 const {
   songs,
@@ -46,6 +51,14 @@ const {
   load: loadQQGuessLikeSongs,
   clear: clearQQGuessLikeSongs,
 } = useQQGuessLikeData()
+
+const {
+  songs: dailyRecommendSongs,
+  isLoading: isLoadingDailyRecommend,
+  loadError: dailyRecommendLoadError,
+  load: loadQQDailyRecommendSongs,
+  clear: clearQQDailyRecommendSongs,
+} = useQQDailyRecommendData()
 
 const {
   qrStatusText,
@@ -59,23 +72,59 @@ const {
   handleCloseLogin()
 })
 
-const { card, getKicker } = useQQGuessLikeCard({
+const { card: guessLikeCard, getKicker: getGuessLikeKicker } = useQQGuessLikeCard({
   songs,
   isLoading,
   loadError,
   isLoggedIn: qqIsLoggedIn,
 })
-const cards = computed(() => [card.value])
+const { card: dailyRecommendCard, getKicker: getDailyRecommendKicker } = useQQDailyRecommendCard({
+  songs: dailyRecommendSongs,
+  isLoading: isLoadingDailyRecommend,
+  loadError: dailyRecommendLoadError,
+  isLoggedIn: qqIsLoggedIn,
+})
+const cards = computed(() => [guessLikeCard.value, dailyRecommendCard.value])
 
 const {
-  isCardPlaying,
-  getCardPlayLabel,
-  handleCardAction,
+  isCardPlaying: isGuessLikeCardPlaying,
+  getCardPlayLabel: getGuessLikeCardPlayLabel,
+  handleCardAction: handleGuessLikeCardAction,
 } = useQQGuessLikePlayback({
   loadSongs: loadQQGuessLikeSongs,
   getAccountKey: () => accountKey.value,
+  getAccountRevision: () => accountRevision,
   onLoginRequired: handleShowLogin,
 })
+
+const {
+  isCardPlaying: isDailyRecommendCardPlaying,
+  getCardPlayLabel: getDailyRecommendCardPlayLabel,
+  handleCardOpen: handleDailyRecommendCardOpen,
+  handleCardPlay: handleDailyRecommendCardPlay,
+} = useQQDailyRecommendPlayback({
+  loadSongs: loadQQDailyRecommendSongs,
+  getAccountKey: () => accountKey.value,
+  onLoginRequired: handleShowLogin,
+})
+
+const getKicker = (card: RecommendCard) => card.isQQDailyRecommend
+  ? getDailyRecommendKicker()
+  : getGuessLikeKicker()
+const isCardPlaying = (card: RecommendCard) => card.isQQDailyRecommend
+  ? isDailyRecommendCardPlaying(card)
+  : isGuessLikeCardPlaying(card)
+const getCardPlayLabel = (card: RecommendCard) => card.isQQDailyRecommend
+  ? getDailyRecommendCardPlayLabel(card)
+  : getGuessLikeCardPlayLabel(card)
+const handleCardOpen = async(card: RecommendCard) => {
+  if (card.isQQDailyRecommend) return handleDailyRecommendCardOpen(card)
+  return handleGuessLikeCardAction(card)
+}
+const handleCardPlay = async(card: RecommendCard) => {
+  if (card.isQQDailyRecommend) return handleDailyRecommendCardPlay(card)
+  return handleGuessLikeCardAction(card)
+}
 
 let isInitializingAccount = false
 
@@ -85,19 +134,22 @@ const initializeAccount = async() => {
   await nextTick()
   isInitializingAccount = false
   if (accountKey.value) {
-    await loadQQGuessLikeSongs()
+    await Promise.allSettled([loadQQGuessLikeSongs(), loadQQDailyRecommendSongs()])
   } else {
     clearQQGuessLikeSongs()
+    clearQQDailyRecommendSongs()
   }
 }
 
 watch(accountKey, (value, oldValue) => {
   if (value == oldValue) return
+  accountRevision++
   clearQQGuessLikeSongs()
+  clearQQDailyRecommendSongs()
   if (!value) return
   handleCloseLogin()
   if (isInitializingAccount) return
-  void loadQQGuessLikeSongs()
+  void Promise.allSettled([loadQQGuessLikeSongs(), loadQQDailyRecommendSongs()])
 })
 
 watch(() => route.query.login, login => {

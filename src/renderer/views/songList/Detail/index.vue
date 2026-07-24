@@ -1,7 +1,7 @@
 <template>
   <div :class="$style.container">
     <div :class="$style.songListHeader">
-      <div :class="$style.songListHeaderLeft" :style="{ backgroundImage: 'url('+(picUrl || listDetailInfo.info.img)+')' }">
+      <div :class="$style.songListHeaderLeft" :style="{ backgroundImage: 'url('+coverPicUrl+')' }">
         <!-- <span v-if="listDetailInfo.info.play_count" :class="$style.playNum">{{ listDetailInfo.info.play_count }}</span> -->
       </div>
       <div :class="$style.songListHeaderMiddle">
@@ -43,13 +43,15 @@
 </template>
 
 <script lang="ts">
-import { ref, watch } from '@common/utils/vueTools'
+import { computed, ref, watch } from '@common/utils/vueTools'
 import { listDetailInfo } from '@renderer/store/songList/state'
-import { setVisibleListDetail } from '@renderer/store/songList/action'
+import { clearListDetail, setVisibleListDetail } from '@renderer/store/songList/action'
 import { useRouter } from '@common/utils/vueRouter'
+import { isLoggedIn as qqIsLoggedIn, profile as qqProfile } from '@renderer/store/qqMusic'
 import { addSongListDetail, playSongListDetail } from './action'
 import useList from './useList'
 import useKeyBack from './useKeyBack'
+import { useQQDailyRecommendDetailAccount, useQQDailyRecommendDetailCover } from './useQQDailyRecommendAccount'
 import { DAILY_RECOMMEND_TEMP_LIST_ID } from '@renderer/store/dailyRecommend/state'
 
 
@@ -115,6 +117,7 @@ export default {
   setup() {
     const router = useRouter()
     const listContextId = ref('')
+    const qqAccountKey = computed(() => qqIsLoggedIn.value ? qqProfile.value?.uin ?? null : null)
 
     const {
       listRef,
@@ -136,6 +139,22 @@ export default {
 
     useKeyBack(handleBack)
 
+    useQQDailyRecommendDetailAccount({
+      accountKey: qqAccountKey,
+      source,
+      id,
+      page,
+      refresh,
+      clear: clearListDetail,
+      reload: getListData,
+    })
+    const coverPicUrl = useQQDailyRecommendDetailCover({
+      source,
+      id,
+      picUrl,
+      detailImg: computed(() => listDetailInfo.info.img),
+    })
+
     watch([source, id, page, refresh], async([_source, _id, _page, _refresh]) => {
       if (!_source || !_id) return router.replace({ path: '/songList/list' })
       listContextId.value = getTempListId(_id, _source)
@@ -154,6 +173,7 @@ export default {
       id,
       page,
       picUrl,
+      coverPicUrl,
       listDetailInfo,
       listContextId,
       listRef,

@@ -4,6 +4,7 @@ import { type ProgressInfo, type UpdateDownloadedEvent, type UpdateInfo } from '
 import { markRaw, toRaw } from '@common/utils/vueTools'
 import * as hotKeys from '@common/hotKey'
 import { APP_EVENT_NAMES, DATA_KEYS, DEFAULT_SETTING } from '@common/constants'
+import type { ListeningTimeStats } from '@common/utils/listeningTime'
 
 type RemoveListener = () => void
 
@@ -215,14 +216,14 @@ export const getRecentPlayList = async() => {
   return rendererInvoke<string, LX.Music.MusicInfo[] | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.recentPlayList)
 }
 
-export const saveListeningTimeStats = (stats: import('@common/utils/listeningTime').ListeningTimeStats) => {
+export const saveListeningTimeStats = (stats: ListeningTimeStats) => {
   rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
     path: DATA_KEYS.listeningTimeStats,
     data: toCloneable(stats),
   })
 }
 export const getListeningTimeStats = async() => {
-  return rendererInvoke<string, import('@common/utils/listeningTime').ListeningTimeStats | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.listeningTimeStats)
+  return rendererInvoke<string, ListeningTimeStats | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.listeningTimeStats)
 }
 
 export const saveSearchHistoryList = (list: LX.List.SearchHistoryList) => {
@@ -737,6 +738,10 @@ export const getQQMusicGuessLikeSongs = async(continuation = false) => {
     WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_guess_like_songs,
     { continuation },
   )
+}
+
+export const getQQMusicDailyRecommendSongs = async() => {
+  return rendererInvoke<LX.Music.MusicInfo_tx[]>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_daily_recommend_songs)
 }
 
 export const getNeteaseAccountStatus = async() => {

@@ -4,6 +4,7 @@ import {
   checkLoginQr,
   createLoginQr,
   getAccountStatus,
+  getDailyRecommendSongs,
   getGuessLikeSongs,
   logout,
 } from '@main/modules/qqMusic'
@@ -28,5 +29,10 @@ export default () => {
   mainHandle<LX.QQMusic.GuessLikeRequest | undefined, LX.Music.MusicInfo_tx[]>(
     WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_guess_like_songs,
     async({ params }) => getGuessLikeSongs(params),
+  )
+
+  mainHandle<LX.Music.MusicInfo_tx[]>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_daily_recommend_songs,
+    async() => getDailyRecommendSongs(),
   )
 }

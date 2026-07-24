@@ -12,6 +12,7 @@ const handlerIndex = read('src/main/modules/winMain/rendererEvent/index.ts')
 const rendererIpc = read('src/renderer/utils/ipc.ts')
 const mainTypes = read('src/main/types/common.d.ts')
 const rendererTypes = read('src/renderer/types/common.d.ts')
+const qqMusicMain = read('src/main/modules/qqMusic/index.ts')
 
 for (const name of [
   'qq_music_get_account_status',
@@ -19,6 +20,7 @@ for (const name of [
   'qq_music_login_qr_check',
   'qq_music_logout',
   'qq_music_get_guess_like_songs',
+  'qq_music_get_daily_recommend_songs',
 ]) {
   assert.match(names, new RegExp(`${name}: '${name}'`))
   assert.match(handlers, new RegExp(name))
@@ -32,13 +34,16 @@ assert.match(rendererIpc, /createQQMusicLoginQr/)
 assert.match(rendererIpc, /checkQQMusicLoginQr/)
 assert.match(rendererIpc, /logoutQQMusic/)
 assert.match(rendererIpc, /getQQMusicGuessLikeSongs/)
-assert.match(types, /interface GuessLikeRequest\s*\{[\s\S]*?continuation\?: boolean/)
-assert.match(handlers, /getGuessLikeSongs\(params\)/)
-assert.match(rendererIpc, /getQQMusicGuessLikeSongs = async\(continuation = false\)/)
-assert.match(rendererIpc, /\{ continuation \}/)
-assert.doesNotMatch(types, /HomeRecommendResponse/)
-assert.doesNotMatch(handlers, /HomeRecommend|getHomeRecommend/)
-assert.doesNotMatch(rendererIpc, /QQMusicHomeRecommend|QQMusic\.HomeRecommendResponse/)
+assert.match(rendererIpc, /getQQMusicDailyRecommendSongs/)
+assert.match(handlers, /getDailyRecommendSongs\(\)/)
+assert.doesNotMatch(names, /qq_music_get_home_recommend/, 'QQ home recommendation IPC name should be removed')
+assert.doesNotMatch(handlers, /getHomeRecommend|qq_music_get_home_recommend/, 'QQ home recommendation handler should be removed')
+assert.doesNotMatch(rendererIpc, /getQQMusicHomeRecommend|qq_music_get_home_recommend/, 'QQ home recommendation renderer wrapper should be removed')
+assert.doesNotMatch(types, /HomeRecommendResponse/, 'QQ home recommendation response type should be removed')
+assert(!fs.existsSync(path.join(root, 'src/main/modules/qqMusic/recommend.ts')),
+  'QQ home recommendation request service should remain removed')
+assert.doesNotMatch(qqMusicMain, /createQQMusicRecommendService|\bgetHomeRecommend\b/,
+  'QQ account facade should not expose home recommendations')
 
 const publicTypeBodies = [...types.matchAll(/interface (?:Profile|AccountStatus|LoginQr|LoginQrCheck)\s*\{([\s\S]*?)\n\s*\}/g)]
   .map(match => match[1]).join('\n')

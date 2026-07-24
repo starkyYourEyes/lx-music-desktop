@@ -81,6 +81,7 @@ const createQQGuessLikePlaybackHarness = ({ accountKey = 'A', loadSongs }) => {
   const isPlay = ref(false)
   const enterCalls = []
   let currentAccountKey = accountKey
+  let accountRevision = 0
   let activeAccountKey = null
   let loginRequiredCalls = 0
   let pauseCalls = 0
@@ -107,6 +108,7 @@ const createQQGuessLikePlaybackHarness = ({ accountKey = 'A', loadSongs }) => {
   const playback = useQQGuessLikePlayback({
     loadSongs,
     getAccountKey: () => currentAccountKey,
+    getAccountRevision: () => accountRevision,
     onLoginRequired: () => { loginRequiredCalls++ },
   })
 
@@ -115,7 +117,10 @@ const createQQGuessLikePlaybackHarness = ({ accountKey = 'A', loadSongs }) => {
     isPlay,
     enterCalls,
     getAccountKey: () => currentAccountKey,
-    setAccountKey: value => { currentAccountKey = value },
+    setAccountKey: value => {
+      if (currentAccountKey != value) accountRevision++
+      currentAccountKey = value
+    },
     setActiveAccountKey: value => { activeAccountKey = value },
     get loginRequiredCalls() { return loginRequiredCalls },
     get pauseCalls() { return pauseCalls },
@@ -228,6 +233,32 @@ const testQQGuessLikePlaybackScopesPendingActivationToAccount = async() => {
 
   assert.deepStrictEqual(harness.enterCalls, ['B'],
     'the stale account A activation must not replace account B playback')
+}
+
+const testQQGuessLikePlaybackInvalidatesPendingAccountRoundTrip = async() => {
+  const oldAccountA = deferred()
+  const newAccountA = deferred()
+  let loadCalls = 0
+  const harness = createQQGuessLikePlaybackHarness({
+    loadSongs: async() => ++loadCalls == 1 ? oldAccountA.promise : newAccountA.promise,
+  })
+
+  const oldActivation = toggleQQGuessLike(harness.playback)
+  await Promise.resolve()
+  harness.setAccountKey('B')
+  harness.setAccountKey('A')
+  const newActivation = toggleQQGuessLike(harness.playback)
+  await Promise.resolve()
+  assert.strictEqual(loadCalls, 2)
+
+  oldAccountA.resolve([song('stale-account-a')])
+  await oldActivation
+  assert.deepStrictEqual(harness.enterCalls, [],
+    'an activation from an earlier account revision must not survive A-B-A')
+
+  newAccountA.resolve([song('current-account-a')])
+  await newActivation
+  assert.deepStrictEqual(harness.enterCalls, ['A'])
 }
 
 const testQQGuessLikeDataRetriesCurrentAccount = async() => {
@@ -448,7 +479,9 @@ const testDedicatedQQRecommendationWiring = () => {
   assert.match(qqData, /qqGuessLikeQueue/)
   assert.match(qqPlayback, /enterQQGuessLikeMode/)
   assert.match(qqPlayback, /isQQGuessLikeListActive/)
+  assert.match(qqPage, /getAccountRevision:\s*\(\)\s*=>\s*accountRevision/)
   assert.match(qqAccount, /resetQQGuessLikeQueue/)
+  assert.match(qqAccount, /resetQQDailyRecommend/)
 }
 
 const main = async() => {
@@ -458,6 +491,7 @@ const main = async() => {
   await testQQGuessLikePlaybackActivatesOncePerPendingAccount()
   await testQQGuessLikePlaybackRetriesRejectedAndEmptyLoads()
   await testQQGuessLikePlaybackScopesPendingActivationToAccount()
+  await testQQGuessLikePlaybackInvalidatesPendingAccountRoundTrip()
   await testQQGuessLikeDataRetriesCurrentAccount()
   await testEndedContinuationDoesNotAdvanceChangedPlayback()
   testDedicatedQQRecommendationWiring()

@@ -1,12 +1,12 @@
 import { computed, ref } from '@common/utils/vueTools'
-import { prepareQQGuessLikeQueue, resetQQGuessLikeQueue } from '@renderer/store/qqGuessLike/action'
-import { isLoadingQQGuessLike, qqGuessLikeQueue } from '@renderer/store/qqGuessLike/state'
+import { prepareQQDailyRecommend, resetQQDailyRecommend } from '@renderer/store/qqDailyRecommend/action'
+import { isLoadingQQDailyRecommend, qqDailyRecommendSongs } from '@renderer/store/qqDailyRecommend/state'
 import { getQQMusicAccountKey, initQQMusicAccount } from '@renderer/store/qqMusic'
 
-const LOAD_ERROR = '猜你喜欢加载失败，请稍后重试'
+const LOAD_ERROR = '每日30首加载失败，请稍后重试'
 
-export const useQQGuessLikeData = () => {
-  const songs = computed(() => qqGuessLikeQueue)
+export const useQQDailyRecommendData = () => {
+  const songs = computed(() => qqDailyRecommendSongs)
   const isRefreshing = ref(false)
   const loadError = ref('')
   let requestRevision = 0
@@ -16,14 +16,13 @@ export const useQQGuessLikeData = () => {
     const accountKey = getQQMusicAccountKey()
     if (!accountKey) {
       loadError.value = ''
-      resetQQGuessLikeQueue()
       return []
     }
 
     loadError.value = ''
     if (force) isRefreshing.value = true
     try {
-      const nextSongs = await prepareQQGuessLikeQueue(accountKey, force)
+      const nextSongs = await prepareQQDailyRecommend(accountKey, force)
       if (revision != requestRevision || getQQMusicAccountKey() != accountKey) return []
       return nextSongs
     } catch {
@@ -40,12 +39,12 @@ export const useQQGuessLikeData = () => {
     requestRevision++
     loadError.value = ''
     isRefreshing.value = false
-    resetQQGuessLikeQueue()
+    resetQQDailyRecommend()
   }
 
   return {
     songs,
-    isLoading: isLoadingQQGuessLike,
+    isLoading: isLoadingQQDailyRecommend,
     isRefreshing,
     loadError,
     load,

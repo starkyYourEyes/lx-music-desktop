@@ -9,29 +9,28 @@ import type { RecommendCard } from '@renderer/views/Recommend/types'
 export const useQQGuessLikePlayback = ({
   loadSongs,
   getAccountKey,
+  getAccountRevision = () => 0,
   onLoginRequired,
 }: {
   loadSongs: () => Promise<LX.Music.MusicInfoOnline[]>
   getAccountKey: () => string | null
+  getAccountRevision?: () => number
   onLoginRequired: () => void
 }) => {
-  let activation: {
-    accountKey: string
-    token: symbol
-    task: Promise<void>
-  } | null = null
+  let activation: { accountKey: string, accountRevision: number, task: Promise<void> } | null = null
 
   const isPlayingList = () => isQQGuessLikeListActive(getAccountKey())
   const isPlaying = () => isPlayingList() && isPlay.value
 
-  const start = async(accountKey: string, token: symbol) => {
+  const start = async(accountKey: string, accountRevision: number) => {
     const songs = await loadSongs()
-    if (!songs.length || getAccountKey() != accountKey || activation?.token != token) return
+    if (!songs.length || getAccountKey() != accountKey || getAccountRevision() != accountRevision) return
     await enterQQGuessLikeMode(accountKey)
   }
 
   const toggle = async() => {
     const accountKey = getAccountKey()
+    const accountRevision = getAccountRevision()
     if (!accountKey) {
       onLoginRequired()
       return
@@ -41,15 +40,15 @@ export const useQQGuessLikePlayback = ({
       else play()
       return
     }
-    if (activation?.accountKey == accountKey) return activation.task
+    if (activation?.accountKey == accountKey && activation.accountRevision == accountRevision) return activation.task
 
-    const token = Symbol('qq-guess-like-activation')
-    const task = start(accountKey, token)
-    activation = { accountKey, token, task }
+    const task = start(accountKey, accountRevision)
+    const currentActivation = { accountKey, accountRevision, task }
+    activation = currentActivation
     try {
       await task
     } finally {
-      if (activation?.token == token) activation = null
+      if (activation == currentActivation) activation = null
     }
   }
 

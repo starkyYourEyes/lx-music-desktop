@@ -243,10 +243,8 @@ const testStaticWiring = () => {
   assert.match(specialCards, /:cards="specialCards"/)
   assert.match(specialCards, /@open="handleOpenPlaylist"/)
   assert.match(specialCards, /@toggle-card-play="handleToggleCardPlay"/)
-  assert.match(
-    recommendIndex,
-    /const\s+showQQGuessLikeCard\s*=\s*computed\(\(\)\s*=>\s*qqIsLoggedIn\.value\s*\|\|\s*appSetting\['recommend\.qqGuessLikeLoggedOutVisible'\]\)/,
-  )
+  const showQQGuessLikeCardDeclaration = recommendIndex.match(/const\s+showQQGuessLikeCard\s*=\s*computed\([\s\S]*?(?=\n\s*const\s|\n\s*\n)/)?.[0] || ''
+  assert.match(showQQGuessLikeCardDeclaration, /qqIsLoggedIn\.value\s*\|\|\s*appSetting\['recommend\.qqGuessLikeLoggedOutVisible'\]/)
   const recommendCardsCall = recommendIndex.match(/useRecommendCards\(\s*specialSourcePlaylists\s*,\s*\{[\s\S]*?\}\s*\)/)?.[0] || ''
   assert.match(recommendCardsCall, /showQQGuessLike:\s*showQQGuessLikeCard/)
   assert.match(recommendCardsCall, /qqGuessLikeSongs/)
@@ -256,6 +254,11 @@ const testStaticWiring = () => {
   assert.match(recommendPlaybackCall, /loadQQGuessLikeSongs:\s*loadQQGuessLikeForPlayback/)
   assert.match(recommendPlaybackCall, /getQQGuessLikeAccountKey:\s*\(\)\s*=>\s*qqAccountKey\.value/)
   assert.match(recommendPlaybackCall, /onQQGuessLikeLoginRequired:\s*handleShowQQLogin/)
+  const lazyQQPlaybackLoader = recommendIndex.match(/const\s+loadQQGuessLikeForPlayback\s*=\s*async\(\)\s*=>\s*\{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(lazyQQPlaybackLoader, /await\s+loadQQGuessLikeSongs\(\)/)
+  const playbackCallPosition = recommendIndex.indexOf('useRecommendPlayback({')
+  assert.ok(recommendIndex.indexOf('const handleShowQQLogin') >= 0 && recommendIndex.indexOf('const handleShowQQLogin') < playbackCallPosition)
+  assert.ok(recommendIndex.indexOf('const loadQQGuessLikeForPlayback') >= 0 && recommendIndex.indexOf('const loadQQGuessLikeForPlayback') < playbackCallPosition)
   assert.doesNotMatch(recommendIndex, /qqLoadCoordinator/)
   assert.doesNotMatch(recommendIndex, /handleRefreshQQGuessLike/)
   assert.doesNotMatch(recommendIndex, /handleToggleQQGuessLikeSongs/)

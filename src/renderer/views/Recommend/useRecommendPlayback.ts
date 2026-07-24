@@ -17,29 +17,40 @@ export const useRecommendPlayback = ({
   homeStyleSongs,
   homeSimilarSongs,
   qqGuessLikeSongs,
+  loadQQGuessLikeSongs,
+  getQQGuessLikeAccountKey,
+  onQQGuessLikeLoginRequired,
   setError,
 }: {
   homeStyleSongs: { value: LX.Music.MusicInfoOnline[] }
   homeSimilarSongs: { value: LX.Music.MusicInfoOnline[] }
   qqGuessLikeSongs: { value: LX.Music.MusicInfoOnline[] }
+  loadQQGuessLikeSongs: () => Promise<void>
+  getQQGuessLikeAccountKey: () => string | null
+  onQQGuessLikeLoginRequired: () => void
   setError: (message: string) => void
 }) => {
   const route = useRoute()
   const router = useRouter()
+  let qqGuessLikeQueueAccountKey: string | null = null
+  let qqGuessLikeActivation: { accountKey: string, task: Promise<void> } | null = null
 
   const isPrivateFmPlaying = () => isPrivateFmMode.value && isPlay.value
   const isDailyRecommendPlaying = () => isDailyRecommendPlayingList.value && isPlay.value
   const isSongSectionPlayingList = (tempListId: string) => playInfo.playerListId == LIST_IDS.TEMP && tempListMeta.id == tempListId
   const isStyleSongsPlayingList = () => isSongSectionPlayingList(HOME_STYLE_SONGS_TEMP_LIST_ID)
   const isHomeSongsPlayingList = () => isSongSectionPlayingList(HOME_SIMILAR_SONGS_TEMP_LIST_ID)
-  const isQQGuessLikePlayingList = () => isSongSectionPlayingList(QQ_GUESS_LIKE_TEMP_LIST_ID)
+  const isQQGuessLikePlayingList = () => {
+    const accountKey = getQQGuessLikeAccountKey()
+    return accountKey != null && isSongSectionPlayingList(QQ_GUESS_LIKE_TEMP_LIST_ID) && qqGuessLikeQueueAccountKey == accountKey
+  }
   const isStyleSongsPlaying = () => isStyleSongsPlayingList() && isPlay.value
   const isHomeSongsPlaying = () => isHomeSongsPlayingList() && isPlay.value
   const isQQGuessLikePlaying = () => isQQGuessLikePlayingList() && isPlay.value
 
-  const getPlaylistTempListId = (playlist: LX.Netease.Playlist) => `${playlist.source}__${playlist.id}`
+  const getPlaylistTempListId = (playlist: RecommendCard) => `${playlist.source}__${playlist.id}`
 
-  const isPlaylistPlayingList = (playlist: LX.Netease.Playlist) => {
+  const isPlaylistPlayingList = (playlist: RecommendCard) => {
     return playInfo.playerListId == LIST_IDS.TEMP && tempListMeta.id == getPlaylistTempListId(playlist)
   }
 
@@ -48,7 +59,6 @@ export const useRecommendPlayback = ({
   }
   const isStyleSongPlaying = (song: LX.Music.MusicInfoOnline) => isSongSectionSongPlaying(HOME_STYLE_SONGS_TEMP_LIST_ID, song)
   const isHomeSongPlaying = (song: LX.Music.MusicInfoOnline) => isSongSectionSongPlaying(HOME_SIMILAR_SONGS_TEMP_LIST_ID, song)
-  const isQQGuessLikeSongPlaying = (song: LX.Music.MusicInfoOnline) => isSongSectionSongPlaying(QQ_GUESS_LIKE_TEMP_LIST_ID, song)
 
   const handleToggleDailyRecommend = async() => {
     if (isDailyRecommendPlaying()) {
@@ -84,14 +94,14 @@ export const useRecommendPlayback = ({
     }
   }
 
-  const handleTogglePrivateRadar = async(playlist: LX.Netease.Playlist) => {
+  const handleTogglePrivateRadar = async(playlist: RecommendCard) => {
     if (isPlaylistPlayingList(playlist)) {
       if (isPlay.value) pause()
       else play()
       return
     }
     try {
-      await playSongListDetail(playlist.id, playlist.source)
+      await playSongListDetail(playlist.id, 'wy')
     } catch (err: any) {
       setError(err?.message ?? '私人雷达加载失败')
     }
@@ -136,15 +146,50 @@ export const useRecommendPlayback = ({
 
   const handleToggleStyleSongs = async() => handleToggleSongSection(HOME_STYLE_SONGS_TEMP_LIST_ID, homeStyleSongs)
   const handleToggleHomeSongs = async() => handleToggleSongSection(HOME_SIMILAR_SONGS_TEMP_LIST_ID, homeSimilarSongs)
-  const handleToggleQQGuessLikeSongs = async() => handleToggleSongSection(QQ_GUESS_LIKE_TEMP_LIST_ID, qqGuessLikeSongs)
   const handlePlayStyleSongs = async(index = 0) => handlePlaySongSection(HOME_STYLE_SONGS_TEMP_LIST_ID, homeStyleSongs, index)
   const handlePlayHomeSongs = async(index = 0) => handlePlaySongSection(HOME_SIMILAR_SONGS_TEMP_LIST_ID, homeSimilarSongs, index)
-  const handlePlayQQGuessLikeSongs = async(index = 0) => handlePlaySongSection(QQ_GUESS_LIKE_TEMP_LIST_ID, qqGuessLikeSongs, index)
 
-  const handleOpenPlaylist = (playlist: RecommendCard | LX.Netease.Playlist) => {
+  const startQQGuessLike = async(accountKey: string) => {
+    if (!qqGuessLikeSongs.value.length) await loadQQGuessLikeSongs()
+    if (getQQGuessLikeAccountKey() != accountKey || !qqGuessLikeSongs.value.length) return
+
+    await setTempList(QQ_GUESS_LIKE_TEMP_LIST_ID, toCloneable(qqGuessLikeSongs.value))
+    if (getQQGuessLikeAccountKey() != accountKey) return
+
+    qqGuessLikeQueueAccountKey = accountKey
+    playList(LIST_IDS.TEMP, 0)
+  }
+
+  const handleToggleQQGuessLikeCard = async() => {
+    const accountKey = getQQGuessLikeAccountKey()
+    if (!accountKey) {
+      onQQGuessLikeLoginRequired()
+      return
+    }
+    if (isQQGuessLikePlayingList()) {
+      if (isPlay.value) pause()
+      else play()
+      return
+    }
+    if (qqGuessLikeActivation?.accountKey == accountKey) return qqGuessLikeActivation.task
+
+    const task = startQQGuessLike(accountKey)
+    qqGuessLikeActivation = { accountKey, task }
+    try {
+      await task
+    } finally {
+      if (qqGuessLikeActivation?.task == task) qqGuessLikeActivation = null
+    }
+  }
+
+  const handleOpenPlaylist = async(playlist: RecommendCard | LX.Netease.Playlist) => {
     if ('isPlaceholder' in playlist && playlist.isPlaceholder) return
+    if ('isQQGuessLike' in playlist && playlist.isQQGuessLike) {
+      await handleToggleQQGuessLikeCard()
+      return
+    }
     if ('isPrivateFm' in playlist && playlist.isPrivateFm) {
-      void handleTogglePrivateFm()
+      await handleTogglePrivateFm()
       return
     }
     void router.push({
@@ -174,6 +219,7 @@ export const useRecommendPlayback = ({
   const isCardPlaying = (playlist: RecommendCard) => {
     if (playlist.isPrivateFm) return isPrivateFmPlaying()
     if (playlist.isDailyRecommend) return isDailyRecommendPlaying()
+    if (playlist.isQQGuessLike) return isQQGuessLikePlaying()
     if (playlist.isPrivateRadar) return isPlaylistPlayingList(playlist) && isPlay.value
     return false
   }
@@ -181,6 +227,7 @@ export const useRecommendPlayback = ({
   const getCardPlayLabel = (playlist: RecommendCard) => {
     if (playlist.isPrivateFm) return isPrivateFmPlaying() ? '暂停私人 FM' : '播放私人 FM'
     if (playlist.isDailyRecommend) return isDailyRecommendPlaying() ? '暂停每日推荐' : '播放每日推荐'
+    if (playlist.isQQGuessLike) return isQQGuessLikePlaying() ? '暂停猜你喜欢' : '播放猜你喜欢'
     if (playlist.isPrivateRadar) return isCardPlaying(playlist) ? '暂停私人雷达' : '播放私人雷达'
     return '播放'
   }
@@ -189,17 +236,21 @@ export const useRecommendPlayback = ({
     return isPlaylistPlayingList(playlist) && isPlay.value ? `暂停 ${playlist.name}` : `播放 ${playlist.name}`
   }
 
-  const handleToggleCardPlay = (playlist: RecommendCard) => {
+  const handleToggleCardPlay = async(playlist: RecommendCard) => {
     if (playlist.isPrivateFm) {
-      void handleTogglePrivateFm()
+      await handleTogglePrivateFm()
       return
     }
     if (playlist.isDailyRecommend) {
-      void handleToggleDailyRecommend()
+      await handleToggleDailyRecommend()
+      return
+    }
+    if (playlist.isQQGuessLike) {
+      await handleToggleQQGuessLikeCard()
       return
     }
     if (playlist.isPrivateRadar) {
-      void handleTogglePrivateRadar(playlist)
+      await handleTogglePrivateRadar(playlist)
     }
   }
 
@@ -222,7 +273,6 @@ export const useRecommendPlayback = ({
     isQQGuessLikePlaying,
     isStyleSongPlaying,
     isHomeSongPlaying,
-    isQQGuessLikeSongPlaying,
     isCardPlaying,
     getCardPlayLabel,
     getPlaylistPlayLabel,
@@ -230,10 +280,9 @@ export const useRecommendPlayback = ({
     handleTogglePlaylistPlay,
     handleToggleStyleSongs,
     handleToggleHomeSongs,
-    handleToggleQQGuessLikeSongs,
+    handleToggleQQGuessLikeCard,
     handlePlayStyleSongs,
     handlePlayHomeSongs,
-    handlePlayQQGuessLikeSongs,
     handleOpenPlaylist,
     handleOpenChart,
     handleShowAll,

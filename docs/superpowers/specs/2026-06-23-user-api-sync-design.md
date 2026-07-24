@@ -105,6 +105,7 @@ declare namespace LX {
         homepage: string
         version: string
         allowShowUpdateAlert?: boolean
+        sources?: LX.UserApi.UserApiSources
         script: string
         scriptEncoding: 'plain'
       }
@@ -507,12 +508,20 @@ Mobile client accepts:
       "name": "Example Source",
       "description": "v1.2.1 example",
       "author": "",
-      "homepage": "",
-      "version": "1.2.1",
-      "allowShowUpdateAlert": true,
-      "scriptEncoding": "plain",
-      "script": "/* ... original JavaScript source ... */\n"
-    }
+        "homepage": "",
+        "version": "1.2.1",
+        "allowShowUpdateAlert": true,
+        "sources": {
+          "kw": {
+            "name": "kw",
+            "type": "music",
+            "actions": ["musicUrl", "lyric", "pic"],
+            "qualitys": ["128k", "320k", "flac"]
+          }
+        },
+        "scriptEncoding": "plain",
+        "script": "/* ... original JavaScript source ... */\n"
+      }
   ]
 }
 ```
@@ -522,6 +531,7 @@ Field notes:
 - `id` is the desktop custom source id. Mobile may preserve it as the stable remote id.
 - `scriptEncoding` is currently always `plain`.
 - `script` is raw JavaScript text after desktop `gz_` inflation.
+- `sources` is optional desktop-parsed capability metadata. Mobile may use it as a hint, but should still parse `script` with its own custom source importer.
 - `updatedAt` is informational. It should not be part of the MD5 comparison.
 - Empty `apis: []` means desktop has no custom sources and mobile should clear sources whose `remoteSource` is `"desktop"`.
 

@@ -12,7 +12,7 @@ import {
 import { setMusicList } from '@renderer/store/list/listManage/action'
 import { toRaw } from '@common/utils/vueTools'
 import { LIST_IDS } from '@common/constants'
-import { likeNeteaseMusic, listWebDAVMusics } from '@renderer/utils/ipc'
+import { likeNeteaseMusic, listWebDAVMusics, uploadLocalMusicToWebDAV } from '@renderer/utils/ipc'
 
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
 
@@ -63,11 +63,50 @@ export const refreshWebDAVList = async() => {
   }
 }
 
+const shouldConvertLocalMusicToWebDAV = (id: string) => {
+  if (id == LIST_IDS.DEFAULT || id == LIST_IDS.LOVE) return true
+  return userLists.some(list => list.id == id)
+}
+
+const upsertWebDAVListCache = (musicInfos: LX.Music.MusicInfoWebDAV[]) => {
+  if (!musicInfos.length) return
+  const currentList = allMusicList.get(LIST_IDS.WEBDAV) ?? setMusicList(LIST_IDS.WEBDAV, [])
+  const existsIds = new Set(currentList.map(musicInfo => musicInfo.id))
+  const appendList = musicInfos.filter(musicInfo => !existsIds.has(musicInfo.id))
+  if (!appendList.length) return
+  currentList.unshift(...appendList)
+  setUpdateTime(LIST_IDS.WEBDAV, new Date().toLocaleString())
+  window.app_event.myListUpdate([LIST_IDS.WEBDAV])
+}
+
+const convertLocalMusicsToWebDAV = async(musicInfos: LX.Music.MusicInfo[]) => {
+  const uploadedWebDAVMusics: LX.Music.MusicInfoWebDAV[] = []
+  const convertedList: LX.Music.MusicInfo[] = []
+  try {
+    for (const musicInfo of musicInfos) {
+      if (musicInfo.source != 'local') {
+        convertedList.push(musicInfo)
+        continue
+      }
+      const webDAVMusicInfo = await uploadLocalMusicToWebDAV(musicInfo)
+      uploadedWebDAVMusics.push(webDAVMusicInfo)
+      convertedList.push(webDAVMusicInfo)
+    }
+    return convertedList
+  } finally {
+    upsertWebDAVListCache(uploadedWebDAVMusics)
+  }
+}
+
 export const addListMusics = async(id: string, musicInfos: LX.Music.MusicInfo[], addMusicLocationType?: LX.AddMusicLocationType, options?: {
   waitNeteaseSync?: boolean
   skipNeteaseSync?: boolean
+  skipLocalWebDAVSync?: boolean
 }) => {
-  const rawMusicInfos = toCloneable(musicInfos)
+  let rawMusicInfos = toCloneable(musicInfos)
+  if (!options?.skipLocalWebDAVSync && shouldConvertLocalMusicToWebDAV(id) && rawMusicInfos.some(musicInfo => musicInfo.source == 'local')) {
+    rawMusicInfos = await convertLocalMusicsToWebDAV(rawMusicInfos)
+  }
   const result = await addListMusicsAction({
     id,
     musicInfos: rawMusicInfos,
@@ -119,7 +158,7 @@ export const createUserList = async({ name, id = `userlist_${Date.now()}`, list 
 }
 
 
-export const setTempList = async(id: string, list: LX.Music.MusicInfoOnline[]) => {
+export const setTempList = async(id: string, list: LX.Music.MusicInfo[]) => {
   tempListMeta.id = id
   setMusicList(LIST_IDS.TEMP, list)
   await overwriteListMusics({

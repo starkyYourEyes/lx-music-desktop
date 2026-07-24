@@ -23,6 +23,14 @@ const router = createRouter({
       },
     },
     {
+      path: '/qq-recommend',
+      name: 'QQRecommend',
+      component: require('./views/QQRecommend/index.vue').default,
+      meta: {
+        name: 'QQRecommend',
+      },
+    },
+    {
       path: '/recent-play',
       name: 'RecentPlay',
       component: require('./views/RecentPlay/index.vue').default,
@@ -36,6 +44,14 @@ const router = createRouter({
       component: require('./views/CloudDisk/index.vue').default,
       meta: {
         name: 'CloudDisk',
+      },
+    },
+    {
+      path: '/local-music',
+      name: 'LocalMusic',
+      component: require('./views/LocalMusic/index.vue').default,
+      meta: {
+        name: 'LocalMusic',
       },
     },
     {

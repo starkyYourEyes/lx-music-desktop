@@ -29,6 +29,7 @@ dd
       base-btn.btn(min :disabled="isTestingWebDAV" @click="handleTestWebDAV") 测试连接
     .p
       base-checkbox(id="setting_webdav_auto_refresh" :model-value="appSetting['webdav.autoRefresh']" label="启动时自动更新我的云盘" @update:model-value="updateSetting({'webdav.autoRefresh': $event})")
+
 dd
   h3#other_resource_cache
     | {{ $t('setting__other_resource_cache') }}
@@ -168,7 +169,6 @@ export default {
       }
     }
 
-
     const otherSourceCount = ref(0)
     const isDisabledOtherSourceCacheClear = ref(false)
     const refreshOtherSourceCount = () => {
@@ -269,7 +269,6 @@ export default {
       handleWebDAVUsernameChange,
       handleWebDAVPasswordChange,
       handleTestWebDAV,
-
       otherSourceCount,
       isDisabledOtherSourceCacheClear,
       handleClearOtherSourceCache,

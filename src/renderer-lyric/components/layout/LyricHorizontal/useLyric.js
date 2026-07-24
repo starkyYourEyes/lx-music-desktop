@@ -7,6 +7,13 @@ import { isWin } from '@common/utils'
 const MIN_WINDOW_HEIGHT = 38
 const MAX_EXTENDED_LINES = 1
 
+const getAutoHeightBounds = (windowWidth, windowHeight, targetHeight) => ({
+  x: 0,
+  y: windowHeight - targetHeight,
+  w: windowWidth,
+  h: targetHeight,
+})
+
 export default () => {
   const dom_lyric = ref(null)
   const dom_lyric_text = ref(null)
@@ -41,12 +48,7 @@ export default () => {
       const paddingBottom = Math.max(0, setting['desktopLyric.style.paddingBottom'])
       const targetHeight = Math.max(MIN_WINDOW_HEIGHT, Math.ceil(contentHeight + paddingTop + paddingBottom))
       if (Math.abs(window.innerHeight - targetHeight) < 2) return
-      setWindowBounds({
-        x: 0,
-        y: 0,
-        w: window.innerWidth,
-        h: targetHeight,
-      })
+      setWindowBounds(getAutoHeightBounds(window.innerWidth, window.innerHeight, targetHeight))
     })
   }
 

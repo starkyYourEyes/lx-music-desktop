@@ -959,7 +959,7 @@ const addHomeSong = (
 ) => {
   if (!song?.id || !song?.name || ids.has(String(song.id))) return false
   const musicInfo = normalizeSong(song, privilege, {
-    recommendTag: recommendTag || null,
+    recommendTag: recommendTag ?? null,
   })
   ids.add(String(song.id))
   songs.push(musicInfo)

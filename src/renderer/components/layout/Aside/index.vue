@@ -80,9 +80,9 @@ const handleQQMusicAction = async() => {
     await logoutQQMusicAccount()
     return
   }
-  if (route.path == '/recommend') window.dispatchEvent(new Event('show-qq-music-login'))
+  if (route.path == '/qq-recommend') window.dispatchEvent(new Event('show-qq-music-login'))
   void router.push({
-    path: '/recommend',
+    path: '/qq-recommend',
     query: {
       login: 'qq',
     },

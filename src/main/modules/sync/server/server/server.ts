@@ -11,6 +11,7 @@ import { decryptMsg, encryptMsg, generateCode as handleGenerateCode } from '../u
 import migrateData from '../../migrate'
 import type { Socket } from 'node:net'
 import { getAddress } from '@common/utils/nodejs'
+import { arrRemove } from '@common/utils/common'
 
 
 let status: LX.Sync.ServerStatus = {
@@ -86,7 +87,9 @@ const handleConnection = async(socket: LX.Sync.Server.Socket, request: IncomingM
   // handleConnection(io, socket)
   sendServerStatus(status)
   socket.onClose(() => {
-    status.devices.splice(status.devices.findIndex(k => k.clientId == keyInfo.clientId), 1)
+    const index = status.devices.findIndex(k => k.clientId == keyInfo.clientId)
+    if (index < 0) return
+    status.devices.splice(index, 1)
     sendServerStatus(status)
   })
 
@@ -159,10 +162,12 @@ const handleStartServer = async(port = 9527, ip = '0.0.0.0') => await new Promis
     socket.moduleReadys = {
       list: false,
       dislike: false,
+      userApi: false,
     }
     socket.feature = {
       list: false,
       dislike: false,
+      userApi: false,
     }
     socket.on('pong', () => {
       socket.isAlive = true
@@ -201,6 +206,7 @@ const handleStartServer = async(port = 9527, ip = '0.0.0.0') => await new Promis
     socket.remote = msg2call.remote
     socket.remoteQueueList = msg2call.createQueueRemote('list')
     socket.remoteQueueDislike = msg2call.createQueueRemote('dislike')
+    socket.remoteQueueUserApi = msg2call.createQueueRemote('userApi')
     socket.addEventListener('message', ({ data }) => {
       if (typeof data != 'string') return
       void decryptMsg(socket.keyInfo, data).then((data) => {
@@ -241,7 +247,7 @@ const handleStartServer = async(port = 9527, ip = '0.0.0.0') => await new Promis
     socket.onClose = function(handler: typeof closeEvents[number]) {
       closeEvents.push(handler)
       return () => {
-        closeEvents.splice(closeEvents.indexOf(handler), 1)
+        arrRemove(closeEvents, handler)
       }
     }
     socket.broadcast = function(handler) {

@@ -150,15 +150,19 @@ export default {
           ? 4
           : width < 3840 ? 5 : 6
     },
-    handleClick(index) {
-      if (this.isMove) void moveListMusics(this.fromListId, this.lists[index].id, [this.currentMusicInfo])
-      else void addListMusics(this.lists[index].id, [this.currentMusicInfo])
+    async handleClick(index) {
+      try {
+        if (this.isMove) await moveListMusics(this.fromListId, this.lists[index].id, [this.currentMusicInfo])
+        else await addListMusics(this.lists[index].id, [this.currentMusicInfo])
 
-      this.lists[index].isExist = true
-      if (this.keyModDown && !this.isMove) return
-      this.$nextTick(() => {
-        this.handleClose()
-      })
+        this.lists[index].isExist = true
+        if (this.keyModDown && !this.isMove) return
+        this.$nextTick(() => {
+          this.handleClose()
+        })
+      } catch (err) {
+        void dialog(this.$t('list__add_failed', { message: err.message ?? err }))
+      }
     },
     handleClose() {
       this.$emit('update:show', false)

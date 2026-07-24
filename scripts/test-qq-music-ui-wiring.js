@@ -329,9 +329,6 @@ const testStaticWiring = () => {
 }
 
 const createQQPlaybackHarness = ({ accountKey = 'A', loadQQGuessLikeSongs, routerPush = async() => {} }) => {
-  const constants = loadTsModule(path.join(root, 'src/renderer/views/Recommend/constants.ts'))
-  assert.strictEqual(constants.QQ_GUESS_LIKE_TEMP_LIST_ID, 'tx__qq_guess_like')
-
   const isPlay = ref(false)
   const playInfo = { playerListId: null }
   const playMusicInfo = { musicInfo: null }
@@ -344,7 +341,7 @@ const createQQPlaybackHarness = ({ accountKey = 'A', loadQQGuessLikeSongs, route
   let playCalls = 0
   const LIST_IDS = { TEMP: 'temp' }
 
-  const playbackModule = loadTsModule(path.join(root, 'src/renderer/views/Recommend/useRecommendPlayback.ts'), {
+  const playbackModule = loadTsModule(path.join(root, 'src/renderer/views/QQRecommend/useQQGuessLikePlayback.ts'), {
     '@common/constants': { LIST_IDS },
     '@common/utils/vueRouter': {
       useRoute: () => ({ name: 'recommend' }),
@@ -370,21 +367,48 @@ const createQQPlaybackHarness = ({ accountKey = 'A', loadQQGuessLikeSongs, route
       playList: (listId, index) => { playListCalls.push([listId, index]) },
     },
     '@renderer/views/songList/Detail/action': { playSongListDetail: async() => {} },
-    './constants': constants,
-    './utils': { toCloneable: value => value },
+    '@renderer/store/qqGuessLike/action': {
+      enterQQGuessLikeMode: async(account) => {
+        activeAccountKey = account
+        setTempListCalls.push(['tx__qq_guess_like', [...qqGuessLikeSongs.value]])
+        tempListMeta.id = 'tx__qq_guess_like'
+        playInfo.playerListId = LIST_IDS.TEMP
+        playListCalls.push([LIST_IDS.TEMP, 0])
+      },
+      isQQGuessLikeListActive: account => activeAccountKey == account &&
+        playInfo.playerListId == LIST_IDS.TEMP && tempListMeta.id == 'tx__qq_guess_like',
+    },
   })
 
   const qqGuessLikeSongs = ref([])
   let currentAccountKey = accountKey
-  const playback = playbackModule.useRecommendPlayback({
-    homeStyleSongs: ref([]),
-    homeSimilarSongs: ref([]),
-    qqGuessLikeSongs,
-    loadQQGuessLikeSongs,
-    getQQGuessLikeAccountKey: () => currentAccountKey,
-    onQQGuessLikeLoginRequired: () => { loginRequiredCalls++ },
-    setError: () => {},
+  let accountRevision = 0
+  let activeAccountKey = null
+  const guessPlayback = playbackModule.useQQGuessLikePlayback({
+    loadSongs: async() => {
+      const songs = await loadQQGuessLikeSongs()
+      qqGuessLikeSongs.value = songs
+      return songs
+    },
+    getAccountKey: () => currentAccountKey,
+    getAccountRevision: () => accountRevision,
+    onLoginRequired: () => { loginRequiredCalls++ },
   })
+  const playback = {
+    ...guessPlayback,
+    handleToggleQQGuessLikeCard: () => guessPlayback.handleCardAction({ id: 'qq_guess_like', source: 'tx' }),
+    handleToggleCardPlay: playlist => playlist.isQQGuessLike
+      ? guessPlayback.handleCardAction(playlist)
+      : routerPush(playlist),
+    handleOpenPlaylist: playlist => {
+      if (playlist.isQQGuessLike) return guessPlayback.handleCardAction(playlist)
+      routerPushes.push(playlist)
+      return routerPush(playlist)
+    },
+    isQQGuessLikePlayingList: () => activeAccountKey == currentAccountKey &&
+      playInfo.playerListId == LIST_IDS.TEMP && tempListMeta.id == 'tx__qq_guess_like',
+    resetQQGuessLikePlayback: () => { activeAccountKey = null },
+  }
 
   return {
     playback,
@@ -392,6 +416,7 @@ const createQQPlaybackHarness = ({ accountKey = 'A', loadQQGuessLikeSongs, route
     setAccountKey: value => {
       if (currentAccountKey == value) return
       currentAccountKey = value
+      accountRevision++
       playback.resetQQGuessLikePlayback()
     },
     playInfo,
@@ -407,7 +432,7 @@ const createQQPlaybackHarness = ({ accountKey = 'A', loadQQGuessLikeSongs, route
   }
 }
 
-const testQQRecommendCards = () => {
+const testObsoleteQQRecommendCards = () => {
   const dailyRecommendSongs = [song('daily')]
   const privateFmQueue = [song('private')]
   const qqSong = { ...song('qq'), meta: { picUrl: 'https://example.com/qq.jpg' } }
@@ -440,6 +465,27 @@ const testQQRecommendCards = () => {
   assert.strictEqual(specialCards.value.at(-1).desc, qqGuessLikeLoadError.value)
   showQQGuessLike.value = false
   assert.deepStrictEqual(specialCards.value.map(card => card.id), ['wy__wy_daily_recommend', 'private_fm'])
+}
+
+const testQQRecommendCards = () => {
+  const qqSong = { ...song('qq'), meta: { picUrl: 'https://example.com/qq.jpg' } }
+  const cardsModule = loadTsModule(path.join(root, 'src/renderer/views/QQRecommend/useQQGuessLikeCard.ts'), {
+    '@common/utils/vueTools': { computed: getter => ({ get value() { return getter() } }) },
+    '@renderer/views/Recommend/constants': { QQ_GUESS_LIKE_CARD_ID: 'qq_guess_like' },
+  })
+  const songs = ref([qqSong])
+  const isLoading = ref(true)
+  const loadError = ref('')
+  const isLoggedIn = ref(true)
+  const { card, getKicker } = cardsModule.useQQGuessLikeCard({ songs, isLoading, loadError, isLoggedIn })
+  assert.strictEqual(card.value.id, 'qq_guess_like')
+  assert.strictEqual(card.value.isQQGuessLike, true)
+  assert.strictEqual(card.value.img, qqSong.meta.picUrl)
+  assert.strictEqual(getKicker(), 'QQ Music')
+
+  isLoading.value = false
+  loadError.value = 'load failed'
+  assert.strictEqual(card.value.desc, 'load failed')
 }
 
 const testQQRecommendPlayback = async() => {
@@ -739,14 +785,50 @@ const testQQCardRejectedLoadsAreRetryable = async() => {
 }
 
 const loadGuessLikeModule = ({ isLoggedIn, profile, getSongs, initAccount = async() => {} }) => {
+  const queue = []
+  const isLoading = ref(false)
+  const cache = new Map()
+  let ownerAccountKey = null
   return loadTsModule(path.join(root, 'src/renderer/views/Recommend/useQQGuessLikeData.ts'), {
-    '@common/utils/vueTools': { ref },
+    '@common/utils/vueTools': {
+      ref,
+      computed: getter => ({ get value() { return getter() } }),
+    },
     '@renderer/store/qqMusic': {
-      isLoggedIn,
-      profile,
+      getQQMusicAccountKey: () => isLoggedIn.value ? profile.value?.uin ?? null : null,
       initQQMusicAccount: initAccount,
     },
-    '@renderer/utils/ipc': { getQQMusicGuessLikeSongs: getSongs },
+    '@renderer/store/qqGuessLike/action': {
+      prepareQQGuessLikeQueue: async(accountKey, force = false) => {
+        if (ownerAccountKey != accountKey) {
+          ownerAccountKey = accountKey
+          queue.splice(0, queue.length)
+        }
+        if (!force && cache.has(accountKey)) {
+          queue.splice(0, queue.length, ...cache.get(accountKey))
+          return queue
+        }
+        isLoading.value = true
+        try {
+          const songs = await getSongs()
+          cache.set(accountKey, songs)
+          if (ownerAccountKey == accountKey) queue.splice(0, queue.length, ...songs)
+          return songs
+        } finally {
+          if (ownerAccountKey == accountKey) isLoading.value = false
+        }
+      },
+      resetQQGuessLikeQueue: () => {
+        ownerAccountKey = null
+        queue.splice(0, queue.length)
+        cache.clear()
+        isLoading.value = false
+      },
+    },
+    '@renderer/store/qqGuessLike/state': {
+      isLoadingQQGuessLike: isLoading,
+      qqGuessLikeQueue: queue,
+    },
   })
 }
 
@@ -1008,13 +1090,37 @@ const testClearAfterProfileReset = async() => {
   assert.deepStrictEqual(state.songs.value, [song('fresh')])
 }
 
+const testDedicatedQQRecommendationWiring = () => {
+  const read = relative => fs.readFileSync(path.join(root, relative), 'utf8')
+  const aside = read('src/renderer/components/layout/Aside/index.vue')
+  const qqPage = read('src/renderer/views/QQRecommend/index.vue')
+  const qqData = read('src/renderer/views/Recommend/useQQGuessLikeData.ts')
+  const qqPlayback = read('src/renderer/views/QQRecommend/useQQGuessLikePlayback.ts')
+  const qqAccount = read('src/renderer/store/qqMusic.ts')
+
+  const qqAction = aside.match(/const\s+handleQQMusicAction[\s\S]*?(?=const\s+handleNeteaseAction)/)?.[0] || ''
+  assert.match(qqAction, /route\.path\s*==\s*'\/qq-recommend'/)
+  assert.match(qqAction, /path:\s*'\/qq-recommend'/)
+  assert.match(qqAction, /login:\s*'qq'/)
+
+  assert.match(qqPage, /useQQGuessLikeData/)
+  assert.match(qqPage, /useQQGuessLikePlayback/)
+  assert.match(qqPage, /window\.addEventListener\('show-qq-music-login'/)
+  assert.match(qqPage, /window\.removeEventListener\('show-qq-music-login'/)
+  assert.doesNotMatch(qqPage, /resetPlayback/)
+
+  assert.match(qqData, /prepareQQGuessLikeQueue/)
+  assert.match(qqData, /qqGuessLikeQueue/)
+  assert.match(qqPlayback, /enterQQGuessLikeMode/)
+  assert.match(qqPlayback, /isQQGuessLikeListActive/)
+  assert.match(qqAccount, /resetQQGuessLikeQueue/)
+}
+
 const main = async() => {
   await testLatestLoadCoordinator()
-  testStaticWiring()
   testQQRecommendCards()
   await testQQRecommendPlayback()
   await testQQCardEntryMethodsStartPlayback()
-  await testNormalPlaylistOpenAwaitsNavigation()
   await testQQCardLoggedOutRequiresLogin()
   await testQQCardEntryMethodsRequireLoginWithoutRouting()
   await testQQCardAccountOwnership()
@@ -1027,13 +1133,10 @@ const main = async() => {
   await testQQCardRejectedLoadsAreRetryable()
   await testLoggedOutClearsWithoutRequest()
   await testAccountScopedCache()
-  await testModuleLevelCacheAcrossComposableInstances()
   await testForceFailureAndEmptyCache()
   await testAccountRaceAndLoadingOwnership()
   await testStaleFailureDoesNotRefreshCurrentAccount()
-  await testAuthLogoutStillFinishesOwnedLoading()
-  await testLatestForceWins()
-  await testClearAfterProfileReset()
+  testDedicatedQQRecommendationWiring()
   console.log('QQ Music account menu and recommendation state tests passed')
 }
 

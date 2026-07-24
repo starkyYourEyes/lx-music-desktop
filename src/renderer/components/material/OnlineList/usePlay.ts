@@ -10,9 +10,9 @@ import { LIST_IDS } from '@common/constants'
 const wait = async(ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 export default ({ selectedList, props, removeAllSelect, emit }: {
-  selectedList: Ref<LX.Music.MusicInfoOnline[]>
+  selectedList: Ref<LX.Music.MusicInfo[]>
   props: {
-    list: LX.Music.MusicInfoOnline[]
+    list: LX.Music.MusicInfo[]
     directListPlay?: boolean
   }
   removeAllSelect: () => void

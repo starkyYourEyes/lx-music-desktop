@@ -19,6 +19,14 @@ declare namespace LX {
     }>
     type ServerSyncHandlerDislikeActions<Socket> = WarpSyncHandlerActions<Socket, ServerSyncDislikeActions>
 
+    type ServerSyncUserApiActions = WarpPromiseRecord<{
+      user_api_get_meta: () => LX.Sync.UserApi.Meta
+      user_api_pull: (mode: LX.Sync.UserApi.SyncMode, data?: LX.Sync.UserApi.Data) => LX.Sync.UserApi.Data
+      user_api_push: (data: LX.Sync.UserApi.Data, mode: LX.Sync.UserApi.SyncMode) => LX.Sync.UserApi.Meta
+      onUserApiSyncAction: (action: LX.Sync.UserApi.ActionList) => void
+    }>
+    type ServerSyncHandlerUserApiActions<Socket> = WarpSyncHandlerActions<Socket, ServerSyncUserApiActions>
+
     type ServerSyncPartyActions = WarpPromiseRecord<{
       party_room_resolve: (input: { roomId?: string, roomCode?: string }) => LX.Party.RoomSummary | null
       party_room_create: (input: LX.Party.RoomCreateInput) => LX.Party.RoomSnapshot
@@ -58,6 +66,12 @@ declare namespace LX {
       dislike_sync_finished: () => void
     }>
     type ClientSyncHandlerDislikeActions<Socket> = WarpSyncHandlerActions<Socket, ClientSyncDislikeActions>
+
+    type ClientSyncUserApiActions = WarpPromiseRecord<{
+      onUserApiSyncAction: (action: LX.Sync.UserApi.ActionList) => void
+      user_api_sync_finished: () => void
+    }>
+    type ClientSyncHandlerUserApiActions<Socket> = WarpSyncHandlerActions<Socket, ClientSyncUserApiActions>
 
     type ClientSyncPartyActions = WarpPromiseRecord<{
       onPartySyncAction: (action: LX.Party.SyncAction) => void

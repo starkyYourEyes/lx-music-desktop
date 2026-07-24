@@ -24,6 +24,7 @@ export default ({
     search: true,
     sourceDetail: true,
     dislike: true,
+    uploadToWebDAV: false,
   })
   const t = useI18n()
   const menuLocation = reactive({ x: 0, y: 0 })
@@ -56,6 +57,13 @@ export default ({
         action: 'addTo',
         disabled: !itemMenuControl.addTo,
       },
+      props.localMusicUpload
+        ? {
+            name: t('local_music__upload_action'),
+            action: 'uploadToWebDAV',
+            disabled: !itemMenuControl.uploadToWebDAV,
+          }
+        : null,
       {
         name: t('list__source_detail'),
         action: 'sourceDetail',
@@ -66,7 +74,7 @@ export default ({
         action: 'dislike',
         disabled: !itemMenuControl.dislike,
       },
-    ]
+    ].filter(Boolean)
   })
 
   const showMenu = (event, musicInfo) => {
@@ -74,6 +82,7 @@ export default ({
     // this.listMenu.itemMenuControl.play =
     //   this.listMenu.itemMenuControl.playLater =
     itemMenuControl.download = assertApiSupport(musicInfo.source)
+    itemMenuControl.uploadToWebDAV = props.localMusicUpload && musicInfo.source == 'local'
 
     itemMenuControl.dislike = !hasDislike(musicInfo)
 
@@ -117,6 +126,9 @@ export default ({
         break
       case 'addTo':
         handleShowMusicAddModal(index)
+        break
+      case 'uploadToWebDAV':
+        emit('upload-webdav', index)
         break
       case 'sourceDetail':
         handleOpenMusicDetail(index)

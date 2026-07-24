@@ -10,6 +10,9 @@ import {
   getClientStatus,
   getServerDevices,
   removeServerDevice,
+  getRemoteUserApiMeta,
+  pullUserApiFromServer,
+  pushUserApiToServer,
 } from '@main/modules/sync'
 import { sendEvent } from '../main'
 
@@ -28,6 +31,9 @@ export default () => {
       case 'get_server_status': return getServerStatus()
       case 'get_client_status': return getClientStatus()
       case 'generate_code': return generateCode()
+      case 'user_api_get_meta': return getRemoteUserApiMeta()
+      case 'user_api_pull': return pullUserApiFromServer(data.data.mode)
+      case 'user_api_push': return pushUserApiToServer(data.data.mode)
       case 'select_mode':
         if (selectModeListenr) {
           selectModeListenr(data.data.mode)

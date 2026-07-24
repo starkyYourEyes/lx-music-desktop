@@ -7,6 +7,8 @@ import {
 } from './login'
 import { getQQMusicAccountUin } from './auth'
 import { createQQMusicSongService, isQQMusicAuthError } from './song'
+import { createQQMusicDailyRecommendService } from './dailyRecommend'
+import { createQQMusicHomeRecommendService } from './homeRecommend'
 
 const CHECK_ERROR = 'QQ Music login check failed'
 
@@ -37,7 +39,15 @@ interface LoginService {
 }
 
 interface SongService {
-  getGuessLikeSongs: () => Promise<LX.Music.MusicInfo_tx[]>
+  getGuessLikeSongs: (options?: LX.QQMusic.GuessLikeRequest) => Promise<LX.Music.MusicInfo_tx[]>
+}
+
+interface DailyRecommendService {
+  getDailyRecommendSongs: () => Promise<LX.Music.MusicInfo_tx[]>
+}
+
+interface HomeRecommendService {
+  getHomeRecommendation: () => Promise<LX.QQMusic.HomeRecommendation>
 }
 
 const emptyAccount = (updatedAt = 0): QQMusicAccountData => ({
@@ -68,11 +78,15 @@ export const createQQMusicAccountService = ({
   store,
   loginService,
   songService,
+  dailyRecommendService,
+  homeRecommendService,
   now = Date.now,
 }: {
   store: AccountStore
   loginService: LoginService
   songService: SongService
+  dailyRecommendService: DailyRecommendService
+  homeRecommendService: HomeRecommendService
   now?: () => number
 }) => {
   let loginGeneration = 0
@@ -135,10 +149,10 @@ export const createQQMusicAccountService = ({
     clearAccount()
   }
 
-  const getGuessLikeSongs = async() => {
+  const runAuthenticatedRequest = async<T>(request: () => Promise<T>) => {
     const account = getAccountData(store)
     try {
-      return await songService.getGuessLikeSongs()
+      return await request()
     } catch (error) {
       if (isQQMusicAuthError(error)) {
         const currentAccount = getAccountData(store)
@@ -150,12 +164,26 @@ export const createQQMusicAccountService = ({
     }
   }
 
+  const getGuessLikeSongs = async(options?: LX.QQMusic.GuessLikeRequest) => {
+    return runAuthenticatedRequest(async() => songService.getGuessLikeSongs(options))
+  }
+
+  const getDailyRecommendSongs = async() => {
+    return runAuthenticatedRequest(async() => dailyRecommendService.getDailyRecommendSongs())
+  }
+
+  const getHomeRecommendation = async() => {
+    return runAuthenticatedRequest(async() => homeRecommendService.getHomeRecommendation())
+  }
+
   return {
     getAccountStatus,
     createLoginQr,
     checkLoginQr,
     logout,
     getGuessLikeSongs,
+    getDailyRecommendSongs,
+    getHomeRecommendation,
   }
 }
 
@@ -165,10 +193,17 @@ const getAccountService = () => {
   if (accountService) return accountService
   const store = getStore(STORE_NAMES.DATA)
   const loginService = createQQMusicLoginService()
-  const songService = createQQMusicSongService({
-    getCookie: () => getAccountData(store).cookie,
+  const getCookie = () => getAccountData(store).cookie
+  const songService = createQQMusicSongService({ getCookie })
+  const dailyRecommendService = createQQMusicDailyRecommendService({ getCookie })
+  const homeRecommendService = createQQMusicHomeRecommendService({ getCookie })
+  accountService = createQQMusicAccountService({
+    store,
+    loginService,
+    songService,
+    dailyRecommendService,
+    homeRecommendService,
   })
-  accountService = createQQMusicAccountService({ store, loginService, songService })
   return accountService
 }
 
@@ -176,4 +211,8 @@ export const getAccountStatus = () => getAccountService().getAccountStatus()
 export const createLoginQr = async() => getAccountService().createLoginQr()
 export const checkLoginQr = async(key: string) => getAccountService().checkLoginQr(key)
 export const logout = async() => getAccountService().logout()
-export const getGuessLikeSongs = async() => getAccountService().getGuessLikeSongs()
+export const getGuessLikeSongs = async(options?: LX.QQMusic.GuessLikeRequest) => {
+  return getAccountService().getGuessLikeSongs(options)
+}
+export const getDailyRecommendSongs = async() => getAccountService().getDailyRecommendSongs()
+export const getHomeRecommendation = async() => getAccountService().getHomeRecommendation()

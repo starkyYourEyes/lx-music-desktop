@@ -51,11 +51,11 @@ const useKeyEvent = ({ handleSelectAllData, listRef }: {
 
 export default ({ props, listRef }: {
   props: {
-    list: LX.Music.MusicInfoOnline[]
+    list: LX.Music.MusicInfo[]
   }
   listRef: Ref<any>
 }) => {
-  const selectedList = ref<LX.Music.MusicInfoOnline[]>([])
+  const selectedList = ref<LX.Music.MusicInfo[]>([])
   let lastSelectIndex = -1
   const listItemHeight = computed(() => {
     return Math.ceil((isFullscreen.value ? getFontSizeWithScreen() : appSetting['common.fontSize']) * 2.3)

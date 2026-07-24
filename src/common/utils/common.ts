@@ -213,6 +213,13 @@ export const arrPushByPosition = <T>(list: T[], newList: T[], position: number) 
   return list
 }
 
+export const arrRemove = <T>(list: T[], item: T) => {
+  const index = list.indexOf(item)
+  if (index < 0) return false
+  list.splice(index, 1)
+  return true
+}
+
 
 // https://stackoverflow.com/a/2450976
 export const arrShuffle = <T>(array: T[]) => {

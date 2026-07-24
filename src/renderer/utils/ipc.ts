@@ -4,6 +4,7 @@ import { type ProgressInfo, type UpdateDownloadedEvent, type UpdateInfo } from '
 import { markRaw, toRaw } from '@common/utils/vueTools'
 import * as hotKeys from '@common/hotKey'
 import { APP_EVENT_NAMES, DATA_KEYS, DEFAULT_SETTING } from '@common/constants'
+import type { ListeningTimeStats } from '@common/utils/listeningTime'
 
 type RemoveListener = () => void
 
@@ -215,14 +216,14 @@ export const getRecentPlayList = async() => {
   return rendererInvoke<string, LX.Music.MusicInfo[] | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.recentPlayList)
 }
 
-export const saveListeningTimeStats = (stats: import('@common/utils/listeningTime').ListeningTimeStats) => {
+export const saveListeningTimeStats = (stats: ListeningTimeStats) => {
   rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
     path: DATA_KEYS.listeningTimeStats,
     data: toCloneable(stats),
   })
 }
 export const getListeningTimeStats = async() => {
-  return rendererInvoke<string, import('@common/utils/listeningTime').ListeningTimeStats | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.listeningTimeStats)
+  return rendererInvoke<string, ListeningTimeStats | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.listeningTimeStats)
 }
 
 export const saveSearchHistoryList = (list: LX.List.SearchHistoryList) => {
@@ -716,6 +717,23 @@ export const getWebDAVMusicLyric = async(musicInfo: LX.Music.MusicInfoWebDAV) =>
   return rendererInvoke<LX.Music.MusicInfoWebDAV, LX.Music.LyricInfo | null>(WIN_MAIN_RENDERER_EVENT_NAME.webdav_get_music_lyric, musicInfo)
 }
 
+export const scanLocalMusicFolders = async(params?: LX.Music.LocalMusicScanParams) => {
+  return rendererInvoke<LX.Music.LocalMusicScanParams | undefined, LX.Music.MusicInfoLocal[]>(
+    WIN_MAIN_RENDERER_EVENT_NAME.local_music_scan,
+    params,
+  )
+}
+
+export const uploadLocalMusicToWebDAV = async(musicInfo: LX.Music.MusicInfoLocal, webdavDir?: string) => {
+  return rendererInvoke<LX.Music.LocalMusicUploadParams, LX.Music.MusicInfoWebDAV>(
+    WIN_MAIN_RENDERER_EVENT_NAME.local_music_upload_to_webdav,
+    {
+      musicInfo,
+      webdavDir,
+    },
+  )
+}
+
 export const getQQMusicAccountStatus = async() => {
   return rendererInvoke<LX.QQMusic.AccountStatus>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_account_status)
 }
@@ -732,8 +750,19 @@ export const logoutQQMusic = async() => {
   await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_logout)
 }
 
-export const getQQMusicGuessLikeSongs = async() => {
-  return rendererInvoke<LX.Music.MusicInfo_tx[]>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_guess_like_songs)
+export const getQQMusicGuessLikeSongs = async(continuation = false) => {
+  return rendererInvoke<LX.QQMusic.GuessLikeRequest, LX.Music.MusicInfo_tx[]>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_guess_like_songs,
+    { continuation },
+  )
+}
+
+export const getQQMusicDailyRecommendSongs = async() => {
+  return rendererInvoke<LX.Music.MusicInfo_tx[]>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_daily_recommend_songs)
+}
+
+export const getQQMusicHomeRecommendation = async() => {
+  return rendererInvoke<LX.QQMusic.HomeRecommendation>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_home_recommendation)
 }
 
 export const getNeteaseAccountStatus = async() => {
@@ -939,8 +968,13 @@ export const onPartyAction = (listener: LX.IpcRendererEventListenerParams<LX.Par
  * @param action
  * @returns
  */
-export const sendSyncAction = async(action: LX.Sync.SyncServiceActions) => {
-  return rendererInvoke<LX.Sync.SyncServiceActions>(WIN_MAIN_RENDERER_EVENT_NAME.sync_action, action)
+type SyncServiceActionResult<T extends LX.Sync.SyncServiceActions> =
+  T['action'] extends 'user_api_get_meta' | 'user_api_pull' | 'user_api_push'
+    ? LX.Sync.UserApi.Meta
+    : undefined
+
+export const sendSyncAction = async<T extends LX.Sync.SyncServiceActions>(action: T): Promise<SyncServiceActionResult<T>> => {
+  return rendererInvoke<T, SyncServiceActionResult<T>>(WIN_MAIN_RENDERER_EVENT_NAME.sync_action, action)
 }
 
 export const sendPartyAction = async<T = LX.Party.StatePayload>(action: LX.Party.ServiceActions) => {

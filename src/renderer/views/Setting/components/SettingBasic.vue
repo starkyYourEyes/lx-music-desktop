@@ -48,6 +48,12 @@ dd
           span(v-if="item.statusLabel" :class="$style.status") {{ item.statusLabel }}
     .p.gap-top
       base-btn.btn(min @click="isShowUserApiModal = true") {{ $t('setting__basic_source_user_api_btn') }}
+    .p.gap-top(:class="$style.userApiSync")
+      base-btn.btn(min :disabled="isUserApiSyncing" @click="handleUserApiSync('user_api_pull', 'merge')") {{ $t('user_api_sync__pull_merge') }}
+      base-btn.btn(min :disabled="isUserApiSyncing" @click="handleUserApiSync('user_api_pull', 'overwrite')") {{ $t('user_api_sync__pull_overwrite') }}
+      base-btn.btn(min :disabled="isUserApiSyncing" @click="handleUserApiSync('user_api_push', 'merge')") {{ $t('user_api_sync__push_merge') }}
+      base-btn.btn(min :disabled="isUserApiSyncing" @click="handleUserApiSync('user_api_push', 'overwrite')") {{ $t('user_api_sync__push_overwrite') }}
+      span(v-if="userApiSyncStatus" :class="$style.syncStatus") {{ userApiSyncStatus }}
 
 dd
   h3#basic_window_size {{ $t('setting__basic_window_size') }}
@@ -115,7 +121,7 @@ user-api-modal(v-model="isShowUserApiModal")
 import { computed, ref, watch, reactive, shallowReactive } from '@common/utils/vueTools'
 import { windowSizeList, userApi, isFullscreen, themeId } from '@renderer/store'
 import { langList, useI18n } from '@root/lang'
-import { getSystemFonts } from '@renderer/utils/ipc'
+import { getSystemFonts, getUserApiList, sendSyncAction } from '@renderer/utils/ipc'
 import apiSourceInfo from '@renderer/utils/musicSdk/api-source-info'
 import { useTimeout } from '@renderer/core/player/timeoutStop'
 import { dialog } from '@renderer/plugins/Dialog'
@@ -250,6 +256,46 @@ export default {
     const { timeLabel } = useTimeout()
 
     const isShowUserApiModal = ref(false)
+    const isUserApiSyncing = ref(false)
+    const userApiSyncStatus = ref('')
+    const formatUserApiMeta = meta => {
+      return t('user_api_sync__meta', {
+        count: meta.count,
+        date: new Date(meta.updatedAt).toLocaleString(),
+      })
+    }
+    const refreshUserApiList = async() => {
+      userApi.list.splice(0, userApi.list.length, ...await getUserApiList())
+    }
+    const handleUserApiSync = async(action, mode) => {
+      if (isUserApiSyncing.value) return
+      if (mode == 'overwrite') {
+        const confirm = await dialog.confirm({
+          message: action == 'user_api_pull'
+            ? t('user_api_sync__confirm_pull_overwrite')
+            : t('user_api_sync__confirm_push_overwrite'),
+          cancelButtonText: t('cancel_button_text'),
+          confirmButtonText: t('confirm_button_text'),
+        })
+        if (!confirm) return
+      }
+
+      isUserApiSyncing.value = true
+      userApiSyncStatus.value = t('user_api_sync__syncing')
+      try {
+        const meta = await sendSyncAction({ action, data: { mode } })
+        if (action == 'user_api_pull') await refreshUserApiList()
+        userApiSyncStatus.value = t('user_api_sync__complete', { meta: formatUserApiMeta(meta) })
+      } catch (err) {
+        userApiSyncStatus.value = t('user_api_sync__failed', { message: err?.message ?? String(err) })
+        void dialog({
+          message: userApiSyncStatus.value,
+          confirmButtonText: t('alert_button_text'),
+        })
+      } finally {
+        isUserApiSyncing.value = false
+      }
+    }
     const getApiStatus = () => {
       let status
       if (userApi.status) status = t('setting__basic_source_status_success')
@@ -344,6 +390,9 @@ export default {
       timeLabel,
       apiSources,
       isShowUserApiModal,
+      isUserApiSyncing,
+      userApiSyncStatus,
+      handleUserApiSync,
       windowSizeList,
       langList,
       sourceNameTypes,
@@ -550,6 +599,19 @@ export default {
   .status {
     margin-left: 5px;
   }
+}
+
+.userApiSync {
+  display: flex;
+  flex-flow: row wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.syncStatus {
+  color: var(--color-500);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 </style>

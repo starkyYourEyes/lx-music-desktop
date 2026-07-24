@@ -1,4 +1,4 @@
-import { throttle } from '@common/utils/common'
+import { arrRemove, throttle } from '@common/utils/common'
 import fs from 'node:fs'
 import path from 'node:path'
 import syncLog from '../../../log'
@@ -36,7 +36,7 @@ export class SnapshotDataManage {
       const name = snapshotList.pop()
       if (name) {
         await this.removeSnapshot(name)
-        this.snapshotInfo.list.splice(this.snapshotInfo.list.indexOf(name), 1)
+        arrRemove(this.snapshotInfo.list, name)
       } else break
     }
     if (requiredSave) this.saveSnapshotInfo(this.snapshotInfo)
@@ -46,7 +46,7 @@ export class SnapshotDataManage {
     // console.log('updateDeviceSnapshotKey', key)
     let client = this.snapshotInfo.clients[clientId]
     if (!client) client = this.snapshotInfo.clients[clientId] = { snapshotKey: '', lastSyncDate: 0 }
-    if (client.snapshotKey) this.clientSnapshotKeys.splice(this.clientSnapshotKeys.indexOf(client.snapshotKey), 1)
+    if (client.snapshotKey) arrRemove(this.clientSnapshotKeys, client.snapshotKey)
     client.snapshotKey = key
     client.lastSyncDate = Date.now()
     this.clientSnapshotKeys.push(key)
@@ -71,7 +71,7 @@ export class SnapshotDataManage {
   removeSnapshotInfo = (clientId: string) => {
     let client = this.snapshotInfo.clients[clientId]
     if (!client) return
-    if (client.snapshotKey) this.clientSnapshotKeys.splice(this.clientSnapshotKeys.indexOf(client.snapshotKey), 1)
+    if (client.snapshotKey) arrRemove(this.clientSnapshotKeys, client.snapshotKey)
     // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
     delete this.snapshotInfo.clients[clientId]
     this.saveSnapshotInfoThrottle()

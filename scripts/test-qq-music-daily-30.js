@@ -1,8 +1,9 @@
 const assert = require('node:assert')
+const { createHash } = require('node:crypto')
 const path = require('node:path')
 const loadTsModule = require('./qq-music-test-loader')
 
-const { getCookieValue } = loadTsModule(
+const { getCookieValue, getGtk } = loadTsModule(
   path.join(__dirname, '../src/main/modules/qqMusic/auth.ts'),
 )
 
@@ -44,7 +45,7 @@ const songModule = loadTsModule(path.join(__dirname, '../src/main/modules/qqMusi
 const { createQQMusicDailyRecommendService } = loadTsModule(
   path.join(__dirname, '../src/main/modules/qqMusic/dailyRecommend.ts'),
   {
-    './auth': { getCookieValue },
+    './auth': { getCookieValue, getGtk },
     './song': songModule,
   },
 )
@@ -53,36 +54,82 @@ const run = async() => {
   let request
   const fetchImpl = async(url, options) => {
     request = { url, options }
-    return { ok: true, status: 200, json: async() => ({ code: 0, daily30: { code: 0, data: { tracks } } }) }
+    return { ok: true, status: 200, json: async() => ({ code: 0, req_1: { code: 0, data: { songlist: tracks } } }) }
   }
   const service = createQQMusicDailyRecommendService({
     fetchImpl,
-    getCookie: () => 'uin=o123; qqmusic_key=secret; tmeLoginType=2',
+    getCookie: () => 'qqmusic_uin=123; qqmusic_key=secret; qqmusic_guid=guid-123; uid=uid-123',
   })
   const songs = await service.getDailyRecommendSongs()
-  assert.strictEqual(String(request.url), 'https://u6.y.qq.com/cgi-bin/musicu.fcg')
+  const requestUrl = new URL(request.url)
+  assert.strictEqual(requestUrl.origin + requestUrl.pathname, 'https://u6.y.qq.com/cgi-bin/musics.fcg')
+  const sign = requestUrl.searchParams.get('sign')
+  assert.match(sign, /^zza[a-z0-9]{10,16}[0-9a-f]{32}$/)
+  assert.ok(!String(request.url).includes('secret'))
   assert.strictEqual(request.options.method, 'POST')
   assert.strictEqual(request.options.headers['Content-Type'], 'application/json')
   assert.strictEqual(request.options.headers.Referer, 'https://y.qq.com/')
-  assert.strictEqual(request.options.headers.Cookie, 'uin=o123; qqmusic_key=secret; tmeLoginType=2')
+  assert.strictEqual(request.options.headers.Cookie, 'qqmusic_uin=123; qqmusic_key=secret; qqmusic_guid=guid-123; uid=uid-123')
+  assert.strictEqual(
+    sign.slice(-32),
+    createHash('md5').update(`CJBPACrRuNy7${request.options.body}`).digest('hex'),
+  )
   assert.deepStrictEqual(JSON.parse(request.options.body), {
-    comm: { ct: 20, cv: 2116, uin: '123', authst: 'secret', tmeLoginType: 2 },
-    daily30: { module: 'music.ai_track_daily_svr', method: 'get_daily_track', param: {} },
+    comm: {
+      format: 'json',
+      ct: 20,
+      cv: 2116,
+      platform: 'wk_v17',
+      uid: 'uid-123',
+      guid: 'guid-123',
+      inCharset: 'utf-8',
+      outCharset: 'utf-8',
+      notice: 0,
+      needNewCode: 1,
+      uin: '123',
+      g_tk_new_20200303: 461122539,
+      g_tk: 461122539,
+    },
+    req_1: {
+      module: 'music.srfDissInfo.aiDissInfo',
+      method: 'uniform_get_Dissinfo',
+      param: {
+        disstid: 0,
+        userinfo: 1,
+        tag: 1,
+        is_pc: 1,
+        guid: 'guid-123',
+        enc_host_uin: '123',
+        dirid: 202,
+      },
+    },
   })
   await createQQMusicDailyRecommendService({
     fetchImpl,
-    getCookie: () => 'qqmusic_uin=o456; qqmusic_key=another-secret',
+    getCookie: () => 'uin=o456; qm_keyst=another-secret; qqmusic_guid=guid-456; uid=uid-456',
   }).getDailyRecommendSongs()
-  assert.deepStrictEqual(JSON.parse(request.options.body).comm, {
-    ct: 20, cv: 2116, uin: '456', authst: 'another-secret', tmeLoginType: 2,
-  })
-  for (const loginType of ['0', '-1', '1.5']) {
-    await createQQMusicDailyRecommendService({
-      fetchImpl,
-      getCookie: () => `uin=o456; qqmusic_key=another-secret; tmeLoginType=${loginType}`,
-    }).getDailyRecommendSongs()
-    assert.strictEqual(JSON.parse(request.options.body).comm.tmeLoginType, 2)
-  }
+  const fallbackBody = JSON.parse(request.options.body)
+  assert.strictEqual(fallbackBody.comm.uin, '456')
+  assert.strictEqual(fallbackBody.req_1.param.enc_host_uin, '456')
+  assert.strictEqual(fallbackBody.comm.guid, 'guid-456')
+  assert.strictEqual(fallbackBody.comm.uid, 'uid-456')
+  assert.strictEqual(fallbackBody.comm.g_tk, fallbackBody.comm.g_tk_new_20200303)
+  const cookieWithoutDeviceIds = 'qqmusic_uin=789; qqmusic_key=fallback-secret'
+  await createQQMusicDailyRecommendService({
+    fetchImpl,
+    getCookie: () => cookieWithoutDeviceIds,
+  }).getDailyRecommendSongs()
+  const generatedDeviceBody = JSON.parse(request.options.body)
+  assert.match(generatedDeviceBody.comm.guid, /^[0-9a-f]{32}$/)
+  assert.match(generatedDeviceBody.comm.uid, /^\d{10}$/)
+  assert.strictEqual(generatedDeviceBody.req_1.param.guid, generatedDeviceBody.comm.guid)
+  await createQQMusicDailyRecommendService({
+    fetchImpl,
+    getCookie: () => cookieWithoutDeviceIds,
+  }).getDailyRecommendSongs()
+  const repeatedDeviceBody = JSON.parse(request.options.body)
+  assert.strictEqual(repeatedDeviceBody.comm.guid, generatedDeviceBody.comm.guid)
+  assert.strictEqual(repeatedDeviceBody.comm.uid, generatedDeviceBody.comm.uid)
   assert.deepStrictEqual(songs, [{
     id: 'tx_song-mid', name: 'Song', singer: 'Singer', source: 'tx', interval: 'time:185',
     meta: {
@@ -97,11 +144,19 @@ const run = async() => {
   const { QQMusicAuthError } = songModule
   const noCookie = createQQMusicDailyRecommendService({ fetchImpl, getCookie: () => '' })
   await assert.rejects(noCookie.getDailyRecommendSongs(), QQMusicAuthError)
-  const httpFailed = createQQMusicDailyRecommendService({ fetchImpl: createFetchWithPayload({}, false, 503), getCookie: () => 'uin=o123; qqmusic_key=secret' })
+  for (const incompleteCookie of [
+    'qqmusic_key=secret; qqmusic_guid=guid-123; uid=uid-123',
+    'qqmusic_uin=123; qqmusic_guid=guid-123; uid=uid-123',
+  ]) {
+    const incomplete = createQQMusicDailyRecommendService({ fetchImpl, getCookie: () => incompleteCookie })
+    await assert.rejects(incomplete.getDailyRecommendSongs(), QQMusicAuthError)
+  }
+  const validCookie = 'qqmusic_uin=123; qqmusic_key=secret; qqmusic_guid=guid-123; uid=uid-123'
+  const httpFailed = createQQMusicDailyRecommendService({ fetchImpl: createFetchWithPayload({}, false, 503), getCookie: () => validCookie })
   await assert.rejects(httpFailed.getDailyRecommendSongs(), error => !(error instanceof QQMusicAuthError) && !String(error).includes('secret'))
   const leakingFetchFailure = createQQMusicDailyRecommendService({
     fetchImpl: async() => { throw new Error('request failed for secret') },
-    getCookie: () => 'uin=o123; qqmusic_key=secret',
+    getCookie: () => validCookie,
   })
   await assert.rejects(leakingFetchFailure.getDailyRecommendSongs(), error => !(error instanceof QQMusicAuthError) && !String(error).includes('secret'))
   let timeoutCallback
@@ -111,7 +166,7 @@ const run = async() => {
       assert.ok(options.signal instanceof AbortSignal)
       options.signal.addEventListener('abort', () => reject(new Error('request failed for secret')))
     }),
-    getCookie: () => 'uin=o123; qqmusic_key=secret',
+    getCookie: () => validCookie,
     setTimeoutImpl: (callback, delay) => {
       assert.strictEqual(delay, 10_000)
       timeoutCallback = callback
@@ -125,13 +180,13 @@ const run = async() => {
   timeoutCallback()
   await assert.rejects(abortedRequest, error => !(error instanceof QQMusicAuthError) && !String(error).includes('secret'))
   assert.strictEqual(clearedTimer, 'daily30-timer')
-  for (const payload of [{ code: 1000 }, { code: 0, daily30: { code: 1000 } }]) {
-    const expired = createQQMusicDailyRecommendService({ fetchImpl: createFetchWithPayload(payload), getCookie: () => 'uin=o123; qqmusic_key=secret' })
+  for (const payload of [{ code: 1000 }, { code: 0, req_1: { code: 1000 } }]) {
+    const expired = createQQMusicDailyRecommendService({ fetchImpl: createFetchWithPayload(payload), getCookie: () => validCookie })
     await assert.rejects(expired.getDailyRecommendSongs(), QQMusicAuthError)
   }
-  const businessFailed = createQQMusicDailyRecommendService({ fetchImpl: createFetchWithPayload({ code: 0, daily30: { code: 1 } }), getCookie: () => 'uin=o123; qqmusic_key=secret' })
+  const businessFailed = createQQMusicDailyRecommendService({ fetchImpl: createFetchWithPayload({ code: 0, req_1: { code: 1 } }), getCookie: () => validCookie })
   await assert.rejects(businessFailed.getDailyRecommendSongs(), error => !(error instanceof QQMusicAuthError) && !String(error).includes('secret'))
-  const malformed = createQQMusicDailyRecommendService({ fetchImpl: createFetchWithPayload({ code: 0, daily30: { code: 0, data: { tracks: {} } } }), getCookie: () => 'uin=o123; qqmusic_key=secret' })
+  const malformed = createQQMusicDailyRecommendService({ fetchImpl: createFetchWithPayload({ code: 0, req_1: { code: 0, data: { songlist: {} } } }), getCookie: () => validCookie })
   await assert.rejects(malformed.getDailyRecommendSongs(), error => !(error instanceof QQMusicAuthError) && !String(error).includes('secret'))
 }
 

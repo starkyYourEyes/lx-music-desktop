@@ -11,6 +11,7 @@ import party from './party'
 import data from './data'
 import music from './music'
 import webdav from './webdav'
+import localMusic from './localMusic'
 import download from './download'
 import soundEffect from './soundEffect'
 import openAPI from './openAPI'
@@ -43,6 +44,7 @@ export default () => {
   data()
   music()
   webdav()
+  localMusic()
   download()
   soundEffect()
   openAPI()

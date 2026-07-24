@@ -1,5 +1,5 @@
 import { mainSend } from '@common/mainIpc'
-import { BrowserWindow } from 'electron'
+import { BrowserWindow, session } from 'electron'
 import fs from 'fs'
 import path from 'node:path'
 import { openDevTools as handleOpenDevTools } from '@main/utils'
@@ -71,6 +71,7 @@ export const createWindow = async(userApi: LX.UserApi.UserApiInfo) => {
   /**
    * Initial window options
    */
+  const userApiSession = session.fromPartition('lx-user-api')
   browserWindow = new BrowserWindow({
     // enableRemoteModule: false,
     resizable: false,
@@ -81,6 +82,7 @@ export const createWindow = async(userApi: LX.UserApi.UserApiInfo) => {
     hasShadow: false,
     show: false,
     webPreferences: {
+      session: userApiSession,
       contextIsolation: true,
       // worldSafeExecuteJavaScript: true,
       nodeIntegration: false,
@@ -105,12 +107,8 @@ export const createWindow = async(userApi: LX.UserApi.UserApiInfo) => {
       event.preventDefault()
     })
   }
-  browserWindow.webContents.session.setPermissionRequestHandler((webContents, permission, resolve) => {
-    if (webContents === browserWindow?.webContents) {
-      resolve(false)
-      return
-    }
-    resolve(true)
+  userApiSession.setPermissionRequestHandler((_webContents, _permission, resolve) => {
+    resolve(false)
   })
   browserWindow.webContents.setWindowOpenHandler(() => {
     return { action: 'deny' }

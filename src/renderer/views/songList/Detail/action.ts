@@ -7,6 +7,9 @@ import { playList } from '@renderer/core/player/action'
 import { LIST_IDS } from '@common/constants'
 import { toMD5 } from '@renderer/utils'
 import { DAILY_RECOMMEND_TEMP_LIST_ID } from '@renderer/store/dailyRecommend/state'
+import { getQQMusicAccountKey } from '@renderer/store/qqMusic'
+import { playQQDailyRecommend } from '@renderer/store/qqDailyRecommend/action'
+import { QQ_DAILY_RECOMMEND_LIST_ID } from '@renderer/store/qqDailyRecommend/state'
 
 const getListId = (id: string, source: LX.OnlineSource) => `${source}__${id}`
 const getTempListId = (id: string, source: LX.OnlineSource) => source == 'wy' && id == DAILY_RECOMMEND_TEMP_LIST_ID
@@ -40,6 +43,13 @@ export const addSongListDetail = async(id: string, source: LX.OnlineSource, name
 }
 
 export const playSongListDetail = async(id: string, source: LX.OnlineSource, list?: LX.Music.MusicInfoOnline[], index: number = 0) => {
+  if (source == 'tx' && id == QQ_DAILY_RECOMMEND_LIST_ID) {
+    const accountKey = getQQMusicAccountKey()
+    if (!accountKey) return
+    await playQQDailyRecommend(accountKey, index)
+    return
+  }
+
   let isPlayingList = false
   // console.log(list)
   const listId = getTempListId(id, source)

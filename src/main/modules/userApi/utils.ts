@@ -1,18 +1,23 @@
 import { userApis as defaultUserApis } from './config'
 import { STORE_NAMES } from '@common/constants'
 import getStore from '@main/utils/store'
+import { assertUserApiSyncData, createUserApiSyncData } from '@common/utils/userApiSync'
+import { log } from '@common/utils'
 import zlib from 'node:zlib'
 
 let userApis: LX.UserApi.UserApiInfo[] | null
 let scripts = new Map<string, string>()
 
-const saveData = () => {
-  getStore(STORE_NAMES.USER_API).set('userApis', userApis!.map(api => {
-    return {
-      ...api,
-      script: scripts.get(api.id),
-    }
+const serializeUserApis = (apis: LX.UserApi.UserApiInfo[], apiScripts: Map<string, string>) => {
+  return apis.map(api => ({
+    ...api,
+    script: apiScripts.get(api.id),
   }))
+}
+
+const saveData = (emitChange = true) => {
+  getStore(STORE_NAMES.USER_API).set('userApis', serializeUserApis(userApis!, scripts))
+  if (emitChange) global.lx.event_app.user_api_changed()
 }
 
 export const getUserApis = (): LX.UserApi.UserApiInfo[] => {
@@ -38,7 +43,7 @@ export const getUserApis = (): LX.UserApi.UserApiInfo[] => {
     }
   } else {
     infoFull = defaultUserApis
-    electronStore_userApi.set('userApis', userApis)
+    electronStore_userApi.set('userApis', defaultUserApis)
   }
   userApis = infoFull.map(api => {
     if (api.allowShowUpdateAlert == null) api.allowShowUpdateAlert = false
@@ -46,7 +51,7 @@ export const getUserApis = (): LX.UserApi.UserApiInfo[] => {
     scripts.set(api.id, script)
     return info
   })
-  if (requiredUpdate) saveData()
+  if (requiredUpdate) saveData(false)
   return userApis
 }
 
@@ -114,9 +119,9 @@ export const importApi = async(scriptRaw: string): Promise<LX.UserApi.UserApiInf
     ...scriptInfo,
     allowShowUpdateAlert: true,
   }
+  const script = await deflateScript(scriptRaw)
   userApis ??= []
   userApis.push(apiInfo)
-  const script = await deflateScript(scriptRaw)
   scripts.set(apiInfo.id, script)
   saveData()
   return apiInfo
@@ -124,23 +129,52 @@ export const importApi = async(scriptRaw: string): Promise<LX.UserApi.UserApiInf
 
 export const removeApi = (ids: string[]) => {
   if (!userApis) return
+  const idSet = new Set(ids)
+  let removed = false
   for (let index = userApis.length - 1; index > -1; index--) {
-    if (ids.includes(userApis[index].id)) {
+    if (idSet.has(userApis[index].id)) {
       scripts.delete(userApis[index].id)
       userApis.splice(index, 1)
-      ids.splice(index, 1)
+      removed = true
     }
   }
+  if (!removed) return
   saveData()
 }
 
 export const setAllowShowUpdateAlert = (id: string, enable: boolean) => {
   const targetApi = userApis?.find(api => api.id == id)
   if (!targetApi) return
+  if (targetApi.allowShowUpdateAlert == enable) return
   targetApi.allowShowUpdateAlert = enable
   saveData()
 }
 
 export const getScript = async(id: string) => {
   return inflateScript(scripts.get(id) ?? '')
+}
+
+export const getUserApiSyncData = async(): Promise<LX.Sync.UserApi.Data> => {
+  return createUserApiSyncData(getUserApis(), getScript, {
+    onScriptError(err: Error, api: LX.UserApi.UserApiInfo) {
+      log.error(`skip invalid user api sync script: ${api.id}`, err)
+    },
+  })
+}
+
+export const overwriteUserApisFromSync = async(data: LX.Sync.UserApi.Data) => {
+  assertUserApiSyncData(data)
+  const nextUserApis: LX.UserApi.UserApiInfo[] = []
+  const nextScripts = new Map<string, string>()
+  for (const api of data.apis) {
+    const { script, scriptEncoding, ...info } = api
+    nextUserApis.push({
+      ...info,
+      allowShowUpdateAlert: info.allowShowUpdateAlert ?? false,
+    })
+    nextScripts.set(api.id, await deflateScript(script))
+  }
+  getStore(STORE_NAMES.USER_API).set('userApis', serializeUserApis(nextUserApis, nextScripts))
+  userApis = nextUserApis
+  scripts = nextScripts
 }

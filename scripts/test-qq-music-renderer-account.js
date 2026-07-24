@@ -25,10 +25,17 @@ const deferred = () => {
   return { promise, resolve: resolveDeferred, reject: rejectDeferred }
 }
 
-const loadAccountStore = (getQQMusicAccountStatus, logoutQQMusic = async() => {}) => {
+const loadAccountStore = (
+  getQQMusicAccountStatus,
+  logoutQQMusic = async() => {},
+  resetQQGuessLikeQueue = () => {},
+  resetQQDailyRecommend = () => {},
+) => {
   return loadTsModule(path.join(__dirname, '../src/renderer/store/qqMusic.ts'), {
     '@common/utils/vueTools': { ref, shallowRef: ref, computed },
     '@renderer/utils/ipc': { getQQMusicAccountStatus, logoutQQMusic },
+    '@renderer/store/qqGuessLike/action': { resetQQGuessLikeQueue },
+    '@renderer/store/qqDailyRecommend/action': { resetQQDailyRecommend },
   })
 }
 
@@ -161,17 +168,11 @@ const testAccountInitRetry = async() => {
     new Error('status unavailable'),
     { isLoggedIn: true, profile: { uin: 'retry', nickname: '重试账号' } },
   ]
-  const store = loadTsModule(path.join(__dirname, '../src/renderer/store/qqMusic.ts'), {
-    '@common/utils/vueTools': { ref, shallowRef: ref, computed },
-    '@renderer/utils/ipc': {
-      getQQMusicAccountStatus: async() => {
-        getCount++
-        const result = getResults.shift()
-        if (result instanceof Error) throw result
-        return result
-      },
-      logoutQQMusic: async() => {},
-    },
+  const store = loadAccountStore(async() => {
+    getCount++
+    const result = getResults.shift()
+    if (result instanceof Error) throw result
+    return result
   })
 
   await assert.rejects(store.initQQMusicAccount(), /status unavailable/)
@@ -193,18 +194,15 @@ const testAccountStore = async() => {
     { isLoggedIn: true, profile: { uin: 'o123', nickname: 'QQ 音乐账号' } },
   ]
 
-  const store = loadTsModule(path.join(__dirname, '../src/renderer/store/qqMusic.ts'), {
-    '@common/utils/vueTools': { ref, shallowRef: ref, computed },
-    '@renderer/utils/ipc': {
-      getQQMusicAccountStatus: async() => {
-        getCount++
-        const result = getResults.shift()
-        if (result instanceof Error) throw result
-        return result
-      },
-      logoutQQMusic: async() => { logoutCount++ },
+  const store = loadAccountStore(
+    async() => {
+      getCount++
+      const result = getResults.shift()
+      if (result instanceof Error) throw result
+      return result
     },
-  })
+    async() => { logoutCount++ },
+  )
 
   await Promise.all([store.initQQMusicAccount(), store.initQQMusicAccount()])
   assert.strictEqual(getCount, 1)
@@ -234,6 +232,29 @@ const testAccountStore = async() => {
   await store.logoutQQMusicAccount()
   assert.strictEqual(logoutCount, 1)
   assert.deepStrictEqual(store.accountStatus.value, { isLoggedIn: false, profile: null })
+}
+
+const testAccountIdentityInvalidatesQQGuessLikeQueue = async() => {
+  let resetCount = 0
+  const store = loadAccountStore(
+    async() => ({ isLoggedIn: false, profile: null }),
+    async() => {},
+    () => { resetCount++ },
+  )
+  const status = uin => ({
+    isLoggedIn: true,
+    profile: { uin, nickname: `account-${uin}` },
+  })
+
+  store.setQQMusicAccountStatus(status('account-a'))
+  store.setQQMusicAccountStatus(status('account-a'))
+  assert.strictEqual(resetCount, 1)
+
+  store.setQQMusicAccountStatus(status('account-b'))
+  assert.strictEqual(resetCount, 2)
+
+  await store.logoutQQMusicAccount()
+  assert.strictEqual(resetCount, 3)
 }
 
 const testQrPolling = async() => {
@@ -417,6 +438,7 @@ const main = async() => {
   await testPendingLogoutPermanentlyInvalidatesOlderInit()
   await testAccountInitRetry()
   await testAccountStore()
+  await testAccountIdentityInvalidatesQQGuessLikeQueue()
   await testQrPolling()
   console.log('QQ Music renderer account tests passed')
 }

@@ -155,7 +155,9 @@ const mergeList = (socket: LX.Sync.Server.Socket, sourceListData: LX.Sync.List.L
       const sourceUpdateTime = sourceList?.locationUpdateTime ?? 0
       if (targetUpdateTime >= sourceUpdateTime) return
       // 调整位置
-      const [newList] = newListData.userList.splice(newListData.userList.findIndex(l => l.id == list.id), 1)
+      const sourceIndex = newListData.userList.findIndex(l => l.id == list.id)
+      if (sourceIndex < 0) return
+      const [newList] = newListData.userList.splice(sourceIndex, 1)
       newList.locationUpdateTime = targetUpdateTime
       newListData.userList.splice(index, 0, newList)
     } else {
@@ -376,7 +378,9 @@ const handleMergeListDataFromSnapshot = async(socket: LX.Sync.Server.Socket, sna
       const localUpdateTime = localUserListData.get(list.id)?.locationUpdateTime ?? 0
       if (localUpdateTime >= remoteUpdateTime) return
       // 调整位置
-      const [newList] = newUserList.splice(newUserList.findIndex(l => l.id == list.id), 1)
+      const localIndex = newUserList.findIndex(l => l.id == list.id)
+      if (localIndex < 0) return
+      const [newList] = newUserList.splice(localIndex, 1)
       newList.locationUpdateTime = localUpdateTime
       newUserList.splice(index, 0, newList)
     } else {

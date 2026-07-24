@@ -2,8 +2,11 @@
 import { deduplicationList, toNewMusicInfo } from '@renderer/utils'
 import musicSdk from '@renderer/utils/musicSdk'
 import { getNeteasePlaylistDetail } from '@renderer/utils/ipc'
+import { getQQMusicAccountKey } from '@renderer/store/qqMusic'
 import { getDailyRecommendPlaylistDetail, loadDailyRecommendSongs } from '@renderer/store/dailyRecommend/action'
 import { DAILY_RECOMMEND_TEMP_LIST_ID } from '@renderer/store/dailyRecommend/state'
+import { getQQDailyRecommendPlaylistDetail } from '@renderer/store/qqDailyRecommend/action'
+import { QQ_DAILY_RECOMMEND_LIST_ID, qqDailyRecommendGeneration } from '@renderer/store/qqDailyRecommend/state'
 import { markRaw, markRawList } from '@common/utils/vueTools'
 import {
   tags,
@@ -31,16 +34,22 @@ const isNeteaseDailyRecommendPlaylist = (id: string, source: LX.OnlineSource) =>
   return source == 'wy' && id == DAILY_RECOMMEND_TEMP_LIST_ID
 }
 
+const isQQDailyRecommendPlaylist = (id: string, source: LX.OnlineSource) => {
+  return source == 'tx' && id == QQ_DAILY_RECOMMEND_LIST_ID
+}
+
 const shouldUseNeteasePlaylistDetail = (id: string, source: LX.OnlineSource) => {
   return source == 'wy' && !isNeteaseDailyRecommendPlaylist(id, source)
 }
 
 const getListDetailCacheKey = (id: string, source: LX.OnlineSource, page: number) => {
-  const detailType = isNeteaseDailyRecommendPlaylist(id, source)
-    ? 'netease_daily_recommend'
-    : shouldUseNeteasePlaylistDetail(id, source)
-      ? isNeteasePrivateRadarPlaylist(id, source) ? 'netease_user_sdetail' : 'netease_sdetail'
-      : 'sdetail'
+  const detailType = isQQDailyRecommendPlaylist(id, source)
+    ? `qq_daily_recommend__${getQQMusicAccountKey() ?? 'guest'}__${qqDailyRecommendGeneration.value}`
+    : isNeteaseDailyRecommendPlaylist(id, source)
+      ? 'netease_daily_recommend'
+      : shouldUseNeteasePlaylistDetail(id, source)
+        ? isNeteasePrivateRadarPlaylist(id, source) ? 'netease_user_sdetail' : 'netease_sdetail'
+        : 'sdetail'
   return `${detailType}__${source}__${id}__${page}`
 }
 
@@ -70,7 +79,7 @@ const loadNeteasePlaylistDetail = async(id: string, source: LX.OnlineSource, pag
 
   return getNeteasePlaylistDetail(id, page)
     .then(normalizeNeteaseListDetail)
-    .catch(err => {
+    .catch(async err => {
       console.warn('Load NetEase playlist detail failed, fallback to source sdk:', err)
       return loadMusicSdkListDetail(id, source, page)
     })
@@ -78,14 +87,29 @@ const loadNeteasePlaylistDetail = async(id: string, source: LX.OnlineSource, pag
 
 const loadListDetail = async(id: string, source: LX.OnlineSource, page: number, isRefresh = false): Promise<ListDetailInfo> => {
   const key = getListDetailCacheKey(id, source, page)
+  const isQQDailyRecommend = isQQDailyRecommendPlaylist(id, source)
+  const qqAccountKey = isQQDailyRecommend ? getQQMusicAccountKey() : null
   if (isRefresh && cache.has(key)) cache.delete(key)
   if (!isRefresh && cache.has(key)) return cache.get(key)
 
-  const result = isNeteaseDailyRecommendPlaylist(id, source)
-    ? normalizeNeteaseListDetail(await getDailyRecommendPlaylistDetail(isRefresh))
-    : await loadNeteasePlaylistDetail(id, source, page)
+  let result: ListDetailInfo
+  let qqDailyGeneration: number | null = null
+  if (isQQDailyRecommend) {
+    const detail = getQQDailyRecommendPlaylistDetail(isRefresh, qqAccountKey)
+    qqDailyGeneration = qqDailyRecommendGeneration.value
+    result = normalizeNeteaseListDetail(await detail)
+  } else if (isNeteaseDailyRecommendPlaylist(id, source)) {
+    result = normalizeNeteaseListDetail(await getDailyRecommendPlaylistDetail(isRefresh))
+  } else {
+    result = await loadNeteasePlaylistDetail(id, source, page)
+  }
 
-  cache.set(key, result)
+  if (!isQQDailyRecommend || (
+    qqAccountKey == getQQMusicAccountKey() &&
+    qqDailyGeneration == qqDailyRecommendGeneration.value
+  )) {
+    cache.set(getListDetailCacheKey(id, source, page), result)
+  }
   return result
 }
 
@@ -211,6 +235,10 @@ export const getListDetail = async(id: string, source: LX.OnlineSource, page: nu
  */
 export const getListDetailAll = async(id: string, source: LX.OnlineSource, isRefresh = false): Promise<LX.Music.MusicInfoOnline[]> => {
   // console.log(source, id)
+  if (isQQDailyRecommendPlaylist(id, source)) {
+    const detail = await getQQDailyRecommendPlaylistDetail(isRefresh, getQQMusicAccountKey())
+    return deduplicationList(detail.list)
+  }
   if (isNeteaseDailyRecommendPlaylist(id, source)) {
     return deduplicationList(await loadDailyRecommendSongs(isRefresh))
   }
@@ -255,9 +283,11 @@ export const getAndSetListDetail = async(id: string, source: LX.OnlineSource, pa
     if (key != listDetailInfo.key) return
     setListDetail(result, id, page)
   }).catch((error: any) => {
-    clearListDetail()
-    listDetailInfo.noItemLabel = window.i18n.t('list__load_failed')
-    console.log(error)
+    if (key == listDetailInfo.key) {
+      clearListDetail()
+      listDetailInfo.noItemLabel = window.i18n.t('list__load_failed')
+      console.log(error)
+    }
     throw error
   })
 }

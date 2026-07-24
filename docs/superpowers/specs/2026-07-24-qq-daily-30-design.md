@@ -6,21 +6,29 @@ Add QQ Music's personalized Daily 30 playlist to the QQ recommendation page. The
 
 ## API And Normalization
 
-The main process sends an authenticated JSON POST request to `https://u6.y.qq.com/cgi-bin/musicu.fcg` with this module request:
+The main process serializes one authenticated request body and signs that exact JSON string with QQ Music's accepted `zza` signing algorithm. It sends the signed body to `https://u6.y.qq.com/cgi-bin/musics.fcg?sign=...` with this module request:
 
 ```json
 {
-  "daily30": {
-    "module": "music.ai_track_daily_svr",
-    "method": "get_daily_track",
-    "param": {}
+  "req_1": {
+    "module": "music.srfDissInfo.aiDissInfo",
+    "method": "uniform_get_Dissinfo",
+    "param": {
+      "disstid": 0,
+      "userinfo": 1,
+      "tag": 1,
+      "is_pc": 1,
+      "guid": "<qqmusic_guid>",
+      "enc_host_uin": "<qqmusic_uin>",
+      "dirid": 202
+    }
   }
 }
 ```
 
-The `comm` object includes the stored account UIN, `qqmusic_key` as `authst`, `tmeLoginType`, and the current QQ Music PC client identifiers (`ct: 20`, `cv: 2116`). The Cookie header remains confined to the main process.
+The `comm` object reproduces the captured QQ Music PC client contract: `format`, `ct`, `cv`, `platform`, `uid`, `guid`, charsets, `notice`, `needNewCode`, `uin`, and both `g_tk` fields. UIN comes from the stored QQ Music Cookie. The service uses Cookie-provided `qqmusic_guid` and `uid` when present; the browser login flow may omit them, so it otherwise derives stable values with the same 32-character hexadecimal GUID and 10-digit UID shapes accepted by the live endpoint. Both `g_tk` values use the standard DJB hash of `qqmusic_key` or `qm_keyst`. The Cookie header remains confined to the main process.
 
-The service validates both the top-level response code and `daily30.code`, treats code `1000` as an expired QQ Music login, and normalizes `daily30.data.tracks` into `LX.Music.MusicInfo_tx[]`. Song normalization is shared with Guess You Like so artwork, artist, duration, quality, and playback metadata remain consistent.
+The service validates both the top-level response code and `req_1.code`, treats code `1000` as an expired QQ Music login, and normalizes `req_1.data.songlist` into `LX.Music.MusicInfo_tx[]`. Song normalization is shared with Guess You Like so artwork, artist, duration, quality, and playback metadata remain consistent.
 
 ## State And Account Isolation
 

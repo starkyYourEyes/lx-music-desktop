@@ -119,13 +119,11 @@ export const useRecommendData = ({
   }
 
   const hasCoreHomeContent = (data: LX.Netease.HomeRecommendation | null) => {
-    return !!(
-      data?.radarPlaylists.length ||
-      data?.styleSongs.length ||
-      data?.dailySongCategoryPlaylists.length ||
-      data?.similarSongs.length ||
-      data?.recommendPlaylists.length
-    )
+    return (data?.radarPlaylists.length ?? 0) > 0 ||
+      (data?.styleSongs.length ?? 0) > 0 ||
+      (data?.dailySongCategoryPlaylists.length ?? 0) > 0 ||
+      (data?.similarSongs.length ?? 0) > 0 ||
+      (data?.recommendPlaylists.length ?? 0) > 0
   }
 
   const displayedPlaylists = computed(() => recommendPlaylists.value.slice(0, EXPLORE_PLAYLIST_LIMIT))

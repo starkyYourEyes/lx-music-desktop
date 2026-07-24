@@ -40,6 +40,11 @@ import useMaxOutputChannelCount from './useMaxOutputChannelCount'
 import { setPowerSaveBlocker } from '@renderer/core/player/utils'
 import usePreloadNextMusic from './usePreloadNextMusic'
 import { ensurePrivateFmNextSongs, syncPrivateFmModeWithPlayer } from '@renderer/store/privateFm/action'
+import {
+  ensureQQGuessLikeNextSongs,
+  syncQQGuessLikeModeWithPlayer,
+} from '@renderer/store/qqGuessLike/action'
+import { getQQMusicAccountKey, initQQMusicAccount } from '@renderer/store/qqMusic'
 
 
 export default () => {
@@ -82,16 +87,31 @@ export default () => {
     saveListeningTimeStatsNow()
   }
 
+  const ensureContinuousNextSongs = async() => {
+    const results = await Promise.allSettled([
+      ensurePrivateFmNextSongs(),
+      ensureQQGuessLikeNextSongs(getQQMusicAccountKey()),
+    ])
+    if (results[0].status == 'rejected') {
+      console.warn('Load private FM next songs failed:', results[0].reason)
+    }
+    if (results[1].status == 'rejected') {
+      console.warn('Load QQ Guess You Like next songs failed:', results[1].reason)
+      await initQQMusicAccount(true).catch(err => {
+        console.warn('Refresh QQ Music account after recommendation failure failed:', err)
+      })
+    }
+  }
+
   const handleUpdatePlayInfo = () => {
     syncPrivateFmModeWithPlayer()
+    syncQQGuessLikeModeWithPlayer(getQQMusicAccountKey())
     setTitle(musicInfo.id ? `${musicInfo.name} - ${musicInfo.singer}` : null)
     if (playMusicInfo.musicInfo) {
       const currentMusicInfo = 'progress' in playMusicInfo.musicInfo ? playMusicInfo.musicInfo.metadata.musicInfo : playMusicInfo.musicInfo
       addRecentPlayMusic(currentMusicInfo)
     }
-    void ensurePrivateFmNextSongs().catch(err => {
-      console.warn('Load private FM next songs failed:', err)
-    })
+    void ensureContinuousNextSongs()
   }
 
   const handleCanplay = () => {
@@ -108,11 +128,10 @@ export default () => {
     }
     // resetPlayerMusicInfo()
     // window.app_event.stop()
-    void ensurePrivateFmNextSongs().catch(err => {
-      console.warn('Load private FM next songs failed:', err)
-    }).finally(() => {
-      void playNext(true)
-    })
+    void (async() => {
+      await ensureContinuousNextSongs()
+      await playNext(true)
+    })()
     // })
   }
 

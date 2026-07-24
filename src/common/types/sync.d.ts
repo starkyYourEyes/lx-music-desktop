@@ -25,6 +25,10 @@ declare namespace LX {
       dislike: LX.Sync.Dislike.SyncMode
     }
 
+    interface UserApiSyncServiceParams {
+      mode: LX.Sync.UserApi.SyncMode
+    }
+
     type ModeType = { [K in keyof ModeTypes]: { type: K, mode: ModeTypes[K] } }[keyof ModeTypes]
 
     type SyncMainWindowActions = SyncAction<'select_mode', { deviceName: string, type: keyof ModeTypes }>
@@ -38,6 +42,9 @@ declare namespace LX {
     | SyncAction<'generate_code'>
     | SyncAction<'enable_server', EnableServer>
     | SyncAction<'enable_client', EnableClient>
+    | SyncAction<'user_api_get_meta'>
+    | SyncAction<'user_api_pull', UserApiSyncServiceParams>
+    | SyncAction<'user_api_push', UserApiSyncServiceParams>
 
     type ServerDevices = ServerKeyInfo[]
 
@@ -75,11 +82,15 @@ declare namespace LX {
     interface DislikeConfig {
       skipSnapshot: boolean
     }
+    interface UserApiConfig {
+      skipSnapshot: true
+    }
     type PartyConfig = Record<string, never>
     type ServerType = 'desktop-app' | 'server'
     interface EnabledFeatures {
       list?: false | ListConfig
       dislike?: false | DislikeConfig
+      userApi?: false | UserApiConfig
       party?: false | PartyConfig
     }
     type SupportedFeatures = Partial<{ [k in keyof EnabledFeatures]: number }>

@@ -5,24 +5,31 @@ const getLoginType = (cookie: string): number => {
   const rawValue = getCookieValue(cookie, 'tmeLoginType')
   if (!rawValue) return 2
   const value = Number(rawValue)
-  return Number.isFinite(value) ? value : 2
+  return Number.isInteger(value) && value > 0 ? value : 2
 }
 
 export const createQQMusicDailyRecommendService = ({
   fetchImpl = fetch,
   getCookie,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
 }: {
   fetchImpl?: typeof fetch
   getCookie: () => string
+  setTimeoutImpl?: typeof setTimeout
+  clearTimeoutImpl?: typeof clearTimeout
 }) => {
   const getDailyRecommendSongs = async(): Promise<LX.Music.MusicInfo_tx[]> => {
     const cookie = getCookie()
     if (!cookie) throw new QQMusicAuthError('QQ Music account is not logged in')
     const uin = (getCookieValue(cookie, 'uin') || getCookieValue(cookie, 'qqmusic_uin')).replace(/^o/, '')
     const authst = getCookieValue(cookie, 'qqmusic_key')
+    const controller = new AbortController()
+    const timer = setTimeoutImpl(() => controller.abort(), 10_000)
     try {
       const response = await fetchImpl('https://u6.y.qq.com/cgi-bin/musicu.fcg', {
         method: 'POST',
+        signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
           Referer: 'https://y.qq.com/',
@@ -45,6 +52,8 @@ export const createQQMusicDailyRecommendService = ({
     } catch (error) {
       if (error instanceof QQMusicAuthError) throw error
       throw new Error('QQ Music daily recommendation request failed')
+    } finally {
+      clearTimeoutImpl(timer)
     }
   }
   return { getDailyRecommendSongs }

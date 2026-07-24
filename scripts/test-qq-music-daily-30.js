@@ -76,6 +76,13 @@ const run = async() => {
   assert.deepStrictEqual(JSON.parse(request.options.body).comm, {
     ct: 20, cv: 2116, uin: '456', authst: 'another-secret', tmeLoginType: 2,
   })
+  for (const loginType of ['0', '-1', '1.5']) {
+    await createQQMusicDailyRecommendService({
+      fetchImpl,
+      getCookie: () => `uin=o456; qqmusic_key=another-secret; tmeLoginType=${loginType}`,
+    }).getDailyRecommendSongs()
+    assert.strictEqual(JSON.parse(request.options.body).comm.tmeLoginType, 2)
+  }
   assert.deepStrictEqual(songs, [{
     id: 'tx_song-mid', name: 'Song', singer: 'Singer', source: 'tx', interval: 'time:185',
     meta: {
@@ -97,6 +104,27 @@ const run = async() => {
     getCookie: () => 'uin=o123; qqmusic_key=secret',
   })
   await assert.rejects(leakingFetchFailure.getDailyRecommendSongs(), error => !(error instanceof QQMusicAuthError) && !String(error).includes('secret'))
+  let timeoutCallback
+  let clearedTimer
+  const aborting = createQQMusicDailyRecommendService({
+    fetchImpl: async(_url, options) => new Promise((_resolve, reject) => {
+      assert.ok(options.signal instanceof AbortSignal)
+      options.signal.addEventListener('abort', () => reject(new Error('request failed for secret')))
+    }),
+    getCookie: () => 'uin=o123; qqmusic_key=secret',
+    setTimeoutImpl: (callback, delay) => {
+      assert.strictEqual(delay, 10_000)
+      timeoutCallback = callback
+      return 'daily30-timer'
+    },
+    clearTimeoutImpl: timer => { clearedTimer = timer },
+  })
+  const abortedRequest = aborting.getDailyRecommendSongs()
+  await Promise.resolve()
+  assert.strictEqual(typeof timeoutCallback, 'function')
+  timeoutCallback()
+  await assert.rejects(abortedRequest, error => !(error instanceof QQMusicAuthError) && !String(error).includes('secret'))
+  assert.strictEqual(clearedTimer, 'daily30-timer')
   for (const payload of [{ code: 1000 }, { code: 0, daily30: { code: 1000 } }]) {
     const expired = createQQMusicDailyRecommendService({ fetchImpl: createFetchWithPayload(payload), getCookie: () => 'uin=o123; qqmusic_key=secret' })
     await assert.rejects(expired.getDailyRecommendSongs(), QQMusicAuthError)

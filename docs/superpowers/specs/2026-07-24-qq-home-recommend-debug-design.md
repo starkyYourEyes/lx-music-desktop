@@ -22,8 +22,9 @@ QQ Music response payload.
 
 ## Upstream Request
 
-Send one POST request to `https://u.y.qq.com/cgi-bin/musicu.fcg` with the same
-batch modules used by `GET /getRecommend`:
+Send one GET request to `https://u.y.qq.com/cgi-bin/musicu.fcg` with `format=json`
+and the complete batch object serialized into the `data` query parameter, as
+used by `GET /getRecommend`:
 
 - `category`: hot playlist categories.
 - `recomPlaylist`: homepage recommended playlists.
@@ -90,4 +91,3 @@ included in either log entry.
   and affected production builds.
 - Start the development application, complete or reuse QQ Music login, open
   developer tools, and inspect the real `[QQ Music getRecommend]` payload.
-

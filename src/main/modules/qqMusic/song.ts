@@ -86,7 +86,9 @@ export const createQQMusicSongService = ({
   fetchImpl?: typeof fetch
   getCookie: () => string
 }) => {
-  const getGuessLikeSongs = async(): Promise<LX.Music.MusicInfo_tx[]> => {
+  const getGuessLikeSongs = async({
+    continuation = false,
+  }: LX.QQMusic.GuessLikeRequest = {}): Promise<LX.Music.MusicInfo_tx[]> => {
     const cookie = getCookie()
     if (!cookie) throw new QQMusicAuthError('QQ Music account is not logged in')
     const controller = new AbortController()
@@ -112,7 +114,7 @@ export const createQQMusicSongService = ({
           songlist: {
             module: 'mb_track_radio_svr',
             method: 'get_radio_track',
-            param: { id: 99, firstplay: 1, num: 15 },
+            param: { id: 99, firstplay: continuation ? 0 : 1, num: 15 },
           },
         }),
       })

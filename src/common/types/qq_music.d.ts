@@ -21,5 +21,9 @@ declare namespace LX {
       state: LoginQrState
       message: string
     }
+
+    interface GuessLikeRequest {
+      continuation?: boolean
+    }
   }
 }

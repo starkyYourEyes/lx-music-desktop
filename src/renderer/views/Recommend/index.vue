@@ -2,17 +2,6 @@
   <div :class="$style.recommend">
     <div :class="$style.playlistPage">
       <login-panel
-        v-if="showQQLoginPanel && !qqIsLoggedIn"
-        title="登录 QQ 音乐"
-        instruction="请使用手机 QQ 扫码，并在手机上确认"
-        :qr-img="qqQrImg"
-        :qr-status-text="qqQrStatusText"
-        :is-creating-qr="isCreatingQQQr"
-        @close="handleCloseQQLogin"
-        @refresh="handleCreateQQLoginQr"
-      />
-
-      <login-panel
         v-if="showNeteaseLoginPanel && !neteaseIsLoggedIn"
         title="登录网易云音乐"
         instruction="请使用网易云音乐 App 扫码，并在手机上确认"
@@ -153,7 +142,6 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from '@common/utils/vueTools'
 import { onBeforeRouteLeave, useRoute, useRouter } from '@common/utils/vueRouter'
 import { initNeteaseAccount, isLoggedIn as neteaseIsLoggedIn, profile as neteaseProfile } from '@renderer/store/netease'
-import { initQQMusicAccount, isLoggedIn as qqIsLoggedIn, profile as qqProfile } from '@renderer/store/qqMusic'
 import { appSetting } from '@renderer/store/setting'
 import { normalizeRecommendHomeSectionOrder } from '@renderer/utils/recommendSectionOrder'
 import ChartsSection from './components/ChartsSection.vue'
@@ -164,8 +152,6 @@ import SimilarSongsSection from './components/SimilarSongsSection.vue'
 import SpecialCards from './components/SpecialCards.vue'
 import { createLatestLoadCoordinator } from './accountLoadCoordinator'
 import { useNeteaseLoginQr } from './useNeteaseLoginQr'
-import { useQQGuessLikeData } from './useQQGuessLikeData'
-import { useQQMusicLoginQr } from './useQQMusicLoginQr'
 import { useRecommendCards } from './useRecommendCards'
 import { useRecommendData } from './useRecommendData'
 import { useRecommendLove } from './useRecommendLove'
@@ -184,7 +170,6 @@ const setRecommendSectionRef = (instance: HorizontalPlaylistSectionExpose | null
 }
 
 const profileNickname = computed(() => neteaseProfile.value?.nickname ? neteaseProfile.value.nickname : 'WY')
-const qqAccountKey = computed(() => qqIsLoggedIn.value ? qqProfile.value?.uin ?? null : null)
 const neteaseAccountKey = computed(() => neteaseIsLoggedIn.value ? String(neteaseProfile.value?.userId ?? '') || null : null)
 const isExploreMode = computed(() => route.query.category === 'playlists')
 const pageTitle = computed(() => isExploreMode.value ? '更多推荐' : '推荐')
@@ -221,36 +206,15 @@ const {
   saveScrollPosition,
 } = recommendData
 
-const {
-  songs: qqGuessLikeSongs,
-  isLoading: isQQGuessLikeLoading,
-  loadError: qqGuessLikeLoadError,
-  load: loadQQGuessLikeSongs,
-  clear: clearQQGuessLikeSongs,
-} = useQQGuessLikeData()
-
-const showQQGuessLikeCard = computed(() => (
-  qqIsLoggedIn.value || appSetting['recommend.qqGuessLikeLoggedOutVisible']
-))
-
 const specialSourcePlaylists = computed(() => [
   ...recommendPlaylists.value,
   ...homeRadarPlaylists.value,
 ])
-const { specialCards, getSpecialCardKicker } = useRecommendCards(specialSourcePlaylists, {
-  showQQGuessLike: showQQGuessLikeCard,
-  qqGuessLikeSongs,
-  isQQGuessLikeLoading,
-  qqGuessLikeLoadError,
-})
+const { specialCards, getSpecialCardKicker } = useRecommendCards(specialSourcePlaylists)
 const specialCardIds = computed(() => new Set(specialCards.value.map(playlist => playlist.id)))
 const hasSpecialHomeContent = computed(() => specialCards.value.some(playlist => !playlist.isPlaceholder))
 const effectivePlaylistNoItemText = computed(() => {
-  if (!isExploreMode.value && (
-    hasSpecialHomeContent.value ||
-    qqIsLoggedIn.value ||
-    appSetting['recommend.qqGuessLikeLoggedOutVisible']
-  )) return ''
+  if (!isExploreMode.value && hasSpecialHomeContent.value) return ''
   return playlistNoItemText.value
 })
 const filteredHomeRadarPlaylists = computed(() => homeRadarPlaylists.value)
@@ -277,18 +241,6 @@ const neteaseLoadCoordinator = createLatestLoadCoordinator(async force => {
 })
 
 const {
-  qrStatusText: qqQrStatusText,
-  qrImg: qqQrImg,
-  isCreatingQr: isCreatingQQQr,
-  showLoginPanel: showQQLoginPanel,
-  handleCreateLoginQr: handleCreateQQLoginQr,
-  handleShowLogin: openQQLoginPanel,
-  handleCloseLogin: handleCloseQQLogin,
-} = useQQMusicLoginQr(async() => {
-  handleCloseQQLogin()
-})
-
-const {
   qrStatusText: neteaseQrStatusText,
   qrImg: neteaseQrImg,
   isCreatingQr: isCreatingNeteaseQr,
@@ -307,20 +259,9 @@ const {
   await request
 })
 
-const handleShowQQLogin = () => {
-  handleCloseNeteaseLogin()
-  if (showQQLoginPanel.value) return
-  openQQLoginPanel()
-}
-
 const handleShowNeteaseLogin = () => {
-  handleCloseQQLogin()
   if (showNeteaseLoginPanel.value) return
   openNeteaseLoginPanel()
-}
-
-const loadQQGuessLikeForPlayback = async() => {
-  return loadQQGuessLikeSongs()
 }
 
 const {
@@ -336,7 +277,6 @@ const {
   handleTogglePlaylistPlay,
   handleToggleStyleSongs,
   handleToggleHomeSongs,
-  resetQQGuessLikePlayback,
   handlePlayStyleSongs,
   handlePlayHomeSongs,
   handleOpenPlaylist,
@@ -345,10 +285,6 @@ const {
 } = useRecommendPlayback({
   homeStyleSongs,
   homeSimilarSongs,
-  qqGuessLikeSongs,
-  getQQGuessLikeAccountKey: () => qqAccountKey.value,
-  onQQGuessLikeLoginRequired: handleShowQQLogin,
-  loadQQGuessLikeSongs: loadQQGuessLikeForPlayback,
   setError: message => {
     playlistLoadError.value = message
   },
@@ -373,9 +309,7 @@ watch(recommendSongsForLove, () => {
 })
 
 watch(() => route.query.login, login => {
-  if (login == 'qq' && !qqIsLoggedIn.value) {
-    handleShowQQLogin()
-  } else if ((login == 'netease' || login == '1') && !neteaseIsLoggedIn.value) {
+  if ((login == 'netease' || login == '1') && !neteaseIsLoggedIn.value) {
     handleShowNeteaseLogin()
   }
 
@@ -402,24 +336,8 @@ watch(neteaseAccountKey, (value, oldValue) => {
   void neteaseLoadCoordinator.request(true)
 })
 
-watch(qqAccountKey, (value, oldValue) => {
-  if (value == oldValue) return
-  resetQQGuessLikePlayback()
-  clearQQGuessLikeSongs()
-  if (value) handleCloseQQLogin()
-})
-
-const handleQQMusicLoginRequest = () => {
-  if (!qqIsLoggedIn.value) handleShowQQLogin()
-}
-
 const handleNeteaseLoginRequest = () => {
   if (!neteaseIsLoggedIn.value) handleShowNeteaseLogin()
-}
-
-const initializeQQAccount = async() => {
-  await initQQMusicAccount().catch(() => null)
-  if (!qqAccountKey.value) clearQQGuessLikeSongs()
 }
 
 const initializeNeteaseAccount = async() => {
@@ -443,14 +361,11 @@ const initializeNeteaseAccount = async() => {
 }
 
 onMounted(() => {
-  window.addEventListener('show-qq-music-login', handleQQMusicLoginRequest)
   window.addEventListener('show-netease-login', handleNeteaseLoginRequest)
-  void initializeQQAccount()
   void initializeNeteaseAccount()
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('show-qq-music-login', handleQQMusicLoginRequest)
   window.removeEventListener('show-netease-login', handleNeteaseLoginRequest)
 })
 

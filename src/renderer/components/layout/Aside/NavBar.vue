@@ -1,9 +1,10 @@
 <template>
   <div :class="$style.menu">
     <ul :class="$style.list" role="toolbar">
-      <li v-for="(item, index) in mainMenus" v-show="item.enable" :key="item.to" :class="[$style.navItem, { [$style.separator]: index == 1 }]" role="presentation">
+      <li v-for="(item, index) in mainMenus" v-show="item.enable" :key="item.to" :class="[$style.navItem, { [$style.separator]: index == 2 }]" role="presentation">
         <router-link :class="[$style.link, {[$style.active]: $route.meta.name == item.name}]" role="tab" :aria-selected="$route.meta.name == item.name" :to="item.to" :aria-label="item.tips">
-          <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" :viewBox="item.iconSize" :height="item.size" :width="item.size" space="preserve">
+          <img v-if="item.logo" :class="$style.providerLogo" :src="item.logo" alt="" draggable="false">
+          <svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" :viewBox="item.iconSize" :height="item.size" :width="item.size" space="preserve">
             <use :xlink:href="item.icon" />
           </svg>
         </router-link>
@@ -25,15 +26,22 @@
 import { appSetting } from '@renderer/store/setting'
 import { useI18n } from '@root/lang'
 import { computed } from '@common/utils/vueTools'
+import neteaseMusicLogo from '@renderer/assets/images/providers/netease-music.svg'
+import qqMusicLogo from '@renderer/assets/images/providers/qq-music.svg'
 
 const iconSize = '32px'
 const menuList = [
   {
     to: '/recommend',
-    tips: 'recommend',
-    icon: '#icon-thumbs-up',
-    iconSize: '0 0 512 512',
+    tips: 'netease_recommend',
+    logo: neteaseMusicLogo,
     name: 'Recommend',
+  },
+  {
+    to: '/qq-recommend',
+    tips: 'qq_recommend',
+    logo: qqMusicLogo,
+    name: 'QQRecommend',
   },
   {
     to: '/list',
@@ -203,5 +211,11 @@ export default {
     opacity: .6;
     background-color: var(--color-primary-light-300-alpha-600);
   }
+}
+.providerLogo {
+  display: block;
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
 }
 </style>

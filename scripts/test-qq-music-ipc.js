@@ -32,6 +32,13 @@ assert.match(rendererIpc, /createQQMusicLoginQr/)
 assert.match(rendererIpc, /checkQQMusicLoginQr/)
 assert.match(rendererIpc, /logoutQQMusic/)
 assert.match(rendererIpc, /getQQMusicGuessLikeSongs/)
+assert.match(types, /interface GuessLikeRequest\s*\{[\s\S]*?continuation\?: boolean/)
+assert.match(handlers, /getGuessLikeSongs\(params\)/)
+assert.match(rendererIpc, /getQQMusicGuessLikeSongs = async\(continuation = false\)/)
+assert.match(rendererIpc, /\{ continuation \}/)
+assert.doesNotMatch(types, /HomeRecommendResponse/)
+assert.doesNotMatch(handlers, /HomeRecommend|getHomeRecommend/)
+assert.doesNotMatch(rendererIpc, /QQMusicHomeRecommend|QQMusic\.HomeRecommendResponse/)
 
 const publicTypeBodies = [...types.matchAll(/interface (?:Profile|AccountStatus|LoginQr|LoginQrCheck)\s*\{([\s\S]*?)\n\s*\}/g)]
   .map(match => match[1]).join('\n')

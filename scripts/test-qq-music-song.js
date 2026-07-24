@@ -114,10 +114,17 @@ service.getGuessLikeSongs().then(async songs => {
   assert.strictEqual(malformedSingerSongs.length, 1)
   assert.strictEqual(malformedSingerSongs[0].singer, '')
 
-  assert.strictEqual(fetchCalls, 1)
+  await service.getGuessLikeSongs({ continuation: true })
+  const continuationBody = JSON.parse(request.options.body)
+  assert.deepStrictEqual(continuationBody.songlist.param, {
+    id: 99,
+    firstplay: 0,
+    num: 15,
+  })
+  assert.strictEqual(fetchCalls, 2)
   const noCookie = createQQMusicSongService({ fetchImpl, getCookie: () => '' })
   await assert.rejects(noCookie.getGuessLikeSongs(), QQMusicAuthError)
-  assert.strictEqual(fetchCalls, 1)
+  assert.strictEqual(fetchCalls, 2)
 
   const createFetchWithPayload = payload => async() => ({
     ok: true,

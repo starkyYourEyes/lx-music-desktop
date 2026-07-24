@@ -732,8 +732,11 @@ export const logoutQQMusic = async() => {
   await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_logout)
 }
 
-export const getQQMusicGuessLikeSongs = async() => {
-  return rendererInvoke<LX.Music.MusicInfo_tx[]>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_guess_like_songs)
+export const getQQMusicGuessLikeSongs = async(continuation = false) => {
+  return rendererInvoke<LX.QQMusic.GuessLikeRequest, LX.Music.MusicInfo_tx[]>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_guess_like_songs,
+    { continuation },
+  )
 }
 
 export const getNeteaseAccountStatus = async() => {

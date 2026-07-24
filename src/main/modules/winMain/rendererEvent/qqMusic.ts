@@ -25,7 +25,8 @@ export default () => {
     await logout()
   })
 
-  mainHandle<LX.Music.MusicInfo_tx[]>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_guess_like_songs, async() => {
-    return getGuessLikeSongs()
-  })
+  mainHandle<LX.QQMusic.GuessLikeRequest | undefined, LX.Music.MusicInfo_tx[]>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_guess_like_songs,
+    async({ params }) => getGuessLikeSongs(params),
+  )
 }

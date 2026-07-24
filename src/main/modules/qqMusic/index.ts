@@ -37,7 +37,7 @@ interface LoginService {
 }
 
 interface SongService {
-  getGuessLikeSongs: () => Promise<LX.Music.MusicInfo_tx[]>
+  getGuessLikeSongs: (options?: LX.QQMusic.GuessLikeRequest) => Promise<LX.Music.MusicInfo_tx[]>
 }
 
 const emptyAccount = (updatedAt = 0): QQMusicAccountData => ({
@@ -135,10 +135,10 @@ export const createQQMusicAccountService = ({
     clearAccount()
   }
 
-  const getGuessLikeSongs = async() => {
+  const getGuessLikeSongs = async(options?: LX.QQMusic.GuessLikeRequest) => {
     const account = getAccountData(store)
     try {
-      return await songService.getGuessLikeSongs()
+      return await songService.getGuessLikeSongs(options)
     } catch (error) {
       if (isQQMusicAuthError(error)) {
         const currentAccount = getAccountData(store)
@@ -176,4 +176,6 @@ export const getAccountStatus = () => getAccountService().getAccountStatus()
 export const createLoginQr = async() => getAccountService().createLoginQr()
 export const checkLoginQr = async(key: string) => getAccountService().checkLoginQr(key)
 export const logout = async() => getAccountService().logout()
-export const getGuessLikeSongs = async() => getAccountService().getGuessLikeSongs()
+export const getGuessLikeSongs = async(options?: LX.QQMusic.GuessLikeRequest) => {
+  return getAccountService().getGuessLikeSongs(options)
+}

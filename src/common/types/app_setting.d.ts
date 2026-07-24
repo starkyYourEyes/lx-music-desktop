@@ -640,11 +640,6 @@ declare global {
       'recommend.dailySongCategoryTagKeys': string[] | null
 
       /**
-       * 未登录 QQ 音乐时是否显示“猜你喜欢”登录入口
-       */
-      'recommend.qqGuessLikeLoggedOutVisible': boolean
-
-      /**
        * 是否启用代理
        */
       'network.proxy.enable': boolean

@@ -3,6 +3,7 @@ import {
   getQQMusicAccountStatus,
   logoutQQMusic,
 } from '@renderer/utils/ipc'
+import { resetQQGuessLikeQueue } from '@renderer/store/qqGuessLike/action'
 
 const emptyStatus: LX.QQMusic.AccountStatus = {
   isLoggedIn: false,
@@ -20,11 +21,19 @@ let accountRevision = 0
 export const profile = computed(() => accountStatus.value.profile)
 export const isLoggedIn = computed(() => accountStatus.value.isLoggedIn)
 
+const getStatusAccountKey = (status: LX.QQMusic.AccountStatus) => {
+  return status.isLoggedIn ? status.profile?.uin ?? null : null
+}
+
+export const getQQMusicAccountKey = () => getStatusAccountKey(accountStatus.value)
+
 const commitQQMusicAccountStatus = (status: LX.QQMusic.AccountStatus) => {
+  const previousAccountKey = getQQMusicAccountKey()
   accountStatus.value = {
     isLoggedIn: status.isLoggedIn,
     profile: status.profile,
   }
+  if (previousAccountKey != getQQMusicAccountKey()) resetQQGuessLikeQueue()
 }
 
 export const setQQMusicAccountStatus = (status: LX.QQMusic.AccountStatus) => {

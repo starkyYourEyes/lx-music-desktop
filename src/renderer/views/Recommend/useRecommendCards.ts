@@ -4,26 +4,10 @@ import { privateFmQueue } from '@renderer/store/privateFm/state'
 import {
   PRIVATE_FM_CARD_ID,
   PRIVATE_RADAR_PLAYLIST_ID,
-  QQ_GUESS_LIKE_CARD_ID,
 } from './constants'
 import type { RecommendCard } from './types'
 
-interface RecommendCardOptions {
-  showQQGuessLike: { value: boolean }
-  qqGuessLikeSongs: { value: LX.Music.MusicInfoOnline[] }
-  isQQGuessLikeLoading: { value: boolean }
-  qqGuessLikeLoadError: { value: string }
-}
-
-export const useRecommendCards = (
-  recommendPlaylists: { value: LX.Netease.Playlist[] },
-  {
-    showQQGuessLike,
-    qqGuessLikeSongs,
-    isQQGuessLikeLoading,
-    qqGuessLikeLoadError,
-  }: RecommendCardOptions,
-) => {
+export const useRecommendCards = (recommendPlaylists: { value: LX.Netease.Playlist[] }) => {
   const firstPrivateFmSong = computed(() => privateFmQueue[0] ?? null)
   const firstDailyRecommendSong = computed(() => dailyRecommendSongs[0] ?? null)
 
@@ -70,30 +54,10 @@ export const useRecommendCards = (
     }
   })
 
-  const qqGuessLikeCard = computed((): RecommendCard | null => {
-    if (!showQQGuessLike.value) return null
-    const song = qqGuessLikeSongs.value[0]
-    return {
-      id: QQ_GUESS_LIKE_CARD_ID,
-      source: 'tx',
-      play_count: '',
-      author: song?.singer || 'QQ Music',
-      name: '猜你喜欢',
-      time: '',
-      img: song?.meta.picUrl ?? '',
-      desc: isQQGuessLikeLoading.value
-        ? '正在从 QQ 音乐加载猜你喜欢...'
-        : qqGuessLikeLoadError.value || song?.name || 'QQ Music',
-      total: song ? `${qqGuessLikeSongs.value.length}` : '',
-      isQQGuessLike: true,
-    }
-  })
-
   const specialCards = computed(() => {
     const result: RecommendCard[] = []
     if (dailyRecommendCard.value) result.push(dailyRecommendCard.value)
     if (privateFmCard.value) result.push(privateFmCard.value)
-    if (qqGuessLikeCard.value) result.push(qqGuessLikeCard.value)
     if (privateRadarCard.value) result.push(privateRadarCard.value)
     return result
   })
@@ -102,7 +66,6 @@ export const useRecommendCards = (
     if (playlist.isDailyRecommend) return 'Daily Mix'
     if (playlist.isPrivateFm) return 'Private FM'
     if (playlist.isPrivateRadar) return 'Radar'
-    if (playlist.isQQGuessLike) return 'QQ Music'
     return 'Playlist'
   }
 

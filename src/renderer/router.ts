@@ -23,6 +23,14 @@ const router = createRouter({
       },
     },
     {
+      path: '/qq-recommend',
+      name: 'QQRecommend',
+      component: require('./views/QQRecommend/index.vue').default,
+      meta: {
+        name: 'QQRecommend',
+      },
+    },
+    {
       path: '/recent-play',
       name: 'RecentPlay',
       component: require('./views/RecentPlay/index.vue').default,

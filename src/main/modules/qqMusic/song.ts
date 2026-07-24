@@ -45,9 +45,8 @@ const createQualityInfo = (file: any) => {
   return { qualitys, _qualitys }
 }
 
-export const normalizeGuessLikeSongs = (payload: any): LX.Music.MusicInfo_tx[] => {
-  const tracks = getTracks(payload)
-  if (!tracks) throw new Error('Invalid QQ Music guess-like response')
+export const normalizeQQMusicTracks = (tracks: unknown): LX.Music.MusicInfo_tx[] => {
+  if (!Array.isArray(tracks)) throw new Error('Invalid QQ Music tracks response')
   const ids = new Set<string>()
   const songs: LX.Music.MusicInfo_tx[] = []
   for (const song of tracks) {
@@ -77,6 +76,12 @@ export const normalizeGuessLikeSongs = (payload: any): LX.Music.MusicInfo_tx[] =
     })
   }
   return songs
+}
+
+export const normalizeGuessLikeSongs = (payload: any): LX.Music.MusicInfo_tx[] => {
+  const tracks = getTracks(payload)
+  if (!tracks) throw new Error('Invalid QQ Music guess-like response')
+  return normalizeQQMusicTracks(tracks)
 }
 
 export const createQQMusicSongService = ({

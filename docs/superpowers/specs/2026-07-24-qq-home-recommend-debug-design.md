@@ -68,8 +68,10 @@ On failure, write a warning without credentials:
 console.warn('[QQ Music getRecommend] request failed', error)
 ```
 
-No Cookie, request headers, QR-login artifacts, or raw account UIN may be
-included in either log entry.
+Do not separately include the stored Cookie, request headers, QR-login
+artifacts, or account UIN in either log entry. The upstream response object is
+still logged unchanged because inspecting that payload is the purpose of this
+diagnostic.
 
 ## Error Handling
 

@@ -25,7 +25,9 @@ export const createQQMusicDailyRecommendService = ({
     const uin = (getCookieValue(cookie, 'uin') || getCookieValue(cookie, 'qqmusic_uin')).replace(/^o/, '')
     const authst = getCookieValue(cookie, 'qqmusic_key')
     const controller = new AbortController()
-    const timer = setTimeoutImpl(() => controller.abort(), 10_000)
+    const timer = setTimeoutImpl(() => {
+      controller.abort()
+    }, 10_000)
     try {
       const response = await fetchImpl('https://u6.y.qq.com/cgi-bin/musicu.fcg', {
         method: 'POST',

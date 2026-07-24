@@ -60,24 +60,6 @@
             @toggle-card-play="handleToggleCardPlay"
           />
 
-          <QQGuessLikeSection
-            :visible-when-logged-out="appSetting['recommend.qqGuessLikeLoggedOutVisible']"
-            :is-logged-in="qqIsLoggedIn"
-            :songs="qqGuessLikeSongs"
-            :is-loading="isLoadingQQGuessLike"
-            :is-refreshing="isRefreshingQQGuessLike"
-            :load-error="qqGuessLikeLoadError"
-            :is-section-playing="isQQGuessLikePlaying()"
-            :is-song-playing="isQQGuessLikeSongPlaying"
-            :is-song-loved="isHomeSongLoved"
-            @login="handleShowQQLogin"
-            @retry="handleRefreshQQGuessLike"
-            @refresh="handleRefreshQQGuessLike"
-            @play-all="handleToggleQQGuessLikeSongs"
-            @play="handlePlayQQGuessLikeSongs"
-            @toggle-love="handleToggleHomeSongLove"
-          />
-
           <template v-for="section in homeSectionOrder" :key="section">
           <horizontal-playlist-section
             v-if="section == 'radarPlaylists'"
@@ -178,7 +160,6 @@ import ChartsSection from './components/ChartsSection.vue'
 import ExplorePlaylistGrid from './components/ExplorePlaylistGrid.vue'
 import HorizontalPlaylistSection from './components/HorizontalPlaylistSection.vue'
 import LoginPanel from './components/LoginPanel.vue'
-import QQGuessLikeSection from './components/QQGuessLikeSection.vue'
 import SimilarSongsSection from './components/SimilarSongsSection.vue'
 import SpecialCards from './components/SpecialCards.vue'
 import { createLatestLoadCoordinator } from './accountLoadCoordinator'
@@ -242,18 +223,26 @@ const {
 
 const {
   songs: qqGuessLikeSongs,
-  isLoading: isLoadingQQGuessLike,
-  isRefreshing: isRefreshingQQGuessLike,
+  isLoading: isQQGuessLikeLoading,
   loadError: qqGuessLikeLoadError,
   load: loadQQGuessLikeSongs,
   clear: clearQQGuessLikeSongs,
 } = useQQGuessLikeData()
 
+const showQQGuessLikeCard = computed(() => (
+  qqIsLoggedIn.value || appSetting['recommend.qqGuessLikeLoggedOutVisible']
+))
+
 const specialSourcePlaylists = computed(() => [
   ...recommendPlaylists.value,
   ...homeRadarPlaylists.value,
 ])
-const { specialCards, getSpecialCardKicker } = useRecommendCards(specialSourcePlaylists)
+const { specialCards, getSpecialCardKicker } = useRecommendCards(specialSourcePlaylists, {
+  showQQGuessLike: showQQGuessLikeCard,
+  qqGuessLikeSongs,
+  isQQGuessLikeLoading,
+  qqGuessLikeLoadError,
+})
 const specialCardIds = computed(() => new Set(specialCards.value.map(playlist => playlist.id)))
 const hasSpecialHomeContent = computed(() => specialCards.value.some(playlist => !playlist.isPlaceholder))
 const effectivePlaylistNoItemText = computed(() => {
@@ -270,7 +259,6 @@ const filteredHomeRecommendPlaylists = computed(() => homeRecommendPlaylists.val
 const recommendSongsForLove = computed(() => [
   ...homeStyleSongs.value,
   ...homeSimilarSongs.value,
-  ...qqGuessLikeSongs.value,
 ])
 const recommendLove = useRecommendLove(recommendSongsForLove)
 const {
@@ -279,53 +267,10 @@ const {
   handleToggleHomeSongLove,
 } = recommendLove
 
-const {
-  isPlaylistPlayingList,
-  isStyleSongsPlaying,
-  isHomeSongsPlaying,
-  isQQGuessLikePlaying,
-  isStyleSongPlaying,
-  isHomeSongPlaying,
-  isQQGuessLikeSongPlaying,
-  isCardPlaying,
-  getCardPlayLabel,
-  getPlaylistPlayLabel,
-  handleToggleCardPlay,
-  handleTogglePlaylistPlay,
-  handleToggleStyleSongs,
-  handleToggleHomeSongs,
-  handleToggleQQGuessLikeSongs,
-  handlePlayStyleSongs,
-  handlePlayHomeSongs,
-  handlePlayQQGuessLikeSongs,
-  handleOpenPlaylist,
-  handleOpenChart,
-  handleShowAll,
-} = useRecommendPlayback({
-  homeStyleSongs,
-  homeSimilarSongs,
-  qqGuessLikeSongs,
-  setError: message => {
-    playlistLoadError.value = message
-  },
-})
-
-let isInitializingQQAccount = false
 let isInitializingNeteaseAccount = false
-let forceQQLoadAfterInitialization = false
 let forceNeteaseLoadAfterInitialization = false
-let suppressNextQQAccountWatchKey: string | null = null
 let suppressNextNeteaseAccountWatchKey: string | null = null
-let initializationHandledQQKey: string | null = null
 let initializationHandledNeteaseKey: string | null = null
-
-const qqLoadCoordinator = createLatestLoadCoordinator(async force => {
-  if (!qqAccountKey.value) {
-    clearQQGuessLikeSongs()
-    return
-  }
-  await loadQQGuessLikeSongs(force)
-})
 
 const neteaseLoadCoordinator = createLatestLoadCoordinator(async force => {
   await loadRecommendPlaylists(force)
@@ -340,14 +285,7 @@ const {
   handleShowLogin: openQQLoginPanel,
   handleCloseLogin: handleCloseQQLogin,
 } = useQQMusicLoginQr(async() => {
-  const handledKey = qqAccountKey.value
-  suppressNextQQAccountWatchKey = handledKey
-  if (isInitializingQQAccount) initializationHandledQQKey = handledKey
   handleCloseQQLogin()
-  const request = qqLoadCoordinator.request(true)
-  await nextTick()
-  if (suppressNextQQAccountWatchKey == handledKey) suppressNextQQAccountWatchKey = null
-  await request
 })
 
 const {
@@ -381,9 +319,40 @@ const handleShowNeteaseLogin = () => {
   openNeteaseLoginPanel()
 }
 
-const handleRefreshQQGuessLike = async() => {
-  await qqLoadCoordinator.request(true)
+const loadQQGuessLikeForPlayback = async() => {
+  return loadQQGuessLikeSongs()
 }
+
+const {
+  isPlaylistPlayingList,
+  isStyleSongsPlaying,
+  isHomeSongsPlaying,
+  isStyleSongPlaying,
+  isHomeSongPlaying,
+  isCardPlaying,
+  getCardPlayLabel,
+  getPlaylistPlayLabel,
+  handleToggleCardPlay,
+  handleTogglePlaylistPlay,
+  handleToggleStyleSongs,
+  handleToggleHomeSongs,
+  resetQQGuessLikePlayback,
+  handlePlayStyleSongs,
+  handlePlayHomeSongs,
+  handleOpenPlaylist,
+  handleOpenChart,
+  handleShowAll,
+} = useRecommendPlayback({
+  homeStyleSongs,
+  homeSimilarSongs,
+  qqGuessLikeSongs,
+  getQQGuessLikeAccountKey: () => qqAccountKey.value,
+  onQQGuessLikeLoginRequired: handleShowQQLogin,
+  loadQQGuessLikeSongs: loadQQGuessLikeForPlayback,
+  setError: message => {
+    playlistLoadError.value = message
+  },
+})
 
 const handleRefreshRecommendPlaylists = async() => {
   await recommendData.handleRefreshRecommendPlaylists()
@@ -435,24 +404,9 @@ watch(neteaseAccountKey, (value, oldValue) => {
 
 watch(qqAccountKey, (value, oldValue) => {
   if (value == oldValue) return
-  const suppressedKey = suppressNextQQAccountWatchKey
-  if (suppressedKey != null) {
-    suppressNextQQAccountWatchKey = null
-    if (value == suppressedKey) return
-  }
-  if (!value) {
-    forceQQLoadAfterInitialization = false
-    qqLoadCoordinator.invalidate()
-    clearQQGuessLikeSongs()
-    return
-  }
-  handleCloseQQLogin()
+  resetQQGuessLikePlayback()
   clearQQGuessLikeSongs()
-  if (isInitializingQQAccount) {
-    forceQQLoadAfterInitialization = true
-    return
-  }
-  void qqLoadCoordinator.request(true)
+  if (value) handleCloseQQLogin()
 })
 
 const handleQQMusicLoginRequest = () => {
@@ -464,28 +418,8 @@ const handleNeteaseLoginRequest = () => {
 }
 
 const initializeQQAccount = async() => {
-  let currentKey: string | null = null
-  let force = false
-  let handledKey: string | null = null
-  isInitializingQQAccount = true
-  try {
-    await initQQMusicAccount().catch(() => null)
-    await nextTick()
-    currentKey = qqAccountKey.value
-    force = forceQQLoadAfterInitialization
-    handledKey = initializationHandledQQKey
-    forceQQLoadAfterInitialization = false
-    initializationHandledQQKey = null
-  } finally {
-    isInitializingQQAccount = false
-  }
-  if (!currentKey) {
-    qqLoadCoordinator.invalidate()
-    clearQQGuessLikeSongs()
-    return
-  }
-  if (handledKey == currentKey && !force) return
-  await qqLoadCoordinator.request(force || handledKey != null)
+  await initQQMusicAccount().catch(() => null)
+  if (!qqAccountKey.value) clearQQGuessLikeSongs()
 }
 
 const initializeNeteaseAccount = async() => {

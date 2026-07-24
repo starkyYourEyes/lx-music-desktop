@@ -241,8 +241,19 @@ const testStaticWiring = () => {
   assert.match(specialCards, /:cards="specialCards"/)
   assert.match(specialCards, /@open="handleOpenPlaylist"/)
   assert.match(specialCards, /@toggle-card-play="handleToggleCardPlay"/)
-  assert.match(recommendIndex, /showQQGuessLike/)
-  assert.match(recommendIndex, /loadQQGuessLikeSongs/)
+  assert.match(
+    recommendIndex,
+    /const\s+showQQGuessLike\s*=\s*computed\(\(\)\s*=>\s*qqIsLoggedIn\.value\s*\|\|\s*appSetting\['recommend\.qqGuessLikeLoggedOutVisible'\]\)/,
+  )
+  const recommendCardsCall = recommendIndex.match(/useRecommendCards\(\s*specialSourcePlaylists\s*,\s*\{[\s\S]*?\}\s*\)/)?.[0] || ''
+  assert.match(recommendCardsCall, /showQQGuessLike/)
+  assert.match(recommendCardsCall, /qqGuessLikeSongs/)
+  assert.match(recommendCardsCall, /isQQGuessLikeLoading/)
+  assert.match(recommendCardsCall, /qqGuessLikeLoadError/)
+  const recommendPlaybackCall = recommendIndex.match(/useRecommendPlayback\(\{[\s\S]*?\n\}\)/)?.[0] || ''
+  assert.match(recommendPlaybackCall, /loadQQGuessLikeSongs/)
+  assert.match(recommendPlaybackCall, /getQQGuessLikeAccountKey/)
+  assert.match(recommendPlaybackCall, /onQQGuessLikeLoginRequired:\s*handleShowQQLogin/)
   assert.doesNotMatch(recommendIndex, /qqLoadCoordinator/)
   assert.doesNotMatch(recommendIndex, /handleRefreshQQGuessLike/)
   assert.doesNotMatch(recommendIndex, /handleToggleQQGuessLikeSongs/)
@@ -276,20 +287,27 @@ const testStaticWiring = () => {
   assert.match(recommendIndex, /window\.addEventListener\('show-netease-login',\s*handleNeteaseLoginRequest\)/)
   assert.match(recommendIndex, /window\.removeEventListener\('show-qq-music-login',\s*handleQQMusicLoginRequest\)/)
   assert.match(recommendIndex, /window\.removeEventListener\('show-netease-login',\s*handleNeteaseLoginRequest\)/)
-  assert.match(recommendIndex, /void initializeQQAccount\(\)/)
   assert.match(recommendIndex, /import { createLatestLoadCoordinator } from '.\/accountLoadCoordinator'/)
   assert.doesNotMatch(recommendIndex, /isHandling(?:QQ|Netease)QrLoginSuccess|(?:qq|netease)LifecycleRevision/)
   assert.match(recommendIndex, /const neteaseAccountKey\s*=\s*computed\(\(\)\s*=>\s*neteaseIsLoggedIn\.value\s*\?[\s\S]*?neteaseProfile\.value\?\.userId/)
+  const qqAccountWatch = recommendIndex.match(/watch\(qqAccountKey,[\s\S]*?\n}\)/)?.[0] || ''
+  assert.match(qqAccountWatch, /clearQQGuessLikeSongs\(\)/)
+  assert.match(qqAccountWatch, /if\s*\(value\)[\s\S]*?handleCloseQQLogin\(\)/)
+  assert.doesNotMatch(qqAccountWatch, /loadQQGuessLikeSongs/)
   const neteaseAccountWatch = recommendIndex.match(/watch\(neteaseAccountKey,[\s\S]*?\n}\)/)?.[0] || ''
   assert.match(neteaseAccountWatch, /suppressNextNeteaseAccountWatchKey[\s\S]*?if\s*\(value\s*==\s*suppressedKey\)\s*return/)
   assert.match(neteaseAccountWatch, /if\s*\(isInitializingNeteaseAccount\)[\s\S]*?forceNeteaseLoadAfterInitialization\s*=\s*true[\s\S]*?neteaseLoadCoordinator\.request\(true\)/)
 
+  const qqQrSuccess = recommendIndex.match(/useQQMusicLoginQr\(async\(\)\s*=>\s*\{[\s\S]*?\n}\)/)?.[0] || ''
   const neteaseQrSuccess = recommendIndex.match(/useNeteaseLoginQr\(async\(\)\s*=>\s*\{[\s\S]*?\n}\)/)?.[0] || ''
+  assert.match(qqQrSuccess, /handleCloseQQLogin\(\)/)
+  assert.doesNotMatch(qqQrSuccess, /loadQQGuessLikeSongs/)
   assert.match(neteaseQrSuccess, /const handledKey\s*=\s*neteaseAccountKey\.value[\s\S]*?suppressNextNeteaseAccountWatchKey\s*=\s*handledKey[\s\S]*?initializationHandledNeteaseKey\s*=\s*handledKey[\s\S]*?neteaseLoadCoordinator\.request\(true\)[\s\S]*?await nextTick\(\)/)
 
   const initializeNetease = recommendIndex.match(/const initializeNeteaseAccount\s*=\s*async\(\)\s*=>\s*\{[\s\S]*?\n}/)?.[0] || ''
   const initializeQQ = recommendIndex.match(/const initializeQQAccount\s*=\s*async\(\)\s*=>\s*\{[\s\S]*?\n}/)?.[0] || ''
   assert.match(initializeQQ, /await initQQMusicAccount\(\)/)
+  assert.match(initializeQQ, /if\s*\(!currentKey\)[\s\S]*?clearQQGuessLikeSongs\(\)/)
   assert.doesNotMatch(initializeQQ, /loadQQGuessLikeSongs/)
   assert.doesNotMatch(initializeQQ, /qqLoadCoordinator\.request/)
   assert.match(initializeNetease, /await initNeteaseAccount\(\)[\s\S]*?await nextTick\(\)[\s\S]*?currentKey\s*=\s*neteaseAccountKey\.value[\s\S]*?handledKey\s*=\s*initializationHandledNeteaseKey/)
@@ -299,6 +317,9 @@ const testStaticWiring = () => {
     recommendIndex,
     /if\s*\(!isExploreMode\.value\s*&&\s*\([\s\S]*?qqIsLoggedIn\.value[\s\S]*?appSetting\['recommend\.qqGuessLikeLoggedOutVisible'\][\s\S]*?\)\)\s*return ''/,
   )
+  const onMountedBlock = recommendIndex.match(/onMounted\(\(\)\s*=>\s*\{[\s\S]*?\n}\)/)?.[0] || ''
+  assert.match(onMountedBlock, /void initializeQQAccount\(\)/)
+  assert.match(onMountedBlock, /void initializeNeteaseAccount\(\)/)
 }
 
 const createQQPlaybackHarness = ({ accountKey = 'A', loadQQGuessLikeSongs }) => {
@@ -408,6 +429,7 @@ const testQQRecommendCards = () => {
 const testQQRecommendPlayback = async() => {
   const pendingLoad = deferred()
   let loadCalls = 0
+  const qqCard = { id: 'qq_guess_like', source: 'tx', img: '', isQQGuessLike: true }
   const harness = createQQPlaybackHarness({
     loadQQGuessLikeSongs: async() => {
       loadCalls++
@@ -416,8 +438,8 @@ const testQQRecommendPlayback = async() => {
     },
   })
 
-  const firstActivation = harness.playback.handleToggleQQGuessLikeCard()
-  const secondActivation = harness.playback.handleToggleQQGuessLikeCard()
+  const firstActivation = harness.playback.handleOpenPlaylist(qqCard)
+  const secondActivation = harness.playback.handleToggleCardPlay(qqCard)
   await Promise.resolve()
   assert.strictEqual(loadCalls, 1, 'pending card activations should share one load')
   pendingLoad.resolve()
@@ -436,7 +458,7 @@ const testQQRecommendPlayback = async() => {
   assert.strictEqual(harness.playCalls, 1)
   assert.strictEqual(loadCalls, 1, 'pause and resume should not refetch installed QQ songs')
 
-  await harness.playback.handleOpenPlaylist({ id: 'qq_guess_like', source: 'tx', img: '', isQQGuessLike: true })
+  await harness.playback.handleOpenPlaylist(qqCard)
   assert.deepStrictEqual(harness.routerPushes, [], 'opening a QQ card should not navigate to song-list detail')
 }
 
@@ -473,6 +495,7 @@ const testQQCardEntryMethodsRequireLoginWithoutRouting = async() => {
 
 const testQQCardAccountOwnership = async() => {
   let loadCalls = 0
+  const qqCard = { id: 'qq_guess_like', source: 'tx', img: '', isQQGuessLike: true }
   const harness = createQQPlaybackHarness({
     loadQQGuessLikeSongs: async() => {
       loadCalls++
@@ -484,6 +507,8 @@ const testQQCardAccountOwnership = async() => {
   harness.tempListMeta.id = 'tx__qq_guess_like'
   harness.isPlay.value = true
   harness.setAccountKey('B')
+  assert.strictEqual(harness.playback.isQQGuessLikePlayingList(), false)
+  assert.strictEqual(harness.playback.isCardPlaying(qqCard), false)
   harness.qqGuessLikeSongs.value = []
   await harness.playback.handleToggleQQGuessLikeCard()
   assert.strictEqual(loadCalls, 2, 'account B must load its own QQ queue')
@@ -505,6 +530,7 @@ const testQQCardPausedAccountOwnership = async() => {
   harness.tempListMeta.id = 'tx__qq_guess_like'
   harness.isPlay.value = false
   harness.setAccountKey('B')
+  assert.strictEqual(harness.playback.isQQGuessLikePlayingList(), false)
   harness.qqGuessLikeSongs.value = []
   await harness.playback.handleToggleQQGuessLikeCard()
   assert.strictEqual(loadCalls, 2, 'account B must load instead of resuming paused account A')

@@ -492,6 +492,27 @@ const testQQCardAccountOwnership = async() => {
   assert.strictEqual(harness.playCalls, 0, 'account B must not resume account A queue')
 }
 
+const testQQCardPausedAccountOwnership = async() => {
+  let loadCalls = 0
+  const harness = createQQPlaybackHarness({
+    loadQQGuessLikeSongs: async() => {
+      loadCalls++
+      harness.qqGuessLikeSongs.value = [song(`qq-${loadCalls}`)]
+    },
+  })
+  await harness.playback.handleToggleQQGuessLikeCard()
+  harness.playInfo.playerListId = harness.LIST_IDS.TEMP
+  harness.tempListMeta.id = 'tx__qq_guess_like'
+  harness.isPlay.value = false
+  harness.setAccountKey('B')
+  harness.qqGuessLikeSongs.value = []
+  await harness.playback.handleToggleQQGuessLikeCard()
+  assert.strictEqual(loadCalls, 2, 'account B must load instead of resuming paused account A')
+  assert.strictEqual(harness.setTempListCalls.length, 2)
+  assert.deepStrictEqual(harness.playListCalls.at(-1), [harness.LIST_IDS.TEMP, 0])
+  assert.strictEqual(harness.playCalls, 0, 'account B must not resume paused account A queue')
+}
+
 const testQQCardEmptyLoadsAreRetryable = async() => {
   let loadCalls = 0
   const harness = createQQPlaybackHarness({
@@ -791,6 +812,7 @@ const main = async() => {
   await testQQCardLoggedOutRequiresLogin()
   await testQQCardEntryMethodsRequireLoginWithoutRouting()
   await testQQCardAccountOwnership()
+  await testQQCardPausedAccountOwnership()
   await testQQCardEmptyLoadsAreRetryable()
   await testQQCardRejectedLoadsAreRetryable()
   await testLoggedOutClearsWithoutRequest()

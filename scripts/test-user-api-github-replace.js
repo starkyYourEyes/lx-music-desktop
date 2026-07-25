@@ -227,7 +227,7 @@ const assertAtomicFailure = async(label, mutate, options = {}) => {
 
   await assert.rejects(
     () => harness.userApiUtils.replaceApisFromGitHub(input),
-    undefined,
+    options.expectedError,
     label,
   )
   assert.deepStrictEqual(harness.userApiUtils.getUserApis(), beforeApis, `${label}: memory changed`)
@@ -298,9 +298,18 @@ const originalLx = global.lx
     assert.strictEqual(coldLoadAliasHarness.storeSets.length, 0)
     assert.strictEqual(coldLoadAliasHarness.getChangeEvents(), 0)
 
+    const invalidScriptPath = `${VERSION}/online/b.js`
     await assertAtomicFailure('invalid script', inputItems => {
       inputItems[1].script = 'console.log("missing metadata header")'
-    }, { expectedDeflateCalls: 1 })
+    }, {
+      expectedDeflateCalls: 1,
+      expectedError: err => {
+        assert.strictEqual(err.code, 'GITHUB_INVALID_SCRIPT')
+        assert.strictEqual(err.detail, invalidScriptPath)
+        assert.strictEqual(err.message, `GITHUB_INVALID_SCRIPT: ${invalidScriptPath}`)
+        return true
+      },
+    })
     await assertAtomicFailure('duplicate path', inputItems => {
       inputItems[1].remote.path = inputItems[0].remote.path
     }, { expectedDeflateCalls: 0 })
@@ -613,9 +622,10 @@ const originalLx = global.lx
       closeSteps: [runtimeCloseFailure],
     })
     await closeFailureRuntime.selectStableApi()
-    const closeFailureResult = await closeFailureRuntime.runtime
-      .replaceApisFromGitHub(makeInput())
-    assert.deepStrictEqual(closeFailureResult, committedAfterCloseFailure)
+    await assert.rejects(
+      () => closeFailureRuntime.runtime.replaceApisFromGitHub(makeInput()),
+      runtimeCloseFailure,
+    )
     assert.deepStrictEqual(closeFailureRuntime.actions, ['replace', 'close'])
     assert.strictEqual(closeFailureRuntime.logErrors.length, 1)
     closeFailureRuntime.actions.length = 0
@@ -634,9 +644,10 @@ const originalLx = global.lx
       loadSteps: [undefined, runtimeLoadFailure],
     })
     await loadFailureRuntime.selectStableApi()
-    const loadFailureResult = await loadFailureRuntime.runtime
-      .replaceApisFromGitHub(makeInput())
-    assert.deepStrictEqual(loadFailureResult, committedAfterLoadFailure)
+    await assert.rejects(
+      () => loadFailureRuntime.runtime.replaceApisFromGitHub(makeInput()),
+      runtimeLoadFailure,
+    )
     assert.deepStrictEqual(loadFailureRuntime.actions, [
       'replace',
       'close',

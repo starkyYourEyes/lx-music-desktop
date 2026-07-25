@@ -3,7 +3,7 @@ import { STORE_NAMES } from '@common/constants'
 import getStore from '@main/utils/store'
 import { assertUserApiSyncData, createUserApiSyncData } from '@common/utils/userApiSync'
 import { log } from '@common/utils'
-import { GITHUB_USER_API_LIMITS } from '@common/utils/githubUserApi'
+import { createGitHubUserApiError, GITHUB_USER_API_LIMITS } from '@common/utils/githubUserApi'
 import { createHash } from 'node:crypto'
 import zlib from 'node:zlib'
 
@@ -257,9 +257,15 @@ export const replaceApisFromGitHub = async(items: LX.UserApi.GitHubImportItem[])
   const nextUserApis: LX.UserApi.UserApiInfo[] = []
   const nextScripts = new Map<string, string>()
   for (const { id, script, remote } of snapshots) {
+    let scriptInfo: ReturnType<typeof parseScriptInfo>
+    try {
+      scriptInfo = parseScriptInfo(script)
+    } catch {
+      throw createGitHubUserApiError('GITHUB_INVALID_SCRIPT', remote.path)
+    }
     nextUserApis.push({
       id,
-      ...parseScriptInfo(script),
+      ...scriptInfo,
       allowShowUpdateAlert: true,
       remote,
     })

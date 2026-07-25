@@ -46,7 +46,7 @@ export const replaceApisFromGitHub = async(
       await closeWindow()
     } catch (err) {
       log.error('close active user API after GitHub replacement error:', err)
-      return apiList
+      throw err
     }
     setUserApiId(null)
     if (apiList.some(api => api.id === activeId)) {
@@ -63,6 +63,7 @@ export const replaceApisFromGitHub = async(
             cleanupErr,
           )
         }
+        throw err
       }
     }
     return apiList

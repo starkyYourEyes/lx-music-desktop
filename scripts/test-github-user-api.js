@@ -20,6 +20,11 @@ const createTreeData = (entries, truncated = false) => ({
   truncated,
   tree: entries,
 })
+const createTreeEntry = path => ({
+  type: 'tree',
+  path,
+  sha: '9'.repeat(40),
+})
 
 const createSnapshot = files => ({
   commitSha,
@@ -28,12 +33,12 @@ const createSnapshot = files => ({
 })
 
 const treeData = createTreeData([
-  { type: 'tree', path: 'V260506' },
-  { type: 'tree', path: 'v260724' },
-  { type: 'tree', path: 'notes' },
-  { type: 'tree', path: 'v260724/V260720-其他' },
-  { type: 'tree', path: 'v260724/V260720-推荐' },
-  { type: 'tree', path: 'v260724/online' },
+  createTreeEntry('V260506'),
+  createTreeEntry('v260724'),
+  createTreeEntry('notes'),
+  createTreeEntry('v260724/V260720-其他'),
+  createTreeEntry('v260724/V260720-推荐'),
+  createTreeEntry('v260724/online'),
   {
     type: 'blob',
     path: 'v260724/V260720-其他/中文 音源.js',
@@ -141,14 +146,14 @@ assert.throws(
 )
 assert.throws(
   () => parseGitHubUserApiSnapshot({ commit: { sha: commitSha } }, createTreeData([
-    { type: 'tree', path: 'v260724' },
+    createTreeEntry('v260724'),
     { type: 'blob', path: 'v260724/group/bad.js', sha: 'bad', size: 1 },
   ])),
   expectGitHubError('GITHUB_INVALID_RESPONSE'),
 )
 assert.throws(
   () => parseGitHubUserApiSnapshot({ commit: { sha: commitSha } }, createTreeData([
-    { type: 'tree', path: 'v260724' },
+    createTreeEntry('v260724'),
     { type: 'commit', path: 'v260724/submodule', sha: 'bad' },
     {
       type: 'blob',
@@ -161,13 +166,25 @@ assert.throws(
 )
 assert.throws(
   () => parseGitHubUserApiSnapshot({ commit: { sha: commitSha } }, createTreeData([
-    { type: 'tree', path: 'v260724' },
+    { type: 'tree', path: 'v260724', sha: 'bad' },
+    {
+      type: 'blob',
+      path: 'v260724/group/valid.js',
+      sha: '1'.repeat(40),
+      size: 1,
+    },
+  ])),
+  expectGitHubError('GITHUB_INVALID_RESPONSE'),
+)
+assert.throws(
+  () => parseGitHubUserApiSnapshot({ commit: { sha: commitSha } }, createTreeData([
+    createTreeEntry('v260724'),
   ])),
   expectGitHubError('GITHUB_SCRIPTS_NOT_FOUND'),
 )
 assert.throws(
   () => parseGitHubUserApiSnapshot({ commit: { sha: commitSha } }, createTreeData([
-    { type: 'tree', path: 'v260724' },
+    createTreeEntry('v260724'),
     ...Array.from({ length: 201 }, (_, index) => ({
       type: 'blob',
       path: `v260724/group/${index}.js`,
@@ -179,7 +196,7 @@ assert.throws(
 )
 assert.throws(
   () => parseGitHubUserApiSnapshot({ commit: { sha: commitSha } }, createTreeData([
-    { type: 'tree', path: 'v260724' },
+    createTreeEntry('v260724'),
     {
       type: 'blob',
       path: 'v260724/group/large.js',
@@ -191,7 +208,7 @@ assert.throws(
 )
 assert.throws(
   () => parseGitHubUserApiSnapshot({ commit: { sha: commitSha } }, createTreeData([
-    { type: 'tree', path: 'v260724' },
+    createTreeEntry('v260724'),
     ...Array.from({ length: 6 }, (_, index) => ({
       type: 'blob',
       path: `v260724/group/total-${index}.js`,
@@ -243,6 +260,100 @@ const main = async() => {
     'blobSha',
     'commitSha',
   ])
+
+  const queuedSnapshot = createSnapshot(Array.from({ length: 6 }, (_, index) => ({
+    path: `v260724/online/queued-${index}.js`,
+    blobSha: index.toString(16).padStart(40, '0'),
+    size: 1,
+    group: 'online',
+  })))
+  const started = []
+  const controls = []
+  let controlledActive = 0
+  const controlledDownload = downloadGitHubUserApiScripts(queuedSnapshot, file => {
+    const index = Number.parseInt(file.path.match(/(\d+)\.js$/)[1])
+    started.push(index)
+    controlledActive++
+    if (index >= GITHUB_USER_API_LIMITS.maxConcurrency) {
+      controlledActive--
+      return Promise.resolve(`unexpected-${index}`)
+    }
+    return new Promise((resolve, reject) => {
+      controls[index] = {
+        resolve(script) {
+          controlledActive--
+          resolve(script)
+        },
+        reject(err) {
+          controlledActive--
+          reject(err)
+        },
+      }
+    })
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepStrictEqual(started, [0, 1, 2, 3])
+  assert.strictEqual(controlledActive, 4)
+
+  const controlledError = new Error('controlled failure')
+  let rejectionSettled = false
+  const controlledRejection = assert.rejects(
+    controlledDownload,
+    err => err === controlledError,
+  ).then(() => {
+    rejectionSettled = true
+  })
+  controls[0].reject(controlledError)
+  await new Promise(resolve => setImmediate(resolve))
+  const rejectedBeforeActiveSettled = rejectionSettled
+  controls.slice(1).forEach(control => control.resolve('started before failure'))
+  await controlledRejection
+
+  assert.strictEqual(rejectedBeforeActiveSettled, false)
+  assert.deepStrictEqual(started, [0, 1, 2, 3])
+  assert.strictEqual(controlledActive, 0)
+
+  const exactCountSnapshot = parseGitHubUserApiSnapshot(
+    { commit: { sha: commitSha } },
+    createTreeData([
+      createTreeEntry('v260724'),
+      ...Array.from({ length: 200 }, (_, index) => ({
+        type: 'blob',
+        path: `v260724/online/exact-count-${index}.js`,
+        sha: index.toString(16).padStart(40, '0'),
+        size: 1,
+      })),
+    ]),
+  )
+  const exactCountDownloads = await downloadGitHubUserApiScripts(
+    exactCountSnapshot,
+    async() => 'x',
+  )
+  assert.strictEqual(exactCountDownloads.length, 200)
+
+  const exactSizes = [9_000_000, 9_000_000, 9_000_000, 9_000_000, 9_000_000, 5_000_000]
+  const exactTotalSnapshot = parseGitHubUserApiSnapshot(
+    { commit: { sha: commitSha } },
+    createTreeData([
+      createTreeEntry('v260724'),
+      ...exactSizes.map((size, index) => ({
+        type: 'blob',
+        path: `v260724/online/exact-size-${index}.js`,
+        sha: String(index + 1).repeat(40),
+        size,
+      })),
+    ]),
+  )
+  const exactScript = '\u754c'.repeat(3_000_000)
+  const exactRemainder = 'x'.repeat(5_000_000)
+  const exactTotalDownloads = await downloadGitHubUserApiScripts(exactTotalSnapshot, async file => {
+    return file.size == GITHUB_USER_API_LIMITS.maxScriptBytes ? exactScript : exactRemainder
+  })
+  assert.strictEqual(Buffer.byteLength(exactTotalDownloads[0].script, 'utf8'), 9_000_000)
+  assert.strictEqual(exactTotalDownloads.reduce(
+    (total, item) => total + Buffer.byteLength(item.script, 'utf8'),
+    0,
+  ), 50_000_000)
 
   const downloadError = new Error('download failed')
   await assert.rejects(

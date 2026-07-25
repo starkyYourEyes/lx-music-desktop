@@ -19,7 +19,7 @@ const assertTreeEntry = item => {
   if (!item || !ENTRY_TYPES.has(item.type) || typeof item.path != 'string' || !item.path) {
     throw createGitHubUserApiError('GITHUB_INVALID_RESPONSE', 'tree entry')
   }
-  if (item.type == 'commit' && !SHA_RXP.test(item.sha ?? '')) {
+  if ((item.type == 'commit' || item.type == 'tree') && !SHA_RXP.test(item.sha ?? '')) {
     throw createGitHubUserApiError('GITHUB_INVALID_RESPONSE', item.path)
   }
   if (item.type == 'blob' &&
@@ -122,36 +122,41 @@ const downloadGitHubUserApiScripts = async(snapshot, fetchScript) => {
   const results = new Array(snapshot.files.length)
   let nextIndex = 0
   let totalBytes = 0
+  let firstError = null
 
   const worker = async() => {
-    while (nextIndex < snapshot.files.length) {
+    while (firstError == null && nextIndex < snapshot.files.length) {
       const index = nextIndex++
       const file = snapshot.files[index]
-      const script = await fetchScript(file)
-      if (typeof script != 'string') {
-        throw createGitHubUserApiError('GITHUB_INVALID_SCRIPT', file.path)
-      }
+      try {
+        const script = await fetchScript(file)
+        if (typeof script != 'string') {
+          throw createGitHubUserApiError('GITHUB_INVALID_SCRIPT', file.path)
+        }
 
-      const bytes = Buffer.byteLength(script, 'utf8')
-      if (bytes > GITHUB_USER_API_LIMITS.maxScriptBytes) {
-        throw createGitHubUserApiError('GITHUB_BATCH_LIMIT', file.path)
-      }
-      totalBytes += bytes
-      if (totalBytes > GITHUB_USER_API_LIMITS.maxTotalBytes) {
-        throw createGitHubUserApiError('GITHUB_BATCH_LIMIT', 'total bytes')
-      }
+        const bytes = Buffer.byteLength(script, 'utf8')
+        if (bytes > GITHUB_USER_API_LIMITS.maxScriptBytes) {
+          throw createGitHubUserApiError('GITHUB_BATCH_LIMIT', file.path)
+        }
+        totalBytes += bytes
+        if (totalBytes > GITHUB_USER_API_LIMITS.maxTotalBytes) {
+          throw createGitHubUserApiError('GITHUB_BATCH_LIMIT', 'total bytes')
+        }
 
-      results[index] = {
-        script,
-        remote: {
-          provider: 'github',
-          repository: REPOSITORY,
-          version: snapshot.version,
-          group: file.group,
-          path: file.path,
-          blobSha: file.blobSha,
-          commitSha: snapshot.commitSha,
-        },
+        results[index] = {
+          script,
+          remote: {
+            provider: 'github',
+            repository: REPOSITORY,
+            version: snapshot.version,
+            group: file.group,
+            path: file.path,
+            blobSha: file.blobSha,
+            commitSha: snapshot.commitSha,
+          },
+        }
+      } catch (err) {
+        if (firstError == null) firstError = err
       }
     }
   }
@@ -160,6 +165,7 @@ const downloadGitHubUserApiScripts = async(snapshot, fetchScript) => {
     { length: Math.min(GITHUB_USER_API_LIMITS.maxConcurrency, snapshot.files.length) },
     worker,
   ))
+  if (firstError != null) throw firstError
   return results
 }
 

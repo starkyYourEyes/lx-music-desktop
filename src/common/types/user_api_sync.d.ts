@@ -9,6 +9,7 @@ declare namespace LX {
         homepage: string
         version: string
         allowShowUpdateAlert?: boolean
+        remote?: LX.UserApi.GitHubRemoteInfo
         script: string
         scriptEncoding: 'plain'
       }

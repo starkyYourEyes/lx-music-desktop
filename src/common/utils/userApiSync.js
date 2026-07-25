@@ -13,6 +13,81 @@ const decodeUserApiScript = script => {
 
 const normalizeApiText = value => String(value ?? '')
 
+const GITHUB_REPOSITORY = 'Macrohard0001/lx-ikun-music-sources'
+const GITHUB_VERSION_RXP = /^[vV]\d{6}$/
+const GITHUB_SHA_RXP = /^[0-9a-f]{40}$/i
+const GITHUB_REMOTE_PROPERTIES = [
+  'provider',
+  'repository',
+  'version',
+  'group',
+  'path',
+  'blobSha',
+  'commitSha',
+]
+
+const normalizeRemote = remote => remote == null
+  ? undefined
+  : {
+      provider: remote.provider,
+      repository: remote.repository,
+      version: normalizeApiText(remote.version),
+      group: normalizeApiText(remote.group),
+      path: normalizeApiText(remote.path),
+      blobSha: normalizeApiText(remote.blobSha),
+      commitSha: normalizeApiText(remote.commitSha),
+    }
+
+const isPlainOwnDataRecord = value => {
+  if (value == null || typeof value != 'object') return false
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype != Object.prototype && prototype != null) return false
+  return Object.values(Object.getOwnPropertyDescriptors(value))
+    .every(descriptor => 'value' in descriptor)
+}
+
+const hasOwnProperties = (value, properties) => {
+  return properties.every(property => Object.prototype.hasOwnProperty.call(value, property))
+}
+
+const isWellFormedUnicode = value => {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      if (index + 1 >= value.length) return false
+      const next = value.charCodeAt(index + 1)
+      if (next < 0xdc00 || next > 0xdfff) return false
+      index++
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false
+    }
+  }
+  return true
+}
+
+const assertRemote = remote => {
+  if (!isPlainOwnDataRecord(remote) || !hasOwnProperties(remote, GITHUB_REMOTE_PROPERTIES) ||
+    remote.provider != 'github' || remote.repository != GITHUB_REPOSITORY ||
+    typeof remote.version != 'string' || !GITHUB_VERSION_RXP.test(remote.version) ||
+    typeof remote.group != 'string' || !remote.group || !isWellFormedUnicode(remote.group) ||
+    typeof remote.path != 'string' || !isWellFormedUnicode(remote.path) ||
+    typeof remote.blobSha != 'string' || !GITHUB_SHA_RXP.test(remote.blobSha) ||
+    typeof remote.commitSha != 'string' || !GITHUB_SHA_RXP.test(remote.commitSha) ||
+    !remote.path.startsWith(remote.version + '/') || !/\.js$/i.test(remote.path) ||
+    remote.path.includes('\\')) {
+    throw new Error('Invalid user API remote metadata')
+  }
+
+  const relativeParts = remote.path.substring(remote.version.length + 1).split('/')
+  const fileName = relativeParts.at(-1)
+  const expectedGroup = relativeParts.length > 1 ? relativeParts[0] : remote.version
+  if (!fileName || fileName.length <= 3 ||
+    relativeParts.some(part => !part || part == '.' || part == '..') ||
+    remote.group != expectedGroup) {
+    throw new Error('Invalid user API remote group or path')
+  }
+}
+
 const createUserApiSyncData = async(apis, getScript, options = {}) => {
   const syncApis = []
   for (const api of apis) {
@@ -25,6 +100,7 @@ const createUserApiSyncData = async(apis, getScript, options = {}) => {
         homepage: normalizeApiText(api.homepage),
         version: normalizeApiText(api.version),
         allowShowUpdateAlert: api.allowShowUpdateAlert,
+        ...(api.remote == null ? {} : { remote: normalizeRemote(api.remote) }),
         scriptEncoding: 'plain',
         script: decodeUserApiScript(await getScript(api.id)),
       })
@@ -50,6 +126,7 @@ const createStableUserApiSyncData = data => ({
     homepage: normalizeApiText(api.homepage),
     version: normalizeApiText(api.version),
     allowShowUpdateAlert: api.allowShowUpdateAlert,
+    ...(api.remote == null ? {} : { remote: normalizeRemote(api.remote) }),
     scriptEncoding: api.scriptEncoding,
     script: api.script,
   })),
@@ -87,6 +164,7 @@ const assertUserApiSyncData = data => {
     if (api.allowShowUpdateAlert != null && typeof api.allowShowUpdateAlert != 'boolean') {
       throw new Error('Invalid user API update alert setting')
     }
+    if (api.remote != null) assertRemote(api.remote)
   }
   return data
 }

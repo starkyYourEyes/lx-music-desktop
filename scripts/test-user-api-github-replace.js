@@ -628,10 +628,30 @@ const originalLx = global.lx
     await loadFailureRuntime.runtime.setApi('new-id')
     assert.deepStrictEqual(loadFailureRuntime.actions, ['load:new-id'])
 
+    const inactiveMissingRuntime = createRuntimeHarness()
+    await inactiveMissingRuntime.runtime.setApi('missing-id')
+    assert.deepStrictEqual(inactiveMissingRuntime.actions, [])
+
     const invalidSetRuntime = createRuntimeHarness()
     await invalidSetRuntime.selectStableApi()
     await invalidSetRuntime.runtime.setApi('missing-id')
-    assert.deepStrictEqual(invalidSetRuntime.actions, [])
+    assert.deepStrictEqual(invalidSetRuntime.actions, ['close'])
+    invalidSetRuntime.actions.length = 0
+    await invalidSetRuntime.runtime.setApi('stable-id')
+    assert.deepStrictEqual(invalidSetRuntime.actions, ['load:stable-id'])
+
+    const validSetRuntime = createRuntimeHarness({
+      initialApis: [
+        { id: 'stable-id' },
+        { id: 'new-id' },
+      ],
+    })
+    await validSetRuntime.selectStableApi()
+    await validSetRuntime.runtime.setApi('new-id')
+    assert.deepStrictEqual(validSetRuntime.actions, [
+      'close',
+      'load:new-id',
+    ])
 
     const directSetLoadFailure = new Error('simulated direct set load failure')
     const setLoadFailureRuntime = createRuntimeHarness({

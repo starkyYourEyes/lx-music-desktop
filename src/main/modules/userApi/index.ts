@@ -83,12 +83,15 @@ export const removeApi = async(ids: string[]): Promise<LX.UserApi.UserApiInfo[]>
 export const setApi = async(id: string): Promise<void> => {
   return runLifecycleTask(async() => {
     const apiList = getUserApis()
-    if (!apiList.some(api => api.id === id)) return
+    const targetExists = apiList.some(api => api.id === id)
+    if (!userApiId && !targetExists) return
 
     if (userApiId) {
       await closeWindow()
       setUserApiId(null)
     }
+    if (!targetExists) return
+
     await loadApi(id)
     setUserApiId(id)
   })

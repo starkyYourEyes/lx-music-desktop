@@ -202,7 +202,7 @@ export default {
         })
       } catch (err) {
         if (err instanceof Error && 'apiList' in err && Array.isArray(err.apiList)) {
-          userApi.list = err.apiList as LX.UserApi.UserApiInfo[]
+          userApi.list = err.apiList
         }
         if (!this.isGitHubViewCurrent(viewGeneration)) return
         const message = this.formatGitHubError(err)

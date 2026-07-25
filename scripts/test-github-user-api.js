@@ -261,57 +261,78 @@ const main = async() => {
     'commitSha',
   ])
 
-  const queuedSnapshot = createSnapshot(Array.from({ length: 6 }, (_, index) => ({
-    path: `v260724/online/queued-${index}.js`,
-    blobSha: index.toString(16).padStart(40, '0'),
-    size: 1,
-    group: 'online',
-  })))
-  const started = []
-  const controls = []
-  let controlledActive = 0
-  const controlledDownload = downloadGitHubUserApiScripts(queuedSnapshot, file => {
-    const index = Number.parseInt(file.path.match(/(\d+)\.js$/)[1])
-    started.push(index)
-    controlledActive++
-    if (index >= GITHUB_USER_API_LIMITS.maxConcurrency) {
-      controlledActive--
-      return Promise.resolve(`unexpected-${index}`)
-    }
-    return new Promise((resolve, reject) => {
-      controls[index] = {
-        resolve(script) {
-          controlledActive--
-          resolve(script)
-        },
-        reject(err) {
-          controlledActive--
-          reject(err)
-        },
+  const observeControlledFailure = async rejectionReason => {
+    const queuedSnapshot = createSnapshot(Array.from({ length: 6 }, (_, index) => ({
+      path: `v260724/online/queued-${index}.js`,
+      blobSha: index.toString(16).padStart(40, '0'),
+      size: 1,
+      group: 'online',
+    })))
+    const started = []
+    const controls = []
+    let active = 0
+    const controlledDownload = downloadGitHubUserApiScripts(queuedSnapshot, file => {
+      const index = Number.parseInt(file.path.match(/(\d+)\.js$/)[1])
+      started.push(index)
+      active++
+      if (index >= GITHUB_USER_API_LIMITS.maxConcurrency) {
+        active--
+        return Promise.resolve(`unexpected-${index}`)
       }
+      return new Promise((resolve, reject) => {
+        controls[index] = {
+          resolve(script) {
+            active--
+            resolve(script)
+          },
+          reject(reason) {
+            active--
+            reject(reason)
+          },
+        }
+      })
     })
-  })
-  await new Promise(resolve => setImmediate(resolve))
-  assert.deepStrictEqual(started, [0, 1, 2, 3])
-  assert.strictEqual(controlledActive, 4)
+    await new Promise(resolve => setImmediate(resolve))
+    const initialStarted = started.slice()
+    const initialActive = active
+
+    let downloadSettled = false
+    const outcomePromise = controlledDownload.then(
+      value => ({ status: 'fulfilled', value }),
+      reason => ({ status: 'rejected', reason }),
+    ).finally(() => {
+      downloadSettled = true
+    })
+    controls[0].reject(rejectionReason)
+    await new Promise(resolve => setImmediate(resolve))
+    const settledBeforeActive = downloadSettled
+    controls.slice(1).forEach(control => control.resolve('started before failure'))
+    const outcome = await outcomePromise
+
+    return {
+      outcome,
+      initialStarted,
+      initialActive,
+      settledBeforeActive,
+      finalStarted: started,
+      finalActive: active,
+    }
+  }
 
   const controlledError = new Error('controlled failure')
-  let rejectionSettled = false
-  const controlledRejection = assert.rejects(
-    controlledDownload,
-    err => err === controlledError,
-  ).then(() => {
-    rejectionSettled = true
-  })
-  controls[0].reject(controlledError)
-  await new Promise(resolve => setImmediate(resolve))
-  const rejectedBeforeActiveSettled = rejectionSettled
-  controls.slice(1).forEach(control => control.resolve('started before failure'))
-  await controlledRejection
-
-  assert.strictEqual(rejectedBeforeActiveSettled, false)
-  assert.deepStrictEqual(started, [0, 1, 2, 3])
-  assert.strictEqual(controlledActive, 0)
+  const controlledCases = []
+  for (const reason of [controlledError, undefined, null]) {
+    controlledCases.push({ reason, observation: await observeControlledFailure(reason) })
+  }
+  for (const { reason, observation } of controlledCases) {
+    assert.deepStrictEqual(observation.initialStarted, [0, 1, 2, 3])
+    assert.strictEqual(observation.initialActive, 4)
+    assert.strictEqual(observation.settledBeforeActive, false)
+    assert.strictEqual(observation.outcome.status, 'rejected', `rejection reason: ${String(reason)}`)
+    assert.strictEqual(observation.outcome.reason, reason)
+    assert.deepStrictEqual(observation.finalStarted, [0, 1, 2, 3])
+    assert.strictEqual(observation.finalActive, 0)
+  }
 
   const exactCountSnapshot = parseGitHubUserApiSnapshot(
     { commit: { sha: commitSha } },

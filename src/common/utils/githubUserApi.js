@@ -122,10 +122,11 @@ const downloadGitHubUserApiScripts = async(snapshot, fetchScript) => {
   const results = new Array(snapshot.files.length)
   let nextIndex = 0
   let totalBytes = 0
-  let firstError = null
+  let hasError = false
+  let firstError
 
   const worker = async() => {
-    while (firstError == null && nextIndex < snapshot.files.length) {
+    while (!hasError && nextIndex < snapshot.files.length) {
       const index = nextIndex++
       const file = snapshot.files[index]
       try {
@@ -156,7 +157,10 @@ const downloadGitHubUserApiScripts = async(snapshot, fetchScript) => {
           },
         }
       } catch (err) {
-        if (firstError == null) firstError = err
+        if (!hasError) {
+          hasError = true
+          firstError = err
+        }
       }
     }
   }
@@ -165,7 +169,7 @@ const downloadGitHubUserApiScripts = async(snapshot, fetchScript) => {
     { length: Math.min(GITHUB_USER_API_LIMITS.maxConcurrency, snapshot.files.length) },
     worker,
   ))
-  if (firstError != null) throw firstError
+  if (hasError) throw firstError
   return results
 }
 

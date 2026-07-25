@@ -1,4 +1,7 @@
 const assert = require('node:assert')
+const path = require('node:path')
+
+const loadTsModule = require('./test-utils/load-ts-module')
 
 const {
   GITHUB_USER_API_LIMITS,
@@ -10,6 +13,8 @@ const {
 
 const repository = 'Macrohard0001/lx-ikun-music-sources'
 const commitSha = 'a'.repeat(40)
+const branchUrl = `https://api.github.com/repos/${repository}/branches/main`
+const treeUrl = `https://api.github.com/repos/${repository}/git/trees/${commitSha}?recursive=1`
 
 const expectGitHubError = code => err => {
   assert.strictEqual(err?.code, code)
@@ -31,6 +36,34 @@ const createSnapshot = files => ({
   version: 'v260724',
   files,
 })
+
+const createResponseRequest = responses => {
+  const calls = []
+  const request = (url, options) => {
+    calls.push({ url, options })
+    const response = responses.get(url)
+    return {
+      promise: response instanceof Error
+        ? Promise.reject(response)
+        : Promise.resolve(response),
+    }
+  }
+  request.calls = calls
+  return request
+}
+
+const loadGitHubUserApiClient = request => loadTsModule(
+  path.join(__dirname, '../src/renderer/utils/githubUserApi.js'),
+  {
+    './request': { httpFetch: request },
+    '@common/utils/githubUserApi': {
+      createGitHubUserApiError,
+      parseGitHubUserApiSnapshot,
+      buildGitHubUserApiRawUrl,
+      downloadGitHubUserApiScripts,
+    },
+  },
+)
 
 const treeData = createTreeData([
   createTreeEntry('V260506'),
@@ -220,6 +253,135 @@ assert.throws(
 )
 
 const main = async() => {
+  const clientTreeData = createTreeData([
+    createTreeEntry('v260724'),
+    createTreeEntry('v260724/V260720-\u5176\u4ed6'),
+    {
+      type: 'blob',
+      path: 'v260724/V260720-\u5176\u4ed6/\u4e2d\u6587 \u97f3\u6e90.js',
+      sha: 'b'.repeat(40),
+      size: 120,
+    },
+  ])
+  const rawUrl = buildGitHubUserApiRawUrl(
+    commitSha,
+    'v260724/V260720-\u5176\u4ed6/\u4e2d\u6587 \u97f3\u6e90.js',
+  )
+  const request = createResponseRequest(new Map([
+    [branchUrl, { statusCode: 200, body: { commit: { sha: commitSha } } }],
+    [treeUrl, { statusCode: 200, body: clientTreeData }],
+    [rawUrl, { statusCode: 200, body: '/* @name GitHub source */' }],
+  ]))
+  const {
+    createGitHubUserApiClient,
+    getGitHubUserApiSnapshot,
+    downloadGitHubUserApiSnapshot,
+  } = loadGitHubUserApiClient(request)
+
+  const discoveredSnapshot = await getGitHubUserApiSnapshot()
+  assert.deepStrictEqual(discoveredSnapshot, {
+    commitSha,
+    version: 'v260724',
+    files: [{
+      path: 'v260724/V260720-\u5176\u4ed6/\u4e2d\u6587 \u97f3\u6e90.js',
+      blobSha: 'b'.repeat(40),
+      size: 120,
+      group: 'V260720-\u5176\u4ed6',
+    }],
+  })
+  assert.deepStrictEqual(request.calls.slice(0, 2), [
+    {
+      url: branchUrl,
+      options: {
+        headers: { Accept: 'application/vnd.github+json' },
+        follow_max: 3,
+        timeout: 15_000,
+      },
+    },
+    {
+      url: treeUrl,
+      options: {
+        headers: { Accept: 'application/vnd.github+json' },
+        follow_max: 3,
+        timeout: 15_000,
+      },
+    },
+  ])
+
+  const downloaded = await downloadGitHubUserApiSnapshot(discoveredSnapshot)
+  assert.deepStrictEqual(downloaded, [{
+    script: '/* @name GitHub source */',
+    remote: {
+      provider: 'github',
+      repository,
+      version: 'v260724',
+      group: 'V260720-\u5176\u4ed6',
+      path: 'v260724/V260720-\u5176\u4ed6/\u4e2d\u6587 \u97f3\u6e90.js',
+      blobSha: 'b'.repeat(40),
+      commitSha,
+    },
+  }])
+  assert.deepStrictEqual(request.calls[2], {
+    url: rawUrl,
+    options: { format: 'text', follow_max: 3, timeout: 30_000 },
+  })
+  assert.match(rawUrl, new RegExp(
+    `${commitSha}/v260724/V260720-%E5%85%B6%E4%BB%96/%E4%B8%AD%E6%96%87%20%E9%9F%B3%E6%BA%90\\.js$`,
+  ))
+
+  const expectClientError = async(responses, operation, code, detail) => {
+    const errorRequest = createResponseRequest(new Map(responses))
+    const client = createGitHubUserApiClient(errorRequest)
+    await assert.rejects(
+      operation(client),
+      err => {
+        assert.strictEqual(err?.code, code)
+        assert.match(err?.detail ?? '', detail)
+        return true
+      },
+    )
+    return errorRequest
+  }
+
+  await expectClientError(
+    [[branchUrl, { statusCode: 500, body: {} }]],
+    client => client.getSnapshot(),
+    'GITHUB_HTTP_ERROR',
+    /500.*branches\/main/,
+  )
+  await expectClientError(
+    [[branchUrl, {
+      statusCode: 403,
+      headers: {
+        'x-ratelimit-remaining': '0',
+        'x-ratelimit-reset': '1784950000',
+      },
+      body: {},
+    }]],
+    client => client.getSnapshot(),
+    'GITHUB_RATE_LIMIT',
+    /^1784950000$/,
+  )
+  const malformedRequest = await expectClientError(
+    [[branchUrl, { statusCode: 200, body: { commit: { sha: 'bad' } } }]],
+    client => client.getSnapshot(),
+    'GITHUB_INVALID_RESPONSE',
+    /commit SHA/,
+  )
+  assert.strictEqual(malformedRequest.calls.length, 1)
+  await expectClientError(
+    [[rawUrl, { statusCode: 404, body: 'missing' }]],
+    client => client.downloadSnapshot(discoveredSnapshot),
+    'GITHUB_HTTP_ERROR',
+    /404.*raw\.githubusercontent\.com/,
+  )
+  await expectClientError(
+    [[rawUrl, { statusCode: 200, body: Buffer.from('not text') }]],
+    client => client.downloadSnapshot(discoveredSnapshot),
+    'GITHUB_INVALID_SCRIPT',
+    /v260724\/V260720-\u5176\u4ed6\/\u4e2d\u6587 \u97f3\u6e90\.js/,
+  )
+
   const concurrencySnapshot = createSnapshot(Array.from({ length: 9 }, (_, index) => ({
     path: `v260724/online/${index}.js`,
     blobSha: index.toString(16).padStart(40, '0'),

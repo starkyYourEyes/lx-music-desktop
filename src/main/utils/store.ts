@@ -62,8 +62,16 @@ class Store {
   }
 
   set(key: string, value: any) {
+    const existed = Object.prototype.hasOwnProperty.call(this.store, key)
+    const previous = this.store[key]
     this.store[key] = value
-    this.writeFile()
+    try {
+      this.writeFile()
+    } catch (err) {
+      if (existed) this.store[key] = previous
+      else Reflect.deleteProperty(this.store, key)
+      throw err
+    }
   }
 
   override(value: Record<string, any>) {

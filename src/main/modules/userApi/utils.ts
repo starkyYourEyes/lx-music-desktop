@@ -3,6 +3,8 @@ import { STORE_NAMES } from '@common/constants'
 import getStore from '@main/utils/store'
 import { assertUserApiSyncData, createUserApiSyncData } from '@common/utils/userApiSync'
 import { log } from '@common/utils'
+import { GITHUB_USER_API_LIMITS } from '@common/utils/githubUserApi'
+import { createHash } from 'node:crypto'
 import zlib from 'node:zlib'
 
 let userApis: LX.UserApi.UserApiInfo[] | null
@@ -112,6 +114,96 @@ const inflateScript = async(script: string) => new Promise<string>((resolve, rej
     })
   } else resolve(script)
 })
+
+const GITHUB_REPOSITORY = 'Macrohard0001/lx-ikun-music-sources'
+const GITHUB_VERSION_RXP = /^[vV]\d{6}$/
+const GITHUB_SHA_RXP = /^[0-9a-f]{40}$/i
+
+const validateGitHubImportItems = (items: LX.UserApi.GitHubImportItem[]) => {
+  if (!Array.isArray(items) || !items.length || items.length > GITHUB_USER_API_LIMITS.maxFiles) {
+    throw new Error('Invalid GitHub user API item count')
+  }
+
+  const paths = new Set<string>()
+  let batchVersion: string | undefined
+  let batchCommit: string | undefined
+  let totalBytes = 0
+
+  for (const item of items) {
+    if (item == null || typeof item != 'object') {
+      throw new Error('Invalid GitHub user API metadata')
+    }
+    const { remote, script } = item
+    if (typeof script != 'string' || remote == null || typeof remote != 'object' ||
+      remote.provider != 'github' || remote.repository != GITHUB_REPOSITORY ||
+      typeof remote.version != 'string' || !GITHUB_VERSION_RXP.test(remote.version) ||
+      typeof remote.group != 'string' || !remote.group ||
+      typeof remote.path != 'string' ||
+      typeof remote.blobSha != 'string' || !GITHUB_SHA_RXP.test(remote.blobSha) ||
+      typeof remote.commitSha != 'string' || !GITHUB_SHA_RXP.test(remote.commitSha)) {
+      throw new Error('Invalid GitHub user API metadata')
+    }
+
+    batchVersion ??= remote.version
+    batchCommit ??= remote.commitSha
+    if (remote.version != batchVersion || remote.commitSha != batchCommit ||
+      paths.has(remote.path) || !remote.path.startsWith(remote.version + '/') ||
+      !/\.js$/i.test(remote.path) || remote.path.includes('\\')) {
+      throw new Error('Invalid or duplicate GitHub user API path')
+    }
+
+    const relativeParts = remote.path.substring(remote.version.length + 1).split('/')
+    const fileName = relativeParts.at(-1)
+    const expectedGroup = relativeParts.length > 1 ? relativeParts[0] : remote.version
+    if (!fileName || fileName.length <= 3 ||
+      relativeParts.some(part => !part || part == '.' || part == '..') ||
+      remote.group != expectedGroup) {
+      throw new Error('Invalid GitHub user API group')
+    }
+
+    paths.add(remote.path)
+    const bytes = Buffer.byteLength(script, 'utf8')
+    if (bytes > GITHUB_USER_API_LIMITS.maxScriptBytes) {
+      throw new Error(`GitHub user API script is too large: ${remote.path}`)
+    }
+    totalBytes += bytes
+  }
+
+  if (totalBytes > GITHUB_USER_API_LIMITS.maxTotalBytes) {
+    throw new Error('GitHub user API batch is too large')
+  }
+}
+
+const createGitHubUserApiId = (remotePath: string) => {
+  return 'user_api_github_' + createHash('sha256')
+    .update(remotePath)
+    .digest('hex')
+    .substring(0, 16)
+}
+
+export const replaceApisFromGitHub = async(items: LX.UserApi.GitHubImportItem[]) => {
+  getUserApis()
+  validateGitHubImportItems(items)
+
+  const nextUserApis: LX.UserApi.UserApiInfo[] = []
+  const nextScripts = new Map<string, string>()
+  for (const item of items) {
+    const id = createGitHubUserApiId(item.remote.path)
+    nextUserApis.push({
+      id,
+      ...parseScriptInfo(item.script),
+      allowShowUpdateAlert: true,
+      remote: { ...item.remote },
+    })
+    nextScripts.set(id, await deflateScript(item.script))
+  }
+
+  getStore(STORE_NAMES.USER_API).set('userApis', serializeUserApis(nextUserApis, nextScripts))
+  userApis = nextUserApis
+  scripts = nextScripts
+  global.lx.event_app.user_api_changed()
+  return getUserApis()
+}
 export const importApi = async(scriptRaw: string): Promise<LX.UserApi.UserApiInfo> => {
   let scriptInfo = parseScriptInfo(scriptRaw)
   const apiInfo = {

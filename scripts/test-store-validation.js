@@ -29,6 +29,23 @@ try {
     recovered.set('valid', true)
     assert.deepStrictEqual(JSON.parse(fs.readFileSync(filePath, 'utf8')), { valid: true })
   }
+
+  const rollbackFilePath = path.join(tempDir, 'rollback.json')
+  const rollbackStore = new Store(rollbackFilePath)
+  rollbackStore.set('value', 'before')
+  const originalRenameSync = fs.renameSync
+  try {
+    fs.renameSync = () => {
+      throw new Error('simulated write failure')
+    }
+    assert.throws(
+      () => rollbackStore.set('value', 'after'),
+      /simulated write failure/,
+    )
+  } finally {
+    fs.renameSync = originalRenameSync
+  }
+  assert.strictEqual(rollbackStore.get('value'), 'before')
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true })
 }

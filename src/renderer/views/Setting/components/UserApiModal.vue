@@ -1,5 +1,5 @@
 <template lang="pug">
-material-modal(:show="modelValue" :bg-close="!githubAction" teleport="#view" @close="handleClose")
+material-modal(:show="modelValue" :bg-close="!githubAction" :close-btn="!githubAction" teleport="#view" @close="handleClose")
   main.scroll(:class="$style.main")
     h2 {{ $t('user_api__title') }}
     div.scroll(v-if="apiList.length" :class="$style.content")
@@ -101,6 +101,9 @@ export default {
       this.collapsedGroups = new Set()
       this.githubStatus = ''
     },
+  },
+  beforeUnmount() {
+    this.githubViewGeneration++
   },
   methods: {
     async importUserApi(script) {

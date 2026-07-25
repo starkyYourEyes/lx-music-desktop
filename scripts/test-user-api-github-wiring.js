@@ -43,11 +43,13 @@ const ipcNames = readSource('src/common/ipcNames.ts')
 const mainHandler = readSource('src/main/modules/winMain/rendererEvent/userApi.ts')
 const rendererIpc = readSource('src/renderer/utils/ipc.ts')
 const userApiModal = readSource('src/renderer/views/Setting/components/UserApiModal.vue')
+const baseCheckbox = readSource('src/renderer/components/base/Checkbox.vue')
 const locales = ['zh-cn', 'zh-tw', 'en-us'].map(locale => ({
   locale,
   messages: JSON.parse(readSource(`src/lang/${locale}.json`)),
 }))
 const template = extractBetween(userApiModal, '<template', '</template>', 'template')
+const checkboxTemplate = extractBetween(baseCheckbox, '<template', '</template>', 'checkbox template')
 const style = extractBetween(userApiModal, '<style', '</style>', 'style')
 const githubTestMethod = extractBracedBlock(
   userApiModal,
@@ -64,6 +66,8 @@ const apiGroupsMethod = extractBracedBlock(userApiModal, 'apiGroups()', 'API gro
 const closeMethod = extractBracedBlock(userApiModal, 'handleClose()', 'close handler')
 const changeAlertMethod = extractBracedBlock(userApiModal, 'handleChangeAllowUpdateAlert(api, enable)', 'update alert handler')
 const modelValueWatcher = extractBracedBlock(userApiModal, 'modelValue(show)', 'modelValue watcher')
+const beforeUnmountHook = extractBracedBlock(userApiModal, 'beforeUnmount()', 'beforeUnmount hook')
+const checkboxToggleMethod = extractBracedBlock(baseCheckbox, 'handleToggle(event)', 'checkbox toggle handler')
 const groupTemplate = extractBetween(
   template,
   'section(v-for="group in apiGroups"',
@@ -125,6 +129,20 @@ assertInOrder(modelValueWatcher, [
   'this.githubViewGeneration++',
   'if (!show) return',
 ], 'modal view generation')
+assert.match(
+  beforeUnmountHook,
+  /^beforeUnmount\(\)\s*{\s*this\.githubViewGeneration\+\+\s*}$/,
+  'beforeUnmount must only invalidate the current GitHub view generation',
+)
+assertInOrder(checkboxToggleMethod, [
+  'if (this.disabled) return',
+  'event.lx_handled = true',
+], 'disabled checkbox keyboard guard')
+assert.match(
+  checkboxTemplate,
+  /:tabindex="disabled \? -1 : 0"/,
+  'disabled checkbox custom control must leave the keyboard tab order',
+)
 assertInOrder(githubTestMethod, [
   'const viewGeneration = this.githubViewGeneration',
   'getGitHubUserApiSnapshot()',
@@ -160,6 +178,7 @@ assertInOrder(githubImportMethod, [
 assert.doesNotMatch(githubImportMethod, /\bpreviousId\b|\bpreviousWasCustom\b/)
 assert.match(githubImportMethod, /confirmButtonText:\s*this\.\$t\('confirm_button_text'\)/)
 assert.doesNotMatch(githubImportMethod, /confirmButtonText:\s*this\.\$t\('ok'\)/)
+assert.match(template, /material-modal\([^\r\n]*:close-btn="!githubAction"/)
 
 assert.match(template, /material-modal\([^\r\n]*:bg-close="!githubAction"/)
 assertInOrder(closeMethod, [

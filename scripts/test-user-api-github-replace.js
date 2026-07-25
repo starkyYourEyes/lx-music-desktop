@@ -428,6 +428,26 @@ const originalLx = global.lx
       inputItems[0].remote = remote
     }, { expectedDeflateCalls: 0 })
     assert.strictEqual(getterReads, 0)
+    let symbolGetterReads = 0
+    await assertAtomicFailure('symbol accessor item', inputItems => {
+      Object.defineProperty(inputItems[0], Symbol('item'), {
+        enumerable: true,
+        get() {
+          symbolGetterReads++
+          return 'hidden'
+        },
+      })
+    }, { expectedDeflateCalls: 0 })
+    await assertAtomicFailure('symbol accessor remote', inputItems => {
+      Object.defineProperty(inputItems[0].remote, Symbol('remote'), {
+        enumerable: true,
+        get() {
+          symbolGetterReads++
+          return 'hidden'
+        },
+      })
+    }, { expectedDeflateCalls: 0 })
+    assert.strictEqual(symbolGetterReads, 0)
 
     let mutableInput
     const snapshotHarness = createHarness({

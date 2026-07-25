@@ -20,6 +20,10 @@ export const createUserApiSyncMeta: (data: LX.Sync.UserApi.Data) => LX.Sync.User
 
 export const createUserApiSyncMD5: (data: LX.Sync.UserApi.Data) => string
 
+/**
+ * Validates and freezes the accepted data, API array, API records, and remote metadata.
+ * Returns the same frozen data object.
+ */
 export const assertUserApiSyncData: (data: unknown) => LX.Sync.UserApi.Data
 
 export const mergeUserApiSyncData: (

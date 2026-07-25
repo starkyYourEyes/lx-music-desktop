@@ -37,7 +37,7 @@ const getPlainOwnDataDescriptors = (value, errorMessage) => {
     throw new Error(errorMessage)
   }
   const descriptors = Object.getOwnPropertyDescriptors(value)
-  if (!Object.values(descriptors).every(descriptor => 'value' in descriptor)) {
+  if (!Reflect.ownKeys(descriptors).every(key => 'value' in descriptors[key])) {
     throw new Error(errorMessage)
   }
   return descriptors
@@ -48,7 +48,7 @@ const getOwnArrayValues = (value, errorMessage) => {
     throw new Error(errorMessage)
   }
   const descriptors = Object.getOwnPropertyDescriptors(value)
-  if (!Object.values(descriptors).every(descriptor => 'value' in descriptor)) {
+  if (!Reflect.ownKeys(descriptors).every(key => 'value' in descriptors[key])) {
     throw new Error(errorMessage)
   }
   const values = []
@@ -259,6 +259,7 @@ const createUserApiSyncMeta = data => {
   }
 }
 
+// Freeze accepted graphs so async consumers cannot mutate data after validation.
 const assertUserApiSyncData = data => {
   canonicalizeUserApiSyncData(data, { freezeOriginal: true })
   return data

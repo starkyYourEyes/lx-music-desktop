@@ -194,6 +194,31 @@ assert.strictEqual(decodeUserApiScript(rawScript), rawScript)
   })
   assertInvalidRemoteValue(proxyRemote)
   assert.strictEqual(proxyReads, 0)
+  const symbolAccessorCases = [
+    ['data', candidate => candidate],
+    ['API', candidate => candidate.apis[0]],
+    ['remote', candidate => candidate.apis[0].remote],
+    ['API array', candidate => candidate.apis],
+  ]
+  for (const [label, getTarget] of symbolAccessorCases) {
+    let symbolAccessorReads = 0
+    const candidate = {
+      ...data,
+      apis: [{
+        ...data.apis[0],
+        remote: { ...data.apis[0].remote },
+      }],
+    }
+    Object.defineProperty(getTarget(candidate), Symbol(label), {
+      enumerable: true,
+      get() {
+        symbolAccessorReads++
+        return 'hidden'
+      },
+    })
+    assert.throws(() => assertUserApiSyncData(candidate), undefined, label)
+    assert.strictEqual(symbolAccessorReads, 0, label)
+  }
 
   const localApi = { ...data.apis[0] }
   delete localApi.remote

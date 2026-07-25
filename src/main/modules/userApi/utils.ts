@@ -140,8 +140,9 @@ const isPlainOwnDataRecord = (value: unknown): value is Record<string, unknown> 
   if (value == null || typeof value != 'object') return false
   const prototype = Object.getPrototypeOf(value)
   if (prototype != Object.prototype && prototype != null) return false
-  return Object.values(Object.getOwnPropertyDescriptors(value))
-    .every(descriptor => 'value' in descriptor)
+  const descriptors = Object.getOwnPropertyDescriptors(value) as Record<PropertyKey, PropertyDescriptor>
+  return Reflect.ownKeys(descriptors)
+    .every(key => 'value' in descriptors[key])
 }
 
 const hasOwnProperties = (value: Record<string, unknown>, properties: string[]) => {

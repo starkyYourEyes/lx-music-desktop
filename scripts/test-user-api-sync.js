@@ -89,16 +89,19 @@ assert.strictEqual(decodeUserApiScript(rawScript), rawScript)
   assert.strictEqual(data.apis[0].remote.group, 'V260720-\u63a8\u8350')
   remoteInput.group = 'V260720-\u63a8\u8350'
 
+  const stableRemoteInput = { ...data.apis[0].remote, unknown: 'drop me' }
   const stableData = createStableUserApiSyncData({
     ...data,
     apis: [{
       ...data.apis[0],
-      remote: { ...data.apis[0].remote, unknown: 'drop me' },
+      remote: stableRemoteInput,
     }],
   })
   assert.deepStrictEqual(stableData.apis[0].remote, data.apis[0].remote)
   assert.notStrictEqual(stableData.apis[0].remote, data.apis[0].remote)
   assert.strictEqual(Object.prototype.hasOwnProperty.call(stableData.apis[0].remote, 'unknown'), false)
+  stableRemoteInput.group = 'mutated'
+  assert.strictEqual(stableData.apis[0].remote.group, 'V260720-\u63a8\u8350')
 
   const localStableData = createStableUserApiSyncData({
     ...data,
@@ -116,7 +119,11 @@ assert.strictEqual(decodeUserApiScript(rawScript), rawScript)
       ...data,
       apis: [{
         ...data.apis[0],
-        remote: { ...data.apis[0].remote, group: 'V260720-\u5176\u4ed6' },
+        remote: {
+          ...data.apis[0].remote,
+          group: 'V260720-\u5176\u4ed6',
+          path: 'v260724/V260720-\u5176\u4ed6/kg.js',
+        },
       }],
     }),
   )
@@ -157,6 +164,63 @@ assert.strictEqual(decodeUserApiScript(rawScript), rawScript)
   assertInvalidRemote({ path: 'v260724/V260720-\u63a8\u8350/.js' })
   assertInvalidRemote({ blobSha: 'a'.repeat(39) })
   assertInvalidRemote({ commitSha: 'not-a-sha' })
+  const assertInvalidRemoteValue = remoteValue => {
+    assert.throws(() => assertUserApiSyncData({
+      ...data,
+      apis: [{ ...data.apis[0], remote: remoteValue }],
+    }), /remote/)
+  }
+  assertInvalidRemoteValue('github')
+
+  let accessorReads = 0
+  const accessorRemote = { ...remote }
+  Object.defineProperty(accessorRemote, 'group', {
+    enumerable: true,
+    get() {
+      accessorReads++
+      return remote.group
+    },
+  })
+  assertInvalidRemoteValue(accessorRemote)
+  assert.strictEqual(accessorReads, 0)
+
+  let proxyReads = 0
+  const proxyRemote = new Proxy({ ...remote }, {
+    get(target, property, receiver) {
+      proxyReads++
+      if (property == 'group' && proxyReads % 2 == 0) return 'V260720-\u5176\u4ed6'
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  assertInvalidRemoteValue(proxyRemote)
+  assert.strictEqual(proxyReads, 0)
+
+  const localApi = { ...data.apis[0] }
+  delete localApi.remote
+  const localData = { ...data, apis: [localApi] }
+  assert.strictEqual(assertUserApiSyncData(localData), localData)
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(
+    createStableUserApiSyncData(localData).apis[0],
+    'remote',
+  ), false)
+
+  const nullRemoteData = {
+    ...data,
+    apis: [{ ...data.apis[0], remote: null }],
+  }
+  assert.strictEqual(assertUserApiSyncData(nullRemoteData), nullRemoteData)
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(
+    createStableUserApiSyncData(nullRemoteData).apis[0],
+    'remote',
+  ), false)
+  assert.strictEqual(Object.isFrozen(data), true)
+  assert.strictEqual(Object.isFrozen(data.apis), true)
+  assert.strictEqual(Object.isFrozen(data.apis[0]), true)
+  assert.strictEqual(Object.isFrozen(data.apis[0].remote), true)
+  const assertedMD5 = createUserApiSyncMD5(data)
+  assert.strictEqual(Reflect.set(data.apis[0], 'name', 'mutated'), false)
+  assert.strictEqual(Reflect.set(data.apis[0].remote, 'group', 'mutated'), false)
+  assert.strictEqual(createUserApiSyncMD5(data), assertedMD5)
 
   assert.doesNotThrow(() => assertUserApiSyncData({
     ...data,
@@ -192,23 +256,35 @@ assert.strictEqual(decodeUserApiScript(rawScript), rawScript)
       apis: [{
         ...data.apis[0],
         id: 'valid_' + remoteInfo.version,
-        remote: remoteInfo,
+        remote: { ...remoteInfo },
       }],
     }))
+  }
+  const baseApi = {
+    ...data.apis[0],
+    id: 'same',
+    name: 'base',
+    remote: baseRemote,
+  }
+  const incomingApi = {
+    ...data.apis[0],
+    id: 'same',
+    name: 'incoming',
+    remote: incomingRemote,
   }
 
   const merged = mergeUserApiSyncData({
     source: 'desktop',
     updatedAt: 1,
     apis: [
-      { ...data.apis[0], id: 'same', name: 'base', remote: baseRemote },
+      baseApi,
       { ...data.apis[0], id: '', name: 'invalid base' },
     ],
   }, {
     source: 'desktop',
     updatedAt: 2,
     apis: [
-      { ...data.apis[0], id: 'same', name: 'incoming', remote: incomingRemote },
+      incomingApi,
       { ...data.apis[0], id: 'new', name: 'new' },
       { ...data.apis[0], id: '', name: 'invalid incoming' },
     ],
@@ -220,6 +296,20 @@ assert.strictEqual(decodeUserApiScript(rawScript), rawScript)
   assert.strictEqual(merged.updatedAt, 300)
   assert.deepStrictEqual(merged.apis[0].remote, incomingRemote)
   assert.notStrictEqual(merged.apis[0].remote, baseRemote)
+  assert.notStrictEqual(merged.apis[0].remote, incomingRemote)
+
+  const stableMerged = createStableUserApiSyncData(merged)
+  const stableMergedMD5 = createUserApiSyncMD5(merged)
+  incomingApi.name = 'mutated incoming'
+  incomingApi.script = 'mutated script'
+  incomingRemote.group = 'mutated'
+  incomingRemote.path = 'V260725/mutated/source.JS'
+
+  assert.strictEqual(merged.apis[0].name, 'incoming')
+  assert.strictEqual(merged.apis[0].script, rawScript)
+  assert.deepStrictEqual(merged.apis[0].remote, stableMerged.apis[0].remote)
+  assert.deepStrictEqual(createStableUserApiSyncData(merged), stableMerged)
+  assert.strictEqual(createUserApiSyncMD5(merged), stableMergedMD5)
 
   console.log('user api sync helper tests passed')
 })().catch(err => {

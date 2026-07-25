@@ -1,5 +1,6 @@
 const crypto = require('node:crypto')
 const zlib = require('node:zlib')
+const { types: { isProxy } } = require('node:util')
 
 const MAX_USER_API_SCRIPT_LENGTH = 10 * 1024 * 1024
 
@@ -25,29 +26,38 @@ const GITHUB_REMOTE_PROPERTIES = [
   'blobSha',
   'commitSha',
 ]
+const USER_API_SYNC_DATA_PROPERTIES = ['source', 'updatedAt', 'apis']
 
-const normalizeRemote = remote => remote == null
-  ? undefined
-  : {
-      provider: remote.provider,
-      repository: remote.repository,
-      version: normalizeApiText(remote.version),
-      group: normalizeApiText(remote.group),
-      path: normalizeApiText(remote.path),
-      blobSha: normalizeApiText(remote.blobSha),
-      commitSha: normalizeApiText(remote.commitSha),
-    }
-
-const isPlainOwnDataRecord = value => {
-  if (value == null || typeof value != 'object') return false
+const getPlainOwnDataDescriptors = (value, errorMessage) => {
+  if (value == null || typeof value !== 'object' || isProxy(value)) {
+    throw new Error(errorMessage)
+  }
   const prototype = Object.getPrototypeOf(value)
-  if (prototype != Object.prototype && prototype != null) return false
-  return Object.values(Object.getOwnPropertyDescriptors(value))
-    .every(descriptor => 'value' in descriptor)
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new Error(errorMessage)
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value)
+  if (!Object.values(descriptors).every(descriptor => 'value' in descriptor)) {
+    throw new Error(errorMessage)
+  }
+  return descriptors
 }
 
-const hasOwnProperties = (value, properties) => {
-  return properties.every(property => Object.prototype.hasOwnProperty.call(value, property))
+const getOwnArrayValues = (value, errorMessage) => {
+  if (!Array.isArray(value) || isProxy(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    throw new Error(errorMessage)
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value)
+  if (!Object.values(descriptors).every(descriptor => 'value' in descriptor)) {
+    throw new Error(errorMessage)
+  }
+  const values = []
+  for (let index = 0; index < descriptors.length.value; index++) {
+    const descriptor = descriptors[index]
+    if (!descriptor || !('value' in descriptor)) throw new Error(errorMessage)
+    values.push(descriptor.value)
+  }
+  return values
 }
 
 const isWellFormedUnicode = value => {
@@ -65,45 +75,160 @@ const isWellFormedUnicode = value => {
   return true
 }
 
-const assertRemote = remote => {
-  if (!isPlainOwnDataRecord(remote) || !hasOwnProperties(remote, GITHUB_REMOTE_PROPERTIES) ||
-    typeof remote.provider !== 'string' || remote.provider !== 'github' ||
-    typeof remote.repository !== 'string' || remote.repository !== GITHUB_REPOSITORY ||
-    typeof remote.version !== 'string' || !GITHUB_VERSION_RXP.test(remote.version) ||
-    typeof remote.group !== 'string' || !remote.group || !isWellFormedUnicode(remote.group) ||
-    typeof remote.path !== 'string' || !isWellFormedUnicode(remote.path) ||
-    typeof remote.blobSha !== 'string' || !GITHUB_SHA_RXP.test(remote.blobSha) ||
-    typeof remote.commitSha !== 'string' || !GITHUB_SHA_RXP.test(remote.commitSha) ||
-    !remote.path.startsWith(remote.version + '/') || !/\.js$/i.test(remote.path) ||
-    remote.path.includes('\\')) {
+const canonicalizeRemote = remote => {
+  if (remote == null) return undefined
+  const descriptors = getPlainOwnDataDescriptors(remote, 'Invalid user API remote metadata')
+  if (!GITHUB_REMOTE_PROPERTIES.every(property => descriptors[property])) {
     throw new Error('Invalid user API remote metadata')
   }
 
-  const relativeParts = remote.path.substring(remote.version.length + 1).split('/')
+  const provider = descriptors.provider.value
+  const repository = descriptors.repository.value
+  const version = descriptors.version.value
+  const group = descriptors.group.value
+  const path = descriptors.path.value
+  const blobSha = descriptors.blobSha.value
+  const commitSha = descriptors.commitSha.value
+  if (typeof provider !== 'string' || provider !== 'github' ||
+    typeof repository !== 'string' || repository !== GITHUB_REPOSITORY ||
+    typeof version !== 'string' || !GITHUB_VERSION_RXP.test(version) ||
+    typeof group !== 'string' || !group || !isWellFormedUnicode(group) ||
+    typeof path !== 'string' || !isWellFormedUnicode(path) ||
+    typeof blobSha !== 'string' || !GITHUB_SHA_RXP.test(blobSha) ||
+    typeof commitSha !== 'string' || !GITHUB_SHA_RXP.test(commitSha) ||
+    !path.startsWith(version + '/') || !/\.js$/i.test(path) || path.includes('\\')) {
+    throw new Error('Invalid user API remote metadata')
+  }
+
+  const relativeParts = path.substring(version.length + 1).split('/')
   const fileName = relativeParts.at(-1)
-  const expectedGroup = relativeParts.length > 1 ? relativeParts[0] : remote.version
+  const expectedGroup = relativeParts.length > 1 ? relativeParts[0] : version
   if (!fileName || fileName.length <= 3 ||
     relativeParts.some(part => !part || part === '.' || part === '..') ||
-    remote.group !== expectedGroup) {
+    group !== expectedGroup) {
     throw new Error('Invalid user API remote group or path')
   }
+
+  return { provider, repository, version, group, path, blobSha, commitSha }
+}
+
+const canonicalizeSyncApi = (api, options = {}) => {
+  const descriptors = getPlainOwnDataDescriptors(api, 'Invalid user API record')
+  const id = descriptors.id?.value
+  if (options.skipEmptyId && !id) return null
+  if (typeof id !== 'string' || !id) {
+    throw new Error('Invalid or duplicate user API id')
+  }
+
+  for (const key of ['name', 'description', 'author', 'homepage', 'version']) {
+    if (typeof descriptors[key]?.value !== 'string') throw new Error('Invalid user API ' + key)
+  }
+
+  const scriptEncoding = descriptors.scriptEncoding?.value
+  const script = descriptors.script?.value
+  if (scriptEncoding !== 'plain' || typeof script !== 'string' ||
+    script.length > MAX_USER_API_SCRIPT_LENGTH) {
+    throw new Error('Invalid user API script')
+  }
+
+  const allowShowUpdateAlert = descriptors.allowShowUpdateAlert?.value
+  if (allowShowUpdateAlert != null && typeof allowShowUpdateAlert !== 'boolean') {
+    throw new Error('Invalid user API update alert setting')
+  }
+
+  const originalRemote = descriptors.remote?.value
+  const remote = canonicalizeRemote(originalRemote)
+  return {
+    value: {
+      id,
+      name: descriptors.name.value,
+      description: descriptors.description.value,
+      author: descriptors.author.value,
+      homepage: descriptors.homepage.value,
+      version: descriptors.version.value,
+      allowShowUpdateAlert,
+      ...(remote == null ? {} : { remote }),
+      scriptEncoding,
+      script,
+    },
+    original: api,
+    originalRemote,
+  }
+}
+
+const canonicalizeUserApiSyncData = (data, options = {}) => {
+  const descriptors = getPlainOwnDataDescriptors(data, 'Invalid user API sync data')
+  if (!USER_API_SYNC_DATA_PROPERTIES.every(property => descriptors[property])) {
+    throw new Error('Invalid user API sync data')
+  }
+
+  const source = descriptors.source.value
+  const updatedAt = descriptors.updatedAt.value
+  const originalApis = descriptors.apis.value
+  if (source !== 'desktop' || !Number.isFinite(updatedAt)) {
+    throw new Error('Invalid user API sync data')
+  }
+
+  const apiValues = getOwnArrayValues(originalApis, 'Invalid user API sync data')
+  const ids = new Set()
+  const snapshots = []
+  for (const api of apiValues) {
+    const snapshot = canonicalizeSyncApi(api, {
+      skipEmptyId: options.skipEmptyIds,
+    })
+    if (snapshot == null) continue
+    if (!options.allowDuplicateIds && ids.has(snapshot.value.id)) {
+      throw new Error('Invalid or duplicate user API id')
+    }
+    ids.add(snapshot.value.id)
+    snapshots.push(snapshot)
+  }
+
+  if (options.freezeOriginal) {
+    for (const snapshot of snapshots) {
+      if (snapshot.originalRemote != null) Object.freeze(snapshot.originalRemote)
+      Object.freeze(snapshot.original)
+    }
+    Object.freeze(originalApis)
+    Object.freeze(data)
+  }
+
+  return {
+    source: 'desktop',
+    updatedAt,
+    apis: snapshots.map(snapshot => snapshot.value),
+  }
+}
+
+const createStableUserApiSyncDataFromCanonical = data => ({
+  source: 'desktop',
+  apis: data.apis,
+})
+
+const createUserApiSyncMD5FromCanonical = data => {
+  return crypto.createHash('md5')
+    .update(JSON.stringify(createStableUserApiSyncDataFromCanonical(data)))
+    .digest('hex')
 }
 
 const createUserApiSyncData = async(apis, getScript, options = {}) => {
   const syncApis = []
   for (const api of apis) {
     try {
+      const descriptors = getPlainOwnDataDescriptors(api, 'Invalid user API record')
+      const id = descriptors.id?.value
+      const remote = canonicalizeRemote(descriptors.remote?.value)
       syncApis.push({
-        id: api.id,
-        name: normalizeApiText(api.name),
-        description: normalizeApiText(api.description),
-        author: normalizeApiText(api.author),
-        homepage: normalizeApiText(api.homepage),
-        version: normalizeApiText(api.version),
-        allowShowUpdateAlert: api.allowShowUpdateAlert,
-        ...(api.remote == null ? {} : { remote: normalizeRemote(api.remote) }),
+        id,
+        name: normalizeApiText(descriptors.name?.value),
+        description: normalizeApiText(descriptors.description?.value),
+        author: normalizeApiText(descriptors.author?.value),
+        homepage: normalizeApiText(descriptors.homepage?.value),
+        version: normalizeApiText(descriptors.version?.value),
+        allowShowUpdateAlert: descriptors.allowShowUpdateAlert?.value,
+        ...(remote == null ? {} : { remote }),
         scriptEncoding: 'plain',
-        script: decodeUserApiScript(await getScript(api.id)),
+        script: decodeUserApiScript(await getScript(id)),
       })
     } catch (err) {
       options.onScriptError?.(err, api)
@@ -117,68 +242,41 @@ const createUserApiSyncData = async(apis, getScript, options = {}) => {
   }
 }
 
-const createStableUserApiSyncData = data => ({
-  source: 'desktop',
-  apis: data.apis.map(api => ({
-    id: api.id,
-    name: normalizeApiText(api.name),
-    description: normalizeApiText(api.description),
-    author: normalizeApiText(api.author),
-    homepage: normalizeApiText(api.homepage),
-    version: normalizeApiText(api.version),
-    allowShowUpdateAlert: api.allowShowUpdateAlert,
-    ...(api.remote == null ? {} : { remote: normalizeRemote(api.remote) }),
-    scriptEncoding: api.scriptEncoding,
-    script: api.script,
-  })),
-})
-
-const createUserApiSyncMD5 = data => {
-  return crypto.createHash('md5')
-    .update(JSON.stringify(createStableUserApiSyncData(data)))
-    .digest('hex')
+const createStableUserApiSyncData = data => {
+  return createStableUserApiSyncDataFromCanonical(canonicalizeUserApiSyncData(data))
 }
 
-const createUserApiSyncMeta = data => ({
-  md5: createUserApiSyncMD5(data),
-  updatedAt: data.updatedAt,
-  count: data.apis.length,
-})
+const createUserApiSyncMD5 = data => {
+  return createUserApiSyncMD5FromCanonical(canonicalizeUserApiSyncData(data))
+}
+
+const createUserApiSyncMeta = data => {
+  const canonical = canonicalizeUserApiSyncData(data)
+  return {
+    md5: createUserApiSyncMD5FromCanonical(canonical),
+    updatedAt: canonical.updatedAt,
+    count: canonical.apis.length,
+  }
+}
 
 const assertUserApiSyncData = data => {
-  if (!data || data.source != 'desktop' || !Number.isFinite(data.updatedAt) || !Array.isArray(data.apis)) {
-    throw new Error('Invalid user API sync data')
-  }
-
-  const ids = new Set()
-  for (const api of data.apis) {
-    if (!api || typeof api.id != 'string' || !api.id || ids.has(api.id)) {
-      throw new Error('Invalid or duplicate user API id')
-    }
-    ids.add(api.id)
-    for (const key of ['name', 'description', 'author', 'homepage', 'version']) {
-      if (typeof api[key] != 'string') throw new Error(`Invalid user API ${key}`)
-    }
-    if (api.scriptEncoding != 'plain' || typeof api.script != 'string' || api.script.length > MAX_USER_API_SCRIPT_LENGTH) {
-      throw new Error('Invalid user API script')
-    }
-    if (api.allowShowUpdateAlert != null && typeof api.allowShowUpdateAlert != 'boolean') {
-      throw new Error('Invalid user API update alert setting')
-    }
-    if (api.remote != null) assertRemote(api.remote)
-  }
+  canonicalizeUserApiSyncData(data, { freezeOriginal: true })
   return data
 }
 
 const mergeUserApiSyncData = (baseData, incomingData, options = {}) => {
   const updatedAt = options.updatedAt ?? Date.now()
+  const canonicalOptions = {
+    allowDuplicateIds: true,
+    skipEmptyIds: true,
+  }
+  const base = canonicalizeUserApiSyncData(baseData, canonicalOptions)
+  const incoming = canonicalizeUserApiSyncData(incomingData, canonicalOptions)
   const apiMap = new Map()
-  for (const api of baseData.apis) {
-    if (!api.id) continue
+  for (const api of base.apis) {
     apiMap.set(api.id, api)
   }
-  for (const api of incomingData.apis) {
-    if (!api.id) continue
+  for (const api of incoming.apis) {
     apiMap.set(api.id, api)
   }
 

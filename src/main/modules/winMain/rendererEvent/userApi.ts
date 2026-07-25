@@ -3,6 +3,7 @@ import { mainHandle } from '@common/mainIpc'
 import {
   getApiList,
   importApi,
+  replaceApisFromGitHub,
   removeApi,
   setApi,
   getStatus,
@@ -16,6 +17,13 @@ export default () => {
   mainHandle<string, LX.UserApi.ImportUserApi>(WIN_MAIN_RENDERER_EVENT_NAME.import_user_api, async({ params: script }) => {
     return importApi(script)
   })
+
+  mainHandle<LX.UserApi.GitHubImportItem[], LX.UserApi.UserApiInfo[]>(
+    WIN_MAIN_RENDERER_EVENT_NAME.replace_user_api_from_github,
+    async({ params: items }) => {
+      return replaceApisFromGitHub(items)
+    },
+  )
 
   mainHandle<string[], LX.UserApi.UserApiInfo[]>(WIN_MAIN_RENDERER_EVENT_NAME.remove_user_api, async({ params: apiIds }) => {
     return removeApi(apiIds)

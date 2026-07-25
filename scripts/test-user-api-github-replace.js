@@ -38,6 +38,54 @@ const makeInput = () => [
   },
 ]
 
+const createRuntimeHarness = (replacementSteps = [[{
+  id: 'stable-id',
+}]]) => {
+  const actions = []
+  let replacementCall = 0
+  const stableApi = {
+    id: 'stable-id',
+  }
+  const runtime = loadTsModule(
+    path.join(__dirname, '../src/main/modules/userApi/index.ts'),
+    {
+      './main': {
+        async closeWindow() {
+          actions.push('close')
+        },
+      },
+      './utils': {
+        getUserApis: () => [stableApi],
+        async importApi() {},
+        removeApi() {},
+        setAllowShowUpdateAlert() {},
+        async replaceApisFromGitHub(items) {
+          actions.push('replace')
+          const step = replacementSteps[replacementCall++]
+          if (step instanceof Error) throw step
+          return step
+        },
+      },
+      './rendererEvent/rendererEvent': {
+        async loadApi(id) {
+          actions.push('load:' + id)
+        },
+        setAllowShowUpdateAlert() {},
+        init() {},
+      },
+    },
+  )
+
+  return {
+    runtime,
+    actions,
+    selectStableApi: async() => {
+      await runtime.setApi(stableApi.id)
+      actions.length = 0
+    },
+  }
+}
+
 const oldSerialized = () => [{
   id: 'user_api_old',
   name: 'Old source',
@@ -375,6 +423,45 @@ const originalLx = global.lx
       expectedStoreAttempts: 1,
       expectedDeflateCalls: 2,
     })
+    const retainedRuntime = createRuntimeHarness()
+    await retainedRuntime.selectStableApi()
+    const retainedList = await retainedRuntime.runtime.replaceApisFromGitHub(makeInput())
+    assert.deepStrictEqual(retainedList, [{ id: 'stable-id' }])
+    assert.deepStrictEqual(retainedRuntime.actions, [
+      'replace',
+      'close',
+      'load:stable-id',
+    ])
+
+    const removedRuntime = createRuntimeHarness([[]])
+    await removedRuntime.selectStableApi()
+    const removedList = await removedRuntime.runtime.replaceApisFromGitHub(makeInput())
+    assert.deepStrictEqual(removedList, [])
+    assert.deepStrictEqual(removedRuntime.actions, ['replace', 'close'])
+
+    const replacementError = new Error('simulated runtime replacement failure')
+    const failedRuntime = createRuntimeHarness([
+      replacementError,
+      [{ id: 'stable-id' }],
+    ])
+    await failedRuntime.selectStableApi()
+    await assert.rejects(
+      () => failedRuntime.runtime.replaceApisFromGitHub(makeInput()),
+      replacementError,
+    )
+    assert.deepStrictEqual(failedRuntime.actions, ['replace'])
+    failedRuntime.actions.length = 0
+    await failedRuntime.runtime.replaceApisFromGitHub(makeInput())
+    assert.deepStrictEqual(failedRuntime.actions, [
+      'replace',
+      'close',
+      'load:stable-id',
+    ])
+
+    const inactiveRuntime = createRuntimeHarness()
+    const inactiveList = await inactiveRuntime.runtime.replaceApisFromGitHub(makeInput())
+    assert.deepStrictEqual(inactiveList, [{ id: 'stable-id' }])
+    assert.deepStrictEqual(inactiveRuntime.actions, ['replace'])
 
     console.log('GitHub user API replacement tests passed')
   } finally {

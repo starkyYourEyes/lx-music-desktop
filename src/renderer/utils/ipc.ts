@@ -127,6 +127,13 @@ export const onUpdateNotAvailable = (listener: LX.IpcRendererEventListenerParams
 export const importUserApi = async(fileText: string) => {
   return rendererInvoke<string, LX.UserApi.ImportUserApi>(WIN_MAIN_RENDERER_EVENT_NAME.import_user_api, fileText)
 }
+export const replaceUserApisFromGitHub = async(items: LX.UserApi.GitHubImportItem[]) => {
+  return rendererInvoke<LX.UserApi.GitHubImportItem[], LX.UserApi.UserApiInfo[]>(
+    WIN_MAIN_RENDERER_EVENT_NAME.replace_user_api_from_github,
+    items,
+  )
+}
+
 export const setUserApi = async(source: LX.UserApi.UserApiSetApiParams): Promise<void> => {
   return rendererInvoke<LX.UserApi.UserApiSetApiParams>(WIN_MAIN_RENDERER_EVENT_NAME.set_user_api, source)
 }

@@ -19,6 +19,9 @@ const assertTreeEntry = item => {
   if (!item || !ENTRY_TYPES.has(item.type) || typeof item.path != 'string' || !item.path) {
     throw createGitHubUserApiError('GITHUB_INVALID_RESPONSE', 'tree entry')
   }
+  if (item.type == 'commit' && !SHA_RXP.test(item.sha ?? '')) {
+    throw createGitHubUserApiError('GITHUB_INVALID_RESPONSE', item.path)
+  }
   if (item.type == 'blob' &&
     (!SHA_RXP.test(item.sha ?? '') || !Number.isSafeInteger(item.size) || item.size < 0)) {
     throw createGitHubUserApiError('GITHUB_INVALID_RESPONSE', item.path)

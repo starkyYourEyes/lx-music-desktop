@@ -149,6 +149,19 @@ assert.throws(
 assert.throws(
   () => parseGitHubUserApiSnapshot({ commit: { sha: commitSha } }, createTreeData([
     { type: 'tree', path: 'v260724' },
+    { type: 'commit', path: 'v260724/submodule', sha: 'bad' },
+    {
+      type: 'blob',
+      path: 'v260724/group/valid.js',
+      sha: '1'.repeat(40),
+      size: 1,
+    },
+  ])),
+  expectGitHubError('GITHUB_INVALID_RESPONSE'),
+)
+assert.throws(
+  () => parseGitHubUserApiSnapshot({ commit: { sha: commitSha } }, createTreeData([
+    { type: 'tree', path: 'v260724' },
   ])),
   expectGitHubError('GITHUB_SCRIPTS_NOT_FOUND'),
 )

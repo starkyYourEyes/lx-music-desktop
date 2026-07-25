@@ -196,6 +196,18 @@ const originalLx = global.lx
     )
     assert.strictEqual(aliasHarness.storeSets.length, 1)
 
+    const persistedRemoteApis = oldSerialized()
+    persistedRemoteApis[0].remote = makeRemote()
+    const coldLoadAliasHarness = createHarness({ initialStored: persistedRemoteApis })
+    const coldStoredBeforeMutation = structuredClone(coldLoadAliasHarness.getStored())
+    const coldLoadedApis = coldLoadAliasHarness.userApiUtils.getUserApis()
+    coldLoadedApis[0].remote.group = 'mutated-after-cold-load'
+    assert.deepStrictEqual(
+      coldLoadAliasHarness.getStored(),
+      coldStoredBeforeMutation,
+    )
+    assert.strictEqual(coldLoadAliasHarness.storeSets.length, 0)
+    assert.strictEqual(coldLoadAliasHarness.getChangeEvents(), 0)
 
     await assertAtomicFailure('invalid script', inputItems => {
       inputItems[1].script = 'console.log("missing metadata header")'

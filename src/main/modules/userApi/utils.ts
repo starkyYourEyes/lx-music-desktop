@@ -50,9 +50,9 @@ export const getUserApis = (): LX.UserApi.UserApiInfo[] => {
   }
   userApis = infoFull.map(api => {
     if (api.allowShowUpdateAlert == null) api.allowShowUpdateAlert = false
-    const { script, ...info } = api
+    const { script, remote, ...info } = api
     scripts.set(api.id, script)
-    return info
+    return remote ? { ...info, remote: { ...remote } } : info
   })
   if (requiredUpdate) saveData(false)
   return userApis

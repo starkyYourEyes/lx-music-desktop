@@ -2,19 +2,26 @@
 material-modal(:show="modelValue" bg-close teleport="#view" @close="handleClose")
   main.scroll(:class="$style.main")
     h2 {{ $t('user_api__title') }}
-    ul.scroll(v-if="apiList.length" :class="$style.content")
-      li(v-for="(api, index) in apiList" :key="api.id" :class="[$style.listItem, {[$style.active]: appSetting['common.apiSource'] == api.id}]")
-        div(:class="$style.listLeft")
-          h3
-            | {{ api.name }}
-            span(v-if="api.version") {{ /^\d/.test(api.version) ? `v${api.version}` : api.version }}
-            span(v-if="api.author") {{ api.author }}
-          p {{ api.description }}
-          div
-            base-checkbox(:id="`user_api_${api.id}`" v-model="api.allowShowUpdateAlert" :class="$style.checkbox" :label="$t('user_api__allow_show_update_alert')" @change="handleChangeAllowUpdateAlert(api, $event)")
-        base-btn(:class="$style.listBtn" outline :aria-label="$t('user_api__btn_remove')" @click.stop="handleRemove(index)")
-          svg(v-once version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 212.982 212.982" space="preserve")
-            use(xlink:href="#icon-delete")
+    div.scroll(v-if="apiList.length" :class="$style.content")
+      section(v-for="group in apiGroups" :key="group.name || 'local'" :class="$style.group")
+        button(type="button" :class="$style.groupHeader" :aria-expanded="!collapsedGroups.has(group.name)" @click="toggleGroup(group.name)")
+          span(:class="$style.groupName") {{ group.name || $t('user_api__github_local_group') }}
+          span(:class="$style.groupCount") {{ group.apis.length }}
+          svg(:class="[$style.groupIcon, { [$style.collapsed]: collapsedGroups.has(group.name) }]" version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024")
+            use(xlink:href="#icon-down")
+        ul(v-show="!collapsedGroups.has(group.name)")
+          li(v-for="api in group.apis" :key="api.id" :class="[$style.listItem, {[$style.active]: appSetting['common.apiSource'] == api.id}]")
+            div(:class="$style.listLeft")
+              h3
+                | {{ api.name }}
+                span(v-if="api.version") {{ /^\d/.test(api.version) ? `v${api.version}` : api.version }}
+                span(v-if="api.author") {{ api.author }}
+              p {{ api.description }}
+              div
+                base-checkbox(:id="`user_api_${api.id}`" v-model="api.allowShowUpdateAlert" :class="$style.checkbox" :label="$t('user_api__allow_show_update_alert')" @change="handleChangeAllowUpdateAlert(api, $event)")
+            base-btn(:class="$style.listBtn" outline :aria-label="$t('user_api__btn_remove')" @click.stop="handleRemove(api)")
+              svg(v-once version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 212.982 212.982" space="preserve")
+                use(xlink:href="#icon-delete")
     div(v-else :class="$style.content")
       div(:class="$style.noitem") {{ $t('user_api__noitem') }}
     div(:class="$style.note")
@@ -22,15 +29,19 @@ material-modal(:show="modelValue" bg-close teleport="#view" @close="handleClose"
         | {{ $t('user_api__readme') }}
         span.hover.underline(aria-label="https://lxmusic.toside.cn/desktop/custom-source" @click="handleOpenUrl('https://lyswhut.github.io/lx-music-doc/desktop/custom-source')") FAQ
       p {{ $t('user_api__note') }}
+    div(v-if="githubStatus" :class="$style.githubStatus" role="status" aria-live="polite") {{ githubStatus }}
     div(:class="$style.footer")
-      base-btn(:class="$style.footerBtn" @click="isShowOnlineImportModal = true") {{ $t('user_api__btn_import_online') }}
-      base-btn(:class="$style.footerBtn" @click="handleImport") {{ $t('user_api__btn_import') }}
+      base-btn(:class="$style.footerBtn" :disabled="!!githubAction" @click="handleGitHubTest") {{ $t(githubAction == 'test' ? 'user_api__github_testing' : 'user_api__github_test') }}
+      base-btn(:class="$style.footerBtn" :disabled="!!githubAction" @click="handleGitHubImport") {{ $t(githubAction == 'import' ? 'user_api__github_importing' : 'user_api__github_import') }}
+      base-btn(:class="$style.footerBtn" :disabled="!!githubAction" @click="isShowOnlineImportModal = true") {{ $t('user_api__btn_import_online') }}
+      base-btn(:class="$style.footerBtn" :disabled="!!githubAction" @click="handleImport") {{ $t('user_api__btn_import') }}
       //- base-btn(:class="$style.footerBtn" @click="handleExport") {{ $t('user_api__btn_export') }}
     UserApiOnlineImportModal(v-model:show="isShowOnlineImportModal" @import="importUserApi")
 </template>
 
 <script>
-import { importUserApi, removeUserApi, showSelectDialog, setAllowShowUserApiUpdateAlert } from '@renderer/utils/ipc'
+import { importUserApi, removeUserApi, replaceUserApisFromGitHub, showSelectDialog, setAllowShowUserApiUpdateAlert } from '@renderer/utils/ipc'
+import { getGitHubUserApiSnapshot, downloadGitHubUserApiSnapshot } from '@renderer/utils/githubUserApi'
 import { readFile } from '@common/utils/nodejs'
 import { openUrl } from '@common/utils/electron'
 import apiSourceInfo from '@renderer/utils/musicSdk/api-source-info'
@@ -63,6 +74,31 @@ export default {
       isShowOnlineImportModal,
     }
   },
+  data() {
+    return {
+      githubAction: '',
+      githubStatus: '',
+      collapsedGroups: new Set(),
+    }
+  },
+  computed: {
+    apiGroups() {
+      const groups = new Map()
+      for (const api of this.apiList) {
+        const name = api.remote?.group ?? ''
+        if (!groups.has(name)) groups.set(name, [])
+        groups.get(name).push(api)
+      }
+      return [...groups].map(([name, apis]) => ({ name, apis }))
+    },
+  },
+  watch: {
+    modelValue(show) {
+      if (!show) return
+      this.collapsedGroups = new Set()
+      this.githubStatus = ''
+    },
+  },
   methods: {
     async importUserApi(script) {
       return importUserApi(script).then(({ apiList }) => {
@@ -71,14 +107,89 @@ export default {
         void dialog(this.$t('user_api_import__failed', { message: err.message }))
       })
     },
-    handleImport() {
-      if (this.userApi.list.length > 20) {
-        this.$dialog({
-          message: this.$t('user_api__max_tip'),
-          confirmButtonText: this.$t('ok'),
-        })
-        return
+    toggleGroup(name) {
+      if (this.collapsedGroups.has(name)) this.collapsedGroups.delete(name)
+      else this.collapsedGroups.add(name)
+    },
+    formatGitHubError(err) {
+      const errorKeys = {
+        GITHUB_RATE_LIMIT: 'user_api__github_error_rate_limit',
+        GITHUB_HTTP_ERROR: 'user_api__github_error_http',
+        GITHUB_INVALID_RESPONSE: 'user_api__github_error_tree',
+        GITHUB_TREE_TRUNCATED: 'user_api__github_error_tree',
+        GITHUB_VERSION_NOT_FOUND: 'user_api__github_error_version',
+        GITHUB_SCRIPTS_NOT_FOUND: 'user_api__github_error_scripts',
+        GITHUB_BATCH_LIMIT: 'user_api__github_error_limit',
+        GITHUB_INVALID_SCRIPT: 'user_api__github_error_invalid_script',
       }
+      const detail = String(err?.detail || err?.message || err || '')
+        .split(/\r?\n/, 1)[0]
+        .substring(0, 500)
+      return this.$t(errorKeys[err?.code] ?? 'user_api__github_error_generic', {
+        message: detail,
+      })
+    },
+    async handleGitHubTest() {
+      if (this.githubAction) return
+      this.githubAction = 'test'
+      this.githubStatus = this.$t('user_api__github_testing')
+      try {
+        const snapshot = await getGitHubUserApiSnapshot()
+        this.githubStatus = this.$t('user_api__github_test_success', {
+          version: snapshot.version,
+          count: snapshot.files.length,
+          commit: snapshot.commitSha.substring(0, 7),
+        })
+      } catch (err) {
+        const message = this.formatGitHubError(err)
+        this.githubStatus = message
+        void dialog(message)
+      } finally {
+        this.githubAction = ''
+      }
+    },
+    async handleGitHubImport() {
+      if (this.githubAction) return
+      this.githubAction = 'import'
+      this.githubStatus = this.$t('user_api__github_importing')
+      try {
+        const snapshot = await getGitHubUserApiSnapshot()
+        const confirmed = await this.$dialog.confirm({
+          message: this.$t('user_api__github_import_confirm', {
+            localCount: this.apiList.length,
+            version: snapshot.version,
+            remoteCount: snapshot.files.length,
+          }),
+          confirmButtonText: this.$t('ok'),
+          cancelButtonText: this.$t('cancel_button_text'),
+        })
+        if (!confirmed) {
+          this.githubStatus = ''
+          return
+        }
+
+        const previousId = appSetting['common.apiSource']
+        const previousWasCustom = this.apiList.some(api => api.id == previousId)
+        const items = await downloadGitHubUserApiSnapshot(snapshot)
+        const apiList = await replaceUserApisFromGitHub(items)
+        userApi.list = apiList
+        if (previousWasCustom && !apiList.some(api => api.id == previousId)) {
+          const fallback = apiSourceInfo.find(api => !api.disabled) ?? apiList[0]
+          updateSetting({ 'common.apiSource': fallback?.id ?? '' })
+        }
+        this.githubStatus = this.$t('user_api__github_import_success', {
+          version: snapshot.version,
+          count: apiList.length,
+        })
+      } catch (err) {
+        const message = this.formatGitHubError(err)
+        this.githubStatus = message
+        void dialog(message)
+      } finally {
+        this.githubAction = ''
+      }
+    },
+    handleImport() {
       void showSelectDialog({
         title: this.$t('user_api__import_file'),
         properties: ['openFile'],
@@ -96,12 +207,10 @@ export default {
     handleExport() {
 
     },
-    async handleRemove(index) {
-      const api = this.apiList[index]
-      if (!api) return
+    async handleRemove(api) {
       if (appSetting['common.apiSource'] == api.id) {
         let backApi = apiSourceInfo.find(api => !api.disabled)
-        if (!backApi) backApi = userApi.list[0]
+        if (!backApi) backApi = userApi.list.find(item => item.id != api.id)
         updateSetting({ 'common.apiSource': backApi?.id ?? '' })
       }
       userApi.list = await removeUserApi([api.id])
@@ -156,6 +265,54 @@ export default {
   max-height: 100%;
   margin-top: 15px;
   padding: 0 7px;
+}
+.group {
+  + .group {
+    margin-top: 8px;
+  }
+}
+.groupHeader {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: @radius-border;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 16px;
+  gap: 8px;
+  align-items: center;
+  color: var(--color-font);
+  background-color: transparent;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  &:hover,
+  &:focus-visible {
+    background-color: var(--color-primary-background-hover);
+    outline: none;
+  }
+}
+.groupName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.groupCount {
+  color: var(--color-font-label);
+  font-size: 12px;
+}
+.groupIcon {
+  width: 16px;
+  height: 16px;
+  color: var(--color-font-label);
+  fill: currentColor;
+  transition: transform 0.2s ease;
+  &.collapsed {
+    transform: rotate(-90deg);
+  }
 }
 .listItem {
   display: flex;
@@ -226,25 +383,40 @@ export default {
     }
   }
 }
+.githubStatus {
+  min-width: 0;
+  padding: 0 7px;
+  margin-top: 10px;
+  color: var(--color-font-label);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
 .footer {
   padding: 0 7px;
   margin-top: 15px;
-  display: flex;
-  flex-flow: row nowrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 .footerBtn {
-  flex: auto;
-  height: 36px;
-  line-height: 36px;
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  line-height: 1.2;
   padding: 0 10px !important;
-  width: 150px;
-  .mixin-ellipsis-1();
-  + .footerBtn {
-    margin-left: 15px;
-  }
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .ruleLink {
   .mixin-ellipsis-1();
 }
+
+@media (max-width: 420px) {
+  .footer {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 
 </style>

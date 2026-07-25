@@ -57,11 +57,15 @@ export const createGitHubUserApiClient = (request = httpFetch) => {
         follow_max: 3,
         timeout: 30_000,
       }).promise
-      const body = assertResponse(response, url).body
-      if (typeof body != 'string') {
+      const successfulResponse = assertResponse(response, url)
+      const { raw } = successfulResponse
+      const script = raw instanceof Uint8Array
+        ? Buffer.from(raw).toString('utf8')
+        : successfulResponse.body
+      if (typeof script != 'string') {
         throw createGitHubUserApiError('GITHUB_INVALID_SCRIPT', file.path)
       }
-      return body
+      return script
     },
   )
 

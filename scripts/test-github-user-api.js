@@ -328,6 +328,26 @@ const main = async() => {
   assert.match(rawUrl, new RegExp(
     `${commitSha}/v260724/V260720-%E5%85%B6%E4%BB%96/%E4%B8%AD%E6%96%87%20%E9%9F%B3%E6%BA%90\\.js$`,
   ))
+  const rawScriptCases = [
+    {
+      response: { statusCode: 200, body: {}, raw: Buffer.from('{}') },
+      expected: '{}',
+    },
+    {
+      response: {
+        statusCode: 200,
+        body: 'JSON string source',
+        raw: Uint8Array.from(Buffer.from('"JSON string source"')),
+      },
+      expected: '"JSON string source"',
+    },
+  ]
+  for (const { response, expected } of rawScriptCases) {
+    const rawRequest = createResponseRequest(new Map([[rawUrl, response]]))
+    const rawDownloads = await createGitHubUserApiClient(rawRequest)
+      .downloadSnapshot(discoveredSnapshot)
+    assert.strictEqual(rawDownloads[0].script, expected)
+  }
 
   const expectClientError = async(responses, operation, code, detail) => {
     const errorRequest = createResponseRequest(new Map(responses))
@@ -342,6 +362,39 @@ const main = async() => {
     )
     return errorRequest
   }
+
+  const transportError = new Error('transport failed')
+  const transportRequest = createResponseRequest(new Map([[branchUrl, transportError]]))
+  await assert.rejects(
+    createGitHubUserApiClient(transportRequest).getSnapshot(),
+    err => err === transportError,
+  )
+
+  await expectClientError(
+    [
+      [branchUrl, { statusCode: 200, body: { commit: { sha: commitSha } } }],
+      [treeUrl, { statusCode: 502, body: {} }],
+    ],
+    client => client.getSnapshot(),
+    'GITHUB_HTTP_ERROR',
+    /502.*git\/trees/,
+  )
+  await expectClientError(
+    [
+      [branchUrl, { statusCode: 200, body: { commit: { sha: commitSha } } }],
+      [treeUrl, {
+        statusCode: 403,
+        headers: {
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': '1784950001',
+        },
+        body: {},
+      }],
+    ],
+    client => client.getSnapshot(),
+    'GITHUB_RATE_LIMIT',
+    /^1784950001$/,
+  )
 
   await expectClientError(
     [[branchUrl, { statusCode: 500, body: {} }]],

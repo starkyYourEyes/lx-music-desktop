@@ -11,6 +11,14 @@ assert.match(userApiTypes, /interface\s+Meta\s*{[\s\S]*md5:\s*string[\s\S]*updat
 assert.match(userApiTypes, /user_api_data_changed/)
 assert.doesNotMatch(userApiTypes, /user_api_data_overwrite/)
 
+const userApiEvent = read('src/main/modules/sync/userApiEvent.ts')
+assert.match(
+  userApiEvent,
+  /from ['"]@main\/modules\/userApi['"]/,
+)
+assert.doesNotMatch(userApiEvent, /@main\/modules\/userApi\/utils/)
+
+
 const syncCommonTypes = read('src/main/types/sync_common.d.ts')
 assert.match(syncCommonTypes, /user_api_get_meta/)
 assert.match(syncCommonTypes, /user_api_pull/)

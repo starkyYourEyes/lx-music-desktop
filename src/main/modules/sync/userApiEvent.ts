@@ -6,7 +6,7 @@ import {
 import {
   getUserApiSyncData,
   overwriteUserApisFromSync,
-} from '@main/modules/userApi/utils'
+} from '@main/modules/userApi'
 import log from '@main/modules/sync/log'
 
 export const getLocalUserApiData = async(): Promise<LX.Sync.UserApi.Data> => {

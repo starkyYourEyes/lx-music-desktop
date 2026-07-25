@@ -53,20 +53,51 @@ const waitForAsyncTurn = () => new Promise(resolve => setImmediate(resolve))
 const createRuntimeHarness = (options = {}) => {
   const actions = []
   const logErrors = []
+  const committedApiIds = []
+  let storeCommits = 0
+  let changeEvents = 0
   let replacementCall = 0
+  let stateReads = 0
+  let syncCall = 0
   let closeCall = 0
   let loadCall = 0
+  let commitCall = 0
   const stableApi = {
     id: 'stable-id',
   }
   const replacementSteps = options.replacementSteps ?? [[stableApi]]
+  const syncSteps = options.syncSteps ?? []
   const closeSteps = options.closeSteps ?? []
   const loadSteps = options.loadSteps ?? []
+  const commitSteps = options.commitSteps ?? []
   let currentApiList = options.initialApis ?? [stableApi]
+  let taskQueue = Promise.resolve()
 
   const runStep = async(step) => {
     if (step instanceof Error) throw step
     return typeof step === 'function' ? step() : step
+  }
+  const runUserApiTask = async(task) => {
+    const result = taskQueue.then(task)
+    taskQueue = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
+  }
+  const commitState = (state) => {
+    const step = commitSteps[commitCall++]
+    if (step instanceof Error) throw step
+    if (typeof step === 'function') step()
+    currentApiList = state.apiList
+    storeCommits++
+    committedApiIds.push(currentApiList.map(api => api.id))
+    return currentApiList
+  }
+  const prepareReplacement = async() => {
+    actions.push('replace')
+    const step = replacementSteps[replacementCall++]
+    return { apiList: await runStep(step) }
   }
 
   const runtime = loadTsModule(
@@ -78,19 +109,34 @@ const createRuntimeHarness = (options = {}) => {
           await runStep(closeSteps[closeCall++])
         },
       },
+      './queue': { runUserApiTask },
       './utils': {
         getUserApis: () => currentApiList,
+        getUserApiState: () => {
+          stateReads++
+          return { apiList: currentApiList }
+        },
         async importApi() {},
         removeApi(ids) {
           actions.push('remove:' + ids.join(','))
           currentApiList = currentApiList.filter(api => !ids.includes(api.id))
         },
         setAllowShowUpdateAlert() {},
-        async replaceApisFromGitHub(items) {
-          actions.push('replace')
-          const step = replacementSteps[replacementCall++]
-          const apiList = await runStep(step)
-          currentApiList = apiList
+        prepareApisFromGitHub: prepareReplacement,
+        commitUserApiState: commitState,
+        notifyUserApiChanged() {
+          changeEvents++
+        },
+        async prepareUserApisFromSync(data) {
+          actions.push('sync')
+          const step = syncSteps[syncCall++] ?? data.apis
+          return { apiList: await runStep(step) }
+        },
+        async getUserApiSyncData() {},
+        async replaceApisFromGitHub() {
+          const state = await prepareReplacement()
+          const apiList = commitState(state)
+          changeEvents++
           return apiList
         },
       },
@@ -120,6 +166,11 @@ const createRuntimeHarness = (options = {}) => {
     runtime,
     actions,
     logErrors,
+    getStoreCommits: () => storeCommits,
+    getChangeEvents: () => changeEvents,
+    getCommittedApiIds: () => committedApiIds,
+    getStateReads: () => stateReads,
+    getCurrentApiList: () => currentApiList,
     selectStableApi: async() => {
       await runtime.setApi(stableApi.id)
       actions.length = 0
@@ -187,7 +238,7 @@ const createHarness = (options = {}) => {
     },
   }
 
-  const userApiUtils = loadTsModule(
+  const rawUserApiUtils = loadTsModule(
     path.join(__dirname, '../src/main/modules/userApi/utils.ts'),
     {
       './config': { userApis: defaultUserApis },
@@ -203,6 +254,19 @@ const createHarness = (options = {}) => {
       'node:crypto': { createHash: createHashImpl },
     },
   )
+  const userApiUtils = {
+    ...rawUserApiUtils,
+    async replaceApisFromGitHub(items) {
+      if (!rawUserApiUtils.prepareApisFromGitHub) {
+        return rawUserApiUtils.replaceApisFromGitHub(items)
+      }
+      const state = await rawUserApiUtils.prepareApisFromGitHub(items)
+      const apiList = rawUserApiUtils.commitUserApiState(state)
+      rawUserApiUtils.notifyUserApiChanged()
+      return apiList
+    },
+  }
+
 
   return {
     userApiUtils,
@@ -534,6 +598,9 @@ const originalLx = global.lx
     const inactiveList = await inactiveRuntime.runtime.replaceApisFromGitHub(makeInput())
     assert.deepStrictEqual(inactiveList, [{ id: 'stable-id' }])
     assert.deepStrictEqual(inactiveRuntime.actions, ['replace'])
+    assert.strictEqual(inactiveRuntime.getStateReads(), 0)
+    assert.strictEqual(inactiveRuntime.getStoreCommits(), 1)
+    assert.strictEqual(inactiveRuntime.getChangeEvents(), 1)
 
     const replacementClose = createDeferred()
     const serializedSetRuntime = createRuntimeHarness({
@@ -612,13 +679,13 @@ const originalLx = global.lx
       'load:new-id',
     ])
 
-    const committedAfterCloseFailure = [
+    const preparedAfterCloseFailure = [
       { id: 'stable-id' },
       { id: 'new-id' },
     ]
     const runtimeCloseFailure = new Error('simulated replacement close failure')
     const closeFailureRuntime = createRuntimeHarness({
-      replacementSteps: [committedAfterCloseFailure],
+      replacementSteps: [preparedAfterCloseFailure],
       closeSteps: [runtimeCloseFailure],
     })
     await closeFailureRuntime.selectStableApi()
@@ -627,19 +694,25 @@ const originalLx = global.lx
       runtimeCloseFailure,
     )
     assert.deepStrictEqual(closeFailureRuntime.actions, ['replace', 'close'])
+    assert.strictEqual(closeFailureRuntime.getStoreCommits(), 0)
+    assert.strictEqual(closeFailureRuntime.getChangeEvents(), 0)
+    assert.deepStrictEqual(
+      await closeFailureRuntime.runtime.getApiList(),
+      [{ id: 'stable-id' }],
+    )
     assert.strictEqual(closeFailureRuntime.logErrors.length, 1)
     closeFailureRuntime.actions.length = 0
     await closeFailureRuntime.runtime.setApi('new-id')
-    assert.deepStrictEqual(closeFailureRuntime.actions, ['close', 'load:new-id'])
+    assert.deepStrictEqual(closeFailureRuntime.actions, ['close'])
 
-    const committedAfterLoadFailure = [
+    const preparedAfterLoadFailure = [
       { id: 'stable-id' },
       { id: 'new-id' },
     ]
     const runtimeLoadFailure = new Error('simulated replacement load failure')
     const cleanupFailure = new Error('simulated replacement cleanup failure')
     const loadFailureRuntime = createRuntimeHarness({
-      replacementSteps: [committedAfterLoadFailure],
+      replacementSteps: [preparedAfterLoadFailure],
       closeSteps: [undefined, cleanupFailure],
       loadSteps: [undefined, runtimeLoadFailure],
     })
@@ -653,11 +726,96 @@ const originalLx = global.lx
       'close',
       'load:stable-id',
       'close',
+      'load:stable-id',
     ])
+    assert.deepStrictEqual(loadFailureRuntime.getCommittedApiIds(), [
+      ['stable-id', 'new-id'],
+      ['stable-id'],
+    ])
+    assert.strictEqual(loadFailureRuntime.getStoreCommits(), 2)
+    assert.strictEqual(loadFailureRuntime.getChangeEvents(), 0)
+    assert.deepStrictEqual(
+      await loadFailureRuntime.runtime.getApiList(),
+      [{ id: 'stable-id' }],
+    )
     assert.strictEqual(loadFailureRuntime.logErrors.length, 2)
     loadFailureRuntime.actions.length = 0
     await loadFailureRuntime.runtime.setApi('new-id')
-    assert.deepStrictEqual(loadFailureRuntime.actions, ['load:new-id'])
+    assert.deepStrictEqual(loadFailureRuntime.actions, ['close'])
+
+    const rollbackError = new Error('simulated replacement rollback failure')
+    const rollbackFailureRuntime = createRuntimeHarness({
+      replacementSteps: [preparedAfterLoadFailure],
+      closeSteps: [undefined, undefined],
+      loadSteps: [undefined, runtimeLoadFailure],
+      commitSteps: [undefined, rollbackError],
+    })
+    await rollbackFailureRuntime.selectStableApi()
+    await assert.rejects(
+      () => rollbackFailureRuntime.runtime.replaceApisFromGitHub(makeInput()),
+      runtimeLoadFailure,
+    )
+    assert.deepStrictEqual(rollbackFailureRuntime.actions, [
+      'replace',
+      'close',
+      'load:stable-id',
+      'close',
+    ])
+    assert.strictEqual(rollbackFailureRuntime.getStoreCommits(), 1)
+    assert.strictEqual(rollbackFailureRuntime.getChangeEvents(), 0)
+    assert.deepStrictEqual(
+      await rollbackFailureRuntime.runtime.getApiList(),
+      preparedAfterLoadFailure,
+    )
+    assert.strictEqual(rollbackFailureRuntime.logErrors.length, 2)
+
+    const githubFirstPreparation = createDeferred()
+    const githubFirstRuntime = createRuntimeHarness({
+      initialApis: [],
+      replacementSteps: [() => githubFirstPreparation.promise],
+      syncSteps: [[{ id: 'sync-id' }]],
+    })
+    const githubFirst = githubFirstRuntime.runtime.replaceApisFromGitHub(makeInput())
+    await waitForAsyncTurn()
+    assert.deepStrictEqual(githubFirstRuntime.actions, ['replace'])
+    const syncSecond = githubFirstRuntime.runtime.overwriteUserApisFromSync({ apis: [] })
+    await waitForAsyncTurn()
+    assert.deepStrictEqual(githubFirstRuntime.actions, ['replace'])
+    githubFirstPreparation.resolve([{ id: 'github-id' }])
+    await Promise.all([githubFirst, syncSecond])
+    assert.deepStrictEqual(githubFirstRuntime.actions, ['replace', 'sync'])
+    assert.deepStrictEqual(githubFirstRuntime.getCommittedApiIds(), [
+      ['github-id'],
+      ['sync-id'],
+    ])
+    assert.deepStrictEqual(
+      await githubFirstRuntime.runtime.getApiList(),
+      [{ id: 'sync-id' }],
+    )
+
+    const syncFirstPreparation = createDeferred()
+    const syncFirstRuntime = createRuntimeHarness({
+      initialApis: [],
+      replacementSteps: [[{ id: 'github-id' }]],
+      syncSteps: [() => syncFirstPreparation.promise],
+    })
+    const syncFirst = syncFirstRuntime.runtime.overwriteUserApisFromSync({ apis: [] })
+    await waitForAsyncTurn()
+    assert.deepStrictEqual(syncFirstRuntime.actions, ['sync'])
+    const githubSecond = syncFirstRuntime.runtime.replaceApisFromGitHub(makeInput())
+    await waitForAsyncTurn()
+    assert.deepStrictEqual(syncFirstRuntime.actions, ['sync'])
+    syncFirstPreparation.resolve([{ id: 'sync-id' }])
+    await Promise.all([syncFirst, githubSecond])
+    assert.deepStrictEqual(syncFirstRuntime.actions, ['sync', 'replace'])
+    assert.deepStrictEqual(syncFirstRuntime.getCommittedApiIds(), [
+      ['sync-id'],
+      ['github-id'],
+    ])
+    assert.deepStrictEqual(
+      await syncFirstRuntime.runtime.getApiList(),
+      [{ id: 'github-id' }],
+    )
 
     const inactiveMissingRuntime = createRuntimeHarness()
     await inactiveMissingRuntime.runtime.setApi('missing-id')
@@ -716,7 +874,7 @@ const originalLx = global.lx
     )
     assert.deepStrictEqual(removeCloseFailureRuntime.actions, ['close'])
     assert.deepStrictEqual(
-      removeCloseFailureRuntime.runtime.getApiList(),
+      await removeCloseFailureRuntime.runtime.getApiList(),
       [{ id: 'stable-id' }],
     )
     removeCloseFailureRuntime.actions.length = 0

@@ -10,12 +10,32 @@ import zlib from 'node:zlib'
 let userApis: LX.UserApi.UserApiInfo[] | null
 let scripts = new Map<string, string>()
 
+export interface UserApiState {
+  apiList: LX.UserApi.UserApiInfo[]
+  scripts: Map<string, string>
+}
+
 const serializeUserApis = (apis: LX.UserApi.UserApiInfo[], apiScripts: Map<string, string>) => {
   return apis.map(api => {
     const serialized = { ...api, script: apiScripts.get(api.id) }
     if (api.remote) serialized.remote = { ...api.remote }
     return serialized
   })
+}
+
+export const commitUserApiState = (state: UserApiState): LX.UserApi.UserApiInfo[] => {
+  getStore(STORE_NAMES.USER_API).set('userApis', serializeUserApis(state.apiList, state.scripts))
+  userApis = state.apiList
+  scripts = state.scripts
+  return userApis
+}
+
+export const notifyUserApiChanged = () => {
+  try {
+    global.lx.event_app.user_api_changed()
+  } catch (err) {
+    log.error('emit user API changed event error:', err)
+  }
 }
 
 const saveData = (emitChange = true) => {
@@ -56,6 +76,14 @@ export const getUserApis = (): LX.UserApi.UserApiInfo[] => {
   })
   if (requiredUpdate) saveData(false)
   return userApis
+}
+
+export const getUserApiState = (): UserApiState => {
+  getUserApis()
+  return {
+    apiList: userApis!,
+    scripts,
+  }
 }
 
 const INFO_NAMES = {
@@ -251,7 +279,9 @@ const createGitHubUserApiId = (remotePath: string) => {
     .substring(0, 16)
 }
 
-export const replaceApisFromGitHub = async(items: LX.UserApi.GitHubImportItem[]) => {
+export const prepareApisFromGitHub = async(
+  items: LX.UserApi.GitHubImportItem[],
+): Promise<UserApiState> => {
   const snapshots = validateGitHubImportItems(items)
 
   const nextUserApis: LX.UserApi.UserApiInfo[] = []
@@ -272,15 +302,10 @@ export const replaceApisFromGitHub = async(items: LX.UserApi.GitHubImportItem[])
     nextScripts.set(id, await deflateScript(script))
   }
 
-  getStore(STORE_NAMES.USER_API).set('userApis', serializeUserApis(nextUserApis, nextScripts))
-  userApis = nextUserApis
-  scripts = nextScripts
-  try {
-    global.lx.event_app.user_api_changed()
-  } catch (err) {
-    log.error('emit user API changed event error:', err)
+  return {
+    apiList: nextUserApis,
+    scripts: nextScripts,
   }
-  return getUserApis()
 }
 export const importApi = async(scriptRaw: string): Promise<LX.UserApi.UserApiInfo> => {
   let scriptInfo = parseScriptInfo(scriptRaw)
@@ -332,7 +357,9 @@ export const getUserApiSyncData = async(): Promise<LX.Sync.UserApi.Data> => {
   })
 }
 
-export const overwriteUserApisFromSync = async(data: LX.Sync.UserApi.Data) => {
+export const prepareUserApisFromSync = async(
+  data: LX.Sync.UserApi.Data,
+): Promise<UserApiState> => {
   assertUserApiSyncData(data)
   const nextUserApis: LX.UserApi.UserApiInfo[] = []
   const nextScripts = new Map<string, string>()
@@ -344,7 +371,8 @@ export const overwriteUserApisFromSync = async(data: LX.Sync.UserApi.Data) => {
     })
     nextScripts.set(api.id, await deflateScript(script))
   }
-  getStore(STORE_NAMES.USER_API).set('userApis', serializeUserApis(nextUserApis, nextScripts))
-  userApis = nextUserApis
-  scripts = nextScripts
+  return {
+    apiList: nextUserApis,
+    scripts: nextScripts,
+  }
 }

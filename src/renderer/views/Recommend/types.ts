@@ -5,5 +5,6 @@ export type RecommendCard = Omit<LX.Netease.Playlist, 'source'> & {
   isPrivateRadar?: boolean
   isQQGuessLike?: boolean
   isQQDailyRecommend?: boolean
+  isQQBrushMode?: boolean
   isPlaceholder?: boolean
 }

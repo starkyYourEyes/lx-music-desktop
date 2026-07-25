@@ -864,11 +864,13 @@ const testDailyPageComposablesUseSharedPlaybackAndDetailLoader = () => {
 
 const testAccountStoreResetsBothQQRecommendationStates = () => {
   let guessLikeResets = 0
+  let brushModeResets = 0
   let dailyResets = 0
   const store = loadTsModule(path.join(__dirname, '../src/renderer/store/qqMusic.ts'), {
     '@common/utils/vueTools': { ref, shallowRef: ref, computed },
     '@renderer/utils/ipc': { getQQMusicAccountStatus: async() => ({ isLoggedIn: false, profile: null }), logoutQQMusic: async() => {} },
     '@renderer/store/qqGuessLike/action': { resetQQGuessLikeQueue: () => { guessLikeResets++ } },
+    '@renderer/store/qqBrushMode/action': { resetQQBrushModeQueue: () => { brushModeResets++ } },
     '@renderer/store/qqDailyRecommend/action': { resetQQDailyRecommend: () => { dailyResets++ } },
   })
   const status = uin => ({ isLoggedIn: true, profile: { uin, nickname: uin } })
@@ -876,6 +878,7 @@ const testAccountStoreResetsBothQQRecommendationStates = () => {
   store.setQQMusicAccountStatus(status('A'))
   store.setQQMusicAccountStatus(status('B'))
   assert.strictEqual(guessLikeResets, 2)
+  assert.strictEqual(brushModeResets, 2)
   assert.strictEqual(dailyResets, 2)
 }
 

@@ -4,22 +4,29 @@ import type { RecommendCard } from '@renderer/views/Recommend/types'
 
 export const useQQGuessLikeCard = ({
   songs,
+  currentSong,
   isLoading,
   loadError,
   isLoggedIn,
 }: {
   songs: { value: LX.Music.MusicInfo_tx[] }
+  currentSong: { value: LX.Music.MusicInfo_tx | null }
   isLoading: { value: boolean }
   loadError: { value: string }
   isLoggedIn: { value: boolean }
 }) => {
   const card = computed((): RecommendCard => {
-    const song = songs.value[0]
+    const activeSong = currentSong.value
+    const previewSong = songs.value[0]
+    const song = activeSong ?? previewSong
+    const songText = song ? `${song.name} · ${song.singer}` : ''
     let desc = '登录 QQ 音乐后获取猜你喜欢'
     if (isLoggedIn.value) {
-      desc = isLoading.value
-        ? '正在从 QQ 音乐加载猜你喜欢...'
-        : loadError.value || (song ? `${song.name} · ${song.singer}` : '暂时没有拿到猜你喜欢')
+      desc = activeSong
+        ? songText
+        : isLoading.value
+          ? '正在从 QQ 音乐加载猜你喜欢...'
+          : loadError.value || songText || '暂时没有拿到猜你喜欢'
     }
 
     return {

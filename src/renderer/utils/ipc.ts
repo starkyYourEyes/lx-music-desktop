@@ -750,10 +750,20 @@ export const logoutQQMusic = async() => {
   await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_logout)
 }
 
-export const getQQMusicGuessLikeSongs = async(continuation = false) => {
+export const getQQMusicGuessLikeSongs = async(
+  continuation = false,
+  apiVersion: LX.QQMusic.GuessLikeApiVersion = 'new',
+) => {
   return rendererInvoke<LX.QQMusic.GuessLikeRequest, LX.Music.MusicInfo_tx[]>(
     WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_guess_like_songs,
-    { continuation },
+    { continuation, apiVersion },
+  )
+}
+
+export const getQQMusicBrushSongs = async(continuation = false) => {
+  return rendererInvoke<LX.QQMusic.GuessLikeRequest, LX.Music.MusicInfo_tx[]>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_guess_like_songs,
+    { continuation, apiVersion: 'new', radioMode: 'brush' },
   )
 }
 

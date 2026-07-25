@@ -1,4 +1,5 @@
 const assert = require('node:assert')
+const fs = require('node:fs')
 const { createHash } = require('node:crypto')
 const path = require('node:path')
 const loadTsModule = require('./qq-music-test-loader')
@@ -6,6 +7,8 @@ const loadTsModule = require('./qq-music-test-loader')
 const { getCookieValue, getGtk } = loadTsModule(
   path.join(__dirname, '../src/main/modules/qqMusic/auth.ts'),
 )
+const requestModulePath = path.join(__dirname, '../src/main/modules/qqMusic/request.ts')
+const requestModule = fs.existsSync(requestModulePath) ? loadTsModule(requestModulePath) : {}
 
 const tracks = [
   {
@@ -40,6 +43,7 @@ const songModule = loadTsModule(path.join(__dirname, '../src/main/modules/qqMusi
     sizeFormate: value => `size:${value}`,
   },
   './auth': { getCookieValue },
+  './request': requestModule,
 })
 
 const { createQQMusicDailyRecommendService } = loadTsModule(
@@ -47,6 +51,7 @@ const { createQQMusicDailyRecommendService } = loadTsModule(
   {
     './auth': { getCookieValue, getGtk },
     './song': songModule,
+    './request': requestModule,
   },
 )
 

@@ -640,6 +640,11 @@ declare global {
       'recommend.dailySongCategoryTagKeys': string[] | null
 
       /**
+       * QQ Music Guess You Like request implementation
+       */
+      'recommend.qqGuessLikeApiVersion': LX.QQMusic.GuessLikeApiVersion
+
+      /**
        * 是否启用代理
        */
       'network.proxy.enable': boolean

@@ -41,12 +41,16 @@ const loadHarness = () => {
   const tempListMeta = { id: '' }
   const responses = []
   const requestKinds = []
+  const requestVersions = []
   const setTempListCalls = []
   const playListCalls = []
   let clearPlayedListCalls = 0
 
-  const getQQMusicGuessLikeSongs = continuation => {
+  const appSetting = { 'recommend.qqGuessLikeApiVersion': 'new' }
+
+  const getQQMusicGuessLikeSongs = (continuation, apiVersion) => {
     requestKinds.push(continuation)
+    requestVersions.push(apiVersion)
     assert(responses.length, `missing QQ response for continuation=${continuation}`)
     const response = responses.shift()
     if (response instanceof Error) return Promise.reject(response)
@@ -74,6 +78,7 @@ const loadHarness = () => {
       clearPlayedList: () => { clearPlayedListCalls++ },
     },
     '@renderer/store/player/state': { playInfo, playMusicInfo },
+    '@renderer/store/setting': { appSetting },
     '@renderer/utils/ipc': { getQQMusicGuessLikeSongs },
     '@renderer/views/Recommend/constants': { QQ_GUESS_LIKE_TEMP_LIST_ID },
     './state': state,
@@ -87,6 +92,8 @@ const loadHarness = () => {
     tempListMeta,
     responses,
     requestKinds,
+    requestVersions,
+    appSetting,
     setTempListCalls,
     playListCalls,
     get clearPlayedListCalls() { return clearPlayedListCalls },
@@ -105,6 +112,7 @@ const testInitialLoadAndEntry = async() => {
 
   await harness.action.prepareQQGuessLikeQueue('account-a')
   assert.deepStrictEqual(harness.requestKinds, [false])
+  assert.deepStrictEqual(harness.requestVersions, ['new'])
   assert.deepStrictEqual(harness.state.qqGuessLikeQueue.map(item => item.id), ['a', 'b', 'c'])
 
   await harness.action.enterQQGuessLikeMode('account-a')
@@ -130,6 +138,7 @@ const testThresholdSingleFlightAppendAndDeduplicate = async() => {
   const second = harness.action.ensureQQGuessLikeNextSongs('account-a')
   assert.strictEqual(first, second)
   assert.deepStrictEqual(harness.requestKinds, [false, true])
+  assert.deepStrictEqual(harness.requestVersions, ['new', 'new'])
 
   continuation.resolve([song('b'), song('f'), song('g')])
   await Promise.all([first, second])
@@ -224,6 +233,27 @@ const testAccountChangeRejectsStaleContinuation = async() => {
   assert.deepStrictEqual(harness.state.qqGuessLikeQueue.map(item => item.id), ['x', 'y', 'z'])
 }
 
+const testApiVersionChangeStartsFreshQueueAndRejectsStaleResponse = async() => {
+  const harness = loadHarness()
+  const newApiRequest = deferred()
+  harness.responses.push(newApiRequest.promise, ['legacy-a', 'legacy-b'].map(song))
+
+  const pendingNewApi = harness.action.prepareQQGuessLikeQueue('account-a')
+  harness.appSetting['recommend.qqGuessLikeApiVersion'] = 'legacy'
+  const legacySongs = await harness.action.prepareQQGuessLikeQueue('account-a')
+
+  assert.deepStrictEqual(harness.requestKinds, [false, false])
+  assert.deepStrictEqual(harness.requestVersions, ['new', 'legacy'])
+  assert.deepStrictEqual(legacySongs.map(item => item.id), ['legacy-a', 'legacy-b'])
+
+  newApiRequest.resolve([song('stale-new')])
+  await pendingNewApi
+  assert.deepStrictEqual(
+    harness.state.qqGuessLikeQueue.map(item => item.id),
+    ['legacy-a', 'legacy-b'],
+  )
+}
+
 const testTemporaryListReplacementDisablesModeAndRejectsStaleContinuation = async() => {
   const harness = loadHarness()
   await prepareAndEnter(harness, ['a', 'b', 'c'])
@@ -274,6 +304,7 @@ const tests = [
   testForcedReloadDoesNotRaceActiveContinuation,
   testResetRejectsStaleContinuation,
   testAccountChangeRejectsStaleContinuation,
+  testApiVersionChangeStartsFreshQueueAndRejectsStaleResponse,
   testTemporaryListReplacementDisablesModeAndRejectsStaleContinuation,
   testGlobalLifecycleWiring,
 ]

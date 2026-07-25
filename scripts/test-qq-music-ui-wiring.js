@@ -477,7 +477,14 @@ const testQQRecommendCards = () => {
   const isLoading = ref(true)
   const loadError = ref('')
   const isLoggedIn = ref(true)
-  const { card, getKicker } = cardsModule.useQQGuessLikeCard({ songs, isLoading, loadError, isLoggedIn })
+  const currentSong = ref(null)
+  const { card, getKicker } = cardsModule.useQQGuessLikeCard({
+    songs,
+    currentSong,
+    isLoading,
+    loadError,
+    isLoggedIn,
+  })
   assert.strictEqual(card.value.id, 'qq_guess_like')
   assert.strictEqual(card.value.isQQGuessLike, true)
   assert.strictEqual(card.value.img, qqSong.meta.picUrl)

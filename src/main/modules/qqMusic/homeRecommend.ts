@@ -1,15 +1,21 @@
-import { getCookieValue } from './auth'
+import { getCookieValue, getGtk } from './auth'
+import {
+  createQQMusicFallbackGuid,
+  createQQMusicFallbackUid,
+  createQQMusicRequestSign,
+} from './request'
 import { normalizeQQMusicTracks, QQMusicAuthError } from './song'
 
-const HOME_RECOMMEND_URL = 'https://u.y.qq.com/cgi-bin/musicu.fcg'
+const HOME_RECOMMEND_URL = 'https://u6.y.qq.com/cgi-bin/musics.fcg'
 const HOME_RECOMMEND_ERROR = 'QQ Music home recommendation request failed'
 
-type RawCard = {
+interface RawCard {
   id?: string | number
   type?: number
   title?: string
   subtitle?: string
   cover?: string
+  scheme?: string
   cnt?: number
   miscellany?: {
     cnt_content?: string
@@ -17,27 +23,28 @@ type RawCard = {
   }
 }
 
-type RawNiche = {
+interface RawNiche {
   v_card?: RawCard[]
 }
 
-type RawShelf = {
+interface RawShelf {
   id?: number
   title_template?: string
   title_content?: string
   v_niche?: RawNiche[]
 }
 
-const getLoginType = (cookie: string): number => {
-  const rawValue = getCookieValue(cookie, 'tmeLoginType')
-  if (!rawValue) return 2
-  const value = Number(rawValue)
-  return Number.isInteger(value) && value > 0 ? value : 2
+const getHomeShelves = (payload: any): RawShelf[] => {
+  const shelves = payload?.home?.data?.v_shelf ?? payload?.req_1?.data?.v_shelf
+  return Array.isArray(shelves) ? shelves : []
 }
 
-const getHomeShelves = (payload: any): RawShelf[] => {
-  const shelves = payload?.home?.data?.v_shelf
-  return Array.isArray(shelves) ? shelves : []
+const assertModuleResponse = (payload: any, checkRetcode = false) => {
+  if (payload?.code == 1000 || payload?.req_1?.code == 1000) throw new QQMusicAuthError()
+  if (payload?.code != 0 || payload?.req_1?.code != 0 ||
+    (checkRetcode && payload?.req_1?.data?.retcode != 0)) {
+    throw new Error(HOME_RECOMMEND_ERROR)
+  }
 }
 
 const getShelfCards = (shelf: RawShelf | undefined): RawCard[] => {
@@ -63,18 +70,35 @@ const formatPlayCount = (card: RawCard): string => {
   return count > 0 ? String(count) : ''
 }
 
+const getNumericId = (value: unknown): string => {
+  const id = String(value ?? '')
+  return /^\d+$/.test(id) && id != '0' ? id : ''
+}
+
+const getPlaylistId = (card: RawCard): string => {
+  const id = getNumericId(card.id)
+  if (id) return id
+  try {
+    const params = new URL(card.scheme ?? '').searchParams.get('p')
+    if (!params) return ''
+    return getNumericId(JSON.parse(params)?.id)
+  } catch {
+    return ''
+  }
+}
+
 const normalizePlaylist = (card: RawCard): LX.QQMusic.RecommendPlaylist | null => {
-  const id = String(card.id ?? '')
+  const id = getPlaylistId(card)
   const name = card.title?.trim() ?? ''
   const img = card.cover?.trim() ?? ''
-  if (card.type != 500 || !/^\d+$/.test(id) || id == '0' || !name || !img) return null
+  if (card.type != 500 || !id || !name || !img) return null
   return {
     id,
     source: 'tx',
     name,
     img,
-    description: card.miscellany?.rcmd_reason?.trim() || card.subtitle?.trim() || '',
-    author: card.subtitle?.trim() || 'QQ Music',
+    description: [card.miscellany?.rcmd_reason?.trim(), card.subtitle?.trim()].find(Boolean) ?? '',
+    author: [card.subtitle?.trim(), 'QQ Music'].find(Boolean) ?? 'QQ Music',
     playCount: formatPlayCount(card),
   }
 }
@@ -83,6 +107,23 @@ const normalizePlaylists = (shelf: RawShelf | undefined): LX.QQMusic.RecommendPl
   return getShelfCards(shelf)
     .map(normalizePlaylist)
     .filter((playlist): playlist is LX.QQMusic.RecommendPlaylist => playlist != null)
+}
+
+const normalizeFeaturedPlaylists = (shelf: RawShelf | undefined): LX.QQMusic.RecommendPlaylist[] => {
+  return getShelfCards(shelf)
+    .filter(card => String(card.id ?? '') != '0' && card.title?.replace(/\s/g, '') != '每日30首')
+    .map(normalizePlaylist)
+    .filter((playlist): playlist is LX.QQMusic.RecommendPlaylist => playlist != null)
+}
+
+const normalizeBrushMode = (shelf: RawShelf | undefined): LX.QQMusic.BrushMode | null => {
+  const card = getShelfCards(shelf).find(card => card.type == 700 && String(card.id ?? '') == '99')
+  if (!card) return null
+  return {
+    id: '99',
+    title: '刷歌模式',
+    description: card.title?.trim() ?? '猜你喜欢-沉浸刷歌',
+  }
 }
 
 const getRelatedSongIds = (shelf: RawShelf | undefined): number[] => {
@@ -105,10 +146,12 @@ export const normalizeQQMusicHomeRecommendation = (
 ): LX.QQMusic.HomeRecommendation => {
   const shelves = getHomeShelves(payload)
   const featuredShelf = shelves.find(shelf => shelf.id == 301)
-  const privateShelf = shelves.find(shelf => getShelfTitle(shelf, '').includes('私荐歌单'))
+  const privateShelf = shelves.find(shelf => getShelfTitle(shelf, '').includes('私荐歌单')) ??
+    shelves.find(shelf => shelf.id == 271)
   const relatedShelf = shelves.find(shelf => getShelfTitle(shelf, '').includes('也会喜欢')) ??
     shelves.find(shelf => shelf.id == 207)
   const guideShelf = shelves.find(shelf => getShelfTitle(shelf, '').includes('歌单遨游指南')) ??
+    shelves.find(shelf => shelf.id == 205) ??
     shelves.find(shelf => shelf.id == 276)
 
   const trackById = new Map<string, LX.Music.MusicInfo_tx>()
@@ -125,7 +168,8 @@ export const normalizeQQMusicHomeRecommendation = (
 
   return {
     title: getShelfTitle(featuredShelf, 'Hi 今日为你推荐'),
-    featuredPlaylists: normalizePlaylists(featuredShelf),
+    brushMode: normalizeBrushMode(featuredShelf),
+    featuredPlaylists: normalizeFeaturedPlaylists(featuredShelf),
     privatePlaylists: normalizePlaylists(privateShelf),
     relatedSongTitle: getShelfTitle(relatedShelf, '为你推荐的歌曲'),
     relatedSongGroups,
@@ -145,10 +189,15 @@ export const createQQMusicHomeRecommendService = ({
   clearTimeoutImpl?: typeof clearTimeout
 }) => {
   const post = async(cookie: string, body: Record<string, unknown>) => {
+    const requestBody = JSON.stringify(body)
+    const url = new URL(HOME_RECOMMEND_URL)
+    url.searchParams.set('sign', createQQMusicRequestSign(requestBody))
     const controller = new AbortController()
-    const timer = setTimeoutImpl(() => controller.abort(), 10_000)
+    const timer = setTimeoutImpl(() => {
+      controller.abort()
+    }, 10_000)
     try {
-      const response = await fetchImpl(HOME_RECOMMEND_URL, {
+      const response = await fetchImpl(url, {
         method: 'POST',
         signal: controller.signal,
         headers: {
@@ -156,7 +205,7 @@ export const createQQMusicHomeRecommendService = ({
           Referer: 'https://y.qq.com/',
           Cookie: cookie,
         },
-        body: JSON.stringify(body),
+        body: requestBody,
       })
       if (!response.ok) throw new Error(`${HOME_RECOMMEND_ERROR}: ${response.status}`)
       return response.json()
@@ -169,28 +218,61 @@ export const createQQMusicHomeRecommendService = ({
     const cookie = getCookie()
     if (!cookie) throw new QQMusicAuthError('QQ Music account is not logged in')
     const qq = (getCookieValue(cookie, 'uin') || getCookieValue(cookie, 'qqmusic_uin')).replace(/^o/, '')
-    const authst = getCookieValue(cookie, 'qqmusic_key')
+    const key = getCookieValue(cookie, 'qqmusic_key') || getCookieValue(cookie, 'qm_keyst')
+    if (!qq || !key) throw new QQMusicAuthError('QQ Music account is not logged in')
+    const uid = getCookieValue(cookie, 'uid') || createQQMusicFallbackUid(qq)
+    const guid = getCookieValue(cookie, 'qqmusic_guid') ||
+      getCookieValue(cookie, 'guid') ||
+      createQQMusicFallbackGuid(qq)
+    const gtk = getGtk(key)
     try {
       const comm = {
-        ct: 11,
-        cv: 14090008,
-        v: 14090008,
-        qq,
-        authst,
-        tmeAppID: 'qqmusic',
-        tmeLoginType: getLoginType(cookie),
+        format: 'json',
+        ct: 20,
+        cv: 2116,
+        platform: 'wk_v17',
+        uid,
+        guid,
+        inCharset: 'utf-8',
+        outCharset: 'utf-8',
+        notice: 0,
+        needNewCode: 1,
+        uin: qq,
+        g_tk_new_20200303: gtk,
+        g_tk: gtk,
       }
-      const homePayload = await post(cookie, {
+      const firstPagePayload = await post(cookie, {
         comm,
-        home: {
+        req_1: {
           module: 'music.recommend.RecommendFeed',
           method: 'get_recommend_feed',
-          param: { direction: 0, page: 1, s_num: 0 },
+          param: { direction: 0, page: 1, v_cache: [], v_uniq: [], s_num: 0 },
         },
       })
-      if (homePayload?.code == 1000 || homePayload?.home?.code == 1000) throw new QQMusicAuthError()
-      if (homePayload?.code != 0 || homePayload?.home?.code != 0 || homePayload?.home?.data?.retcode != 0) {
-        throw new Error(HOME_RECOMMEND_ERROR)
+      assertModuleResponse(firstPagePayload, true)
+      const firstPageShelves = getHomeShelves(firstPagePayload)
+
+      const secondPagePayload = await post(cookie, {
+        comm,
+        req_1: {
+          module: 'music.recommend.RecommendFeed',
+          method: 'get_recommend_feed',
+          param: {
+            direction: 1,
+            page: 2,
+            v_cache: [],
+            v_uniq: [],
+            s_num: firstPageShelves.length,
+          },
+        },
+      })
+      assertModuleResponse(secondPagePayload, true)
+      const homePayload = {
+        home: {
+          data: {
+            v_shelf: [...firstPageShelves, ...getHomeShelves(secondPagePayload)],
+          },
+        },
       }
 
       const shelves = getHomeShelves(homePayload)
@@ -201,21 +283,18 @@ export const createQQMusicHomeRecommendService = ({
       if (ids.length) {
         const tracksPayload = await post(cookie, {
           comm,
-          tracks: {
+          req_1: {
             module: 'music.trackInfo.UniformRuleCtrl',
             method: 'CgiGetTrackInfo',
             param: {
-              ctx: 0,
-              client: 1,
               ids,
               types: ids.map(() => 0),
-              modify_stamp: ids.map(() => 0),
+              source: 'AiNoFree',
             },
           },
         })
-        if (tracksPayload?.code == 1000 || tracksPayload?.tracks?.code == 1000) throw new QQMusicAuthError()
-        if (tracksPayload?.code != 0 || tracksPayload?.tracks?.code != 0) throw new Error(HOME_RECOMMEND_ERROR)
-        tracks = normalizeQQMusicTracks(tracksPayload?.tracks?.data?.tracks)
+        assertModuleResponse(tracksPayload)
+        tracks = normalizeQQMusicTracks(tracksPayload?.req_1?.data?.tracks)
       }
       return normalizeQQMusicHomeRecommendation(homePayload, tracks)
     } catch (error) {

@@ -1,6 +1,20 @@
 <template lang="pug">
 dt#recommend {{ $t('setting__recommend') }}
 dd
+  h3#recommend_qq_guess_like_api {{ $t('setting__recommend_qq_guess_like_api') }}
+  div(:class="$style.apiVersionOptions")
+    base-checkbox(
+      id="setting_qq_guess_like_api_new" name="setting_qq_guess_like_api_version" need
+      :model-value="appSetting['recommend.qqGuessLikeApiVersion']" value="new"
+      :label="$t('setting__recommend_qq_guess_like_api_new')"
+      @update:model-value="updateSetting({ 'recommend.qqGuessLikeApiVersion': $event })")
+    base-checkbox(
+      id="setting_qq_guess_like_api_legacy" name="setting_qq_guess_like_api_version" need
+      :model-value="appSetting['recommend.qqGuessLikeApiVersion']" value="legacy"
+      :label="$t('setting__recommend_qq_guess_like_api_legacy')"
+      @update:model-value="updateSetting({ 'recommend.qqGuessLikeApiVersion': $event })")
+  p(:class="$style.orderDesc") {{ $t('setting__recommend_qq_guess_like_api_tip') }}
+dd
   h3#recommend_home_section_order {{ $t('setting__recommend_home_section_order') }}
   div(:class="$style.orderPanel")
     p(:class="$style.orderDesc") {{ $t('setting__recommend_home_section_order_tip') }}
@@ -189,6 +203,13 @@ export default {
 
 .orderPanel {
   max-width: 560px;
+}
+
+.apiVersionOptions {
+  margin-bottom: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
 }
 
 .tagPanel {

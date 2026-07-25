@@ -1,29 +1,12 @@
-import crypto from 'node:crypto'
 import { getCookieValue, getGtk } from './auth'
 import { normalizeQQMusicTracks, QQMusicAuthError } from './song'
+import {
+  createQQMusicFallbackGuid,
+  createQQMusicFallbackUid,
+  createQQMusicRequestSign,
+} from './request'
 
 const DAILY_RECOMMEND_URL = 'https://u6.y.qq.com/cgi-bin/musics.fcg'
-const SIGN_PREFIX = 'CJBPACrRuNy7'
-const SIGN_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789'
-
-const createRequestSign = (body: string): string => {
-  let randomPart = ''
-  const length = crypto.randomInt(10, 17)
-  for (let index = 0; index < length; index++) {
-    randomPart += SIGN_CHARS[crypto.randomInt(SIGN_CHARS.length)]
-  }
-  const hash = crypto.createHash('md5').update(`${SIGN_PREFIX}${body}`).digest('hex')
-  return `zza${randomPart}${hash}`
-}
-
-const createFallbackGuid = (uin: string): string => {
-  return crypto.createHash('md5').update(`lx-music-qq-guid:${uin}`).digest('hex')
-}
-
-const createFallbackUid = (uin: string): string => {
-  const hash = crypto.createHash('sha256').update(`lx-music-qq-uid:${uin}`).digest('hex')
-  return String(Number.parseInt(hash.slice(0, 12), 16) % 10_000_000_000).padStart(10, '0')
-}
 
 export const createQQMusicDailyRecommendService = ({
   fetchImpl = fetch,
@@ -42,8 +25,8 @@ export const createQQMusicDailyRecommendService = ({
     const uin = (getCookieValue(cookie, 'qqmusic_uin') || getCookieValue(cookie, 'uin')).replace(/^o/, '')
     const key = getCookieValue(cookie, 'qqmusic_key') || getCookieValue(cookie, 'qm_keyst')
     if (!uin || !key) throw new QQMusicAuthError('QQ Music account is not logged in')
-    const guid = getCookieValue(cookie, 'qqmusic_guid') || createFallbackGuid(uin)
-    const uid = getCookieValue(cookie, 'uid') || createFallbackUid(uin)
+    const guid = getCookieValue(cookie, 'qqmusic_guid') || createQQMusicFallbackGuid(uin)
+    const uid = getCookieValue(cookie, 'uid') || createQQMusicFallbackUid(uin)
     const gtk = getGtk(key)
     const body = JSON.stringify({
       comm: {
@@ -76,7 +59,7 @@ export const createQQMusicDailyRecommendService = ({
       },
     })
     const url = new URL(DAILY_RECOMMEND_URL)
-    url.searchParams.set('sign', createRequestSign(body))
+    url.searchParams.set('sign', createQQMusicRequestSign(body))
     const controller = new AbortController()
     const timer = setTimeoutImpl(() => {
       controller.abort()

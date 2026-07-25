@@ -41,6 +41,7 @@ const playlistCard = (id, title, extra = {}) => ({
   title,
   subtitle: extra.subtitle ?? '',
   cover: extra.cover ?? `https://img.test/playlist-${id}.jpg`,
+  scheme: extra.scheme ?? '',
   cnt: extra.cnt ?? 120000,
   miscellany: {
     cnt_content: extra.playCountText ?? '',
@@ -71,8 +72,14 @@ const createFeedPayload = ({ exactGuide = true } = {}) => ({
       retcode: 0,
       v_shelf: [
         shelf(301, 'Hi {String} 今日为你推荐', 'Alice', [
-          { id: '99', type: 700, title: '猜你喜欢', cover: '' },
-          { id: '0', type: 500, title: '每日30首', cover: 'daily.jpg' },
+          { id: '99', type: 700, title: '猜你喜欢-沉浸刷歌', cover: '' },
+          {
+            id: '0',
+            type: 500,
+            title: '每日30首',
+            cover: 'daily.jpg',
+            scheme: 'qqmusic://qq.com/ui/gedan?p={"id":"202","type":"3"}',
+          },
           playlistCard(211111, '百万收藏'),
           playlistCard('bad-id', '无效歌单'),
         ]),
@@ -83,6 +90,9 @@ const createFeedPayload = ({ exactGuide = true } = {}) => ({
         shelf(271, '你的私荐歌单', '', [
           playlistCard(7001, 'Private One', { playCountText: '12.3万 播放', reason: '因为你喜欢流行' }),
           playlistCard(7002, 'Private Two'),
+          playlistCard('opaque-card', 'Private Scheme', {
+            scheme: 'qqmusic://qq.com/ui/gedan?p={"id":"7004","type":"3"}',
+          }),
           playlistCard(7003, '', { cover: '' }),
         ]),
         shelf(276, '为你精选的AI歌单', '', [playlistCard(8001, 'AI Guide')]),
@@ -122,15 +132,26 @@ const createTrackPayload = () => ({
   },
 })
 
+const signedBodies = []
+
 const loadService = () => loadTsModule(
   path.join(__dirname, '../src/main/modules/qqMusic/homeRecommend.ts'),
   {
-    './auth': { getCookieValue },
+    './auth': { getCookieValue, getGtk },
+    './request': {
+      createQQMusicRequestSign: body => {
+        signedBodies.push(body)
+        return 'test-sign'
+      },
+      createQQMusicFallbackGuid: uin => `fallback-guid-${uin}`,
+      createQQMusicFallbackUid: uin => `fallback-uid-${uin}`,
+    },
     './song': { normalizeQQMusicTracks, QQMusicAuthError },
   },
 )
 
 const testAuthenticatedRequestAndNormalization = async() => {
+  signedBodies.length = 0
   const requests = []
   const pageOne = createFeedPayload({ exactGuide: false })
   const responses = [
@@ -143,7 +164,7 @@ const testAuthenticatedRequestAndNormalization = async() => {
   const service = createQQMusicHomeRecommendService({
     getCookie: () => 'uin=o12345; qqmusic_key=secret-key; qqmusic_guid=guid-123; uid=uid-123',
     fetchImpl: async(url, options) => {
-      requests.push({ url, options, body: JSON.parse(options.body) })
+      requests.push({ url, options, rawBody: options.body, body: JSON.parse(options.body) })
       return { ok: true, json: async() => responses.shift() }
     },
     setTimeoutImpl: () => 41,
@@ -156,7 +177,12 @@ const testAuthenticatedRequestAndNormalization = async() => {
   const result = await service.getHomeRecommendation()
 
   assert.strictEqual(requests.length, 3)
-  assert.strictEqual(requests[0].url, 'https://u.y.qq.com/cgi-bin/musicu.fcg')
+  for (const request of requests) {
+    const url = new URL(request.url)
+    assert.strictEqual(url.origin + url.pathname, 'https://u6.y.qq.com/cgi-bin/musics.fcg')
+    assert.strictEqual(url.searchParams.get('sign'), 'test-sign')
+  }
+  assert.deepStrictEqual(signedBodies, requests.map(request => request.rawBody))
   assert.strictEqual(requests[0].options.method, 'POST')
   assert.strictEqual(requests[0].options.headers.Cookie, 'uin=o12345; qqmusic_key=secret-key; qqmusic_guid=guid-123; uid=uid-123')
   assert.deepStrictEqual(requests[0].body.comm, {
@@ -196,8 +222,14 @@ const testAuthenticatedRequestAndNormalization = async() => {
   assert.strictEqual(clearCalls, 3)
 
   assert.strictEqual(result.title, 'Hi Alice 今日为你推荐')
+  assert.deepStrictEqual(result.brushMode, {
+    id: '99',
+    title: '刷歌模式',
+    description: '猜你喜欢-沉浸刷歌',
+  })
   assert.deepStrictEqual(result.featuredPlaylists.map(item => item.id), ['211111'])
-  assert.deepStrictEqual(result.privatePlaylists.map(item => item.id), ['7001', '7002'])
+  assert(!result.featuredPlaylists.some(item => item.id == '0' || item.name == '每日30首'))
+  assert.deepStrictEqual(result.privatePlaylists.map(item => item.id), ['7001', '7002', '7004'])
   assert.strictEqual(result.privatePlaylists[0].playCount, '12.3万 播放')
   assert.strictEqual(result.privatePlaylists[0].description, '因为你喜欢流行')
   assert.strictEqual(result.relatedSongTitle, '听「Candy」也会喜欢')
@@ -215,6 +247,45 @@ const testGuideFallsBackToAiShelf = () => {
     normalizeQQMusicTracks(createTrackPayload().req_1.data.tracks),
   )
   assert.deepStrictEqual(result.guidePlaylists.map(item => item.id), ['8001'])
+}
+
+const testPrivateShelfUsesStableIdAcrossTitleExperiments = () => {
+  const { normalizeQQMusicHomeRecommendation } = loadService()
+  const payload = createFeedPayload()
+  const privateShelf = payload.home.data.v_shelf.find(item => item.id == 271)
+  privateShelf.title_template = '你的歌单补给站'
+  const result = normalizeQQMusicHomeRecommendation(payload, [])
+  assert.deepStrictEqual(result.privatePlaylists.map(item => item.id), ['7001', '7002', '7004'])
+}
+
+const testGuideShelfUsesStableIdAcrossTitleExperiments = () => {
+  const { normalizeQQMusicHomeRecommendation } = loadService()
+  const payload = createGuideFeedPayload()
+  payload.req_1.data.v_shelf[0].title_template = '继续探索歌单'
+  const result = normalizeQQMusicHomeRecommendation(payload, [])
+  assert.deepStrictEqual(result.guidePlaylists.map(item => item.id), ['9001'])
+}
+
+const testBrowserCookieUsesFallbackIdentity = async() => {
+  const requests = []
+  const responses = [
+    { code: 0, req_1: { code: 0, data: { retcode: 0, v_shelf: [] } } },
+    { code: 0, req_1: { code: 0, data: { retcode: 0, v_shelf: [] } } },
+  ]
+  const { createQQMusicHomeRecommendService } = loadService()
+  const service = createQQMusicHomeRecommendService({
+    getCookie: () => 'uin=o12345; qqmusic_key=secret-key',
+    fetchImpl: async(_url, options) => {
+      requests.push(JSON.parse(options.body))
+      return { ok: true, json: async() => responses.shift() }
+    },
+  })
+
+  await service.getHomeRecommendation()
+
+  assert.strictEqual(requests.length, 2)
+  assert.strictEqual(requests[0].comm.uid, 'fallback-uid-12345')
+  assert.strictEqual(requests[0].comm.guid, 'fallback-guid-12345')
 }
 
 const testMissingCookieAndAuthExpiry = async() => {
@@ -259,6 +330,9 @@ const testFailuresAreSanitizedAndTimersCleared = async() => {
 const main = async() => {
   await testAuthenticatedRequestAndNormalization()
   testGuideFallsBackToAiShelf()
+  testPrivateShelfUsesStableIdAcrossTitleExperiments()
+  testGuideShelfUsesStableIdAcrossTitleExperiments()
+  await testBrowserCookieUsesFallbackIdentity()
   await testMissingCookieAndAuthExpiry()
   await testFailuresAreSanitizedAndTimersCleared()
   console.log('QQ Music home recommendation tests passed')

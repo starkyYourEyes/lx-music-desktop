@@ -67,12 +67,13 @@ const isWellFormedUnicode = value => {
 
 const assertRemote = remote => {
   if (!isPlainOwnDataRecord(remote) || !hasOwnProperties(remote, GITHUB_REMOTE_PROPERTIES) ||
-    remote.provider != 'github' || remote.repository != GITHUB_REPOSITORY ||
-    typeof remote.version != 'string' || !GITHUB_VERSION_RXP.test(remote.version) ||
-    typeof remote.group != 'string' || !remote.group || !isWellFormedUnicode(remote.group) ||
-    typeof remote.path != 'string' || !isWellFormedUnicode(remote.path) ||
-    typeof remote.blobSha != 'string' || !GITHUB_SHA_RXP.test(remote.blobSha) ||
-    typeof remote.commitSha != 'string' || !GITHUB_SHA_RXP.test(remote.commitSha) ||
+    typeof remote.provider !== 'string' || remote.provider !== 'github' ||
+    typeof remote.repository !== 'string' || remote.repository !== GITHUB_REPOSITORY ||
+    typeof remote.version !== 'string' || !GITHUB_VERSION_RXP.test(remote.version) ||
+    typeof remote.group !== 'string' || !remote.group || !isWellFormedUnicode(remote.group) ||
+    typeof remote.path !== 'string' || !isWellFormedUnicode(remote.path) ||
+    typeof remote.blobSha !== 'string' || !GITHUB_SHA_RXP.test(remote.blobSha) ||
+    typeof remote.commitSha !== 'string' || !GITHUB_SHA_RXP.test(remote.commitSha) ||
     !remote.path.startsWith(remote.version + '/') || !/\.js$/i.test(remote.path) ||
     remote.path.includes('\\')) {
     throw new Error('Invalid user API remote metadata')
@@ -82,8 +83,8 @@ const assertRemote = remote => {
   const fileName = relativeParts.at(-1)
   const expectedGroup = relativeParts.length > 1 ? relativeParts[0] : remote.version
   if (!fileName || fileName.length <= 3 ||
-    relativeParts.some(part => !part || part == '.' || part == '..') ||
-    remote.group != expectedGroup) {
+    relativeParts.some(part => !part || part === '.' || part === '..') ||
+    remote.group !== expectedGroup) {
     throw new Error('Invalid user API remote group or path')
   }
 }

@@ -143,6 +143,12 @@ assert.strictEqual(decodeUserApiScript(rawScript), rawScript)
   }
   assertInvalidRemote({ provider: 'gitlab' })
   assertInvalidRemote({ repository: 'other/repository' })
+  assertInvalidRemote({ provider: ['github'] })
+  assertInvalidRemote({ provider: Object('github') })
+  assertInvalidRemote({ provider: { [Symbol.toPrimitive]: () => 'github' } })
+  assertInvalidRemote({ repository: ['Macrohard0001/lx-ikun-music-sources'] })
+  assertInvalidRemote({ repository: Object('Macrohard0001/lx-ikun-music-sources') })
+  assertInvalidRemote({ repository: { [Symbol.toPrimitive]: () => 'Macrohard0001/lx-ikun-music-sources' } })
   assertInvalidRemote({ version: '260724' })
   assertInvalidRemote({ group: '' })
   assertInvalidRemote({ group: 'V260720-\u5176\u4ed6' })
@@ -164,18 +170,45 @@ assert.strictEqual(decodeUserApiScript(rawScript), rawScript)
     }],
   }))
 
+  const baseRemote = {
+    ...remote,
+    version: 'v260723',
+    group: 'base',
+    path: 'v260723/base/source.js',
+    blobSha: 'c'.repeat(40),
+    commitSha: 'd'.repeat(40),
+  }
+  const incomingRemote = {
+    ...remote,
+    version: 'V260725',
+    group: 'incoming',
+    path: 'V260725/incoming/source.JS',
+    blobSha: 'e'.repeat(40),
+    commitSha: 'f'.repeat(40),
+  }
+  for (const remoteInfo of [baseRemote, incomingRemote]) {
+    assert.doesNotThrow(() => assertUserApiSyncData({
+      ...data,
+      apis: [{
+        ...data.apis[0],
+        id: 'valid_' + remoteInfo.version,
+        remote: remoteInfo,
+      }],
+    }))
+  }
+
   const merged = mergeUserApiSyncData({
     source: 'desktop',
     updatedAt: 1,
     apis: [
-      { ...data.apis[0], id: 'same', name: 'base' },
+      { ...data.apis[0], id: 'same', name: 'base', remote: baseRemote },
       { ...data.apis[0], id: '', name: 'invalid base' },
     ],
   }, {
     source: 'desktop',
     updatedAt: 2,
     apis: [
-      { ...data.apis[0], id: 'same', name: 'incoming' },
+      { ...data.apis[0], id: 'same', name: 'incoming', remote: incomingRemote },
       { ...data.apis[0], id: 'new', name: 'new' },
       { ...data.apis[0], id: '', name: 'invalid incoming' },
     ],
@@ -185,7 +218,8 @@ assert.strictEqual(decodeUserApiScript(rawScript), rawScript)
     ['new', 'new'],
   ])
   assert.strictEqual(merged.updatedAt, 300)
-  assert.deepStrictEqual(merged.apis[0].remote, data.apis[0].remote)
+  assert.deepStrictEqual(merged.apis[0].remote, incomingRemote)
+  assert.notStrictEqual(merged.apis[0].remote, baseRemote)
 
   console.log('user api sync helper tests passed')
 })().catch(err => {

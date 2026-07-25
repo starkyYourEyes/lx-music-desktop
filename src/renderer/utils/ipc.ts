@@ -137,9 +137,11 @@ export const replaceUserApisFromGitHub = async(items: LX.UserApi.GitHubImportIte
   const error = new Error(result.error.message) as Error & {
     code?: string
     detail?: string
+    apiList?: LX.UserApi.UserApiInfo[]
   }
   if (result.error.code != null) error.code = result.error.code
   if (result.error.detail != null) error.detail = result.error.detail
+  if (result.apiList != null) error.apiList = result.apiList
   throw error
 }
 

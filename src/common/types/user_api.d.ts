@@ -29,6 +29,7 @@ declare namespace LX {
       apiList: UserApiInfo[]
     } | {
       success: false
+      apiList?: UserApiInfo[]
       error: GitHubReplaceError
     }
 

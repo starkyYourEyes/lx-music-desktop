@@ -2,6 +2,7 @@ import { WIN_MAIN_RENDERER_EVENT_NAME } from '@common/ipcNames'
 import { mainHandle } from '@common/mainIpc'
 import {
   getApiList,
+  takeReplacementFailureApiList,
   importApi,
   replaceApisFromGitHub,
   removeApi,
@@ -53,7 +54,12 @@ export default () => {
       try {
         return { success: true, apiList: await replaceApisFromGitHub(items) }
       } catch (err) {
-        return { success: false, error: serializeReplaceError(err) }
+        const apiList = takeReplacementFailureApiList(err)
+        return {
+          success: false,
+          ...(apiList == null ? {} : { apiList }),
+          error: serializeReplaceError(err),
+        }
       }
     },
   )

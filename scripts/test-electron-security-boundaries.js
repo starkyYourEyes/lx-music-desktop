@@ -46,6 +46,7 @@ const { createWindow, closeWindow } = loadTsModule(
   path.join(root, 'src/main/modules/userApi/main.ts'),
   {
     '@common/mainIpc': { mainSend() {} },
+    '@common/utils': { log: { error() {} } },
     electron: {
       BrowserWindow: FakeBrowserWindow,
       session: { fromPartition: () => isolatedSession },

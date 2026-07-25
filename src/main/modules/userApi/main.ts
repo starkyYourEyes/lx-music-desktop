@@ -1,4 +1,5 @@
 import { mainSend } from '@common/mainIpc'
+import { log } from '@common/utils'
 import { BrowserWindow, session } from 'electron'
 import fs from 'fs'
 import path from 'node:path'
@@ -50,8 +51,12 @@ const handleUpdateProxy = (keys: Array<keyof LX.AppSetting>) => {
 
 const winEvent = () => {
   if (!browserWindow) return
-  browserWindow.on('closed', () => {
-    browserWindow = null
+  const window = browserWindow
+  window.on('closed', () => {
+    if (browserWindow === window) {
+      global.lx.event_app.off('updated_config', handleUpdateProxy)
+      browserWindow = null
+    }
   })
 }
 
@@ -130,15 +135,36 @@ export const createWindow = async(userApi: LX.UserApi.UserApiInfo) => {
 }
 
 export const closeWindow = async() => {
-  global.lx.event_app.off('updated_config', handleUpdateProxy)
   if (!browserWindow) return
-  await Promise.all([
-    browserWindow.webContents.session.clearAuthCache(),
-    browserWindow.webContents.session.clearStorageData(),
-    browserWindow.webContents.session.clearCache(),
-  ])
-  browserWindow?.destroy()
+
+  const closingWindow = browserWindow
+  const userApiSession = closingWindow.webContents.session
+  closingWindow.destroy()
   browserWindow = null
+  global.lx.event_app.off('updated_config', handleUpdateProxy)
+
+  const cleanupTasks = [
+    {
+      name: 'auth cache',
+      run: async() => userApiSession.clearAuthCache(),
+    },
+    {
+      name: 'storage data',
+      run: async() => userApiSession.clearStorageData(),
+    },
+    {
+      name: 'cache',
+      run: async() => userApiSession.clearCache(),
+    },
+  ]
+  const results = await Promise.allSettled(
+    cleanupTasks.map(async({ run }) => run()),
+  )
+  for (const [index, result] of results.entries()) {
+    if (result.status == 'rejected') {
+      log.error(`clear user API ${cleanupTasks[index].name} error:`, result.reason)
+    }
+  }
 }
 
 export const sendEvent = <T = any>(name: string, params?: T) => {

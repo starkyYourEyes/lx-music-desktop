@@ -16,6 +16,17 @@ import { runUserApiTask } from './queue'
 import { loadApi, setAllowShowUpdateAlert as setRendererEventAllowShowUpdateAlert, init } from './rendererEvent/rendererEvent'
 
 let userApiId: string | null = null
+const replacementFailureApiLists = new WeakMap<object, LX.UserApi.UserApiInfo[]>()
+
+export const takeReplacementFailureApiList = (
+  err: unknown,
+): LX.UserApi.UserApiInfo[] | undefined => {
+  if (err == null || (typeof err != 'object' && typeof err != 'function')) return
+  const apiList = replacementFailureApiLists.get(err)
+  replacementFailureApiLists.delete(err)
+  return apiList
+}
+
 
 const setUserApiId = (id: string | null) => {
   userApiId = id
@@ -102,6 +113,10 @@ export const replaceApisFromGitHub = async(
           rollbackSucceeded = true
         } catch (rollbackErr) {
           log.error('rollback user APIs after GitHub replacement error:', rollbackErr)
+          if (err != null && (typeof err == 'object' || typeof err == 'function')) {
+            replacementFailureApiLists.set(err, apiList)
+          }
+          notifyUserApiChanged()
         }
         if (rollbackSucceeded) {
           await restoreActiveRuntime(

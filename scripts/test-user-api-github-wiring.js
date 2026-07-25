@@ -41,6 +41,7 @@ const extractBetween = (source, startMarker, endMarker, label) => {
 }
 
 const ipcNames = readSource('src/common/ipcNames.ts')
+const userApiTypes = readSource('src/common/types/user_api.d.ts')
 const mainHandler = readSource('src/main/modules/winMain/rendererEvent/userApi.ts')
 const rendererIpc = readSource('src/renderer/utils/ipc.ts')
 const userApiModal = readSource('src/renderer/views/Setting/components/UserApiModal.vue')
@@ -102,6 +103,10 @@ assert.match(
 )
 
 assert.match(
+  userApiTypes,
+  /success:\s*false\s*\r?\n\s*apiList\?:\s*UserApiInfo\[\]/,
+)
+assert.match(
   userApiModal,
   /import\s*{[^}]*getGitHubUserApiSnapshot[^}]*downloadGitHubUserApiSnapshot[^}]*}\s*from\s*['"]@renderer\/utils\/githubUserApi['"]/s,
 )
@@ -117,7 +122,7 @@ for (const [label, method] of [
   assert.match(method, /const\s+viewGeneration\s*=\s*this\.githubViewGeneration/)
   assert.match(
     method,
-    /catch\s*\(err\)\s*{\s*if\s*\(!this\.isGitHubViewCurrent\(viewGeneration\)\)\s*return/,
+    /catch\s*\(err\)\s*{[\s\S]*?if\s*\(!this\.isGitHubViewCurrent\(viewGeneration\)\)\s*return/,
     label + ' does not suppress stale errors',
   )
   assert.match(
@@ -176,6 +181,19 @@ assertInOrder(githubImportMethod, [
   'if (!this.isGitHubViewCurrent(viewGeneration)) return',
   "this.githubStatus = this.$t('user_api__github_import_success'",
 ], 'live selected custom source preservation')
+assert.match(
+  githubImportMethod,
+  /catch\s*\(err\)\s*{[\s\S]*err\s+instanceof\s+Error[\s\S]*['"]apiList['"]\s+in\s+err[\s\S]*userApi\.list\s*=\s*err\.apiList[\s\S]*this\.formatGitHubError\(err\)/,
+  'GitHub import failure must reconcile the canonical API list before reporting the error',
+)
+
+assertInOrder(githubImportMethod, [
+  '} catch (err) {',
+  'userApi.list = err.apiList',
+  'if (!this.isGitHubViewCurrent(viewGeneration)) return',
+  'const message = this.formatGitHubError(err)',
+], 'GitHub import failure reconciliation')
+
 assert.doesNotMatch(githubImportMethod, /\bpreviousId\b|\bpreviousWasCustom\b/)
 assert.match(githubImportMethod, /confirmButtonText:\s*this\.\$t\('confirm_button_text'\)/)
 assert.doesNotMatch(githubImportMethod, /confirmButtonText:\s*this\.\$t\('ok'\)/)
@@ -385,7 +403,9 @@ const hotKeyGroup = new Proxy({}, {
   },
 })
 
+const canonicalApiList = [{ id: 'canonical-source' }]
 let rendererResult
+const rollbackLoadError = new Error('simulated replacement load failure')
 const rendererRuntime = loadTsModule(
   path.join(root, 'src/renderer/utils/ipc.ts'),
   {
@@ -432,8 +452,13 @@ const mainRuntime = loadTsModule(
       },
     },
     '@main/modules/userApi': {
-      getApiList() {},
+      getApiList() {
+        return canonicalApiList
+      },
       importApi() {},
+      takeReplacementFailureApiList(err) {
+        return err === rollbackLoadError ? canonicalApiList : undefined
+      },
       replaceApisFromGitHub(items) {
         return replaceImplementation(items)
       },
@@ -470,6 +495,7 @@ const invokeMainReplacement = async() => structuredClone(await replaceHandler({
       assert.equal(err.message, serializedInvalidError.message)
       assert.equal(err.code, serializedInvalidError.code)
       assert.equal(err.detail, serializedInvalidError.detail)
+      assert.equal(Object.prototype.hasOwnProperty.call(err, 'apiList'), false)
       return true
     },
   )
@@ -491,6 +517,21 @@ const invokeMainReplacement = async() => structuredClone(await replaceHandler({
       assert.equal(err.message, 'simulated replacement close failure')
       assert.equal(Object.prototype.hasOwnProperty.call(err, 'code'), false)
       assert.equal(Object.prototype.hasOwnProperty.call(err, 'detail'), false)
+      assert.equal(Object.prototype.hasOwnProperty.call(err, 'apiList'), false)
+      return true
+    },
+  )
+
+  rendererResult = {
+    success: false,
+    apiList: canonicalApiList,
+    error: { message: rollbackLoadError.message },
+  }
+  await assert.rejects(
+    () => rendererRuntime.replaceUserApisFromGitHub([]),
+    err => {
+      assert.equal(err.message, rollbackLoadError.message)
+      assert.deepStrictEqual(err.apiList, canonicalApiList)
       return true
     },
   )
@@ -508,11 +549,10 @@ const invokeMainReplacement = async() => structuredClone(await replaceHandler({
     error: serializedInvalidError,
   })
 
-  replaceImplementation = async() => {
-    throw new Error('simulated replacement load failure')
-  }
+  replaceImplementation = async() => { throw rollbackLoadError }
   assert.deepStrictEqual(await invokeMainReplacement(), {
     success: false,
+    apiList: canonicalApiList,
     error: { message: 'simulated replacement load failure' },
   })
 

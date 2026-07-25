@@ -762,10 +762,18 @@ const originalLx = global.lx
       'close',
     ])
     assert.strictEqual(rollbackFailureRuntime.getStoreCommits(), 1)
-    assert.strictEqual(rollbackFailureRuntime.getChangeEvents(), 0)
+    assert.strictEqual(rollbackFailureRuntime.getChangeEvents(), 1)
     assert.deepStrictEqual(
       await rollbackFailureRuntime.runtime.getApiList(),
       preparedAfterLoadFailure,
+    )
+    assert.deepStrictEqual(
+      rollbackFailureRuntime.runtime.takeReplacementFailureApiList(runtimeLoadFailure),
+      preparedAfterLoadFailure,
+    )
+    assert.strictEqual(
+      rollbackFailureRuntime.runtime.takeReplacementFailureApiList(runtimeLoadFailure),
+      undefined,
     )
     assert.strictEqual(rollbackFailureRuntime.logErrors.length, 2)
 

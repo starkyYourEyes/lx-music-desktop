@@ -47,15 +47,23 @@ const oldSerialized = () => [{
   script: 'old-compressed-script',
 }]
 
-const createHarness = ({
-  initialStored = [],
-  failStore = false,
-  failCompression = false,
-} = {}) => {
+const createHarness = (options = {}) => {
+  const {
+    failStore = false,
+    failCompression = false,
+    defaultUserApis = [],
+    createHashImpl = createHash,
+    eventError,
+    onDeflate,
+  } = options
+  const initialStored = Object.prototype.hasOwnProperty.call(options, 'initialStored')
+    ? options.initialStored
+    : []
   let stored = structuredClone(initialStored)
   const storeSets = []
   let changeEvents = 0
   let deflateCalls = 0
+  const logErrors = []
   const store = {
     get(key) {
       assert.strictEqual(key, 'userApis')
@@ -72,6 +80,7 @@ const createHarness = ({
     ...actualZlib,
     deflate(value, callback) {
       deflateCalls++
+      if (onDeflate) onDeflate(deflateCalls)
       if (failCompression) {
         callback(new Error('simulated compression failure'))
         return
@@ -84,6 +93,7 @@ const createHarness = ({
     event_app: {
       user_api_changed() {
         changeEvents++
+        if (eventError) throw eventError
       },
     },
   }
@@ -91,16 +101,17 @@ const createHarness = ({
   const userApiUtils = loadTsModule(
     path.join(__dirname, '../src/main/modules/userApi/utils.ts'),
     {
-      './config': { userApis: [] },
+      './config': { userApis: defaultUserApis },
       '@common/constants': { STORE_NAMES: { USER_API: 'userApi' } },
       '@main/utils/store': () => store,
       '@common/utils/userApiSync': {
         assertUserApiSyncData() {},
         createUserApiSyncData() {},
       },
-      '@common/utils': { log: { error() {} } },
+      '@common/utils': { log: { error: (...args) => logErrors.push(args) } },
       '@common/utils/githubUserApi': githubUserApi,
       'node:zlib': zlib,
+      'node:crypto': { createHash: createHashImpl },
     },
   )
 
@@ -110,6 +121,7 @@ const createHarness = ({
     getStored: () => stored,
     getChangeEvents: () => changeEvents,
     getDeflateCalls: () => deflateCalls,
+    logErrors,
   }
 }
 
@@ -174,12 +186,54 @@ const originalLx = global.lx
     assert.strictEqual(harness.storeSets.length, 2)
     assert.strictEqual(harness.getChangeEvents(), 2)
 
+    const aliasHarness = createHarness()
+    const aliasResult = await aliasHarness.userApiUtils.replaceApisFromGitHub(makeInput())
+    const persistedBeforeMutation = structuredClone(aliasHarness.getStored())
+    aliasResult[0].remote.group = 'mutated-in-memory'
+    assert.deepStrictEqual(
+      aliasHarness.getStored(),
+      persistedBeforeMutation,
+    )
+    assert.strictEqual(aliasHarness.storeSets.length, 1)
+
+
     await assertAtomicFailure('invalid script', inputItems => {
       inputItems[1].script = 'console.log("missing metadata header")'
     }, { expectedDeflateCalls: 1 })
     await assertAtomicFailure('duplicate path', inputItems => {
       inputItems[1].remote.path = inputItems[0].remote.path
     }, { expectedDeflateCalls: 0 })
+
+    const legacyStored = oldSerialized()
+    delete legacyStored[0].version
+    legacyStored[0].script = validScript('Legacy source')
+    const coldLegacyHarness = createHarness({ initialStored: legacyStored })
+    const invalidLegacyInput = makeInput()
+    invalidLegacyInput[0].remote.repository = 'someone/another-repository'
+    await assert.rejects(
+      () => coldLegacyHarness.userApiUtils.replaceApisFromGitHub(invalidLegacyInput),
+      undefined,
+      'cold legacy invalid batch',
+    )
+    assert.strictEqual(coldLegacyHarness.storeSets.length, 0)
+    assert.deepStrictEqual(coldLegacyHarness.getStored(), legacyStored)
+    assert.strictEqual(coldLegacyHarness.getChangeEvents(), 0)
+
+    const defaults = oldSerialized()
+    const coldDefaultHarness = createHarness({
+      initialStored: undefined,
+      defaultUserApis: defaults,
+    })
+    const invalidDefaultInput = makeInput()
+    invalidDefaultInput[1].remote.path = invalidDefaultInput[0].remote.path
+    await assert.rejects(
+      () => coldDefaultHarness.userApiUtils.replaceApisFromGitHub(invalidDefaultInput),
+      undefined,
+      'cold default invalid batch',
+    )
+    assert.strictEqual(coldDefaultHarness.storeSets.length, 0)
+    assert.strictEqual(coldDefaultHarness.getStored(), undefined)
+    assert.strictEqual(coldDefaultHarness.getChangeEvents(), 0)
     await assertAtomicFailure('wrong repository', inputItems => {
       inputItems[0].remote.repository = 'someone/another-repository'
     }, { expectedDeflateCalls: 0 })
@@ -199,6 +253,104 @@ const originalLx = global.lx
     await assertAtomicFailure('invalid group', inputItems => {
       inputItems[0].remote.group = 'online'
     }, { expectedDeflateCalls: 0 })
+    await assertAtomicFailure('malformed Unicode path and group', inputItems => {
+      const malformedGroup = 'group-\ud800'
+      inputItems[0].remote.group = malformedGroup
+      inputItems[0].remote.path = `${VERSION}/${malformedGroup}/a.js`
+    }, { expectedDeflateCalls: 0 })
+
+    const astralGroup = 'music-\ud83c\udfb5'
+    const astralHarness = createHarness()
+    const astralInput = [{
+      script: validScript('Astral source'),
+      remote: makeRemote({
+        group: astralGroup,
+        path: `${VERSION}/${astralGroup}/astral.js`,
+      }),
+    }]
+    const astralResult = await astralHarness.userApiUtils.replaceApisFromGitHub(astralInput)
+    assert.strictEqual(astralResult.length, 1)
+    assert.strictEqual(astralHarness.storeSets.length, 1)
+    assert.strictEqual(astralHarness.getChangeEvents(), 1)
+    const collisionHarness = createHarness({
+      createHashImpl() {
+        return {
+          update() {
+            return this
+          },
+          digest() {
+            return '0'.repeat(64)
+          },
+        }
+      },
+    })
+    await assert.rejects(
+      () => collisionHarness.userApiUtils.replaceApisFromGitHub(makeInput()),
+      /duplicate GitHub user API ID/,
+    )
+    assert.strictEqual(collisionHarness.storeSets.length, 0)
+    assert.strictEqual(collisionHarness.getChangeEvents(), 0)
+    assert.strictEqual(collisionHarness.getDeflateCalls(), 0)
+
+
+    const notificationError = new Error('simulated notification failure')
+    const eventFailureHarness = createHarness({ eventError: notificationError })
+    const eventFailureResult = await eventFailureHarness.userApiUtils
+      .replaceApisFromGitHub(makeInput())
+    assert.strictEqual(eventFailureResult.length, 2)
+    assert.deepStrictEqual(
+      eventFailureHarness.userApiUtils.getUserApis(),
+      eventFailureResult,
+    )
+    assert.strictEqual(eventFailureHarness.getStored().length, 2)
+    assert.strictEqual(eventFailureHarness.storeSets.length, 1)
+    assert.strictEqual(eventFailureHarness.getChangeEvents(), 1)
+    assert.strictEqual(eventFailureHarness.logErrors.length, 1)
+
+    await assertAtomicFailure('inherited item fields', inputItems => {
+      inputItems[0] = Object.create(inputItems[0])
+    }, { expectedDeflateCalls: 0 })
+    await assertAtomicFailure('inherited remote fields', inputItems => {
+      inputItems[0].remote = Object.create(inputItems[0].remote)
+    }, { expectedDeflateCalls: 0 })
+
+    let getterReads = 0
+    await assertAtomicFailure('getter-backed remote field', inputItems => {
+      const remote = { ...inputItems[0].remote }
+      Object.defineProperty(remote, 'path', {
+        enumerable: true,
+        get() {
+          getterReads++
+          return `${VERSION}/${RECOMMENDED_GROUP}/a.js`
+        },
+      })
+      inputItems[0].remote = remote
+    }, { expectedDeflateCalls: 0 })
+    assert.strictEqual(getterReads, 0)
+
+    let mutableInput
+    const snapshotHarness = createHarness({
+      onDeflate(call) {
+        if (call != 1) return
+        mutableInput[1].script = 'invalid after validation'
+        mutableInput[1].remote.group = 'mutated'
+        mutableInput[1].remote.path = `${VERSION}/mutated/b.js`
+      },
+    })
+    mutableInput = makeInput()
+    const originalSecondItem = structuredClone(mutableInput[1])
+    const snapshotResult = await snapshotHarness.userApiUtils
+      .replaceApisFromGitHub(mutableInput)
+    assert.strictEqual(snapshotResult.length, 2)
+    assert.strictEqual(snapshotResult[1].name, 'Source B')
+    assert.deepStrictEqual(snapshotResult[1].remote, originalSecondItem.remote)
+    assert.deepStrictEqual(
+      snapshotHarness.getStored()[1].remote,
+      originalSecondItem.remote,
+    )
+    assert.strictEqual(snapshotHarness.storeSets.length, 1)
+    assert.strictEqual(snapshotHarness.getChangeEvents(), 1)
+
     await assertAtomicFailure('invalid SHA', inputItems => {
       inputItems[0].remote.blobSha = 'not-a-sha'
     }, { expectedDeflateCalls: 0 })

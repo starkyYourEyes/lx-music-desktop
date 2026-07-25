@@ -11,10 +11,11 @@ let userApis: LX.UserApi.UserApiInfo[] | null
 let scripts = new Map<string, string>()
 
 const serializeUserApis = (apis: LX.UserApi.UserApiInfo[], apiScripts: Map<string, string>) => {
-  return apis.map(api => ({
-    ...api,
-    script: apiScripts.get(api.id),
-  }))
+  return apis.map(api => {
+    const serialized = { ...api, script: apiScripts.get(api.id) }
+    if (api.remote) serialized.remote = { ...api.remote }
+    return serialized
+  })
 }
 
 const saveData = (emitChange = true) => {
@@ -118,60 +119,128 @@ const inflateScript = async(script: string) => new Promise<string>((resolve, rej
 const GITHUB_REPOSITORY = 'Macrohard0001/lx-ikun-music-sources'
 const GITHUB_VERSION_RXP = /^[vV]\d{6}$/
 const GITHUB_SHA_RXP = /^[0-9a-f]{40}$/i
+const isWellFormedUnicode = (value: string) => {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      if (index + 1 >= value.length) return false
+      const next = value.charCodeAt(index + 1)
+      if (next < 0xdc00 || next > 0xdfff) return false
+      index++
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false
+    }
+  }
+  return true
+}
 
-const validateGitHubImportItems = (items: LX.UserApi.GitHubImportItem[]) => {
+type GitHubImportSnapshot = LX.UserApi.GitHubImportItem & { id: string }
+
+const isPlainOwnDataRecord = (value: unknown): value is Record<string, unknown> => {
+  if (value == null || typeof value != 'object') return false
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype != Object.prototype && prototype != null) return false
+  return Object.values(Object.getOwnPropertyDescriptors(value))
+    .every(descriptor => 'value' in descriptor)
+}
+
+const hasOwnProperties = (value: Record<string, unknown>, properties: string[]) => {
+  return properties.every(property => Object.prototype.hasOwnProperty.call(value, property))
+}
+
+
+const validateGitHubImportItems = (items: LX.UserApi.GitHubImportItem[]): GitHubImportSnapshot[] => {
   if (!Array.isArray(items) || !items.length || items.length > GITHUB_USER_API_LIMITS.maxFiles) {
     throw new Error('Invalid GitHub user API item count')
   }
 
   const paths = new Set<string>()
+  const ids = new Set<string>()
+  const snapshots: GitHubImportSnapshot[] = []
   let batchVersion: string | undefined
   let batchCommit: string | undefined
   let totalBytes = 0
 
-  for (const item of items) {
-    if (item == null || typeof item != 'object') {
+  for (const itemValue of items as unknown[]) {
+    if (!isPlainOwnDataRecord(itemValue) ||
+      !hasOwnProperties(itemValue, ['script', 'remote'])) {
       throw new Error('Invalid GitHub user API metadata')
     }
-    const { remote, script } = item
-    if (typeof script != 'string' || remote == null || typeof remote != 'object' ||
-      remote.provider != 'github' || remote.repository != GITHUB_REPOSITORY ||
-      typeof remote.version != 'string' || !GITHUB_VERSION_RXP.test(remote.version) ||
-      typeof remote.group != 'string' || !remote.group ||
-      typeof remote.path != 'string' ||
-      typeof remote.blobSha != 'string' || !GITHUB_SHA_RXP.test(remote.blobSha) ||
-      typeof remote.commitSha != 'string' || !GITHUB_SHA_RXP.test(remote.commitSha)) {
+    const script = itemValue.script
+    const remoteValue = itemValue.remote
+    if (typeof script != 'string' || !isPlainOwnDataRecord(remoteValue) ||
+      !hasOwnProperties(remoteValue, [
+        'provider',
+        'repository',
+        'version',
+        'group',
+        'path',
+        'blobSha',
+        'commitSha',
+      ])) {
+      throw new Error('Invalid GitHub user API metadata')
+    }
+    const provider = remoteValue.provider
+    const repository = remoteValue.repository
+    const version = remoteValue.version
+    const group = remoteValue.group
+    const remotePath = remoteValue.path
+    const blobSha = remoteValue.blobSha
+    const commitSha = remoteValue.commitSha
+    if (provider != 'github' || repository != GITHUB_REPOSITORY ||
+      typeof version != 'string' || !GITHUB_VERSION_RXP.test(version) ||
+      typeof group != 'string' || !group || !isWellFormedUnicode(group) ||
+      typeof remotePath != 'string' || !isWellFormedUnicode(remotePath) ||
+      typeof blobSha != 'string' || !GITHUB_SHA_RXP.test(blobSha) ||
+      typeof commitSha != 'string' || !GITHUB_SHA_RXP.test(commitSha)) {
       throw new Error('Invalid GitHub user API metadata')
     }
 
-    batchVersion ??= remote.version
-    batchCommit ??= remote.commitSha
-    if (remote.version != batchVersion || remote.commitSha != batchCommit ||
-      paths.has(remote.path) || !remote.path.startsWith(remote.version + '/') ||
-      !/\.js$/i.test(remote.path) || remote.path.includes('\\')) {
+    batchVersion ??= version
+    batchCommit ??= commitSha
+    if (version != batchVersion || commitSha != batchCommit ||
+      paths.has(remotePath) || !remotePath.startsWith(version + '/') ||
+      !/\.js$/i.test(remotePath) || remotePath.includes('\\')) {
       throw new Error('Invalid or duplicate GitHub user API path')
     }
 
-    const relativeParts = remote.path.substring(remote.version.length + 1).split('/')
+    const relativeParts = remotePath.substring(version.length + 1).split('/')
     const fileName = relativeParts.at(-1)
-    const expectedGroup = relativeParts.length > 1 ? relativeParts[0] : remote.version
+    const expectedGroup = relativeParts.length > 1 ? relativeParts[0] : version
     if (!fileName || fileName.length <= 3 ||
       relativeParts.some(part => !part || part == '.' || part == '..') ||
-      remote.group != expectedGroup) {
+      group != expectedGroup) {
       throw new Error('Invalid GitHub user API group')
     }
 
-    paths.add(remote.path)
+    paths.add(remotePath)
+    const id = createGitHubUserApiId(remotePath)
+    if (ids.has(id)) throw new Error(`Invalid or duplicate GitHub user API ID: ${id}`)
+    ids.add(id)
     const bytes = Buffer.byteLength(script, 'utf8')
     if (bytes > GITHUB_USER_API_LIMITS.maxScriptBytes) {
-      throw new Error(`GitHub user API script is too large: ${remote.path}`)
+      throw new Error(`GitHub user API script is too large: ${remotePath}`)
     }
     totalBytes += bytes
+    snapshots.push({
+      id,
+      script,
+      remote: {
+        provider: 'github',
+        repository: GITHUB_REPOSITORY,
+        version,
+        group,
+        path: remotePath,
+        blobSha,
+        commitSha,
+      },
+    })
   }
 
   if (totalBytes > GITHUB_USER_API_LIMITS.maxTotalBytes) {
     throw new Error('GitHub user API batch is too large')
   }
+  return snapshots
 }
 
 const createGitHubUserApiId = (remotePath: string) => {
@@ -182,26 +251,28 @@ const createGitHubUserApiId = (remotePath: string) => {
 }
 
 export const replaceApisFromGitHub = async(items: LX.UserApi.GitHubImportItem[]) => {
-  getUserApis()
-  validateGitHubImportItems(items)
+  const snapshots = validateGitHubImportItems(items)
 
   const nextUserApis: LX.UserApi.UserApiInfo[] = []
   const nextScripts = new Map<string, string>()
-  for (const item of items) {
-    const id = createGitHubUserApiId(item.remote.path)
+  for (const { id, script, remote } of snapshots) {
     nextUserApis.push({
       id,
-      ...parseScriptInfo(item.script),
+      ...parseScriptInfo(script),
       allowShowUpdateAlert: true,
-      remote: { ...item.remote },
+      remote,
     })
-    nextScripts.set(id, await deflateScript(item.script))
+    nextScripts.set(id, await deflateScript(script))
   }
 
   getStore(STORE_NAMES.USER_API).set('userApis', serializeUserApis(nextUserApis, nextScripts))
   userApis = nextUserApis
   scripts = nextScripts
-  global.lx.event_app.user_api_changed()
+  try {
+    global.lx.event_app.user_api_changed()
+  } catch (err) {
+    log.error('emit user API changed event error:', err)
+  }
   return getUserApis()
 }
 export const importApi = async(scriptRaw: string): Promise<LX.UserApi.UserApiInfo> => {

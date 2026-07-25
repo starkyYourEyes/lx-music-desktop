@@ -42,10 +42,48 @@ try {
       () => rollbackStore.set('value', 'after'),
       /simulated write failure/,
     )
+    assert.throws(
+      () => rollbackStore.set('new-key', 'new-value'),
+      /simulated write failure/,
+    )
+    assert.strictEqual(rollbackStore.has('new-key'), false)
+
+    Object.defineProperty(rollbackStore.store, 'descriptor-key', {
+      value: 'descriptor-before',
+      enumerable: false,
+      writable: false,
+      configurable: true,
+    })
+    const previousDescriptor = Object.getOwnPropertyDescriptor(
+      rollbackStore.store,
+      'descriptor-key',
+    )
+    assert.throws(
+      () => rollbackStore.set('descriptor-key', 'descriptor-after'),
+      /simulated write failure/,
+    )
+    assert.deepStrictEqual(
+      Object.getOwnPropertyDescriptor(rollbackStore.store, 'descriptor-key'),
+      previousDescriptor,
+    )
   } finally {
     fs.renameSync = originalRenameSync
   }
   assert.strictEqual(rollbackStore.get('value'), 'before')
+
+  const originalBackingPrototype = Object.getPrototypeOf(rollbackStore.store)
+  const protoValue = { safe: true }
+  rollbackStore.set('__proto__', protoValue)
+  const persistedProtoStore = JSON.parse(fs.readFileSync(rollbackFilePath, 'utf8'))
+  assert.strictEqual(
+    Object.prototype.hasOwnProperty.call(persistedProtoStore, '__proto__'),
+    true,
+  )
+  assert.deepStrictEqual(
+    Object.getOwnPropertyDescriptor(persistedProtoStore, '__proto__').value,
+    protoValue,
+  )
+  assert.strictEqual(Object.getPrototypeOf(rollbackStore.store), originalBackingPrototype)
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true })
 }

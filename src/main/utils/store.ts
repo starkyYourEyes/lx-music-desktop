@@ -62,13 +62,17 @@ class Store {
   }
 
   set(key: string, value: any) {
-    const existed = Object.prototype.hasOwnProperty.call(this.store, key)
-    const previous = this.store[key]
-    this.store[key] = value
+    const previousDescriptor = Object.getOwnPropertyDescriptor(this.store, key)
+    Object.defineProperty(this.store, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
     try {
       this.writeFile()
     } catch (err) {
-      if (existed) this.store[key] = previous
+      if (previousDescriptor) Object.defineProperty(this.store, key, previousDescriptor)
       else Reflect.deleteProperty(this.store, key)
       throw err
     }

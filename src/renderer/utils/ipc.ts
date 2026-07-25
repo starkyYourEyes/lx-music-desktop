@@ -128,10 +128,19 @@ export const importUserApi = async(fileText: string) => {
   return rendererInvoke<string, LX.UserApi.ImportUserApi>(WIN_MAIN_RENDERER_EVENT_NAME.import_user_api, fileText)
 }
 export const replaceUserApisFromGitHub = async(items: LX.UserApi.GitHubImportItem[]) => {
-  return rendererInvoke<LX.UserApi.GitHubImportItem[], LX.UserApi.UserApiInfo[]>(
+  const result = await rendererInvoke<LX.UserApi.GitHubImportItem[], LX.UserApi.GitHubReplaceResult>(
     WIN_MAIN_RENDERER_EVENT_NAME.replace_user_api_from_github,
     items,
   )
+  if (result.success) return result.apiList
+
+  const error = new Error(result.error.message) as Error & {
+    code?: string
+    detail?: string
+  }
+  if (result.error.code != null) error.code = result.error.code
+  if (result.error.detail != null) error.detail = result.error.detail
+  throw error
 }
 
 export const setUserApi = async(source: LX.UserApi.UserApiSetApiParams): Promise<void> => {

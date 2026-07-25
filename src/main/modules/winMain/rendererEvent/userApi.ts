@@ -13,15 +13,48 @@ import {
 } from '@main/modules/userApi'
 import { sendEvent } from '@main/modules/winMain/main'
 
+const REPLACE_ERROR_LIMITS = {
+  message: 500,
+  code: 100,
+  detail: 500,
+} as const
+
+const getErrorText = (
+  err: unknown,
+  key: keyof typeof REPLACE_ERROR_LIMITS,
+): string | undefined => {
+  if (err == null || typeof err != 'object') return
+  const descriptor = Object.getOwnPropertyDescriptor(err, key)
+  if (!descriptor || !('value' in descriptor) || typeof descriptor.value != 'string') return
+  return descriptor.value
+    .split(/\r?\n/, 1)[0]
+    .substring(0, REPLACE_ERROR_LIMITS[key])
+}
+
+const serializeReplaceError = (err: unknown): LX.UserApi.GitHubReplaceError => {
+  const message = getErrorText(err, 'message') ?? 'GitHub user API replacement failed'
+  const code = getErrorText(err, 'code')
+  const detail = getErrorText(err, 'detail')
+  return {
+    message,
+    ...(code == null ? {} : { code }),
+    ...(detail == null ? {} : { detail }),
+  }
+}
+
 export default () => {
   mainHandle<string, LX.UserApi.ImportUserApi>(WIN_MAIN_RENDERER_EVENT_NAME.import_user_api, async({ params: script }) => {
     return importApi(script)
   })
 
-  mainHandle<LX.UserApi.GitHubImportItem[], LX.UserApi.UserApiInfo[]>(
+  mainHandle<LX.UserApi.GitHubImportItem[], LX.UserApi.GitHubReplaceResult>(
     WIN_MAIN_RENDERER_EVENT_NAME.replace_user_api_from_github,
     async({ params: items }) => {
-      return replaceApisFromGitHub(items)
+      try {
+        return { success: true, apiList: await replaceApisFromGitHub(items) }
+      } catch (err) {
+        return { success: false, error: serializeReplaceError(err) }
+      }
     },
   )
 

@@ -1,6 +1,7 @@
 const assert = require('node:assert')
 const fs = require('node:fs')
 const path = require('node:path')
+const loadTsModule = require('./test-utils/load-ts-module')
 
 const root = path.join(__dirname, '..')
 const readSource = relativePath => fs.readFileSync(path.join(root, relativePath), 'utf8')
@@ -87,13 +88,13 @@ assert.match(
 )
 assert.match(
   mainHandler,
-  /mainHandle<LX\.UserApi\.GitHubImportItem\[\],\s*LX\.UserApi\.UserApiInfo\[\]>/,
+  /mainHandle<LX\.UserApi\.GitHubImportItem\[\],/,
 )
 assert.match(mainHandler, /replaceApisFromGitHub\(items\)/)
 assert.match(rendererIpc, /export const replaceUserApisFromGitHub/)
 assert.match(
   rendererIpc,
-  /rendererInvoke<LX\.UserApi\.GitHubImportItem\[\],\s*LX\.UserApi\.UserApiInfo\[\]>/,
+  /rendererInvoke<LX\.UserApi\.GitHubImportItem\[\],/,
 )
 assert.match(
   rendererIpc,
@@ -368,4 +369,171 @@ for (const { locale, messages } of locales) {
   }
 }
 
-console.log('GitHub user API IPC wiring tests passed')
+const replaceEventName = 'replace_user_api_from_github'
+const createIpcNames = values => new Proxy(values, {
+  get(target, property) {
+    return Reflect.has(target, property) ? Reflect.get(target, property) : String(property)
+  },
+})
+const winMainEventNames = createIpcNames({
+  replace_user_api_from_github: replaceEventName,
+})
+const emptyEventNames = createIpcNames({})
+const hotKeyGroup = new Proxy({}, {
+  get(_target, property) {
+    return { name: String(property), action: String(property) }
+  },
+})
+
+let rendererResult
+const rendererRuntime = loadTsModule(
+  path.join(root, 'src/renderer/utils/ipc.ts'),
+  {
+    '@common/rendererIpc': {
+      rendererSend() {},
+      async rendererInvoke() {
+        return structuredClone(rendererResult)
+      },
+      rendererOn() {},
+      rendererOff() {},
+    },
+    '@common/ipcNames': {
+      HOTKEY_RENDERER_EVENT_NAME: emptyEventNames,
+      WIN_MAIN_RENDERER_EVENT_NAME: winMainEventNames,
+      CMMON_EVENT_NAME: emptyEventNames,
+    },
+    '@common/utils/vueTools': {
+      markRaw: value => value,
+      toRaw: value => value,
+    },
+    '@common/hotKey': {
+      __esModule: true,
+      HOTKEY_PLAYER: hotKeyGroup,
+      HOTKEY_COMMON: hotKeyGroup,
+      HOTKEY_DESKTOP_LYRIC: hotKeyGroup,
+    },
+    '@common/constants': {
+      APP_EVENT_NAMES: { winMainName: 'main', winLyricName: 'lyric' },
+      DATA_KEYS: {},
+      DEFAULT_SETTING: {},
+    },
+  },
+)
+
+let replaceImplementation
+const registeredHandlers = new Map()
+const mainRuntime = loadTsModule(
+  path.join(root, 'src/main/modules/winMain/rendererEvent/userApi.ts'),
+  {
+    '@common/ipcNames': { WIN_MAIN_RENDERER_EVENT_NAME: winMainEventNames },
+    '@common/mainIpc': {
+      mainHandle(name, handler) {
+        registeredHandlers.set(name, handler)
+      },
+    },
+    '@main/modules/userApi': {
+      getApiList() {},
+      importApi() {},
+      replaceApisFromGitHub(items) {
+        return replaceImplementation(items)
+      },
+      removeApi() {},
+      setApi() {},
+      getStatus() {},
+      request() {},
+      cancelRequest() {},
+      setAllowShowUpdateAlert() {},
+    },
+    '@main/modules/winMain/main': { sendEvent() {} },
+  },
+)
+mainRuntime.default()
+const replaceHandler = registeredHandlers.get(replaceEventName)
+assert.equal(typeof replaceHandler, 'function')
+
+const invokeMainReplacement = async() => structuredClone(await replaceHandler({
+  params: [],
+}))
+
+;(async() => {
+  const remotePath = 'v260724/online/file.js'
+  const serializedInvalidError = {
+    message: `GITHUB_INVALID_SCRIPT: ${remotePath}`,
+    code: 'GITHUB_INVALID_SCRIPT',
+    detail: remotePath,
+  }
+  rendererResult = { success: false, error: serializedInvalidError }
+  await assert.rejects(
+    () => rendererRuntime.replaceUserApisFromGitHub([]),
+    err => {
+      assert(err instanceof Error)
+      assert.equal(err.message, serializedInvalidError.message)
+      assert.equal(err.code, serializedInvalidError.code)
+      assert.equal(err.detail, serializedInvalidError.detail)
+      return true
+    },
+  )
+
+  const successList = [{ id: 'github-source' }]
+  rendererResult = { success: true, apiList: successList }
+  assert.deepStrictEqual(
+    await rendererRuntime.replaceUserApisFromGitHub([]),
+    successList,
+  )
+
+  rendererResult = {
+    success: false,
+    error: { message: 'simulated replacement close failure' },
+  }
+  await assert.rejects(
+    () => rendererRuntime.replaceUserApisFromGitHub([]),
+    err => {
+      assert.equal(err.message, 'simulated replacement close failure')
+      assert.equal(Object.prototype.hasOwnProperty.call(err, 'code'), false)
+      assert.equal(Object.prototype.hasOwnProperty.call(err, 'detail'), false)
+      return true
+    },
+  )
+
+  const invalidError = Object.assign(
+    new Error(`${serializedInvalidError.message}\nsecret script contents`),
+    {
+      code: serializedInvalidError.code,
+      detail: serializedInvalidError.detail,
+    },
+  )
+  replaceImplementation = async() => { throw invalidError }
+  assert.deepStrictEqual(await invokeMainReplacement(), {
+    success: false,
+    error: serializedInvalidError,
+  })
+
+  replaceImplementation = async() => {
+    throw new Error('simulated replacement load failure')
+  }
+  assert.deepStrictEqual(await invokeMainReplacement(), {
+    success: false,
+    error: { message: 'simulated replacement load failure' },
+  })
+
+  const longError = Object.assign(new Error('m'.repeat(600)), {
+    code: 'c'.repeat(150),
+    detail: 'd'.repeat(600),
+  })
+  replaceImplementation = async() => { throw longError }
+  const boundedResult = await invokeMainReplacement()
+  assert.equal(boundedResult.error.message.length, 500)
+  assert.equal(boundedResult.error.code.length, 100)
+  assert.equal(boundedResult.error.detail.length, 500)
+
+  replaceImplementation = async() => successList
+  assert.deepStrictEqual(await invokeMainReplacement(), {
+    success: true,
+    apiList: successList,
+  })
+
+  console.log('GitHub user API IPC wiring tests passed')
+})().catch(err => {
+  console.error(err)
+  process.exitCode = 1
+})

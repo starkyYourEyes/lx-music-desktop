@@ -1,15 +1,15 @@
 <template lang="pug">
-material-modal(:show="modelValue" bg-close teleport="#view" @close="handleClose")
+material-modal(:show="modelValue" :bg-close="!githubAction" teleport="#view" @close="handleClose")
   main.scroll(:class="$style.main")
     h2 {{ $t('user_api__title') }}
     div.scroll(v-if="apiList.length" :class="$style.content")
-      section(v-for="group in apiGroups" :key="group.name || 'local'" :class="$style.group")
-        button(type="button" :class="$style.groupHeader" :aria-expanded="!collapsedGroups.has(group.name)" @click="toggleGroup(group.name)")
+      section(v-for="group in apiGroups" :key="group.key" :class="$style.group")
+        button(type="button" :class="$style.groupHeader" :aria-expanded="!collapsedGroups.has(group.key)" @click="toggleGroup(group.key)")
           span(:class="$style.groupName") {{ group.name || $t('user_api__github_local_group') }}
           span(:class="$style.groupCount") {{ group.apis.length }}
-          svg(:class="[$style.groupIcon, { [$style.collapsed]: collapsedGroups.has(group.name) }]" version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024")
+          svg(:class="[$style.groupIcon, { [$style.collapsed]: collapsedGroups.has(group.key) }]" version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024")
             use(xlink:href="#icon-down")
-        ul(v-show="!collapsedGroups.has(group.name)")
+        ul(v-show="!collapsedGroups.has(group.key)")
           li(v-for="api in group.apis" :key="api.id" :class="[$style.listItem, {[$style.active]: appSetting['common.apiSource'] == api.id}]")
             div(:class="$style.listLeft")
               h3
@@ -18,8 +18,8 @@ material-modal(:show="modelValue" bg-close teleport="#view" @close="handleClose"
                 span(v-if="api.author") {{ api.author }}
               p {{ api.description }}
               div
-                base-checkbox(:id="`user_api_${api.id}`" v-model="api.allowShowUpdateAlert" :class="$style.checkbox" :label="$t('user_api__allow_show_update_alert')" @change="handleChangeAllowUpdateAlert(api, $event)")
-            base-btn(:class="$style.listBtn" outline :aria-label="$t('user_api__btn_remove')" @click.stop="handleRemove(api)")
+                base-checkbox(:id="`user_api_${api.id}`" v-model="api.allowShowUpdateAlert" :class="$style.checkbox" :disabled="!!githubAction" :label="$t('user_api__allow_show_update_alert')" @change="handleChangeAllowUpdateAlert(api, $event)")
+            base-btn(:class="$style.listBtn" outline :disabled="!!githubAction" :aria-label="$t('user_api__btn_remove')" @click.stop="handleRemove(api)")
               svg(v-once version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 212.982 212.982" space="preserve")
                 use(xlink:href="#icon-delete")
     div(v-else :class="$style.content")
@@ -78,6 +78,7 @@ export default {
     return {
       githubAction: '',
       githubStatus: '',
+      githubViewGeneration: 0,
       collapsedGroups: new Set(),
     }
   },
@@ -86,14 +87,16 @@ export default {
       const groups = new Map()
       for (const api of this.apiList) {
         const name = api.remote?.group ?? ''
-        if (!groups.has(name)) groups.set(name, [])
-        groups.get(name).push(api)
+        const key = name ? 'remote:' + name : 'local:'
+        if (!groups.has(key)) groups.set(key, { key, name, apis: [] })
+        groups.get(key).apis.push(api)
       }
-      return [...groups].map(([name, apis]) => ({ name, apis }))
+      return [...groups.values()]
     },
   },
   watch: {
     modelValue(show) {
+      this.githubViewGeneration++
       if (!show) return
       this.collapsedGroups = new Set()
       this.githubStatus = ''
@@ -129,64 +132,78 @@ export default {
         message: detail,
       })
     },
+    isGitHubViewCurrent(viewGeneration) {
+      return this.modelValue && this.githubViewGeneration == viewGeneration
+    },
     async handleGitHubTest() {
       if (this.githubAction) return
-      this.githubAction = 'test'
+      const action = 'test'
+      this.githubAction = action
+      const viewGeneration = this.githubViewGeneration
       this.githubStatus = this.$t('user_api__github_testing')
       try {
         const snapshot = await getGitHubUserApiSnapshot()
+        if (!this.isGitHubViewCurrent(viewGeneration)) return
         this.githubStatus = this.$t('user_api__github_test_success', {
           version: snapshot.version,
           count: snapshot.files.length,
           commit: snapshot.commitSha.substring(0, 7),
         })
       } catch (err) {
+        if (!this.isGitHubViewCurrent(viewGeneration)) return
         const message = this.formatGitHubError(err)
         this.githubStatus = message
         void dialog(message)
       } finally {
-        this.githubAction = ''
+        if (this.githubAction == action) this.githubAction = ''
       }
     },
     async handleGitHubImport() {
       if (this.githubAction) return
-      this.githubAction = 'import'
+      const action = 'import'
+      this.githubAction = action
+      const viewGeneration = this.githubViewGeneration
       this.githubStatus = this.$t('user_api__github_importing')
       try {
         const snapshot = await getGitHubUserApiSnapshot()
+        if (!this.isGitHubViewCurrent(viewGeneration)) return
         const confirmed = await this.$dialog.confirm({
           message: this.$t('user_api__github_import_confirm', {
             localCount: this.apiList.length,
             version: snapshot.version,
             remoteCount: snapshot.files.length,
           }),
-          confirmButtonText: this.$t('ok'),
+          confirmButtonText: this.$t('confirm_button_text'),
           cancelButtonText: this.$t('cancel_button_text'),
         })
+        if (!this.isGitHubViewCurrent(viewGeneration)) return
         if (!confirmed) {
           this.githubStatus = ''
           return
         }
 
-        const previousId = appSetting['common.apiSource']
-        const previousWasCustom = this.apiList.some(api => api.id == previousId)
+        const oldCustomIds = new Set(this.apiList.map(api => api.id))
         const items = await downloadGitHubUserApiSnapshot(snapshot)
+        if (!this.isGitHubViewCurrent(viewGeneration)) return
         const apiList = await replaceUserApisFromGitHub(items)
         userApi.list = apiList
-        if (previousWasCustom && !apiList.some(api => api.id == previousId)) {
+        const selectedId = appSetting['common.apiSource']
+        if (oldCustomIds.has(selectedId) && !apiList.some(api => api.id == selectedId)) {
           const fallback = apiSourceInfo.find(api => !api.disabled) ?? apiList[0]
           updateSetting({ 'common.apiSource': fallback?.id ?? '' })
         }
+        if (!this.isGitHubViewCurrent(viewGeneration)) return
         this.githubStatus = this.$t('user_api__github_import_success', {
           version: snapshot.version,
           count: apiList.length,
         })
       } catch (err) {
+        if (!this.isGitHubViewCurrent(viewGeneration)) return
         const message = this.formatGitHubError(err)
         this.githubStatus = message
         void dialog(message)
       } finally {
-        this.githubAction = ''
+        if (this.githubAction == action) this.githubAction = ''
       }
     },
     handleImport() {
@@ -208,6 +225,7 @@ export default {
 
     },
     async handleRemove(api) {
+      if (this.githubAction) return
       if (appSetting['common.apiSource'] == api.id) {
         let backApi = apiSourceInfo.find(api => !api.disabled)
         if (!backApi) backApi = userApi.list.find(item => item.id != api.id)
@@ -216,12 +234,14 @@ export default {
       userApi.list = await removeUserApi([api.id])
     },
     handleClose() {
+      if (this.githubAction) return
       this.$emit('update:modelValue', false)
     },
     handleOpenUrl(url) {
       void openUrl(url)
     },
     handleChangeAllowUpdateAlert(api, enable) {
+      if (this.githubAction) return
       void setAllowShowUserApiUpdateAlert(api.id, enable)
     },
   },

@@ -61,6 +61,9 @@ const githubImportMethod = extractBracedBlock(
 )
 const removeMethod = extractBracedBlock(userApiModal, 'async handleRemove(api)', 'remove handler')
 const apiGroupsMethod = extractBracedBlock(userApiModal, 'apiGroups()', 'API groups computed')
+const closeMethod = extractBracedBlock(userApiModal, 'handleClose()', 'close handler')
+const changeAlertMethod = extractBracedBlock(userApiModal, 'handleChangeAllowUpdateAlert(api, enable)', 'update alert handler')
+const modelValueWatcher = extractBracedBlock(userApiModal, 'modelValue(show)', 'modelValue watcher')
 const groupTemplate = extractBetween(
   template,
   'section(v-for="group in apiGroups"',
@@ -106,34 +109,68 @@ for (const [label, method] of [
   ['GitHub import handler', githubImportMethod],
 ]) {
   assert.match(method, /if\s*\(this\.githubAction\)\s*return/, label + ' has no action guard')
+  assert.match(method, /const\s+viewGeneration\s*=\s*this\.githubViewGeneration/)
   assert.match(
     method,
-    /finally\s*{[\s\S]*?this\.githubAction\s*=\s*['"]{2}/,
-    label + ' does not clear the action in finally',
+    /catch\s*\(err\)\s*{\s*if\s*\(!this\.isGitHubViewCurrent\(viewGeneration\)\)\s*return/,
+    label + ' does not suppress stale errors',
+  )
+  assert.match(
+    method,
+    /finally\s*{\s*if\s*\(this\.githubAction\s*==\s*action\)\s*this\.githubAction\s*=\s*['"]{2}/,
+    label + ' can clear another action',
   )
 }
-assertInOrder(githubImportMethod, [
+assertInOrder(modelValueWatcher, [
+  'this.githubViewGeneration++',
+  'if (!show) return',
+], 'modal view generation')
+assertInOrder(githubTestMethod, [
+  'const viewGeneration = this.githubViewGeneration',
   'getGitHubUserApiSnapshot()',
+  'if (!this.isGitHubViewCurrent(viewGeneration)) return',
+  "this.githubStatus = this.$t('user_api__github_test_success'",
+], 'GitHub connection test lifecycle')
+assertInOrder(githubImportMethod, [
+  'const viewGeneration = this.githubViewGeneration',
+  'getGitHubUserApiSnapshot()',
+  'if (!this.isGitHubViewCurrent(viewGeneration)) return',
   'this.$dialog.confirm',
+  'if (!this.isGitHubViewCurrent(viewGeneration)) return',
   'if (!confirmed)',
+  "this.githubStatus = ''",
   'return',
+  'const oldCustomIds = new Set(this.apiList.map(api => api.id))',
   'downloadGitHubUserApiSnapshot(snapshot)',
+  'if (!this.isGitHubViewCurrent(viewGeneration)) return',
   'replaceUserApisFromGitHub(items)',
 ], 'GitHub import flow')
 assertInOrder(githubImportMethod, [
-  "const previousId = appSetting['common.apiSource']",
-  'const previousWasCustom = this.apiList.some(api => api.id == previousId)',
+  'const oldCustomIds = new Set(this.apiList.map(api => api.id))',
   'const items = await downloadGitHubUserApiSnapshot(snapshot)',
   'const apiList = await replaceUserApisFromGitHub(items)',
   'userApi.list = apiList',
-  'if (previousWasCustom && !apiList.some(api => api.id == previousId))',
+  "const selectedId = appSetting['common.apiSource']",
+  'if (oldCustomIds.has(selectedId) && !apiList.some(api => api.id == selectedId))',
   'const fallback = apiSourceInfo.find(api => !api.disabled) ?? apiList[0]',
   "updateSetting({ 'common.apiSource': fallback?.id ?? '' })",
-], 'selected custom source preservation')
+  'if (!this.isGitHubViewCurrent(viewGeneration)) return',
+  "this.githubStatus = this.$t('user_api__github_import_success'",
+], 'live selected custom source preservation')
+assert.doesNotMatch(githubImportMethod, /\bpreviousId\b|\bpreviousWasCustom\b/)
+assert.match(githubImportMethod, /confirmButtonText:\s*this\.\$t\('confirm_button_text'\)/)
+assert.doesNotMatch(githubImportMethod, /confirmButtonText:\s*this\.\$t\('ok'\)/)
+
+assert.match(template, /material-modal\([^\r\n]*:bg-close="!githubAction"/)
+assertInOrder(closeMethod, [
+  'if (this.githubAction) return',
+  "this.$emit('update:modelValue', false)",
+], 'modal close guard')
 
 assert.match(userApiModal, /async\s+handleRemove\(api\)/)
 assert.doesNotMatch(removeMethod, /this\.apiList\s*\[\s*index\s*\]/)
 assertInOrder(removeMethod, [
+  'if (this.githubAction) return',
   "if (appSetting['common.apiSource'] == api.id)",
   'apiSourceInfo.find(api => !api.disabled)',
   'userApi.list.find(item => item.id != api.id)',
@@ -141,22 +178,31 @@ assertInOrder(removeMethod, [
   'removeUserApi([api.id])',
 ], 'custom source removal')
 assert.match(groupTemplate, /@click\.stop="handleRemove\(api\)"/)
+assert.match(groupTemplate, /base-btn\([^\r\n]*:disabled="!!githubAction"[^\r\n]*@click\.stop="handleRemove\(api\)"/)
+assert.match(groupTemplate, /base-checkbox\([^\r\n]*:disabled="!!githubAction"/)
+assertInOrder(changeAlertMethod, [
+  'if (this.githubAction) return',
+  'setAllowShowUserApiUpdateAlert(api.id, enable)',
+], 'update alert guard')
 
 assertInOrder(apiGroupsMethod, [
   'for (const api of this.apiList)',
   "const name = api.remote?.group ?? ''",
-  'if (!groups.has(name)) groups.set(name, [])',
-  'groups.get(name).push(api)',
-  'return [...groups].map(([name, apis]) => ({ name, apis }))',
+  "const key = name ? 'remote:' + name : 'local:'",
+  'if (!groups.has(key)) groups.set(key, { key, name, apis: [] })',
+  'groups.get(key).apis.push(api)',
+  'return [...groups.values()]',
 ], 'API grouping')
 assert.doesNotMatch(apiGroupsMethod, /\.sort\s*\(/)
+assert.notEqual('local:', 'remote:' + 'local')
 assert.match(groupTemplate, /section\(v-for="group in apiGroups"/)
-assert.match(groupTemplate, /:key="group\.name \|\| 'local'"/)
+assert.match(groupTemplate, /:key="group\.key"/)
+assert.doesNotMatch(groupTemplate, /:key="group\.name \|\| 'local'"/)
 assert.match(groupTemplate, /span\(:class="\$style\.groupCount"\) {{ group\.apis\.length }}/)
-assert.match(groupTemplate, /ul\(v-show="!collapsedGroups\.has\(group\.name\)"\)/)
+assert.match(groupTemplate, /ul\(v-show="!collapsedGroups\.has\(group\.key\)"\)/)
 assert.match(groupTemplate, /li\(v-for="api in group\.apis"/)
 assert.match(groupTemplate, /group\.name \|\| \$t\('user_api__github_local_group'\)/)
-assert.match(groupTemplate, /:aria-expanded="!collapsedGroups\.has\(group\.name\)"/)
+assert.match(groupTemplate, /:aria-expanded="!collapsedGroups\.has\(group\.key\)"/)
 assert.match(groupTemplate, /#icon-down/)
 
 assertInOrder(footerTemplate, [

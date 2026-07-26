@@ -9,6 +9,7 @@
       />
       <span :class="$style.progressMarker" aria-hidden="true" />
       <span :class="$style.progressTooltip" aria-hidden="true">{{ nowPlayTimeStr }} / {{ maxPlayTimeStr }}</span>
+      <span :class="$style.progressTime">{{ nowPlayTimeStr }} / {{ maxPlayTimeStr }}</span>
     </div>
     <div :class="$style.footerLeft">
       <div :class="$style.trackInfo">
@@ -118,7 +119,7 @@ const progressPosition = computed(() => `${Math.min(Math.max(progress.value || 0
 .progressMarker {
   position: absolute;
   z-index: 2;
-  left: var(--progress-position);
+  left: clamp(4px, var(--progress-position), calc(100% - 4px));
   top: 5.5px;
   width: 8px;
   height: 8px;
@@ -151,6 +152,19 @@ const progressPosition = computed(() => `${Math.min(Math.max(progress.value || 0
   transform: translate(-50%, 2px);
   pointer-events: none;
   transition: left .2s ease-out, opacity .15s ease, transform .15s ease;
+}
+
+.progressTime {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  pointer-events: none;
 }
 
 .progressTrack:hover .progressTooltip {

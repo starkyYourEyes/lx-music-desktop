@@ -265,20 +265,43 @@ const progressTrackTemplate = playBar.match(/<div\b(?=[^>]*:class="\$style\.prog
 assert(progressTrackTemplate, 'Progress track should bind its CSS position before the footer metadata block')
 const progressTrackBlock = progressTrackTemplate[1]
 assert.match(progressTrackBlock, /:class="\$style\.progressMarker"/, 'Progress track should render its marker')
-assert.match(
-  progressTrackBlock,
+const progressTooltipElement = progressTrackBlock.match(
   /<span\b(?=[^>]*:class="\$style\.progressTooltip")[^>]*>\s*\{\{\s*nowPlayTimeStr\s*\}\}\s*\/\s*\{\{\s*maxPlayTimeStr\s*\}\}\s*<\/span>/,
-  'Progress tooltip should contain current and total time',
 )
+assert(progressTooltipElement, 'Progress tooltip should contain current and total time')
+assert.match(progressTooltipElement[0], /(?:^|\s)aria-hidden\s*=\s*["']true["'](?=\s|\/?>)/, 'Progress tooltip should remain hidden from assistive technology')
+const accessibleProgressTime = progressTrackBlock.match(
+  /<span\b(?=[^>]*:class="\$style\.progressTime")[^>]*>\s*\{\{\s*nowPlayTimeStr\s*\}\}\s*\/\s*\{\{\s*maxPlayTimeStr\s*\}\}\s*<\/span>/,
+)
+assert(accessibleProgressTime, 'Progress track should expose current and total time to assistive technology')
+assert.doesNotMatch(accessibleProgressTime[0], /(?:^|\s)aria-hidden(?=\s|=|\/?>)/, 'Accessible progress time should not be hidden from assistive technology')
+assert.doesNotMatch(accessibleProgressTime[0], /(?:^|\s)aria-live(?=\s|=|\/?>)/, 'Accessible progress time should not announce every playback update')
 
 const progressMarker = getDirectDeclarations(getRule(playBarStyle, '.progressMarker'))
-expectDeclaration(progressMarker, 'left', 'var(--progress-position)', 'Progress marker should follow the CSS progress position')
+expectDeclaration(
+  progressMarker,
+  'left',
+  'clamp(4px, var(--progress-position), calc(100% - 4px))',
+  'Progress marker should stay fully visible at the zero and completion endpoints',
+)
 expectDeclaration(progressMarker, 'pointer-events', 'none', 'Progress marker should not intercept pointer input')
 
 const progressTooltip = getDirectDeclarations(getRule(playBarStyle, '.progressTooltip'))
 expectDeclaration(progressTooltip, 'left', 'clamp(50px, var(--progress-position), calc(100% - 50px))', 'Progress tooltip should remain within the track')
 expectDeclaration(progressTooltip, 'opacity', '0', 'Progress tooltip should start hidden')
 expectDeclaration(progressTooltip, 'pointer-events', 'none', 'Progress tooltip should not intercept pointer input')
+
+const progressTime = getDirectDeclarations(getRule(playBarStyle, '.progressTime'))
+expectDeclaration(progressTime, 'position', 'absolute', 'Accessible progress time should not participate in footer layout')
+expectDeclaration(progressTime, 'width', '1px', 'Accessible progress time should use the standard visually-hidden width')
+expectDeclaration(progressTime, 'height', '1px', 'Accessible progress time should use the standard visually-hidden height')
+expectDeclaration(progressTime, 'padding', '0', 'Accessible progress time should not add layout padding')
+expectDeclaration(progressTime, 'margin', '-1px', 'Accessible progress time should use the standard visually-hidden margin')
+expectDeclaration(progressTime, 'overflow', 'hidden', 'Accessible progress time should remain visually clipped')
+expectDeclaration(progressTime, 'clip', 'rect(0, 0, 0, 0)', 'Accessible progress time should use the standard visually-hidden clip')
+expectDeclaration(progressTime, 'white-space', 'nowrap', 'Accessible progress time should remain on one clipped line')
+expectDeclaration(progressTime, 'border', '0', 'Accessible progress time should not render a border')
+expectDeclaration(progressTime, 'pointer-events', 'none', 'Accessible progress time should not intercept seeking')
 
 const progressTrackHoverTooltip = getDirectDeclarations(getRule(playBarStyle, '.progressTrack:hover .progressTooltip'))
 expectDeclaration(progressTrackHoverTooltip, 'visibility', 'visible', 'Progress tooltip should become visible on hover')

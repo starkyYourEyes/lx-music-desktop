@@ -70,6 +70,10 @@ export class Event extends EventEmitter {
     this.emit('hot_key_config_update', config)
   }
 
+  user_api_changed() {
+    this.emit('user_api_changed')
+  }
+
   main_window_created(win: BrowserWindow) {
     this.emit('main_window_created', win)
   }

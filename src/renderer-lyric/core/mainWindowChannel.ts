@@ -3,6 +3,7 @@ import { onBeforeUnmount } from '@common/utils/vueTools'
 import { setMusicInfo, setIsPlay } from '../store/action'
 import { pause, play, setLyric, setLyricOffset, setPlaybackRate, stop } from './lyric'
 import { lyrics } from '@lyric/store/lyric'
+import { arrRemove } from '@common/utils/common'
 
 let mainWindowPort: Electron.IpcRendererEvent['ports'][0] | null = null
 export const sendDesktopLyricInfo = (info: LX.DesktopLyric.WinMainActions) => {
@@ -94,7 +95,7 @@ export const useEvent = (listener: (event: LX.DesktopLyric.LyricActions) => void
   listeners.push(listener)
 
   onBeforeUnmount(() => {
-    listeners.splice(listeners.indexOf(listener), 1)
+    arrRemove(listeners, listener)
   })
 }
 

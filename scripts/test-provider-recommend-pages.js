@@ -17,6 +17,10 @@ const zhCN = read('src/lang/zh-cn.json')
 const zhTW = read('src/lang/zh-tw.json')
 const enUS = read('src/lang/en-us.json')
 
+assert.strictEqual(JSON.parse(zhCN).setting__recommend, '推荐设置')
+assert.strictEqual(JSON.parse(zhTW).setting__recommend, '推薦設定')
+assert.strictEqual(JSON.parse(enUS).setting__recommend, 'Recommendations')
+
 assert.match(router, /path:\s*'\/qq-recommend'[\s\S]*?views\/QQRecommend\/index\.vue/,
   'router should expose a dedicated QQ recommendation page')
 
@@ -51,6 +55,10 @@ assert(exists('src/renderer/views/QQRecommend/useQQDailyRecommendCard.ts'),
   'QQ Daily 30 card builder should exist')
 assert(exists('src/renderer/views/QQRecommend/useQQDailyRecommendPlayback.ts'),
   'QQ Daily 30 playback controller should exist')
+assert(exists('src/renderer/views/QQRecommend/useQQHomeRecommendData.ts'),
+  'QQ personalized home data facade should exist')
+assert(exists('src/renderer/views/QQRecommend/useQQHomeRecommendPlayback.ts'),
+  'QQ personalized home playback controller should exist')
 assert(!exists('src/renderer/views/QQRecommend/useQQHomeRecommendDiagnostic.ts'),
   'QQ home recommendation diagnostic should be removed')
 
@@ -66,8 +74,8 @@ assert.match(qqPage, /useQQMusicLoginQr/,
   'QQ page should own QQ QR login')
 assert.doesNotMatch(qqPage, /useQQHomeRecommendDiagnostic|inspectHomeRecommend|resetHomeRecommendDiagnostic/,
   'QQ page should not request or log QQ home recommendations')
-assert.match(qqPage, /Promise\.allSettled\(\[loadQQGuessLikeSongs\(\), loadQQDailyRecommendSongs\(\)\]\)/,
-  'QQ page should independently load both recommendations for a signed-in account')
+assert.match(qqPage, /Promise\.allSettled\(\[[\s\S]*?loadHomeRecommendation\(force\)[\s\S]*?loadQQGuessLikeSongs\(force\)[\s\S]*?loadQQDailyRecommendSongs\(force\)[\s\S]*?\]\)/,
+  'QQ page should independently load the home feed, Guess You Like, and Daily 30')
 assert.match(qqCard, /登录 QQ 音乐后获取猜你喜欢/,
   'signed-out QQ page should show a stable login entry')
 assert.match(qqCard, /img:\s*song\?\.meta\.picUrl/,
@@ -84,11 +92,11 @@ assert.match(qqDailyCard, /img:\s*song\?\.meta\.picUrl/,
   'Daily 30 card should use the first song artwork')
 assert.match(qqDailyCard, /getKicker:\s*\(\)\s*=>\s*'Daily 30'/,
   'Daily 30 card should expose its kicker')
-assert.match(qqPage, /const cards = computed\(\(\) => \[guessLikeCard\.value, dailyRecommendCard\.value\]\)/,
+assert.match(qqPage, /const featuredCards = computed\(\(\) => \[\s*guessLikeCard\.value,\s*dailyRecommendCard\.value/,
   'QQ page should show Guess You Like before Daily 30')
-assert.match(qqPage, /@open="handleCardOpen"/,
+assert.match(qqPage, /@open="handleFeatureCardOpen"/,
   'card body opens should use a dedicated handler')
-assert.match(qqPage, /@toggle-card-play="handleCardPlay"/,
+assert.match(qqPage, /@toggle-play="handleFeatureCardPlay"/,
   'card cover play controls should use a dedicated handler')
 assert.match(qqPage, /Promise\.allSettled\(/,
   'Guess You Like and Daily 30 should load independently')
@@ -111,6 +119,17 @@ assert.match(specialCards, /@click="\$emit\('open', playlist\)"/,
 assert.match(qqCard, /`\$\{song\.name\} · \$\{song\.singer\}`/,
   'Guess You Like subtitle should combine first song name and singer')
 
+assert.match(defaultSetting, /'recommend\.qqGuessLikeApiVersion':\s*'new'/,
+  'new QQ Guess You Like API should be the default')
+assert.match(settingTypes, /'recommend\.qqGuessLikeApiVersion':\s*LX\.QQMusic\.GuessLikeApiVersion/,
+  'QQ Guess You Like API selection should be typed')
+assert.match(settingPage, /appSetting\['recommend\.qqGuessLikeApiVersion'\]/,
+  'recommend settings should bind the QQ Guess You Like API selection')
+assert.match(settingPage, /name="setting_qq_guess_like_api_version"[\s\S]*?value="new"/,
+  'recommend settings should expose the new QQ API option')
+assert.match(settingPage, /name="setting_qq_guess_like_api_version"[\s\S]*?value="legacy"/,
+  'recommend settings should expose the legacy QQ API option')
+
 for (const [name, source] of [
   ['default settings', defaultSetting],
   ['setting types', settingTypes],
@@ -127,6 +146,10 @@ for (const [name, source] of [
 ]) {
   assert(source.includes('netease_recommend') && source.includes('qq_recommend'),
     `${name} should include provider-specific navigation labels`)
+  assert(source.includes('setting__recommend_qq_guess_like_api') &&
+    source.includes('setting__recommend_qq_guess_like_api_new') &&
+    source.includes('setting__recommend_qq_guess_like_api_legacy'),
+  `${name} should include QQ Guess You Like API selector labels`)
   assert(!source.includes('setting__recommend_qq_guess_like_logged_out_visible'),
     `${name} should remove the obsolete QQ setting label`)
 }

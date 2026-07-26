@@ -71,4 +71,5 @@ export const File = {
 export const FeaturesList = [
   'list',
   'dislike',
+  'userApi',
 ] as const

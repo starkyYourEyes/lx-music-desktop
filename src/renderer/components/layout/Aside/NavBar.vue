@@ -58,6 +58,13 @@ const menuList = [
     name: 'CloudDisk',
   },
   {
+    to: '/local-music',
+    tips: 'local_music',
+    icon: '#icon-musicFolder',
+    iconSize: '0 0 247.498 247.498',
+    name: 'LocalMusic',
+  },
+  {
     to: '/recent-play',
     tips: 'recent_play',
     icon: '#icon-recent-play',

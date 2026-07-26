@@ -30,11 +30,13 @@ const loadAccountStore = (
   logoutQQMusic = async() => {},
   resetQQGuessLikeQueue = () => {},
   resetQQDailyRecommend = () => {},
+  resetQQBrushModeQueue = () => {},
 ) => {
   return loadTsModule(path.join(__dirname, '../src/renderer/store/qqMusic.ts'), {
     '@common/utils/vueTools': { ref, shallowRef: ref, computed },
     '@renderer/utils/ipc': { getQQMusicAccountStatus, logoutQQMusic },
     '@renderer/store/qqGuessLike/action': { resetQQGuessLikeQueue },
+    '@renderer/store/qqBrushMode/action': { resetQQBrushModeQueue },
     '@renderer/store/qqDailyRecommend/action': { resetQQDailyRecommend },
   })
 }
@@ -236,10 +238,13 @@ const testAccountStore = async() => {
 
 const testAccountIdentityInvalidatesQQGuessLikeQueue = async() => {
   let resetCount = 0
+  let brushResetCount = 0
   const store = loadAccountStore(
     async() => ({ isLoggedIn: false, profile: null }),
     async() => {},
     () => { resetCount++ },
+    () => {},
+    () => { brushResetCount++ },
   )
   const status = uin => ({
     isLoggedIn: true,
@@ -249,12 +254,15 @@ const testAccountIdentityInvalidatesQQGuessLikeQueue = async() => {
   store.setQQMusicAccountStatus(status('account-a'))
   store.setQQMusicAccountStatus(status('account-a'))
   assert.strictEqual(resetCount, 1)
+  assert.strictEqual(brushResetCount, 1)
 
   store.setQQMusicAccountStatus(status('account-b'))
   assert.strictEqual(resetCount, 2)
+  assert.strictEqual(brushResetCount, 2)
 
   await store.logoutQQMusicAccount()
   assert.strictEqual(resetCount, 3)
+  assert.strictEqual(brushResetCount, 3)
 }
 
 const testQrPolling = async() => {

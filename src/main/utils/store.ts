@@ -8,6 +8,10 @@ type Stores = Record<string, Store>
 
 const stores: Stores = {}
 
+const isStoreRecord = (value: unknown): value is Record<string, any> => {
+  return value != null && typeof value == 'object' && !Array.isArray(value)
+}
+
 
 class Store {
   private readonly filePath: string
@@ -42,7 +46,7 @@ class Store {
       } else store = JSON.parse(fs.readFileSync(this.filePath, 'utf8'))
     } else store = {}
 
-    if (typeof store != 'object') {
+    if (!isStoreRecord(store)) {
       if (clearInvalidConfig) store = {}
       else throw new Error('parse data error: ' + String(store))
     }
@@ -58,11 +62,24 @@ class Store {
   }
 
   set(key: string, value: any) {
-    this.store[key] = value
-    this.writeFile()
+    const previousDescriptor = Object.getOwnPropertyDescriptor(this.store, key)
+    Object.defineProperty(this.store, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
+    try {
+      this.writeFile()
+    } catch (err) {
+      if (previousDescriptor) Object.defineProperty(this.store, key, previousDescriptor)
+      else Reflect.deleteProperty(this.store, key)
+      throw err
+    }
   }
 
   override(value: Record<string, any>) {
+    if (!isStoreRecord(value)) throw new Error('invalid store data')
     this.store = value
     this.writeFile()
   }

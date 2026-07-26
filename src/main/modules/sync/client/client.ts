@@ -5,7 +5,7 @@ import { callObj } from './sync'
 // import { getStore } from '@root/store'
 // import registerSyncListHandler from './syncList'
 import log from '../log'
-import { dateFormat } from '@common/utils/common'
+import { arrRemove, dateFormat } from '@common/utils/common'
 import { aesEncrypt } from '../utils'
 import { sendClientStatus } from '@main/modules/winMain'
 import { createMsg2call } from 'message2call'
@@ -204,6 +204,7 @@ export const connect = (urlInfo: LX.Sync.Client.UrlInfo, keyInfo: LX.Sync.Client
   client.remoteQueueList = message2read.createQueueRemote('list')
   client.remoteQueueDislike = message2read.createQueueRemote('dislike')
   client.remoteQueueParty = message2read.createQueueRemote('party')
+  client.remoteQueueUserApi = message2read.createQueueRemote('userApi')
 
   client.addEventListener('message', ({ data }) => {
     if (data == 'ping') return
@@ -227,7 +228,7 @@ export const connect = (urlInfo: LX.Sync.Client.UrlInfo, keyInfo: LX.Sync.Client
   client.onClose = function(handler: typeof closeEvents[number]) {
     closeEvents.push(handler)
     return () => {
-      closeEvents.splice(closeEvents.indexOf(handler), 1)
+      arrRemove(closeEvents, handler)
     }
   }
 
@@ -241,6 +242,7 @@ export const connect = (urlInfo: LX.Sync.Client.UrlInfo, keyInfo: LX.Sync.Client
       list: false,
       dislike: false,
       party: false,
+      userApi: false,
     }
     disconnected = false
     sendSyncStatus({

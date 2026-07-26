@@ -123,6 +123,15 @@ declare namespace LX {
       password?: string
     }
 
+    interface LocalMusicScanParams {
+      dirs?: string[]
+    }
+
+    interface LocalMusicUploadParams {
+      musicInfo: MusicInfoLocal
+      webdavDir?: string
+    }
+
     interface LyricInfo {
       // 歌曲歌词
       lyric: string

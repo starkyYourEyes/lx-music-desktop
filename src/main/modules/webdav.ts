@@ -1,6 +1,7 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import crypto from 'node:crypto'
-import { URL } from 'node:url'
+import fs from 'node:fs'
+import path from 'node:path'
 import type { Readable } from 'node:stream'
 import { request } from 'undici'
 import { detect } from 'jschardet'
@@ -8,6 +9,19 @@ import iconv from 'iconv-lite'
 import { decodeKrc } from '@common/utils/lyricUtils/kg'
 import { formatPlayTime } from '@common/utils/common'
 import type { IAudioMetadata, IComment } from 'music-metadata/lib/type'
+import {
+  normalizeWebDAVSubDir,
+  createLocalMusicWebDAVPath,
+} from '@common/utils/localMusicWebdav'
+import {
+  normalizeLocalMusicWebDAVDir,
+  normalizeLocalMusicDirs,
+} from '@common/utils/localMusicSettings'
+import {
+  createWebDAVFileUrl,
+  normalizeWebDAVRootUrl,
+  resolveWebDAVHref,
+} from '@common/utils/webdavUrl'
 
 const AUDIO_EXTS = new Set(['mp3', 'flac', 'ogg', 'oga', 'wav', 'm4a'])
 const LYRIC_EXTS = new Set(['lrc'])
@@ -24,7 +38,8 @@ interface WebDAVEntry {
 }
 
 interface WebDAVTokenInfo {
-  musicInfo: LX.Music.MusicInfoWebDAV
+  targetUrl: string
+  ext: string
   config: LX.Music.WebDAVConfig
   expiresAt: number
 }
@@ -43,9 +58,12 @@ interface ParsedWebDAVMusicMeta {
 
 let httpServer: http.Server | null = null
 let serverPort = 0
+let serverStartPromise: Promise<void> | null = null
 const tokens = new Map<string, WebDAVTokenInfo>()
+const TOKEN_TTL = 3 * 60 * 60 * 1000
+const MAX_TOKEN_COUNT = 128
 
-const normalizeDirUrl = (url: string) => url.endsWith('/') ? url : `${url}/`
+const normalizeDirUrl = (url: string) => normalizeWebDAVRootUrl(url)
 
 const getConfiguredWebDAV = (): LX.Music.WebDAVConfig => ({
   url: global.lx.appSetting['webdav.url'],
@@ -55,49 +73,43 @@ const getConfiguredWebDAV = (): LX.Music.WebDAVConfig => ({
 
 const assertConfig = (config: LX.Music.WebDAVConfig) => {
   if (!config.url || !config.username || !config.password) throw new Error('WebDAV config is incomplete')
+  normalizeDirUrl(config.url)
 }
 
 const getAuthHeader = (config: LX.Music.WebDAVConfig) => {
   return `Basic ${Buffer.from(`${config.username}:${config.password}`).toString('base64')}`
 }
 
-const encodePathname = (pathname: string) => {
-  return pathname
-    .split('/')
-    .map(part => encodeURIComponent(decodeURIComponent(part)))
-    .join('/')
-}
-
-const buildChildUrl = (baseUrl: string, href: string) => {
-  const base = new URL(normalizeDirUrl(baseUrl))
-  if (/^https?:\/\//i.test(href)) return href
-  if (href.startsWith('/')) {
-    base.pathname = encodePathname(href)
-    base.search = ''
-    base.hash = ''
-    return base.toString()
-  }
-  return new URL(encodePathname(href), base).toString()
-}
-
-const getRelativePath = (rootUrl: string, childUrl: string) => {
-  const root = new URL(normalizeDirUrl(rootUrl))
-  const child = new URL(childUrl)
-  let rootPath = decodeURIComponent(root.pathname)
-  let childPath = decodeURIComponent(child.pathname)
-  if (!rootPath.endsWith('/')) rootPath += '/'
-  if (childPath.startsWith(rootPath)) childPath = childPath.slice(rootPath.length)
-  return childPath.replace(/^\/+/, '')
-}
-
 const getFileName = (path: string) => {
   const name = path.split('/').filter(Boolean).at(-1) ?? path
-  return decodeURIComponent(name)
+  try {
+    return decodeURIComponent(name)
+  } catch {
+    return name
+  }
 }
 
 const getExt = (fileName: string) => {
   const ext = /\.([^.]+)$/.exec(fileName)?.[1] ?? ''
   return ext.toLocaleLowerCase()
+}
+
+const getAudioContentType = (ext: string) => {
+  switch (ext.toLocaleLowerCase()) {
+    case 'mp3':
+      return 'audio/mpeg'
+    case 'flac':
+      return 'audio/flac'
+    case 'ogg':
+    case 'oga':
+      return 'audio/ogg'
+    case 'wav':
+      return 'audio/wav'
+    case 'm4a':
+      return 'audio/mp4'
+    default:
+      return 'application/octet-stream'
+  }
 }
 
 const stripExt = (fileName: string) => fileName.replace(/\.[^.]*$/, '')
@@ -158,6 +170,7 @@ const getEmbeddedLyric = (metadata: IAudioMetadata) => {
 }
 
 const parseWebDAVMusicMeta = async(entry: WebDAVEntry, config: LX.Music.WebDAVConfig): Promise<ParsedWebDAVMusicMeta | null> => {
+  let body: Readable | null = null
   try {
     const resp = await request(entry.url, {
       method: 'GET',
@@ -165,10 +178,11 @@ const parseWebDAVMusicMeta = async(entry: WebDAVEntry, config: LX.Music.WebDAVCo
         Authorization: getAuthHeader(config),
       },
     })
+    body = resp.body as unknown as Readable
     if (resp.statusCode < 200 || resp.statusCode >= 300) return null
 
     const { parseStream } = await import('music-metadata')
-    const metadata = await parseStream(resp.body as unknown as Readable, {
+    const metadata = await parseStream(body, {
       mimeType: resp.headers['content-type']?.toString(),
       path: entry.path,
       size: entry.size,
@@ -190,10 +204,12 @@ const parseWebDAVMusicMeta = async(entry: WebDAVEntry, config: LX.Music.WebDAVCo
   } catch (err) {
     console.log(err)
     return null
+  } finally {
+    body?.destroy()
   }
 }
 
-const parsePropfindResponse = (xml: string, rootUrl: string): WebDAVEntry[] => {
+const parsePropfindResponse = (xml: string, rootUrl: string, baseUrl: string): WebDAVEntry[] => {
   const entries: WebDAVEntry[] = []
   const responseReg = /<(?:\w+:)?response\b[\s\S]*?<\/(?:\w+:)?response>/gi
   const tagValue = (block: string, tag: string) => {
@@ -204,8 +220,9 @@ const parsePropfindResponse = (xml: string, rootUrl: string): WebDAVEntry[] => {
   for (const [response] of xml.matchAll(responseReg)) {
     const href = tagValue(response, 'href')
     if (!href) continue
-    const url = buildChildUrl(rootUrl, href)
-    const path = getRelativePath(rootUrl, url)
+    const resolved = resolveWebDAVHref(rootUrl, baseUrl, href)
+    if (!resolved) continue
+    const { url, path } = resolved
     if (!path) continue
     const isDirectory = /<(?:\w+:)?collection\b/i.test(response)
     const sizeRaw = tagValue(response, 'getcontentlength')
@@ -231,7 +248,10 @@ const propfind = async(url: string, config: LX.Music.WebDAVConfig) => {
     },
     body: '<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:allprop/></d:propfind>',
   })
-  if (resp.statusCode < 200 || resp.statusCode >= 300) throw new Error(`WebDAV PROPFIND failed: ${resp.statusCode}`)
+  if (resp.statusCode < 200 || resp.statusCode >= 300) {
+    await resp.body.dump()
+    throw new Error(`WebDAV PROPFIND failed: ${resp.statusCode}`)
+  }
   return resp.body.text()
 }
 
@@ -246,7 +266,7 @@ const scanMusics = async(rootUrl: string, config: LX.Music.WebDAVConfig) => {
     if (visited.has(currentUrl)) continue
     visited.add(currentUrl)
     const xml = await propfind(currentUrl, config)
-    const entries = parsePropfindResponse(xml, rootUrl)
+    const entries = parsePropfindResponse(xml, rootUrl, currentUrl)
     for (const entry of entries) {
       if (entry.isDirectory) {
         queue.push(normalizeDirUrl(entry.url))
@@ -319,20 +339,90 @@ const scanMusics = async(rootUrl: string, config: LX.Music.WebDAVConfig) => {
   return musics
 }
 
-const getWebDAVFileUrl = (musicInfo: LX.Music.MusicInfoWebDAV, filePath: string) => {
-  return new URL(encodePathname(filePath), normalizeDirUrl(musicInfo.meta.url)).toString()
+const getWebDAVFileUrl = (musicInfo: LX.Music.MusicInfoWebDAV, filePath: string, config: LX.Music.WebDAVConfig) => {
+  if (normalizeDirUrl(musicInfo.meta.url) != normalizeDirUrl(config.url)) {
+    throw new Error('WebDAV configuration has changed; refresh the music list')
+  }
+  return createWebDAVFileUrl(config.url, filePath)
+}
+
+const ensureWebDAVDirectory = async(rootUrl: string, relativeDir: string, config: LX.Music.WebDAVConfig) => {
+  const dir = normalizeWebDAVSubDir(relativeDir)
+  if (!dir) return
+
+  let currentUrl = normalizeDirUrl(rootUrl)
+  for (const segment of dir.split('/')) {
+    currentUrl = new URL(`${encodeURIComponent(segment)}/`, currentUrl).toString()
+    const resp = await request(currentUrl, {
+      method: 'MKCOL',
+      headers: {
+        Authorization: getAuthHeader(config),
+      },
+    }).catch((err) => {
+      console.log(err)
+      return null
+    })
+    if (!resp) throw new Error('WebDAV MKCOL failed')
+    await resp.body.dump()
+    if (resp.statusCode == 405) continue
+    if (resp.statusCode < 200 || resp.statusCode >= 300) {
+      throw new Error(`WebDAV MKCOL failed: ${resp.statusCode}`)
+    }
+  }
+}
+
+const createUploadedWebDAVMusicInfo = (
+  musicInfo: LX.Music.MusicInfoLocal,
+  rootUrl: string,
+  remotePath: string,
+  size?: number,
+): LX.Music.MusicInfoWebDAV => {
+  const fileName = getFileName(remotePath)
+  const ext = getExt(fileName) || musicInfo.meta.ext
+  const id = `webdav_${crypto.createHash('sha1').update(`${normalizeDirUrl(rootUrl)}\n${remotePath}`).digest('hex')}`
+  return {
+    id,
+    name: musicInfo.name,
+    singer: musicInfo.singer,
+    source: 'webdav',
+    interval: musicInfo.interval,
+    meta: {
+      songId: remotePath,
+      albumName: musicInfo.meta.albumName,
+      picUrl: null,
+      url: normalizeDirUrl(rootUrl),
+      path: remotePath,
+      fileName,
+      ext,
+      title: musicInfo.name || null,
+      artist: musicInfo.singer || null,
+      album: musicInfo.meta.albumName || null,
+      albumArtist: null,
+      year: null,
+      genre: null,
+      hasEmbeddedPic: false,
+      embeddedLyric: null,
+      lyricPath: null,
+      krcPath: null,
+      picPath: null,
+      size,
+    },
+  }
 }
 
 const requestWebDAVFile = async(musicInfo: LX.Music.MusicInfoWebDAV, filePath: string) => {
   const config = getConfiguredWebDAV()
   assertConfig(config)
-  const resp = await request(getWebDAVFileUrl(musicInfo, filePath), {
+  const resp = await request(getWebDAVFileUrl(musicInfo, filePath, config), {
     method: 'GET',
     headers: {
       Authorization: getAuthHeader(config),
     },
   })
-  if (resp.statusCode < 200 || resp.statusCode >= 300) throw new Error(`WebDAV GET failed: ${resp.statusCode}`)
+  if (resp.statusCode < 200 || resp.statusCode >= 300) {
+    await resp.body.dump()
+    throw new Error(`WebDAV GET failed: ${resp.statusCode}`)
+  }
   return resp
 }
 
@@ -357,13 +447,12 @@ const streamWebDAVMusic = async(req: IncomingMessage, res: ServerResponse, token
     return
   }
 
-  const targetUrl = new URL(encodePathname(info.musicInfo.meta.path), normalizeDirUrl(info.musicInfo.meta.url)).toString()
   const headers: Record<string, string> = {
     Authorization: getAuthHeader(info.config),
   }
   if (req.headers.range) headers.Range = req.headers.range
 
-  const upstream = await request(targetUrl, { method: 'GET', headers }).catch(err => {
+  const upstream = await request(info.targetUrl, { method: 'GET', headers }).catch(err => {
     console.log(err)
     return null
   })
@@ -372,11 +461,12 @@ const streamWebDAVMusic = async(req: IncomingMessage, res: ServerResponse, token
     return
   }
   if (upstream.statusCode < 200 || upstream.statusCode >= 300) {
+    await upstream.body.dump()
     sendPlain(res, upstream.statusCode, `WebDAV stream failed: ${upstream.statusCode}`)
     return
   }
 
-  const audioExt = info.musicInfo.meta.ext ? info.musicInfo.meta.ext : 'mpeg'
+  const audioExt = info.ext || 'mpeg'
   const responseHeaders: Record<string, string | number> = {
     'Access-Control-Allow-Origin': '*',
     'Accept-Ranges': 'bytes',
@@ -387,32 +477,57 @@ const streamWebDAVMusic = async(req: IncomingMessage, res: ServerResponse, token
     if (val != null) responseHeaders[key] = Array.isArray(val) ? val.join(', ') : val.toString()
   }
   res.writeHead(upstream.statusCode, responseHeaders)
+  res.once('close', () => upstream.body.destroy())
   upstream.body.pipe(res)
 }
 
 const ensureServer = async() => {
-  if (httpServer) return
-  await new Promise<void>((resolve, reject) => {
-    httpServer = http.createServer((req, res) => {
+  if (httpServer?.listening && serverPort) return
+  if (serverStartPromise) return serverStartPromise
+
+  serverStartPromise = new Promise<void>((resolve, reject) => {
+    const server = http.createServer((req, res) => {
       const match = /^\/webdav\/stream\/([^/?#]+)/.exec(req.url ?? '')
       if (!match) {
         sendPlain(res, 404, 'Not found')
         return
       }
-      void streamWebDAVMusic(req, res, match[1])
+      void streamWebDAVMusic(req, res, match[1]).catch(err => {
+        console.error('[webdav] stream failed:', err)
+        if (!res.headersSent) sendPlain(res, 502, 'WebDAV stream failed')
+        else res.destroy(err instanceof Error ? err : undefined)
+      })
     })
-    httpServer.on('error', reject)
-    httpServer.on('listening', () => {
-      const address = httpServer?.address()
+    httpServer = server
+    server.on('error', (err) => {
+      if (httpServer === server && !server.listening) {
+        httpServer = null
+        serverPort = 0
+      }
+      reject(err)
+    })
+    server.on('close', () => {
+      if (httpServer !== server) return
+      httpServer = null
+      serverPort = 0
+    })
+    server.on('listening', () => {
+      const address = server.address()
       if (!address || typeof address == 'string') {
+        httpServer = null
+        serverPort = 0
+        server.close()
         reject(new Error('invalid webdav proxy address'))
         return
       }
       serverPort = address.port
       resolve()
     })
-    httpServer.listen(0, '127.0.0.1')
+    server.listen(0, '127.0.0.1')
+  }).finally(() => {
+    serverStartPromise = null
   })
+  return serverStartPromise
 }
 
 export const testWebDAV = async(config: LX.Music.WebDAVConfig) => {
@@ -435,12 +550,23 @@ export const listWebDAVMusics = async(params?: LX.Music.WebDAVListMusicParams) =
 export const getWebDAVMusicUrl = async(musicInfo: LX.Music.MusicInfoWebDAV) => {
   const config = getConfiguredWebDAV()
   assertConfig(config)
+  const targetUrl = getWebDAVFileUrl(musicInfo, musicInfo.meta.path, config)
   await ensureServer()
+  const now = Date.now()
+  for (const [key, info] of tokens) {
+    if (info.expiresAt < now) tokens.delete(key)
+  }
+  while (tokens.size >= MAX_TOKEN_COUNT) {
+    const oldestToken = tokens.keys().next().value
+    if (!oldestToken) break
+    tokens.delete(oldestToken)
+  }
   const token = crypto.randomBytes(18).toString('hex')
   tokens.set(token, {
-    musicInfo,
+    targetUrl,
+    ext: musicInfo.meta.ext,
     config,
-    expiresAt: Date.now() + 3 * 60 * 60 * 1000,
+    expiresAt: now + TOKEN_TTL,
   })
   return `http://127.0.0.1:${serverPort}/webdav/stream/${token}`
 }
@@ -448,14 +574,18 @@ export const getWebDAVMusicUrl = async(musicInfo: LX.Music.MusicInfoWebDAV) => {
 export const getWebDAVMusicPic = async(musicInfo: LX.Music.MusicInfoWebDAV) => {
   if (musicInfo.meta.hasEmbeddedPic == true || musicInfo.meta.picUrl?.endsWith('#embedded-cover') == true) {
     const resp = await requestWebDAVFile(musicInfo, musicInfo.meta.path)
-    const { parseStream, selectCover } = await import('music-metadata')
-    const metadata = await parseStream(resp.body as unknown as Readable, {
-      mimeType: resp.headers['content-type']?.toString(),
-      path: musicInfo.meta.path,
-      size: musicInfo.meta.size,
-    })
-    const picture = selectCover(metadata.common.picture)
-    if (picture) return `data:${picture.format};base64,${Buffer.from(picture.data).toString('base64')}`
+    try {
+      const { parseStream, selectCover } = await import('music-metadata')
+      const metadata = await parseStream(resp.body as unknown as Readable, {
+        mimeType: resp.headers['content-type']?.toString(),
+        path: musicInfo.meta.path,
+        size: musicInfo.meta.size,
+      })
+      const picture = selectCover(metadata.common.picture)
+      if (picture) return `data:${picture.format};base64,${Buffer.from(picture.data).toString('base64')}`
+    } finally {
+      resp.body.destroy()
+    }
   }
   if (!musicInfo.meta.picPath) return ''
   const resp = await requestWebDAVFile(musicInfo, musicInfo.meta.picPath)
@@ -478,4 +608,54 @@ export const getWebDAVMusicLyric = async(musicInfo: LX.Music.MusicInfoWebDAV): P
   }
   if (musicInfo.meta.embeddedLyric) return { lyric: musicInfo.meta.embeddedLyric }
   return null
+}
+
+export const uploadLocalMusicToWebDAV = async({
+  musicInfo,
+  webdavDir,
+}: LX.Music.LocalMusicUploadParams): Promise<LX.Music.MusicInfoWebDAV> => {
+  const config = getConfiguredWebDAV()
+  assertConfig(config)
+
+  const filePath = await fs.promises.realpath(musicInfo.meta.filePath)
+  const configuredDirs = await Promise.all(normalizeLocalMusicDirs(global.lx.appSetting['localMusic.dirs'])
+    .map(async dir => fs.promises.realpath(dir).catch(() => null)))
+  const isConfiguredFile = configuredDirs.some(dir => {
+    if (!dir) return false
+    const relative = path.relative(dir, filePath)
+    return relative == '' || (!relative.startsWith(`..${path.sep}`) && relative != '..' && !path.isAbsolute(relative))
+  })
+  if (!isConfiguredFile) throw new Error('Local music file is outside the configured folders')
+
+  const ext = getExt(filePath)
+  if (!AUDIO_EXTS.has(ext)) throw new Error('Unsupported local music file type')
+  const stat = await fs.promises.stat(filePath)
+  if (!stat.isFile()) throw new Error('Local music is not a file')
+
+  const remotePath = createLocalMusicWebDAVPath({
+    dir: normalizeLocalMusicWebDAVDir(webdavDir ?? global.lx.appSetting['localMusic.webdavDir']),
+    name: musicInfo.name,
+    singer: musicInfo.singer,
+    ext,
+    filePath,
+  })
+  const remoteDir = remotePath.split('/').slice(0, -1).join('/')
+  await ensureWebDAVDirectory(config.url, remoteDir, config)
+
+  const targetUrl = createWebDAVFileUrl(config.url, remotePath)
+  const resp = await request(targetUrl, {
+    method: 'PUT',
+    headers: {
+      Authorization: getAuthHeader(config),
+      'Content-Type': getAudioContentType(ext),
+      'Content-Length': String(stat.size),
+    },
+    body: fs.createReadStream(filePath) as any,
+  })
+  await resp.body.dump()
+  if (resp.statusCode < 200 || resp.statusCode >= 300) {
+    throw new Error(`WebDAV PUT failed: ${resp.statusCode}`)
+  }
+
+  return createUploadedWebDAVMusicInfo(musicInfo, config.url, remotePath, stat.size)
 }

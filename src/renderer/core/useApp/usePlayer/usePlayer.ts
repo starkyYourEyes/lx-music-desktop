@@ -46,6 +46,10 @@ import {
   ensureQQGuessLikeNextSongs,
   syncQQGuessLikeModeWithPlayer,
 } from '@renderer/store/qqGuessLike/action'
+import {
+  ensureQQBrushModeNextSongs,
+  syncQQBrushModeWithPlayer,
+} from '@renderer/store/qqBrushMode/action'
 import { getQQMusicAccountKey, initQQMusicAccount } from '@renderer/store/qqMusic'
 
 interface PlaybackOwnershipSnapshot {
@@ -133,12 +137,18 @@ export default () => {
     const results = await Promise.allSettled([
       ensurePrivateFmNextSongs(),
       ensureQQGuessLikeNextSongs(getQQMusicAccountKey()),
+      ensureQQBrushModeNextSongs(getQQMusicAccountKey()),
     ])
     if (results[0].status == 'rejected') {
       console.warn('Load private FM next songs failed:', results[0].reason)
     }
     if (results[1].status == 'rejected') {
       console.warn('Load QQ Guess You Like next songs failed:', results[1].reason)
+    }
+    if (results[2].status == 'rejected') {
+      console.warn('Load QQ Brush Mode next songs failed:', results[2].reason)
+    }
+    if (results[1].status == 'rejected' || results[2].status == 'rejected') {
       await initQQMusicAccount(true).catch(err => {
         console.warn('Refresh QQ Music account after recommendation failure failed:', err)
       })
@@ -148,6 +158,7 @@ export default () => {
   const handleUpdatePlayInfo = () => {
     syncPrivateFmModeWithPlayer()
     syncQQGuessLikeModeWithPlayer(getQQMusicAccountKey())
+    syncQQBrushModeWithPlayer(getQQMusicAccountKey())
     setTitle(musicInfo.id ? `${musicInfo.name} - ${musicInfo.singer}` : null)
     if (playMusicInfo.musicInfo) {
       const currentMusicInfo = 'progress' in playMusicInfo.musicInfo ? playMusicInfo.musicInfo.metadata.musicInfo : playMusicInfo.musicInfo

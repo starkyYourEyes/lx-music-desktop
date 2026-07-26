@@ -3,6 +3,36 @@ declare namespace LX {
     type UserApiSourceInfoType = 'music'
     type UserApiSourceInfoActions = 'musicUrl' | 'lyric' | 'pic'
 
+    interface GitHubRemoteInfo {
+      provider: 'github'
+      repository: 'Macrohard0001/lx-ikun-music-sources'
+      version: string
+      group: string
+      path: string
+      blobSha: string
+      commitSha: string
+    }
+
+    interface GitHubImportItem {
+      script: string
+      remote: GitHubRemoteInfo
+    }
+
+    interface GitHubReplaceError {
+      message: string
+      code?: string
+      detail?: string
+    }
+
+    type GitHubReplaceResult = {
+      success: true
+      apiList: UserApiInfo[]
+    } | {
+      success: false
+      apiList?: UserApiInfo[]
+      error: GitHubReplaceError
+    }
+
     interface UserApiSourceInfo {
       name: string
       type: UserApiSourceInfoType
@@ -22,6 +52,7 @@ declare namespace LX {
       author?: string
       homepage?: string
       version?: string
+      remote?: GitHubRemoteInfo
       sources?: UserApiSources
     }
 

@@ -5,6 +5,7 @@ import { setTempList } from '@renderer/store/list/action'
 import { tempListMeta } from '@renderer/store/list/state'
 import { clearPlayedList } from '@renderer/store/player/action'
 import { playInfo, playMusicInfo } from '@renderer/store/player/state'
+import { appSetting } from '@renderer/store/setting'
 import { getQQMusicGuessLikeSongs } from '@renderer/utils/ipc'
 import { QQ_GUESS_LIKE_TEMP_LIST_ID } from '@renderer/views/Recommend/constants'
 import {
@@ -19,12 +20,16 @@ const MIN_QUEUE_REMAINING = 2
 
 interface QueueRequest {
   accountKey: string
+  apiVersion: LX.QQMusic.GuessLikeApiVersion
   generation: number
   continuation: boolean
   task: Promise<LX.Music.MusicInfo_tx[]>
 }
 
 let request: QueueRequest | null = null
+let queueApiVersion: LX.QQMusic.GuessLikeApiVersion | null = null
+
+const getApiVersion = () => appSetting['recommend.qqGuessLikeApiVersion']
 
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
 
@@ -52,25 +57,29 @@ export const resetQQGuessLikeQueue = () => {
   qqGuessLikeQueue.splice(0, qqGuessLikeQueue.length)
   isLoadingQQGuessLike.value = false
   request = null
+  queueApiVersion = null
 }
 
-const beginAccountSession = (accountKey: string) => {
-  if (qqGuessLikeOwnerAccountKey.value == accountKey) return
+const beginSourceSession = (accountKey: string, apiVersion: LX.QQMusic.GuessLikeApiVersion) => {
+  if (qqGuessLikeOwnerAccountKey.value == accountKey && queueApiVersion == apiVersion) return
   resetQQGuessLikeQueue()
   qqGuessLikeOwnerAccountKey.value = accountKey
+  queueApiVersion = apiVersion
 }
 
 export const prepareQQGuessLikeQueue = async(accountKey: string, force = false) => {
-  beginAccountSession(accountKey)
+  const apiVersion = getApiVersion()
+  beginSourceSession(accountKey, apiVersion)
   if (qqGuessLikeQueue.length && (!force || isQQGuessLikeMode.value)) return qqGuessLikeQueue
 
   const generation = qqGuessLikeGeneration.value
   if (request?.accountKey == accountKey &&
+    request.apiVersion == apiVersion &&
     request.generation == generation &&
     !request.continuation) return request.task
 
   isLoadingQQGuessLike.value = true
-  const task = getQQMusicGuessLikeSongs(false)
+  const task = getQQMusicGuessLikeSongs(false, apiVersion)
     .then(songs => {
       if (!isCurrentSnapshot(accountKey, generation)) return []
       qqGuessLikeQueue.splice(0, qqGuessLikeQueue.length, ...markRawList(songs))
@@ -80,7 +89,7 @@ export const prepareQQGuessLikeQueue = async(accountKey: string, force = false) 
       if (request?.task == task) request = null
       if (isCurrentSnapshot(accountKey, generation)) isLoadingQQGuessLike.value = false
     })
-  request = { accountKey, generation, continuation: false, task }
+  request = { accountKey, apiVersion, generation, continuation: false, task }
   return task
 }
 
@@ -90,7 +99,7 @@ export const syncQQGuessLikeTempList = async() => {
 }
 
 export const enterQQGuessLikeMode = async(accountKey: string) => {
-  beginAccountSession(accountKey)
+  beginSourceSession(accountKey, getApiVersion())
   if (!qqGuessLikeQueue.length) await prepareQQGuessLikeQueue(accountKey)
   if (!qqGuessLikeQueue.length) throw new Error('QQ Guess You Like has no songs')
 
@@ -123,6 +132,7 @@ export const syncQQGuessLikeModeWithPlayer = (accountKey: string | null) => {
 export const isQQGuessLikeListActive = (accountKey: string | null) => {
   return accountKey != null &&
     accountKey == qqGuessLikeOwnerAccountKey.value &&
+    queueApiVersion == getApiVersion() &&
     isQQGuessLikeMode.value &&
     playInfo.playerListId == LIST_IDS.TEMP &&
     tempListMeta.id == QQ_GUESS_LIKE_TEMP_LIST_ID
@@ -134,7 +144,10 @@ export const ensureQQGuessLikeNextSongs = (
   accountKey: string | null,
 ): Promise<LX.Music.MusicInfo_tx[]> => {
   syncQQGuessLikeModeWithPlayer(accountKey)
-  if (!accountKey || !isQQGuessLikeMode.value) return Promise.resolve([])
+  if (!accountKey) return Promise.resolve([])
+  const apiVersion = getApiVersion()
+  beginSourceSession(accountKey, apiVersion)
+  if (!isQQGuessLikeMode.value) return Promise.resolve([])
 
   const currentId = getMusicId(playMusicInfo.musicInfo)
   const currentIndex = qqGuessLikeQueue.findIndex(song => song.id == currentId)
@@ -143,10 +156,11 @@ export const ensureQQGuessLikeNextSongs = (
 
   const generation = qqGuessLikeGeneration.value
   if (request?.accountKey == accountKey &&
+    request.apiVersion == apiVersion &&
     request.generation == generation &&
     request.continuation) return request.task
 
-  const task = getQQMusicGuessLikeSongs(true)
+  const task = getQQMusicGuessLikeSongs(true, apiVersion)
     .then(async songs => {
       if (!isActiveSnapshot(accountKey, generation)) return []
       const ids = new Set(qqGuessLikeQueue.map(song => song.id))
@@ -163,7 +177,7 @@ export const ensureQQGuessLikeNextSongs = (
     .finally(() => {
       if (request?.task == task) request = null
     })
-  request = { accountKey, generation, continuation: true, task }
+  request = { accountKey, apiVersion, generation, continuation: true, task }
   return task
 }
 /* eslint-enable @typescript-eslint/promise-function-async */

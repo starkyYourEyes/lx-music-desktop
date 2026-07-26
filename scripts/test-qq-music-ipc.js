@@ -21,6 +21,7 @@ for (const name of [
   'qq_music_logout',
   'qq_music_get_guess_like_songs',
   'qq_music_get_daily_recommend_songs',
+  'qq_music_get_home_recommendation',
 ]) {
   assert.match(names, new RegExp(`${name}: '${name}'`))
   assert.match(handlers, new RegExp(name))
@@ -34,16 +35,24 @@ assert.match(rendererIpc, /createQQMusicLoginQr/)
 assert.match(rendererIpc, /checkQQMusicLoginQr/)
 assert.match(rendererIpc, /logoutQQMusic/)
 assert.match(rendererIpc, /getQQMusicGuessLikeSongs/)
+assert.match(types, /type GuessLikeApiVersion\s*=\s*'new'\s*\|\s*'legacy'/)
+assert.match(types, /interface GuessLikeRequest\s*\{[\s\S]*?apiVersion\?:\s*GuessLikeApiVersion/)
+assert.match(rendererIpc, /getQQMusicGuessLikeSongs\s*=\s*async\(\s*continuation = false,\s*apiVersion/)
+assert.match(rendererIpc, /\{ continuation, apiVersion \}/)
 assert.match(rendererIpc, /getQQMusicDailyRecommendSongs/)
+assert.match(rendererIpc, /getQQMusicHomeRecommendation/)
 assert.match(handlers, /getDailyRecommendSongs\(\)/)
-assert.doesNotMatch(names, /qq_music_get_home_recommend/, 'QQ home recommendation IPC name should be removed')
-assert.doesNotMatch(handlers, /getHomeRecommend|qq_music_get_home_recommend/, 'QQ home recommendation handler should be removed')
-assert.doesNotMatch(rendererIpc, /getQQMusicHomeRecommend|qq_music_get_home_recommend/, 'QQ home recommendation renderer wrapper should be removed')
-assert.doesNotMatch(types, /HomeRecommendResponse/, 'QQ home recommendation response type should be removed')
+assert.match(handlers, /getHomeRecommendation\(\)/)
+assert.match(rendererIpc, /rendererInvoke<LX\.QQMusic\.HomeRecommendation>/)
+assert.match(types, /interface HomeRecommendation/)
 assert(!fs.existsSync(path.join(root, 'src/main/modules/qqMusic/recommend.ts')),
-  'QQ home recommendation request service should remain removed')
-assert.doesNotMatch(qqMusicMain, /createQQMusicRecommendService|\bgetHomeRecommend\b/,
-  'QQ account facade should not expose home recommendations')
+  'the obsolete generic portal request service should remain removed')
+assert(fs.existsSync(path.join(root, 'src/main/modules/qqMusic/homeRecommend.ts')),
+  'the normalized personalized home service should exist')
+assert.doesNotMatch(qqMusicMain, /createQQMusicRecommendService/,
+  'the obsolete generic portal request service should not return')
+assert.match(qqMusicMain, /createQQMusicHomeRecommendService/)
+assert.match(qqMusicMain, /getHomeRecommendation/)
 
 const publicTypeBodies = [...types.matchAll(/interface (?:Profile|AccountStatus|LoginQr|LoginQrCheck)\s*\{([\s\S]*?)\n\s*\}/g)]
   .map(match => match[1]).join('\n')

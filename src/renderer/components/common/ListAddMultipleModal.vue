@@ -109,17 +109,21 @@ export default {
           ? 4
           : width < 3840 ? 5 : 6
     },
-    handleClick(index) {
+    async handleClick(index) {
       const list = 'progress' in this.musicList[0] ? this.musicList.map(t => t.metadata.musicInfo) : this.musicList
 
-      if (this.isMove) void moveListMusics(this.fromListId, this.lists[index].id, list)
-      else void addListMusics(this.lists[index].id, list)
+      try {
+        if (this.isMove) await moveListMusics(this.fromListId, this.lists[index].id, list)
+        else await addListMusics(this.lists[index].id, list)
 
-      if (this.keyModDown && !this.isMove) return
-      this.$nextTick(() => {
-        this.handleClose()
-        this.$emit('confirm')
-      })
+        if (this.keyModDown && !this.isMove) return
+        this.$nextTick(() => {
+          this.handleClose()
+          this.$emit('confirm')
+        })
+      } catch (err) {
+        void dialog(this.$t('list__add_failed', { message: err.message ?? err }))
+      }
     },
     handleClose() {
       this.$emit('update:show', false)

@@ -107,6 +107,7 @@ const modules = {
     get_hot_key: 'get_hot_key',
 
     import_user_api: 'import_user_api',
+    replace_user_api_from_github: 'replace_user_api_from_github',
     remove_user_api: 'remove_user_api',
     set_user_api: 'set_user_api',
     get_user_api_list: 'get_user_api_list',
@@ -162,6 +163,8 @@ const modules = {
     webdav_get_music_url: 'webdav_get_music_url',
     webdav_get_music_pic: 'webdav_get_music_pic',
     webdav_get_music_lyric: 'webdav_get_music_lyric',
+    local_music_scan: 'local_music_scan',
+    local_music_upload_to_webdav: 'local_music_upload_to_webdav',
 
     netease_get_account_status: 'netease_get_account_status',
     netease_login_qr_create: 'netease_login_qr_create',
@@ -183,6 +186,7 @@ const modules = {
     qq_music_logout: 'qq_music_logout',
     qq_music_get_guess_like_songs: 'qq_music_get_guess_like_songs',
     qq_music_get_daily_recommend_songs: 'qq_music_get_daily_recommend_songs',
+    qq_music_get_home_recommendation: 'qq_music_get_home_recommendation',
   },
   winLyric: {
     close: 'close',

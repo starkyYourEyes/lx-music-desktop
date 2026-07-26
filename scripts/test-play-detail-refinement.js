@@ -159,6 +159,9 @@ const turntableStyle = getStyle(turntable)
 const playDetailStyle = getStyle(playDetail)
 const playBarStyle = getStyle(playBar)
 
+const label = getDirectDeclarations(getRule(turntableStyle, '.label'))
+expectDeclaration(label, 'inset', '19%', 'Record center label should use the approved 62 percent diameter')
+
 assert.match(
   turntable,
   /div\(:class="\[\$style\.tonearm,\s*\{\s*\[\$style\.tonearmPlaying\]:\s*isPlay\s*\}\]"/,
@@ -224,6 +227,85 @@ expectDeclaration(footer, 'padding', '10px 28px 4px', 'Play detail footer should
 const progressTrack = getDirectDeclarations(getRule(playBarStyle, '.progressTrack'))
 expectDeclaration(progressTrack, 'height', '10px', 'Progress track should be 10px high')
 expectDeclaration(progressTrack, 'padding-top', '4px', 'Progress track should use 4px top padding')
+
+assert.match(
+  playBar,
+  /import\s+PlayerControlBtns\s+from\s+['"]\.\.\/PlayBar\/ControlBtns\.vue['"]/,
+  'Play bar should import the compact player controls',
+)
+const footerLeftTemplate = playBar.match(/<div\b(?=[^>]*:class="\$style\.footerLeft")[^>]*>([\s\S]*?)<\/div>\s*<div\b(?=[^>]*:class="\$style\.footerCenter")[^>]*>/)
+assert(footerLeftTemplate, 'Play bar should contain a footerLeft template block before footerCenter')
+const footerLeftBlock = footerLeftTemplate[1]
+assert.match(footerLeftBlock, /\{\{\s*musicInfo\.name\s*\|\|\s*'LX Music'\s*\}\}/, 'Footer metadata should render the track name fallback')
+assert.match(footerLeftBlock, /\{\{\s*musicInfo\.singer\s*\|\|\s*statusText\s*\}\}/, 'Footer metadata should render the singer or status fallback')
+const favoriteControls = footerLeftBlock.match(/<player-control-btns\b[\s\S]*?\/>/)
+assert(favoriteControls, 'Footer metadata should contain compact player controls')
+assert.match(favoriteControls[0], /(?:^|\s)show-favorite(?=\s|\/?>)/, 'Footer player controls should show favorite')
+assert.match(favoriteControls[0], /:show-add-to\s*=\s*['"]false['"]/, 'Footer player controls should hide add-to')
+assert.match(favoriteControls[0], /:show-lyric\s*=\s*['"]false['"]/, 'Footer player controls should hide lyric')
+assert.match(favoriteControls[0], /:show-volume\s*=\s*['"]false['"]/, 'Footer player controls should hide volume')
+assert.match(favoriteControls[0], /:show-play-mode\s*=\s*['"]false['"]/, 'Footer player controls should hide play mode')
+assert.match(favoriteControls[0], /(?:^|\s)compact(?=\s|\/?>)/, 'Footer player controls should use compact layout')
+assert(!/\$style\.(?:status|time)\b/.test(playBar), 'Play bar should not retain separate status or time bindings')
+
+const footerLeft = getDirectDeclarations(getRule(playBarStyle, '.footerLeft'))
+expectDeclaration(footerLeft, 'flex-direction', 'row', 'Footer metadata should use a horizontal layout')
+expectDeclaration(footerLeft, 'align-items', 'center', 'Footer metadata should be vertically centered')
+
+const trackInfo = getDirectDeclarations(getRule(playBarStyle, '.trackInfo'))
+expectDeclaration(trackInfo, 'min-width', '0', 'Track information should be allowed to shrink')
+expectDeclaration(trackInfo, 'overflow', 'hidden', 'Track information should hide overflow')
+
+assert.match(
+  playBar,
+  /const\s+progressPosition\s*=\s*computed\(\s*\(\s*\)\s*=>\s*`\$\{\s*Math\.min\(\s*Math\.max\(\s*progress\.value\s*\|\|\s*0\s*,\s*0\s*\)\s*,\s*1\s*\)\s*\*\s*100\s*\}%`\s*\)/,
+  'Progress position should clamp progress.value to 0 through 1 and format it as a percentage',
+)
+const progressTrackTemplate = playBar.match(/<div\b(?=[^>]*:class="\$style\.progressTrack")(?=[^>]*:style="\{\s*'--progress-position'\s*:\s*progressPosition\s*\}")[^>]*>([\s\S]*?)<\/div>\s*<div\b(?=[^>]*:class="\$style\.footerLeft")[^>]*>/)
+assert(progressTrackTemplate, 'Progress track should bind its CSS position before the footer metadata block')
+const progressTrackBlock = progressTrackTemplate[1]
+assert.match(progressTrackBlock, /:class="\$style\.progressMarker"/, 'Progress track should render its marker')
+const progressTooltipElement = progressTrackBlock.match(
+  /<span\b(?=[^>]*:class="\$style\.progressTooltip")[^>]*>\s*\{\{\s*nowPlayTimeStr\s*\}\}\s*\/\s*\{\{\s*maxPlayTimeStr\s*\}\}\s*<\/span>/,
+)
+assert(progressTooltipElement, 'Progress tooltip should contain current and total time')
+assert.match(progressTooltipElement[0], /(?:^|\s)aria-hidden\s*=\s*["']true["'](?=\s|\/?>)/, 'Progress tooltip should remain hidden from assistive technology')
+const accessibleProgressTime = progressTrackBlock.match(
+  /<span\b(?=[^>]*:class="\$style\.progressTime")[^>]*>\s*\{\{\s*nowPlayTimeStr\s*\}\}\s*\/\s*\{\{\s*maxPlayTimeStr\s*\}\}\s*<\/span>/,
+)
+assert(accessibleProgressTime, 'Progress track should expose current and total time to assistive technology')
+assert.doesNotMatch(accessibleProgressTime[0], /(?:^|\s)aria-hidden(?=\s|=|\/?>)/, 'Accessible progress time should not be hidden from assistive technology')
+assert.doesNotMatch(accessibleProgressTime[0], /(?:^|\s)aria-live(?=\s|=|\/?>)/, 'Accessible progress time should not announce every playback update')
+
+const progressMarker = getDirectDeclarations(getRule(playBarStyle, '.progressMarker'))
+expectDeclaration(
+  progressMarker,
+  'left',
+  'clamp(4px, var(--progress-position), calc(100% - 4px))',
+  'Progress marker should stay fully visible at the zero and completion endpoints',
+)
+expectDeclaration(progressMarker, 'pointer-events', 'none', 'Progress marker should not intercept pointer input')
+
+const progressTooltip = getDirectDeclarations(getRule(playBarStyle, '.progressTooltip'))
+expectDeclaration(progressTooltip, 'left', 'clamp(50px, var(--progress-position), calc(100% - 50px))', 'Progress tooltip should remain within the track')
+expectDeclaration(progressTooltip, 'opacity', '0', 'Progress tooltip should start hidden')
+expectDeclaration(progressTooltip, 'pointer-events', 'none', 'Progress tooltip should not intercept pointer input')
+
+const progressTime = getDirectDeclarations(getRule(playBarStyle, '.progressTime'))
+expectDeclaration(progressTime, 'position', 'absolute', 'Accessible progress time should not participate in footer layout')
+expectDeclaration(progressTime, 'width', '1px', 'Accessible progress time should use the standard visually-hidden width')
+expectDeclaration(progressTime, 'height', '1px', 'Accessible progress time should use the standard visually-hidden height')
+expectDeclaration(progressTime, 'padding', '0', 'Accessible progress time should not add layout padding')
+expectDeclaration(progressTime, 'margin', '-1px', 'Accessible progress time should use the standard visually-hidden margin')
+expectDeclaration(progressTime, 'overflow', 'hidden', 'Accessible progress time should remain visually clipped')
+expectDeclaration(progressTime, 'clip', 'rect(0, 0, 0, 0)', 'Accessible progress time should use the standard visually-hidden clip')
+expectDeclaration(progressTime, 'white-space', 'nowrap', 'Accessible progress time should remain on one clipped line')
+expectDeclaration(progressTime, 'border', '0', 'Accessible progress time should not render a border')
+expectDeclaration(progressTime, 'pointer-events', 'none', 'Accessible progress time should not intercept seeking')
+
+const progressTrackHoverTooltip = getDirectDeclarations(getRule(playBarStyle, '.progressTrack:hover .progressTooltip'))
+expectDeclaration(progressTrackHoverTooltip, 'visibility', 'visible', 'Progress tooltip should become visible on hover')
+expectDeclaration(progressTrackHoverTooltip, 'opacity', '1', 'Progress tooltip should become opaque on hover')
 
 const partyBtn = getDirectDeclarations(getRule(playBarStyle, '.partyBtn'))
 expectDeclaration(partyBtn, 'min-height', '30px', 'Party button should be 30px high')

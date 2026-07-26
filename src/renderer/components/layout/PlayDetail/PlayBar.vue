@@ -1,16 +1,22 @@
 <template>
   <div :class="$style.footer">
-    <div :class="$style.progressTrack">
+    <div :class="$style.progressTrack" :style="{ '--progress-position': progressPosition }">
       <common-progress-bar
         :class-name="$style.progress"
         :progress="progress"
         :handle-transition-end="handleTransitionEnd"
         :is-active-transition="isActiveTransition"
       />
+      <span :class="$style.progressMarker" aria-hidden="true" />
+      <span :class="$style.progressTooltip" aria-hidden="true">{{ nowPlayTimeStr }} / {{ maxPlayTimeStr }}</span>
+      <span :class="$style.progressTime">{{ nowPlayTimeStr }} / {{ maxPlayTimeStr }}</span>
     </div>
     <div :class="$style.footerLeft">
-      <span :class="$style.status">{{ status }}</span>
-      <span :class="$style.time">{{ nowPlayTimeStr }} / {{ maxPlayTimeStr }}</span>
+      <div :class="$style.trackInfo">
+        <span :class="$style.trackTitle">{{ musicInfo.name || 'LX Music' }}</span>
+        <span :class="$style.trackSinger">{{ musicInfo.singer || statusText }}</span>
+      </div>
+      <player-control-btns show-favorite :show-add-to="false" :show-lyric="false" :show-volume="false" :show-play-mode="false" compact />
     </div>
     <div :class="$style.footerCenter">
       <button type="button" :class="$style.playBtn" :aria-label="$t('player__prev')" @click="playPrev()">
@@ -49,23 +55,26 @@
 </template>
 
 <script setup>
-import { ref } from '@common/utils/vueTools'
+import { computed, ref } from '@common/utils/vueTools'
 import { playNext, playPrev, togglePlay } from '@renderer/core/player'
 import { party } from '@renderer/store/party'
-import { status, isPlay } from '@renderer/store/player/state'
+import { isPlay, musicInfo, statusText } from '@renderer/store/player/state'
 import usePlayProgress from '@renderer/utils/compositions/usePlayProgress'
 
 import ControlBtns from './components/ControlBtns.vue'
+import PlayerControlBtns from '../PlayBar/ControlBtns.vue'
 import PlayQueue from '../PlayQueue.vue'
 
 const isShowPlayQueue = ref(false)
 const {
+  progress,
   nowPlayTimeStr,
   maxPlayTimeStr,
-  progress,
   isActiveTransition,
   handleTransitionEnd,
 } = usePlayProgress()
+
+const progressPosition = computed(() => `${Math.min(Math.max(progress.value || 0, 0), 1) * 100}%`)
 
 </script>
 
@@ -94,6 +103,7 @@ const {
 }
 
 .progressTrack {
+  --progress-position: 0%;
   position: absolute;
   top: 0;
   left: 0;
@@ -106,28 +116,97 @@ const {
   height: 3px;
 }
 
+.progressMarker {
+  position: absolute;
+  z-index: 2;
+  left: clamp(4px, var(--progress-position), calc(100% - 4px));
+  top: 5.5px;
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border: 2px solid var(--color-primary);
+  border-radius: 50%;
+  background: var(--color-content-background);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .28);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  transition: left .2s ease-out;
+}
+
+.progressTooltip {
+  position: absolute;
+  z-index: 3;
+  left: clamp(50px, var(--progress-position), calc(100% - 50px));
+  bottom: 12px;
+  padding: 4px 7px;
+  border: 1px solid rgba(128, 128, 128, .18);
+  border-radius: 4px;
+  color: var(--color-font);
+  background: var(--color-content-background);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .16);
+  opacity: 0;
+  visibility: hidden;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+  transform: translate(-50%, 2px);
+  pointer-events: none;
+  transition: left .2s ease-out, opacity .15s ease, transform .15s ease;
+}
+
+.progressTime {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  pointer-events: none;
+}
+
+.progressTrack:hover .progressTooltip {
+  visibility: visible;
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
 .footerLeft {
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
   overflow: hidden;
 }
 
-.status {
+.trackInfo {
+  flex: 0 1 260px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
   overflow: hidden;
-  color: var(--color-font);
-  font-size: 13px;
+}
+
+.trackTitle,
+.trackSinger {
+  overflow: hidden;
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.time {
+.trackTitle {
+  color: var(--color-font);
+  font-size: 13px;
+}
+
+.trackSinger {
   color: var(--color-font-label);
   font-size: 12px;
-  line-height: 1.35;
-  white-space: nowrap;
 }
 
 .footerCenter {
@@ -275,6 +354,13 @@ const {
   .playBtnPrimary {
     width: 38px;
     height: 38px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progressMarker,
+  .progressTooltip {
+    transition: none;
   }
 }
 

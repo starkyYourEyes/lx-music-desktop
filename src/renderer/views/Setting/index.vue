@@ -46,7 +46,7 @@
 </template>
 
 <script>
-import { ref, computed, nextTick } from '@common/utils/vueTools'
+import { ref, computed, nextTick, watch } from '@common/utils/vueTools'
 // import { currentStting } from './setting'
 import { useI18n } from '@renderer/plugins/i18n'
 import { useRoute } from '@common/utils/vueRouter'
@@ -58,6 +58,7 @@ import SettingDesktopLyric from './components/SettingDesktopLyric.vue'
 import SettingSearch from './components/SettingSearch.vue'
 import SettingRecommend from './components/SettingRecommend.vue'
 import SettingList from './components/SettingList.vue'
+import SettingLocalMusic from './components/SettingLocalMusic.vue'
 import SettingDownload from './components/SettingDownload.vue'
 import SettingSync from './components/SettingSync/index.vue'
 import SettingOpenAPI from './components/SettingOpenAPI.vue'
@@ -79,6 +80,7 @@ export default {
     SettingSearch,
     SettingRecommend,
     SettingList,
+    SettingLocalMusic,
     SettingDownload,
     SettingSync,
     SettingOpenAPI,
@@ -105,6 +107,7 @@ export default {
         { id: 'SettingSearch', title: t('setting__search') },
         { id: 'SettingRecommend', title: t('setting__recommend') },
         { id: 'SettingList', title: t('setting__list') },
+        { id: 'SettingLocalMusic', title: t('local_music') },
         { id: 'SettingDownload', title: t('setting__download') },
         { id: 'SettingHotKey', title: t('setting__hot_key') },
         { id: 'SettingSync', title: t('setting__sync') },
@@ -118,8 +121,13 @@ export default {
       ]
     })
 
-    const avtiveComponentName = ref(route.query.name && tocList.value.some(t => t.id == route.query.name)
-      ? route.query.name
+    const getRouteComponentName = () => {
+      const name = Array.isArray(route.query.name) ? route.query.name[0] : route.query.name
+      return name && tocList.value.some(t => t.id == name) ? name : null
+    }
+
+    const avtiveComponentName = ref(getRouteComponentName()
+      ? getRouteComponentName()
       : tocList.value[0].id)
 
     const toggleTab = id => {
@@ -131,6 +139,12 @@ export default {
         })
       })
     }
+
+    watch(() => route.query.name, () => {
+      const name = getRouteComponentName()
+      if (!name || avtiveComponentName.value == name) return
+      toggleTab(name)
+    })
 
     return {
       tocList,

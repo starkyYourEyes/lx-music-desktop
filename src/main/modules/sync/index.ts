@@ -19,6 +19,12 @@ export {
   getStatus as getClientStatus,
 } from './client'
 
+export {
+  getRemoteUserApiMeta,
+  pullUserApiFromServer,
+  pushUserApiToServer,
+} from './client/modules/userApi/service'
+
 export default () => {
   global.lx.event_app.on('main_window_close', () => {
     if (global.lx.appSetting['sync.mode'] == 'server') {

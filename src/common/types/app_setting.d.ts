@@ -640,6 +640,11 @@ declare global {
       'recommend.dailySongCategoryTagKeys': string[] | null
 
       /**
+       * QQ Music Guess You Like request implementation
+       */
+      'recommend.qqGuessLikeApiVersion': LX.QQMusic.GuessLikeApiVersion
+
+      /**
        * 是否启用代理
        */
       'network.proxy.enable': boolean
@@ -673,6 +678,16 @@ declare global {
        * 鍚姩鏃惰嚜鍔ㄦ洿鏂 WebDAV 浜戠洏鍒楄〃
        */
       'webdav.autoRefresh': boolean
+
+      /**
+       * 本地音乐扫描文件夹
+       */
+      'localMusic.dirs': string[]
+
+      /**
+       * 本地音乐上传到 WebDAV 的相对目录
+       */
+      'localMusic.webdavDir': string
 
       /**
        * 是否启用托盘

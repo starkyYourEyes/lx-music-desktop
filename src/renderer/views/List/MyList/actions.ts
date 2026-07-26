@@ -1,6 +1,8 @@
 import { addListMusics, refreshWebDAVList, setFetchingListStatus } from '@renderer/store/list/action'
 import { listWebDAVMusics, showSelectDialog } from '@renderer/utils/ipc'
+import { dialog } from '@renderer/plugins/Dialog'
 
+const getErrorMessage = (err: unknown) => err instanceof Error ? err.message : String(err)
 
 const handleAddMusics = async(listId: string, filePaths: string[], index: number = -1) => {
   // console.log(index + 1, index + 201)
@@ -25,8 +27,13 @@ export const addLocalFile = async(listInfo: LX.List.MyListInfo) => {
 
   console.log(filePaths)
   setFetchingListStatus(listInfo.id, true)
-  await handleAddMusics(listInfo.id, filePaths)
-  setFetchingListStatus(listInfo.id, false)
+  try {
+    await handleAddMusics(listInfo.id, filePaths)
+  } catch (err) {
+    void dialog(window.i18n.t('local_music__add_failed', { message: getErrorMessage(err) }))
+  } finally {
+    setFetchingListStatus(listInfo.id, false)
+  }
 }
 
 export const addWebDAVMusics = async(listInfo: LX.List.MyListInfo) => {

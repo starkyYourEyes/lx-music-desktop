@@ -21,6 +21,7 @@ let pendingSongPromise = null
 let pendingLoginPromise = null
 let singletonGetCookie
 let singletonGetDailyRecommendCookie
+let singletonGetHomeRecommendCookie
 let storeFactoryCallCount = 0
 class QQMusicAuthError extends Error {}
 const loginService = {
@@ -40,6 +41,21 @@ const dailyRecommendService = {
   getDailyRecommendSongs: async() => {
     if (dailyRecommendError) throw dailyRecommendError
     return dailyRecommendSongs
+  },
+}
+let homeRecommendError = null
+const homeRecommendation = {
+  title: 'Hi Alice 今日为你推荐',
+  featuredPlaylists: [],
+  privatePlaylists: [],
+  relatedSongTitle: '',
+  relatedSongGroups: [],
+  guidePlaylists: [],
+}
+const homeRecommendService = {
+  getHomeRecommendation: async() => {
+    if (homeRecommendError) throw homeRecommendError
+    return homeRecommendation
   },
 }
 
@@ -75,6 +91,12 @@ const {
         return dailyRecommendService
       },
     },
+    './homeRecommend': {
+      createQQMusicHomeRecommendService: options => {
+        singletonGetHomeRecommendCookie = options.getCookie
+        return homeRecommendService
+      },
+    },
   },
 )
 assert.strictEqual(storeFactoryCallCount, 0)
@@ -84,6 +106,7 @@ const createFacade = () => createQQMusicAccountService({
   loginService,
   songService,
   dailyRecommendService,
+  homeRecommendService,
   now: () => 123456,
 })
 
@@ -91,6 +114,7 @@ const main = async() => {
   getSingletonAccountStatus()
   assert.strictEqual(storeFactoryCallCount, 1)
   assert.strictEqual(singletonGetDailyRecommendCookie, singletonGetCookie)
+  assert.strictEqual(singletonGetHomeRecommendCookie, singletonGetCookie)
   await createSingletonLoginQr()
   assert.strictEqual(storeFactoryCallCount, 1)
 
@@ -125,6 +149,12 @@ const main = async() => {
   })
   assert.deepStrictEqual(await restarted.getGuessLikeSongs(), [{ id: 'tx_mid' }])
   assert.deepStrictEqual(await restarted.getDailyRecommendSongs(), dailyRecommendSongs)
+  assert.deepStrictEqual(await restarted.getHomeRecommendation(), homeRecommendation)
+
+  homeRecommendError = new Error('home recommendation unavailable')
+  await assert.rejects(restarted.getHomeRecommendation(), /home recommendation unavailable/)
+  assert.strictEqual(restarted.getAccountStatus().isLoggedIn, true)
+  homeRecommendError = null
 
   dailyRecommendError = new Error('daily recommendation unavailable')
   await assert.rejects(restarted.getDailyRecommendSongs(), /daily recommendation unavailable/)
@@ -242,6 +272,7 @@ const main = async() => {
   })
   assert.strictEqual(singletonGetCookie(), '')
   assert.strictEqual(singletonGetDailyRecommendCookie(), '')
+  assert.strictEqual(singletonGetHomeRecommendCookie(), '')
 
   data.set('qqMusicAccount', {
     cookie: 'uin=o123; qqmusic_key=stored-mismatch',
@@ -254,6 +285,7 @@ const main = async() => {
   })
   assert.strictEqual(singletonGetCookie(), '')
   assert.strictEqual(singletonGetDailyRecommendCookie(), '')
+  assert.strictEqual(singletonGetHomeRecommendCookie(), '')
   assert.deepStrictEqual(data.get('neteaseAccount'), { cookie: 'keep-netease' })
 
   data.set('qqMusicAccount', {
@@ -287,6 +319,12 @@ const main = async() => {
   await assert.rejects(raceFacade.getDailyRecommendSongs(), QQMusicAuthError)
   assert.strictEqual(raceFacade.getAccountStatus().isLoggedIn, false)
   dailyRecommendError = null
+
+  data.set('qqMusicAccount', accountB)
+  homeRecommendError = new QQMusicAuthError('expired')
+  await assert.rejects(raceFacade.getHomeRecommendation(), QQMusicAuthError)
+  assert.strictEqual(raceFacade.getAccountStatus().isLoggedIn, false)
+  homeRecommendError = null
 }
 
 main().then(() => {

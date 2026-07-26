@@ -140,6 +140,7 @@ const defaultSetting: LX.AppSetting = {
 
   'recommend.homeSectionOrder': [...RECOMMEND_HOME_SECTION_IDS],
   'recommend.dailySongCategoryTagKeys': null,
+  'recommend.qqGuessLikeApiVersion': 'new',
 
   'network.proxy.enable': false,
   'network.proxy.host': '',
@@ -149,6 +150,8 @@ const defaultSetting: LX.AppSetting = {
   'webdav.username': '',
   'webdav.password': '',
   'webdav.autoRefresh': true,
+  'localMusic.dirs': [],
+  'localMusic.webdavDir': 'local-music',
 
   'tray.enable': false,
   // 'tray.isToTray': false,

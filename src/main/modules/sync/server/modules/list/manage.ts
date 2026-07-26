@@ -2,6 +2,7 @@ import { type UserDataManage } from '../../user'
 import { SnapshotDataManage } from './snapshotDataManage'
 import { toMD5 } from '../../utils'
 import { getLocalListData } from '@main/modules/sync/listEvent'
+import { arrRemove } from '@common/utils/common'
 
 export class ListManage {
   snapshotDataManage: SnapshotDataManage
@@ -17,7 +18,7 @@ export class ListManage {
     console.log(md5, snapshotInfo.latest)
     if (snapshotInfo.latest == md5) return md5
     if (snapshotInfo.list.includes(md5)) {
-      snapshotInfo.list.splice(snapshotInfo.list.indexOf(md5), 1)
+      arrRemove(snapshotInfo.list, md5)
     } else await this.snapshotDataManage.saveSnapshot(md5, listData)
     if (snapshotInfo.latest) snapshotInfo.list.unshift(snapshotInfo.latest)
     snapshotInfo.latest = md5

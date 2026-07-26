@@ -8,6 +8,7 @@ import {
 import { getQQMusicAccountUin } from './auth'
 import { createQQMusicSongService, isQQMusicAuthError } from './song'
 import { createQQMusicDailyRecommendService } from './dailyRecommend'
+import { createQQMusicHomeRecommendService } from './homeRecommend'
 
 const CHECK_ERROR = 'QQ Music login check failed'
 
@@ -45,6 +46,10 @@ interface DailyRecommendService {
   getDailyRecommendSongs: () => Promise<LX.Music.MusicInfo_tx[]>
 }
 
+interface HomeRecommendService {
+  getHomeRecommendation: () => Promise<LX.QQMusic.HomeRecommendation>
+}
+
 const emptyAccount = (updatedAt = 0): QQMusicAccountData => ({
   cookie: '',
   profile: null,
@@ -74,12 +79,14 @@ export const createQQMusicAccountService = ({
   loginService,
   songService,
   dailyRecommendService,
+  homeRecommendService,
   now = Date.now,
 }: {
   store: AccountStore
   loginService: LoginService
   songService: SongService
   dailyRecommendService: DailyRecommendService
+  homeRecommendService: HomeRecommendService
   now?: () => number
 }) => {
   let loginGeneration = 0
@@ -165,6 +172,10 @@ export const createQQMusicAccountService = ({
     return runAuthenticatedRequest(async() => dailyRecommendService.getDailyRecommendSongs())
   }
 
+  const getHomeRecommendation = async() => {
+    return runAuthenticatedRequest(async() => homeRecommendService.getHomeRecommendation())
+  }
+
   return {
     getAccountStatus,
     createLoginQr,
@@ -172,6 +183,7 @@ export const createQQMusicAccountService = ({
     logout,
     getGuessLikeSongs,
     getDailyRecommendSongs,
+    getHomeRecommendation,
   }
 }
 
@@ -184,7 +196,14 @@ const getAccountService = () => {
   const getCookie = () => getAccountData(store).cookie
   const songService = createQQMusicSongService({ getCookie })
   const dailyRecommendService = createQQMusicDailyRecommendService({ getCookie })
-  accountService = createQQMusicAccountService({ store, loginService, songService, dailyRecommendService })
+  const homeRecommendService = createQQMusicHomeRecommendService({ getCookie })
+  accountService = createQQMusicAccountService({
+    store,
+    loginService,
+    songService,
+    dailyRecommendService,
+    homeRecommendService,
+  })
   return accountService
 }
 
@@ -196,3 +215,4 @@ export const getGuessLikeSongs = async(options?: LX.QQMusic.GuessLikeRequest) =>
   return getAccountService().getGuessLikeSongs(options)
 }
 export const getDailyRecommendSongs = async() => getAccountService().getDailyRecommendSongs()
+export const getHomeRecommendation = async() => getAccountService().getHomeRecommendation()

@@ -127,6 +127,24 @@ export const onUpdateNotAvailable = (listener: LX.IpcRendererEventListenerParams
 export const importUserApi = async(fileText: string) => {
   return rendererInvoke<string, LX.UserApi.ImportUserApi>(WIN_MAIN_RENDERER_EVENT_NAME.import_user_api, fileText)
 }
+export const replaceUserApisFromGitHub = async(items: LX.UserApi.GitHubImportItem[]) => {
+  const result = await rendererInvoke<LX.UserApi.GitHubImportItem[], LX.UserApi.GitHubReplaceResult>(
+    WIN_MAIN_RENDERER_EVENT_NAME.replace_user_api_from_github,
+    items,
+  )
+  if (result.success) return result.apiList
+
+  const error = new Error(result.error.message) as Error & {
+    code?: string
+    detail?: string
+    apiList?: LX.UserApi.UserApiInfo[]
+  }
+  if (result.error.code != null) error.code = result.error.code
+  if (result.error.detail != null) error.detail = result.error.detail
+  if (result.apiList != null) error.apiList = result.apiList
+  throw error
+}
+
 export const setUserApi = async(source: LX.UserApi.UserApiSetApiParams): Promise<void> => {
   return rendererInvoke<LX.UserApi.UserApiSetApiParams>(WIN_MAIN_RENDERER_EVENT_NAME.set_user_api, source)
 }
@@ -717,6 +735,23 @@ export const getWebDAVMusicLyric = async(musicInfo: LX.Music.MusicInfoWebDAV) =>
   return rendererInvoke<LX.Music.MusicInfoWebDAV, LX.Music.LyricInfo | null>(WIN_MAIN_RENDERER_EVENT_NAME.webdav_get_music_lyric, musicInfo)
 }
 
+export const scanLocalMusicFolders = async(params?: LX.Music.LocalMusicScanParams) => {
+  return rendererInvoke<LX.Music.LocalMusicScanParams | undefined, LX.Music.MusicInfoLocal[]>(
+    WIN_MAIN_RENDERER_EVENT_NAME.local_music_scan,
+    params,
+  )
+}
+
+export const uploadLocalMusicToWebDAV = async(musicInfo: LX.Music.MusicInfoLocal, webdavDir?: string) => {
+  return rendererInvoke<LX.Music.LocalMusicUploadParams, LX.Music.MusicInfoWebDAV>(
+    WIN_MAIN_RENDERER_EVENT_NAME.local_music_upload_to_webdav,
+    {
+      musicInfo,
+      webdavDir,
+    },
+  )
+}
+
 export const getQQMusicAccountStatus = async() => {
   return rendererInvoke<LX.QQMusic.AccountStatus>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_account_status)
 }
@@ -733,15 +768,29 @@ export const logoutQQMusic = async() => {
   await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_logout)
 }
 
-export const getQQMusicGuessLikeSongs = async(continuation = false) => {
+export const getQQMusicGuessLikeSongs = async(
+  continuation = false,
+  apiVersion: LX.QQMusic.GuessLikeApiVersion = 'new',
+) => {
   return rendererInvoke<LX.QQMusic.GuessLikeRequest, LX.Music.MusicInfo_tx[]>(
     WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_guess_like_songs,
-    { continuation },
+    { continuation, apiVersion },
+  )
+}
+
+export const getQQMusicBrushSongs = async(continuation = false) => {
+  return rendererInvoke<LX.QQMusic.GuessLikeRequest, LX.Music.MusicInfo_tx[]>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_guess_like_songs,
+    { continuation, apiVersion: 'new', radioMode: 'brush' },
   )
 }
 
 export const getQQMusicDailyRecommendSongs = async() => {
   return rendererInvoke<LX.Music.MusicInfo_tx[]>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_daily_recommend_songs)
+}
+
+export const getQQMusicHomeRecommendation = async() => {
+  return rendererInvoke<LX.QQMusic.HomeRecommendation>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_home_recommendation)
 }
 
 export const getNeteaseAccountStatus = async() => {
@@ -947,8 +996,13 @@ export const onPartyAction = (listener: LX.IpcRendererEventListenerParams<LX.Par
  * @param action
  * @returns
  */
-export const sendSyncAction = async(action: LX.Sync.SyncServiceActions) => {
-  return rendererInvoke<LX.Sync.SyncServiceActions>(WIN_MAIN_RENDERER_EVENT_NAME.sync_action, action)
+type SyncServiceActionResult<T extends LX.Sync.SyncServiceActions> =
+  T['action'] extends 'user_api_get_meta' | 'user_api_pull' | 'user_api_push'
+    ? LX.Sync.UserApi.Meta
+    : undefined
+
+export const sendSyncAction = async<T extends LX.Sync.SyncServiceActions>(action: T): Promise<SyncServiceActionResult<T>> => {
+  return rendererInvoke<T, SyncServiceActionResult<T>>(WIN_MAIN_RENDERER_EVENT_NAME.sync_action, action)
 }
 
 export const sendPartyAction = async<T = LX.Party.StatePayload>(action: LX.Party.ServiceActions) => {

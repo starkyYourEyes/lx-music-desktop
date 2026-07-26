@@ -85,7 +85,7 @@ const handleImageError = () => {
 
 .label {
   position: absolute;
-  inset: 27%;
+  inset: 19%;
   overflow: hidden;
   border-radius: 50%;
   background: var(--color-primary-light-900-alpha-700);

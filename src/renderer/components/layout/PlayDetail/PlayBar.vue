@@ -9,8 +9,11 @@
       />
     </div>
     <div :class="$style.footerLeft">
-      <span :class="$style.status">{{ status }}</span>
-      <span :class="$style.time">{{ nowPlayTimeStr }} / {{ maxPlayTimeStr }}</span>
+      <div :class="$style.trackInfo">
+        <span :class="$style.trackTitle">{{ musicInfo.name || 'LX Music' }}</span>
+        <span :class="$style.trackSinger">{{ musicInfo.singer || statusText }}</span>
+      </div>
+      <player-control-btns show-favorite :show-add-to="false" :show-lyric="false" :show-volume="false" :show-play-mode="false" compact />
     </div>
     <div :class="$style.footerCenter">
       <button type="button" :class="$style.playBtn" :aria-label="$t('player__prev')" @click="playPrev()">
@@ -52,16 +55,15 @@
 import { ref } from '@common/utils/vueTools'
 import { playNext, playPrev, togglePlay } from '@renderer/core/player'
 import { party } from '@renderer/store/party'
-import { status, isPlay } from '@renderer/store/player/state'
+import { isPlay, musicInfo, statusText } from '@renderer/store/player/state'
 import usePlayProgress from '@renderer/utils/compositions/usePlayProgress'
 
 import ControlBtns from './components/ControlBtns.vue'
+import PlayerControlBtns from '../PlayBar/ControlBtns.vue'
 import PlayQueue from '../PlayQueue.vue'
 
 const isShowPlayQueue = ref(false)
 const {
-  nowPlayTimeStr,
-  maxPlayTimeStr,
   progress,
   isActiveTransition,
   handleTransitionEnd,
@@ -109,25 +111,37 @@ const {
 .footerLeft {
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
   overflow: hidden;
 }
 
-.status {
+.trackInfo {
+  flex: 0 1 260px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
   overflow: hidden;
-  color: var(--color-font);
-  font-size: 13px;
+}
+
+.trackTitle,
+.trackSinger {
+  overflow: hidden;
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.time {
+.trackTitle {
+  color: var(--color-font);
+  font-size: 13px;
+}
+
+.trackSinger {
   color: var(--color-font-label);
   font-size: 12px;
-  line-height: 1.35;
-  white-space: nowrap;
 }
 
 .footerCenter {

@@ -126,7 +126,7 @@ export const applyElectronEnvParams = () => {
   }
 }
 
-export const setUserDataPath = () => {
+export const setUserDataPath = (): { ready: true } | { ready: false, error: unknown } => {
   const portablePaths = getPortableUserDataPaths({
     platform: process.platform,
     executablePath: app.getPath('exe'),
@@ -138,7 +138,9 @@ export const setUserDataPath = () => {
     app.setPath('userData', portablePaths.userDataPath)
   } else {
     const migration = migrateLegacyUserData({ appDataPath: app.getPath('appData'), logger: log })
-    if (!migration.userDataPathReady) throw migration.error
+    if (!migration.userDataPathReady) {
+      return { ready: false, error: migration.error ?? new Error('User-data migration did not produce a usable path') }
+    }
     app.setPath('userData', migration.userDataPath)
   }
 
@@ -146,6 +148,7 @@ export const setUserDataPath = () => {
   global.lxOldDataPath = userDataPath
   global.lxDataPath = path.join(userDataPath, 'LxDatas')
   if (!existsSync(global.lxDataPath)) mkdirSync(global.lxDataPath, { recursive: true })
+  return { ready: true }
 }
 
 export const registerDeeplink = (startApp: () => void) => {

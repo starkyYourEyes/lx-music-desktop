@@ -25,5 +25,6 @@ export const migrateLegacyUserData: (options: {
   appDataPath: string
   currentDirName?: string
   fsApi?: typeof fs
+  isProcessAlive?: (pid: number) => boolean
   logger?: Pick<Console, 'info' | 'warn' | 'error'>
 }) => MigrationResult

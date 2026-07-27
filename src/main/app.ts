@@ -13,6 +13,7 @@ import { migrateDBData } from './utils/migrate'
 import { openDirInExplorer } from '@common/utils/electron'
 import { setProxyByHost } from '@common/utils/request'
 import { getWebContentsNavigationDecision } from '@main/utils/webContentsNavigationGuard'
+import { getPortableUserDataPaths, migrateLegacyUserData } from './migration/legacyUserData'
 
 export const initGlobalData = () => {
   const envParams = parseEnvParams()
@@ -126,21 +127,24 @@ export const applyElectronEnvParams = () => {
 }
 
 export const setUserDataPath = () => {
-  // windows平台下如果应用目录下存在 portable 文件夹则将数据存在此文件下
-  if (process.platform == 'win32') {
-    const portablePath = path.join(path.dirname(app.getPath('exe')), '/portable')
-    if (existsSync(portablePath)) {
-      app.setPath('appData', portablePath)
-      const appDataPath = path.join(portablePath, '/userData')
-      if (!existsSync(appDataPath)) mkdirSync(appDataPath)
-      app.setPath('userData', appDataPath)
-    }
+  const portablePaths = getPortableUserDataPaths({
+    platform: process.platform,
+    executablePath: app.getPath('exe'),
+  })
+
+  if (portablePaths) {
+    app.setPath('appData', portablePaths.appDataPath)
+    if (!existsSync(portablePaths.userDataPath)) mkdirSync(portablePaths.userDataPath, { recursive: true })
+    app.setPath('userData', portablePaths.userDataPath)
+  } else {
+    const migration = migrateLegacyUserData({ appDataPath: app.getPath('appData'), logger: log })
+    app.setPath('userData', migration.userDataPath)
   }
 
   const userDataPath = app.getPath('userData')
   global.lxOldDataPath = userDataPath
   global.lxDataPath = path.join(userDataPath, 'LxDatas')
-  if (!existsSync(global.lxDataPath)) mkdirSync(global.lxDataPath)
+  if (!existsSync(global.lxDataPath)) mkdirSync(global.lxDataPath, { recursive: true })
 }
 
 export const registerDeeplink = (startApp: () => void) => {

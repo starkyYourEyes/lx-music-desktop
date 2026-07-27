@@ -50,6 +50,18 @@ test('package metadata is the identity source for package author and repository'
 test('electron builder consumes the shared identity', () => {
   const source = read('build-config/build-pack.js')
   assert.match(source, /require\('\.\.\/src\/common\/projectIdentity'\)/)
+  assert.match(source, /^[ \t]*appId: PROJECT_IDENTITY\.appId,$/m)
+  assert.match(source, /^[ \t]*productName: PROJECT_IDENTITY\.productName,$/m)
+  assert.match(source, /^[ \t]*name: PROJECT_IDENTITY\.protocolName,$/m)
+  assert.match(source, /^[ \t]*schemes: \[\r?\n[ \t]*PROJECT_IDENTITY\.protocolScheme,\r?\n[ \t]*\],$/m)
+  assert.match(source, /^[ \t]*owner: PROJECT_IDENTITY\.repositoryOwner,$/m)
+  assert.match(source, /^[ \t]*repo: PROJECT_IDENTITY\.repositoryName,$/m)
+  assert.match(source, /^[ \t]*legalTrademarks: PROJECT_IDENTITY\.authorName,$/m)
+  assert.match(source, /^[ \t]*maintainer: PROJECT_IDENTITY\.authorName,$/m)
+  assert.match(source, /^[ \t]*Name: PROJECT_IDENTITY\.displayName,$/m)
+  assert.match(source, /^[ \t]*'Name\[zh_CN\]': PROJECT_IDENTITY\.displayName,$/m)
+  assert.match(source, /^[ \t]*'Name\[zh_TW\]': PROJECT_IDENTITY\.displayName,$/m)
+  assert.match(source, /^[ \t]*MimeType: `x-scheme-handler\/\$\{PROJECT_IDENTITY\.protocolScheme\}`,$/m)
   for (const oldValue of [
     'cn.toside.music.desktop',
     "productName: 'lx-music-desktop'",

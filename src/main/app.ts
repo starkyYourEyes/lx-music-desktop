@@ -14,6 +14,7 @@ import { openDirInExplorer } from '@common/utils/electron'
 import { setProxyByHost } from '@common/utils/request'
 import { getWebContentsNavigationDecision } from '@main/utils/webContentsNavigationGuard'
 import { getPortableUserDataPaths, migrateLegacyUserData } from './migration/legacyUserData'
+import { PROJECT_IDENTITY } from '@common/projectIdentity'
 
 export const initGlobalData = () => {
   const envParams = parseEnvParams()
@@ -156,9 +157,9 @@ export const registerDeeplink = (startApp: () => void) => {
     // Set the path of electron.exe and your app.
     // These two additional parameters are only available on windows.
     // console.log(process.execPath, process.argv)
-    app.setAsDefaultProtocolClient('lxmusic', process.execPath, process.argv.slice(1))
+    app.setAsDefaultProtocolClient(PROJECT_IDENTITY.protocolScheme, process.execPath, process.argv.slice(1))
   } else {
-    app.setAsDefaultProtocolClient('lxmusic')
+    app.setAsDefaultProtocolClient(PROJECT_IDENTITY.protocolScheme)
   }
 
   // deep link

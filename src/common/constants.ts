@@ -1,4 +1,6 @@
-export const URL_SCHEME_RXP = /^lxmusic:\/\//
+import { PROJECT_IDENTITY } from './projectIdentity'
+
+export const URL_SCHEME_RXP = new RegExp(`^${PROJECT_IDENTITY.protocolScheme}:\\/\\/`)
 
 export const SPLIT_CHAR = {
   DISLIKE_NAME: '@',

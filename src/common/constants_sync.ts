@@ -1,3 +1,5 @@
+import { PROJECT_IDENTITY } from './projectIdentity'
+
 export const ENV_PARAMS = [
   'PORT',
   'BIND_IP',
@@ -22,10 +24,10 @@ export const LIST_IDS = {
 export const SYNC_CODE = {
   helloMsg: 'Hello~::^-^::~v4~',
   idPrefix: 'OjppZDo6',
-  authMsg: 'lx-music auth::',
+  authMsg: PROJECT_IDENTITY.syncAuthPrefix,
   msgAuthFailed: 'Auth failed',
   msgBlockedIp: 'Blocked IP',
-  msgConnect: 'lx-music connect',
+  msgConnect: PROJECT_IDENTITY.syncConnectMessage,
 
 
   authFailed: 'Auth failed',

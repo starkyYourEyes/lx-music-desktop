@@ -10,6 +10,7 @@ import { getUserSpace, createClientKeyInfo } from '../user'
 import { toMD5 } from '../utils'
 import { getComputerName } from '../../utils'
 import { SYNC_CODE } from '@common/constants_sync'
+import { PROJECT_IDENTITY } from '@common/projectIdentity'
 
 const requestIps = new Map<string, number>()
 
@@ -56,7 +57,9 @@ const verifyByCode = (encryptMsg: string, password: string) => {
     const data = text.split('\n')
     const publicKey = `-----BEGIN PUBLIC KEY-----\n${data[1]}\n-----END PUBLIC KEY-----`
     const deviceName = data[2] || 'Unknown'
-    const isMobile = data[3] == 'lx_music_mobile'
+    const clientType = data[3]
+    if (clientType != PROJECT_IDENTITY.syncDesktopId && clientType != PROJECT_IDENTITY.syncMobileId) return null
+    const isMobile = clientType == PROJECT_IDENTITY.syncMobileId
     const keyInfo = createClientKeyInfo(deviceName, isMobile)
     const userSpace = getUserSpace()
     userSpace.dataManage.saveClientKeyInfo(keyInfo)

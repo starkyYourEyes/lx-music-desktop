@@ -1,6 +1,7 @@
 import path from 'node:path'
 import os from 'node:os'
 import { RECOMMEND_HOME_SECTION_IDS } from './constants'
+import { PROJECT_IDENTITY } from './projectIdentity'
 
 const isMac = process.platform == 'darwin'
 const isWin = process.platform == 'win32'
@@ -146,7 +147,7 @@ const defaultSetting: LX.AppSetting = {
   'network.proxy.host': '',
   'network.proxy.port': '',
 
-  'webdav.url': 'https://dav.jianguoyun.com/dav/lx-music',
+  'webdav.url': PROJECT_IDENTITY.defaultWebdavUrl,
   'webdav.username': '',
   'webdav.password': '',
   'webdav.autoRefresh': true,

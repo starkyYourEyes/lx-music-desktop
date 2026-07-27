@@ -70,3 +70,36 @@ test('electron builder consumes the shared identity', () => {
     "owner: 'lyswhut'",
   ]) assert.doesNotMatch(source, new RegExp(oldValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
 })
+
+test('runtime identifiers are consumed from the shared identity', () => {
+  const expectedImports = [
+    'src/common/constants.ts',
+    'src/common/constants_sync.ts',
+    'src/main/app.ts',
+    'src/main/modules/sync/client/auth.ts',
+    'src/main/modules/sync/server/server/auth.ts',
+    'src/main/modules/userApi/main.ts',
+    'src/renderer/core/useApp/useDeeplink/index.ts',
+    'src/renderer/utils/musicSdk/options.js',
+    'src/renderer/worker/main/music.ts',
+  ]
+  for (const relativePath of expectedImports) {
+    assert.match(read(relativePath), /projectIdentity/, relativePath)
+  }
+
+  const productionSources = expectedImports.map(read).join('\n')
+  for (const oldPattern of [
+    /\blxmusic:\/\//,
+    /(?<!starky_)\blx_music_desktop\b/,
+    /(?<!starky_)\blx_music_mobile\b/,
+    /(?<!starky-)\blx-music auth::/,
+    /(?<!starky-)\blx-music connect\b/,
+    /(?<!starky-)\blx-user-api\b/,
+    /(?<!starky-)\blx-music request\b/,
+    /\blxmusic_temp\b/,
+  ]) assert.doesNotMatch(productionSources, oldPattern)
+
+  const serverAuth = read('src/main/modules/sync/server/server/auth.ts')
+  assert.match(serverAuth, /syncDesktopId/)
+  assert.match(serverAuth, /syncMobileId/)
+})

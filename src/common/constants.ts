@@ -1,6 +1,7 @@
 import { PROJECT_IDENTITY } from './projectIdentity'
+import { createUrlSchemeRxp } from './runtimeIdentity'
 
-export const URL_SCHEME_RXP = new RegExp(`^${PROJECT_IDENTITY.protocolScheme}:\\/\\/`)
+export const URL_SCHEME_RXP = createUrlSchemeRxp(PROJECT_IDENTITY.protocolScheme)
 
 export const SPLIT_CHAR = {
   DISLIKE_NAME: '@',

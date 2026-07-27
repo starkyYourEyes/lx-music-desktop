@@ -7,6 +7,8 @@ const root = path.resolve(__dirname, '..')
 const pkg = require('../package.json')
 const { PROJECT_IDENTITY } = require('../src/common/projectIdentity')
 const read = relativePath => fs.readFileSync(path.join(root, relativePath), 'utf8')
+const runtimeIdentityPath = path.join(root, 'src/common/runtimeIdentity.js')
+const runtimeIdentity = fs.existsSync(runtimeIdentityPath) ? require(runtimeIdentityPath) : {}
 
 test('project identity contains the approved values', () => {
   assert.deepEqual(PROJECT_IDENTITY, {
@@ -100,6 +102,71 @@ test('runtime identifiers are consumed from the shared identity', () => {
   ]) assert.doesNotMatch(productionSources, oldPattern)
 
   const serverAuth = read('src/main/modules/sync/server/server/auth.ts')
-  assert.match(serverAuth, /syncDesktopId/)
-  assert.match(serverAuth, /syncMobileId/)
+  assert.match(serverAuth, /classifySyncClient\(data\[3\], PROJECT_IDENTITY\)/)
+  assert.match(serverAuth, /createClientKeyInfo\(deviceName, client\.isMobile\)/)
+
+  const runtimeIdentity = read('src/common/runtimeIdentity.js')
+  assert.match(runtimeIdentity, /syncDesktopId/)
+  assert.match(runtimeIdentity, /syncMobileId/)
+
+  const constants = read('src/common/constants.ts')
+  assert.match(constants, /createUrlSchemeRxp\(PROJECT_IDENTITY\.protocolScheme\)/)
+
+  const mainUtils = read('src/main/utils/index.ts')
+  assert.match(mainUtils, /URL_SCHEME_RXP\.test\(param\)/)
+})
+
+test('project protocol recognition requires the exact anchored scheme and separators', () => {
+  assert.equal(typeof runtimeIdentity.createUrlSchemeRxp, 'function')
+  const protocolRxp = runtimeIdentity.createUrlSchemeRxp(PROJECT_IDENTITY.protocolScheme)
+
+  for (const value of [
+    'starkylx://music/play',
+    'starkylx://',
+  ]) assert.equal(protocolRxp.test(value), true, value)
+
+  for (const value of [
+    'lxmusic://music/play',
+    'prefix-starkylx://music/play',
+    'starkylx-extra://music/play',
+    'starkylx:/music/play',
+    'starkylx//music/play',
+    'starkylx:music/play',
+    'https://example.com',
+    '',
+  ]) assert.equal(protocolRxp.test(value), false, value)
+})
+
+test('project protocol recognition escapes regular expression characters in schemes', () => {
+  assert.equal(typeof runtimeIdentity.createUrlSchemeRxp, 'function')
+  const protocolRxp = runtimeIdentity.createUrlSchemeRxp('starky.lx')
+  assert.equal(protocolRxp.test('starky.lx://music/play'), true)
+  assert.equal(protocolRxp.test('starkyXlx://music/play'), false)
+})
+
+test('sync client classification accepts only the approved desktop and mobile identities', () => {
+  assert.equal(typeof runtimeIdentity.classifySyncClient, 'function')
+  assert.deepEqual(runtimeIdentity.classifySyncClient(PROJECT_IDENTITY.syncDesktopId, PROJECT_IDENTITY), {
+    kind: 'desktop',
+    isMobile: false,
+  })
+  assert.deepEqual(runtimeIdentity.classifySyncClient(PROJECT_IDENTITY.syncMobileId, PROJECT_IDENTITY), {
+    kind: 'mobile',
+    isMobile: true,
+  })
+
+  for (const value of [
+    'lx_music_desktop',
+    'lx_music_mobile',
+    'unknown',
+    '',
+    undefined,
+    null,
+    1,
+    true,
+    {},
+    [],
+    `${PROJECT_IDENTITY.syncDesktopId} `,
+    PROJECT_IDENTITY.syncMobileId.toUpperCase(),
+  ]) assert.equal(runtimeIdentity.classifySyncClient(value, PROJECT_IDENTITY), null, String(value))
 })

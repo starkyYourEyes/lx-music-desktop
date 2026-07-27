@@ -138,6 +138,7 @@ export const setUserDataPath = () => {
     app.setPath('userData', portablePaths.userDataPath)
   } else {
     const migration = migrateLegacyUserData({ appDataPath: app.getPath('appData'), logger: log })
+    if (!migration.userDataPathReady) throw migration.error
     app.setPath('userData', migration.userDataPath)
   }
 

@@ -6,7 +6,9 @@ export interface MigrationResult {
   status: MigrationStatus
   legacyPath: string
   userDataPath: string
-  tempPath: string
+  tempPath?: string
+  lockPath: string
+  userDataPathReady: boolean
   error?: unknown
 }
 
@@ -23,5 +25,5 @@ export const migrateLegacyUserData: (options: {
   appDataPath: string
   currentDirName?: string
   fsApi?: typeof fs
-  logger?: Pick<Console, 'info' | 'error'>
+  logger?: Pick<Console, 'info' | 'warn' | 'error'>
 }) => MigrationResult

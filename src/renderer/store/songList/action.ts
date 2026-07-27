@@ -1,7 +1,7 @@
 // import { getSongListSetting } from '@renderer/utils/data'
 import { deduplicationList, toNewMusicInfo } from '@renderer/utils'
 import musicSdk from '@renderer/utils/musicSdk'
-import { getNeteasePlaylistDetail } from '@renderer/utils/ipc'
+import { getNeteasePlaylistDetail, getQQMusicPlaylistDetail } from '@renderer/utils/ipc'
 import { getQQMusicAccountKey } from '@renderer/store/qqMusic'
 import { getDailyRecommendPlaylistDetail, loadDailyRecommendSongs } from '@renderer/store/dailyRecommend/action'
 import { DAILY_RECOMMEND_TEMP_LIST_ID } from '@renderer/store/dailyRecommend/state'
@@ -49,7 +49,9 @@ const getListDetailCacheKey = (id: string, source: LX.OnlineSource, page: number
       ? 'netease_daily_recommend'
       : shouldUseNeteasePlaylistDetail(id, source)
         ? isNeteasePrivateRadarPlaylist(id, source) ? 'netease_user_sdetail' : 'netease_sdetail'
-        : 'sdetail'
+        : source == 'tx'
+          ? `qq_sdetail__${getQQMusicAccountKey() ?? 'guest'}`
+          : 'sdetail'
   return `${detailType}__${source}__${id}__${page}`
 }
 
@@ -58,7 +60,9 @@ const normalizeMusicSdkListDetail = (result: ListDetailInfo): ListDetailInfo => 
   return result
 }
 
-const normalizeNeteaseListDetail = (result: LX.Netease.PlaylistDetailInfo): ListDetailInfo => {
+const normalizeIpcListDetail = (
+  result: LX.Netease.PlaylistDetailInfo | LX.QQMusic.PlaylistDetailInfo,
+): ListDetailInfo => {
   return {
     ...result,
     source: result.source,
@@ -78,9 +82,20 @@ const loadNeteasePlaylistDetail = async(id: string, source: LX.OnlineSource, pag
   if (!shouldUseNeteasePlaylistDetail(id, source)) return loadMusicSdkListDetail(id, source, page)
 
   return getNeteasePlaylistDetail(id, page)
-    .then(normalizeNeteaseListDetail)
+    .then(normalizeIpcListDetail)
     .catch(async err => {
       console.warn('Load NetEase playlist detail failed, fallback to source sdk:', err)
+      return loadMusicSdkListDetail(id, source, page)
+    })
+}
+
+const loadQQMusicPlaylistDetail = async(id: string, source: LX.OnlineSource, page: number) => {
+  if (source != 'tx') return loadNeteasePlaylistDetail(id, source, page)
+
+  return getQQMusicPlaylistDetail(id, page)
+    .then(normalizeIpcListDetail)
+    .catch(async err => {
+      console.warn('Load QQ Music playlist detail failed, fallback to source sdk:', err)
       return loadMusicSdkListDetail(id, source, page)
     })
 }
@@ -89,6 +104,7 @@ const loadListDetail = async(id: string, source: LX.OnlineSource, page: number, 
   const key = getListDetailCacheKey(id, source, page)
   const isQQDailyRecommend = isQQDailyRecommendPlaylist(id, source)
   const qqAccountKey = isQQDailyRecommend ? getQQMusicAccountKey() : null
+  const qqPlaylistAccountKey = source == 'tx' && !isQQDailyRecommend ? getQQMusicAccountKey() : null
   if (isRefresh && cache.has(key)) cache.delete(key)
   if (!isRefresh && cache.has(key)) return cache.get(key)
 
@@ -97,18 +113,21 @@ const loadListDetail = async(id: string, source: LX.OnlineSource, page: number, 
   if (isQQDailyRecommend) {
     const detail = getQQDailyRecommendPlaylistDetail(isRefresh, qqAccountKey)
     qqDailyGeneration = qqDailyRecommendGeneration.value
-    result = normalizeNeteaseListDetail(await detail)
+    result = normalizeIpcListDetail(await detail)
   } else if (isNeteaseDailyRecommendPlaylist(id, source)) {
-    result = normalizeNeteaseListDetail(await getDailyRecommendPlaylistDetail(isRefresh))
+    result = normalizeIpcListDetail(await getDailyRecommendPlaylistDetail(isRefresh))
   } else {
-    result = await loadNeteasePlaylistDetail(id, source, page)
+    result = await loadQQMusicPlaylistDetail(id, source, page)
   }
 
-  if (!isQQDailyRecommend || (
+  const isCurrentQQDailyRecommend = !isQQDailyRecommend || (
     qqAccountKey == getQQMusicAccountKey() &&
     qqDailyGeneration == qqDailyRecommendGeneration.value
-  )) {
-    cache.set(getListDetailCacheKey(id, source, page), result)
+  )
+  const isCurrentQQPlaylist = source != 'tx' || isQQDailyRecommend ||
+    qqPlaylistAccountKey == getQQMusicAccountKey()
+  if (isCurrentQQDailyRecommend && isCurrentQQPlaylist) {
+    cache.set(isQQDailyRecommend ? getListDetailCacheKey(id, source, page) : key, result)
   }
   return result
 }
@@ -273,6 +292,9 @@ export const getListDetailAll = async(id: string, source: LX.OnlineSource, isRef
  */
 export const getAndSetListDetail = async(id: string, source: LX.OnlineSource, page: number, isRefresh = false) => {
   let key = getListDetailCacheKey(id, source, page)
+  const qqAccountKey = source == 'tx' ? getQQMusicAccountKey() : null
+  const isCurrentRequest = () => key == listDetailInfo.key &&
+    (source != 'tx' || qqAccountKey == getQQMusicAccountKey())
 
   if (!isRefresh && listDetailInfo.key == key && listDetailInfo.list.length) return
 
@@ -280,10 +302,10 @@ export const getAndSetListDetail = async(id: string, source: LX.OnlineSource, pa
   listDetailInfo.noItemLabel = window.i18n.t('list__loading')
 
   return getListDetail(id, source, page, isRefresh).then((result: ListDetailInfo) => {
-    if (key != listDetailInfo.key) return
+    if (!isCurrentRequest()) return
     setListDetail(result, id, page)
   }).catch((error: any) => {
-    if (key == listDetailInfo.key) {
+    if (isCurrentRequest()) {
       clearListDetail()
       listDetailInfo.noItemLabel = window.i18n.t('list__load_failed')
       console.log(error)

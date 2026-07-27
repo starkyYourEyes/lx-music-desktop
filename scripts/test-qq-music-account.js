@@ -22,6 +22,7 @@ let pendingLoginPromise = null
 let singletonGetCookie
 let singletonGetDailyRecommendCookie
 let singletonGetHomeRecommendCookie
+let singletonGetPlaylistDetailCookie
 let storeFactoryCallCount = 0
 class QQMusicAuthError extends Error {}
 const loginService = {
@@ -56,6 +57,18 @@ const homeRecommendService = {
   getHomeRecommendation: async() => {
     if (homeRecommendError) throw homeRecommendError
     return homeRecommendation
+  },
+}
+let playlistDetailError = null
+const playlistDetail = {
+  id: '211111',
+  source: 'tx',
+  list: [{ id: 'tx_playlist_mid' }],
+}
+const playlistDetailService = {
+  getPlaylistDetail: async(id, page) => {
+    if (playlistDetailError) throw playlistDetailError
+    return { ...playlistDetail, id, page }
   },
 }
 
@@ -97,6 +110,12 @@ const {
         return homeRecommendService
       },
     },
+    './playlistDetail': {
+      createQQMusicPlaylistDetailService: options => {
+        singletonGetPlaylistDetailCookie = options.getCookie
+        return playlistDetailService
+      },
+    },
   },
 )
 assert.strictEqual(storeFactoryCallCount, 0)
@@ -107,6 +126,7 @@ const createFacade = () => createQQMusicAccountService({
   songService,
   dailyRecommendService,
   homeRecommendService,
+  playlistDetailService,
   now: () => 123456,
 })
 
@@ -115,6 +135,7 @@ const main = async() => {
   assert.strictEqual(storeFactoryCallCount, 1)
   assert.strictEqual(singletonGetDailyRecommendCookie, singletonGetCookie)
   assert.strictEqual(singletonGetHomeRecommendCookie, singletonGetCookie)
+  assert.strictEqual(singletonGetPlaylistDetailCookie, singletonGetCookie)
   await createSingletonLoginQr()
   assert.strictEqual(storeFactoryCallCount, 1)
 
@@ -150,11 +171,21 @@ const main = async() => {
   assert.deepStrictEqual(await restarted.getGuessLikeSongs(), [{ id: 'tx_mid' }])
   assert.deepStrictEqual(await restarted.getDailyRecommendSongs(), dailyRecommendSongs)
   assert.deepStrictEqual(await restarted.getHomeRecommendation(), homeRecommendation)
+  assert.deepStrictEqual(await restarted.getPlaylistDetail('211111', 1), {
+    ...playlistDetail,
+    id: '211111',
+    page: 1,
+  })
 
   homeRecommendError = new Error('home recommendation unavailable')
   await assert.rejects(restarted.getHomeRecommendation(), /home recommendation unavailable/)
   assert.strictEqual(restarted.getAccountStatus().isLoggedIn, true)
   homeRecommendError = null
+
+  playlistDetailError = new Error('playlist detail unavailable')
+  await assert.rejects(restarted.getPlaylistDetail('211111', 1), /playlist detail unavailable/)
+  assert.strictEqual(restarted.getAccountStatus().isLoggedIn, true)
+  playlistDetailError = null
 
   dailyRecommendError = new Error('daily recommendation unavailable')
   await assert.rejects(restarted.getDailyRecommendSongs(), /daily recommendation unavailable/)
@@ -273,6 +304,7 @@ const main = async() => {
   assert.strictEqual(singletonGetCookie(), '')
   assert.strictEqual(singletonGetDailyRecommendCookie(), '')
   assert.strictEqual(singletonGetHomeRecommendCookie(), '')
+  assert.strictEqual(singletonGetPlaylistDetailCookie(), '')
 
   data.set('qqMusicAccount', {
     cookie: 'uin=o123; qqmusic_key=stored-mismatch',
@@ -286,6 +318,7 @@ const main = async() => {
   assert.strictEqual(singletonGetCookie(), '')
   assert.strictEqual(singletonGetDailyRecommendCookie(), '')
   assert.strictEqual(singletonGetHomeRecommendCookie(), '')
+  assert.strictEqual(singletonGetPlaylistDetailCookie(), '')
   assert.deepStrictEqual(data.get('neteaseAccount'), { cookie: 'keep-netease' })
 
   data.set('qqMusicAccount', {
@@ -325,6 +358,12 @@ const main = async() => {
   await assert.rejects(raceFacade.getHomeRecommendation(), QQMusicAuthError)
   assert.strictEqual(raceFacade.getAccountStatus().isLoggedIn, false)
   homeRecommendError = null
+
+  data.set('qqMusicAccount', accountB)
+  playlistDetailError = new QQMusicAuthError('expired')
+  await assert.rejects(raceFacade.getPlaylistDetail('211111', 1), QQMusicAuthError)
+  assert.strictEqual(raceFacade.getAccountStatus().isLoggedIn, false)
+  playlistDetailError = null
 }
 
 main().then(() => {

@@ -22,6 +22,7 @@ for (const name of [
   'qq_music_get_guess_like_songs',
   'qq_music_get_daily_recommend_songs',
   'qq_music_get_home_recommendation',
+  'qq_music_get_playlist_detail',
 ]) {
   assert.match(names, new RegExp(`${name}: '${name}'`))
   assert.match(handlers, new RegExp(name))
@@ -41,10 +42,14 @@ assert.match(rendererIpc, /getQQMusicGuessLikeSongs\s*=\s*async\(\s*continuation
 assert.match(rendererIpc, /\{ continuation, apiVersion \}/)
 assert.match(rendererIpc, /getQQMusicDailyRecommendSongs/)
 assert.match(rendererIpc, /getQQMusicHomeRecommendation/)
+assert.match(rendererIpc, /getQQMusicPlaylistDetail/)
 assert.match(handlers, /getDailyRecommendSongs\(\)/)
 assert.match(handlers, /getHomeRecommendation\(\)/)
+assert.match(handlers, /getPlaylistDetail\(params\.id, params\.page\)/)
 assert.match(rendererIpc, /rendererInvoke<LX\.QQMusic\.HomeRecommendation>/)
 assert.match(types, /interface HomeRecommendation/)
+assert.match(types, /interface PlaylistDetailParams/)
+assert.match(types, /interface PlaylistDetailInfo/)
 assert(!fs.existsSync(path.join(root, 'src/main/modules/qqMusic/recommend.ts')),
   'the obsolete generic portal request service should remain removed')
 assert(fs.existsSync(path.join(root, 'src/main/modules/qqMusic/homeRecommend.ts')),
@@ -53,6 +58,8 @@ assert.doesNotMatch(qqMusicMain, /createQQMusicRecommendService/,
   'the obsolete generic portal request service should not return')
 assert.match(qqMusicMain, /createQQMusicHomeRecommendService/)
 assert.match(qqMusicMain, /getHomeRecommendation/)
+assert.match(qqMusicMain, /createQQMusicPlaylistDetailService/)
+assert.match(qqMusicMain, /getPlaylistDetail/)
 
 const publicTypeBodies = [...types.matchAll(/interface (?:Profile|AccountStatus|LoginQr|LoginQrCheck)\s*\{([\s\S]*?)\n\s*\}/g)]
   .map(match => match[1]).join('\n')

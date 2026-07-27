@@ -793,6 +793,13 @@ export const getQQMusicHomeRecommendation = async() => {
   return rendererInvoke<LX.QQMusic.HomeRecommendation>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_home_recommendation)
 }
 
+export const getQQMusicPlaylistDetail = async(id: string, page = 1) => {
+  return rendererInvoke<LX.QQMusic.PlaylistDetailParams, LX.QQMusic.PlaylistDetailInfo>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_playlist_detail,
+    { id, page },
+  )
+}
+
 export const getNeteaseAccountStatus = async() => {
   return rendererInvoke<LX.Netease.AccountStatus>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_account_status)
 }

@@ -57,5 +57,29 @@ declare namespace LX {
       guidePlaylists: RecommendPlaylist[]
     }
 
+    interface PlaylistDetailInfo {
+      list: LX.Music.MusicInfo_tx[]
+      source: 'tx'
+      desc: string | null
+      total: number
+      page: number
+      limit: number
+      key: string | null
+      id: string
+      info: {
+        name?: string
+        img?: string
+        desc?: string | null
+        author?: string
+        play_count?: string
+      }
+      noItemLabel: string
+    }
+
+    interface PlaylistDetailParams {
+      id: string
+      page: number
+    }
+
   }
 }

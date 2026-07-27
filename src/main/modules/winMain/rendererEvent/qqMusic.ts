@@ -7,6 +7,7 @@ import {
   getDailyRecommendSongs,
   getGuessLikeSongs,
   getHomeRecommendation,
+  getPlaylistDetail,
   logout,
 } from '@main/modules/qqMusic'
 
@@ -40,5 +41,10 @@ export default () => {
   mainHandle<LX.QQMusic.HomeRecommendation>(
     WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_home_recommendation,
     async() => getHomeRecommendation(),
+  )
+
+  mainHandle<LX.QQMusic.PlaylistDetailParams, LX.QQMusic.PlaylistDetailInfo>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_playlist_detail,
+    async({ params }) => getPlaylistDetail(params.id, params.page),
   )
 }

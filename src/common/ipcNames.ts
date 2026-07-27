@@ -187,6 +187,7 @@ const modules = {
     qq_music_get_guess_like_songs: 'qq_music_get_guess_like_songs',
     qq_music_get_daily_recommend_songs: 'qq_music_get_daily_recommend_songs',
     qq_music_get_home_recommendation: 'qq_music_get_home_recommendation',
+    qq_music_get_playlist_detail: 'qq_music_get_playlist_detail',
   },
   winLyric: {
     close: 'close',

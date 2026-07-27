@@ -94,6 +94,17 @@ const buildGitHubUserApiRawUrl = (commitSha, filePath) => {
   return `https://raw.githubusercontent.com/${REPOSITORY}/${commitSha}/${encodedPath}`
 }
 
+const buildGitHubUserApiCdnUrl = (commitSha, filePath) => {
+  if (!SHA_RXP.test(commitSha ?? '')) {
+    throw createGitHubUserApiError('GITHUB_INVALID_RESPONSE', 'commit SHA')
+  }
+  if (typeof filePath != 'string' || !filePath) {
+    throw createGitHubUserApiError('GITHUB_INVALID_RESPONSE', 'file path')
+  }
+  const encodedPath = filePath.split('/').map(encodeURIComponent).join('/')
+  return `https://cdn.jsdelivr.net/gh/${REPOSITORY}@${commitSha}/${encodedPath}`
+}
+
 const assertDownloadSnapshot = snapshot => {
   if (!snapshot || !SHA_RXP.test(snapshot.commitSha ?? '') ||
     typeof snapshot.version != 'string' || !VERSION_RXP.test(snapshot.version) ||
@@ -178,5 +189,6 @@ module.exports = {
   createGitHubUserApiError,
   parseGitHubUserApiSnapshot,
   buildGitHubUserApiRawUrl,
+  buildGitHubUserApiCdnUrl,
   downloadGitHubUserApiScripts,
 }

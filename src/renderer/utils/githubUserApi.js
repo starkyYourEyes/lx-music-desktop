@@ -3,6 +3,7 @@ import {
   createGitHubUserApiError,
   parseGitHubUserApiSnapshot,
   buildGitHubUserApiRawUrl,
+  buildGitHubUserApiCdnUrl,
   downloadGitHubUserApiScripts,
 } from '@common/utils/githubUserApi'
 
@@ -10,6 +11,23 @@ const branchUrl = 'https://api.github.com/repos/Macrohard0001/lx-ikun-music-sour
 const treeUrlPrefix = 'https://api.github.com/repos/Macrohard0001/lx-ikun-music-sources/git/trees/'
 const apiHeaders = { Accept: 'application/vnd.github+json' }
 const commitShaRxp = /^[0-9a-f]{40}$/i
+const retryDelays = [250, 1_000]
+const retryableErrorCodes = new Set([
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EPIPE',
+  'ESOCKETTIMEDOUT',
+  'ETIMEDOUT',
+])
+
+const wait = delay => new Promise(resolve => setTimeout(resolve, delay))
+
+const isRetryableError = error => {
+  return retryableErrorCodes.has(error?.code) || error?.message == 'socket hang up'
+}
 
 const assertResponse = (response, url) => {
   const statusCode = response?.statusCode ?? 0
@@ -26,13 +44,24 @@ const assertResponse = (response, url) => {
   throw createGitHubUserApiError('GITHUB_HTTP_ERROR', `${statusCode} ${url}`)
 }
 
-export const createGitHubUserApiClient = (request = httpFetch) => {
+export const createGitHubUserApiClient = (request = httpFetch, delay = wait) => {
+  const requestWithRetry = async(url, options) => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await request(url, options).promise
+      } catch (error) {
+        if (!isRetryableError(error) || attempt >= retryDelays.length) throw error
+        await delay(retryDelays[attempt])
+      }
+    }
+  }
+
   const requestApi = async url => {
-    const response = await request(url, {
+    const response = await requestWithRetry(url, {
       headers: apiHeaders,
       follow_max: 3,
       timeout: 15_000,
-    }).promise
+    })
     return assertResponse(response, url).body
   }
 
@@ -51,13 +80,26 @@ export const createGitHubUserApiClient = (request = httpFetch) => {
   const downloadSnapshot = snapshot => downloadGitHubUserApiScripts(
     snapshot,
     async file => {
-      const url = buildGitHubUserApiRawUrl(snapshot.commitSha, file.path)
-      const response = await request(url, {
+      const requestOptions = {
         format: 'text',
         follow_max: 3,
         timeout: 30_000,
-      }).promise
-      const successfulResponse = assertResponse(response, url)
+      }
+      const rawUrl = buildGitHubUserApiRawUrl(snapshot.commitSha, file.path)
+      let url = rawUrl
+      let successfulResponse
+      try {
+        successfulResponse = assertResponse(
+          await request(rawUrl, requestOptions).promise,
+          rawUrl,
+        )
+      } catch {
+        url = buildGitHubUserApiCdnUrl(snapshot.commitSha, file.path)
+        successfulResponse = assertResponse(
+          await requestWithRetry(url, requestOptions),
+          url,
+        )
+      }
       const { raw } = successfulResponse
       const script = raw instanceof Uint8Array
         ? Buffer.from(raw).toString('utf8')

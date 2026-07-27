@@ -55,6 +55,11 @@ export const buildGitHubUserApiRawUrl: (
   filePath: string,
 ) => string
 
+export const buildGitHubUserApiCdnUrl: (
+  commitSha: string,
+  filePath: string,
+) => string
+
 export const downloadGitHubUserApiScripts: (
   snapshot: GitHubUserApiSnapshot,
   fetchScript: (file: GitHubUserApiSnapshotFile) => string | Promise<string>,

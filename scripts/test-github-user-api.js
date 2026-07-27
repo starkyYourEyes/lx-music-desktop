@@ -8,6 +8,7 @@ const {
   createGitHubUserApiError,
   parseGitHubUserApiSnapshot,
   buildGitHubUserApiRawUrl,
+  buildGitHubUserApiCdnUrl,
   downloadGitHubUserApiScripts,
 } = require('../src/common/utils/githubUserApi')
 
@@ -60,6 +61,7 @@ const loadGitHubUserApiClient = request => loadTsModule(
       createGitHubUserApiError,
       parseGitHubUserApiSnapshot,
       buildGitHubUserApiRawUrl,
+      buildGitHubUserApiCdnUrl,
       downloadGitHubUserApiScripts,
     },
   },
@@ -267,6 +269,10 @@ const main = async() => {
     commitSha,
     'v260724/V260720-\u5176\u4ed6/\u4e2d\u6587 \u97f3\u6e90.js',
   )
+  const cdnUrl = buildGitHubUserApiCdnUrl(
+    commitSha,
+    'v260724/V260720-\u5176\u4ed6/\u4e2d\u6587 \u97f3\u6e90.js',
+  )
   const request = createResponseRequest(new Map([
     [branchUrl, { statusCode: 200, body: { commit: { sha: commitSha } } }],
     [treeUrl, { statusCode: 200, body: clientTreeData }],
@@ -328,6 +334,10 @@ const main = async() => {
   assert.match(rawUrl, new RegExp(
     `${commitSha}/v260724/V260720-%E5%85%B6%E4%BB%96/%E4%B8%AD%E6%96%87%20%E9%9F%B3%E6%BA%90\\.js$`,
   ))
+  assert.match(cdnUrl, new RegExp(
+    `lx-ikun-music-sources@${commitSha}/v260724/V260720-%E5%85%B6%E4%BB%96/` +
+    '%E4%B8%AD%E6%96%87%20%E9%9F%B3%E6%BA%90\\.js$',
+  ))
   const rawScriptCases = [
     {
       response: { statusCode: 200, body: {}, raw: Buffer.from('{}') },
@@ -349,6 +359,88 @@ const main = async() => {
     assert.strictEqual(rawDownloads[0].script, expected)
   }
 
+  const resetError = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+  const retryCalls = []
+  const retryDelays = []
+  let branchAttempts = 0
+  const retryRequest = (url, options) => {
+    retryCalls.push({ url, options })
+    if (url == branchUrl && branchAttempts++ == 0) {
+      return { promise: Promise.reject(resetError) }
+    }
+    return {
+      promise: Promise.resolve(url == branchUrl
+        ? { statusCode: 200, body: { commit: { sha: commitSha } } }
+        : { statusCode: 200, body: clientTreeData }),
+    }
+  }
+  const retrySnapshot = await createGitHubUserApiClient(
+    retryRequest,
+    async delay => { retryDelays.push(delay) },
+  ).getSnapshot()
+  assert.deepStrictEqual(retrySnapshot, discoveredSnapshot)
+  assert.strictEqual(retryCalls.length, 3)
+  assert.deepStrictEqual(retryCalls[0], retryCalls[1])
+  assert.deepStrictEqual(retryDelays, [250])
+
+  let exhaustedAttempts = 0
+  const exhaustedDelays = []
+  const exhaustedRequest = () => {
+    exhaustedAttempts++
+    return { promise: Promise.reject(resetError) }
+  }
+  await assert.rejects(
+    createGitHubUserApiClient(
+      exhaustedRequest,
+      async delay => { exhaustedDelays.push(delay) },
+    ).getSnapshot(),
+    err => err === resetError,
+  )
+  assert.strictEqual(exhaustedAttempts, 3)
+  assert.deepStrictEqual(exhaustedDelays, [250, 1_000])
+
+  const fallbackCalls = []
+  const fallbackRequest = (url, options) => {
+    fallbackCalls.push({ url, options })
+    return {
+      promise: url == rawUrl
+        ? Promise.reject(resetError)
+        : Promise.resolve({ statusCode: 200, body: '/* @name CDN source */' }),
+    }
+  }
+  const fallbackDownloads = await createGitHubUserApiClient(fallbackRequest)
+    .downloadSnapshot(discoveredSnapshot)
+  assert.strictEqual(fallbackDownloads[0].script, '/* @name CDN source */')
+  assert.deepStrictEqual(fallbackCalls.map(call => call.url), [rawUrl, cdnUrl])
+
+  const cdnRetryCalls = []
+  const cdnRetryDelays = []
+  let cdnAttempts = 0
+  const cdnRetryRequest = (url, options) => {
+    cdnRetryCalls.push({ url, options })
+    return {
+      promise: url == rawUrl || cdnAttempts++ == 0
+        ? Promise.reject(resetError)
+        : Promise.resolve({ statusCode: 200, body: '/* @name Retried CDN source */' }),
+    }
+  }
+  const cdnRetryDownloads = await createGitHubUserApiClient(
+    cdnRetryRequest,
+    async delay => { cdnRetryDelays.push(delay) },
+  ).downloadSnapshot(discoveredSnapshot)
+  assert.strictEqual(cdnRetryDownloads[0].script, '/* @name Retried CDN source */')
+  assert.deepStrictEqual(cdnRetryCalls.map(call => call.url), [rawUrl, cdnUrl, cdnUrl])
+  assert.deepStrictEqual(cdnRetryDelays, [250])
+
+  const httpFallbackRequest = createResponseRequest(new Map([
+    [rawUrl, { statusCode: 404, body: 'missing' }],
+    [cdnUrl, { statusCode: 200, body: '/* @name HTTP fallback source */' }],
+  ]))
+  const httpFallbackDownloads = await createGitHubUserApiClient(httpFallbackRequest)
+    .downloadSnapshot(discoveredSnapshot)
+  assert.strictEqual(httpFallbackDownloads[0].script, '/* @name HTTP fallback source */')
+  assert.deepStrictEqual(httpFallbackRequest.calls.map(call => call.url), [rawUrl, cdnUrl])
+
   const expectClientError = async(responses, operation, code, detail) => {
     const errorRequest = createResponseRequest(new Map(responses))
     const client = createGitHubUserApiClient(errorRequest)
@@ -369,6 +461,7 @@ const main = async() => {
     createGitHubUserApiClient(transportRequest).getSnapshot(),
     err => err === transportError,
   )
+  assert.strictEqual(transportRequest.calls.length, 1)
 
   await expectClientError(
     [
@@ -423,10 +516,13 @@ const main = async() => {
   )
   assert.strictEqual(malformedRequest.calls.length, 1)
   await expectClientError(
-    [[rawUrl, { statusCode: 404, body: 'missing' }]],
+    [
+      [rawUrl, { statusCode: 404, body: 'missing' }],
+      [cdnUrl, { statusCode: 404, body: 'missing' }],
+    ],
     client => client.downloadSnapshot(discoveredSnapshot),
     'GITHUB_HTTP_ERROR',
-    /404.*raw\.githubusercontent\.com/,
+    /404.*cdn\.jsdelivr\.net/,
   )
   await expectClientError(
     [[rawUrl, { statusCode: 200, body: Buffer.from('not text') }]],

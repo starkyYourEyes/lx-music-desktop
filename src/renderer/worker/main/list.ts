@@ -4,6 +4,7 @@ import { SPLIT_CHAR } from '@common/constants'
 import { filterFileName, sortInsert, similar, arrPushByPosition, arrShuffle } from '@common/utils/common'
 import { joinPath, saveStrToFile } from '@common/utils/nodejs'
 import { createLocalMusicInfo } from '@renderer/utils/music'
+import { createListCsvName, createListTextName } from '@common/backupFormats'
 
 
 /**
@@ -311,7 +312,7 @@ export const exportPlayListToText = async(savePath: string, lists: Array<LX.List
       iconv.encode(lists.map(l => l.list.map(m => `${m.name}  ${m.singer}  ${m.meta.albumName ?? ''}`).join('\n')).join('\n\n'), 'utf8', { addBOM: true }))
   } else {
     for await (const list of lists) {
-      await saveStrToFile(joinPath(savePath, `lx_list_${filterFileName(list.name)}.txt`),
+      await saveStrToFile(joinPath(savePath, createListTextName(filterFileName(list.name))),
         iconv.encode(list.list.map(m => `${m.name}  ${m.singer}  ${m.meta.albumName ?? ''}`).join('\n'), 'utf8', { addBOM: true }))
     }
   }
@@ -341,7 +342,7 @@ export const exportPlayListToCSV = async(savePath: string,
     await saveStrToFile(savePath, iconv.encode(header + lists.map(l => l.list.map(m => `${filterStr(m.name)},${filterStr(m.singer)},${filterStr(m.meta.albumName ?? '')}`).join('\n')).join('\n'), 'utf8', { addBOM: true }))
   } else {
     for await (const list of lists) {
-      await saveStrToFile(joinPath(savePath, `lx_list_${filterFileName(list.name)}.csv`), iconv.encode(header + list.list.map(m => `${filterStr(m.name)},${filterStr(m.singer)},${filterStr(m.meta.albumName ?? '')}`).join('\n'), 'utf8', { addBOM: true }))
+      await saveStrToFile(joinPath(savePath, createListCsvName(filterFileName(list.name))), iconv.encode(header + list.list.map(m => `${filterStr(m.name)},${filterStr(m.singer)},${filterStr(m.meta.albumName ?? '')}`).join('\n'), 'utf8', { addBOM: true }))
     }
   }
 }

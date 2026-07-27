@@ -6,6 +6,7 @@ import { getListMusics, updateUserList, addListMusics, overwriteListMusics, crea
 import { defaultList, loveList, userLists } from '@renderer/store/list/state'
 import useImportTip from '@renderer/utils/compositions/useImportTip'
 import { dialog } from '@renderer/plugins/Dialog'
+import { BACKUP_IMPORT_EXTENSIONS, createPlaylistPartBackupName } from '@common/backupFormats'
 
 
 export default () => {
@@ -16,7 +17,7 @@ export default () => {
     if (!listInfo) return
     void openSaveDir({
       title: t('lists__export_part_desc'),
-      defaultPath: `lx_list_part_${filterFileName(listInfo.name)}.lxmc`,
+      defaultPath: createPlaylistPartBackupName(filterFileName(listInfo.name)),
     }).then(async result => {
       if (result.canceled || !result.filePath) return
       void window.lx.worker.main.saveLxConfigFile(result.filePath, {
@@ -30,7 +31,7 @@ export default () => {
       title: t('lists__import_part_desc'),
       properties: ['openFile'],
       filters: [
-        { name: 'Play List Part', extensions: ['json', 'lxmc'] },
+        { name: 'Play List Part', extensions: [...BACKUP_IMPORT_EXTENSIONS] },
         { name: 'All Files', extensions: ['*'] },
       ],
     }).then(async result => {

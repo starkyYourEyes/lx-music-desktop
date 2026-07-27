@@ -43,6 +43,7 @@ import { LIST_IDS } from '@common/constants'
 import { defaultList, loveList, userLists } from '@renderer/store/list/state'
 import { appSetting, updateSetting } from '@renderer/store/setting'
 import migrateSetting from '@common/utils/migrateSetting'
+import { BACKUP_IMPORT_EXTENSIONS, BACKUP_NAMES } from '@common/backupFormats'
 
 
 export default {
@@ -156,7 +157,7 @@ export default {
         title: t('setting__backup_all_import_desc'),
         properties: ['openFile'],
         filters: [
-          { name: 'Setting', extensions: ['json', 'lxmc'] },
+          { name: 'Setting', extensions: [...BACKUP_IMPORT_EXTENSIONS] },
           { name: 'All Files', extensions: ['*'] },
         ],
       }).then(result => {
@@ -183,7 +184,7 @@ export default {
     const handleExportAllData = () => {
       void openSaveDir({
         title: t('setting__backup_all_export_desc'),
-        defaultPath: 'lx_datas_v2.lxmc',
+        defaultPath: BACKUP_NAMES.allData,
       }).then(result => {
         if (result.canceled) return
         void exportAllData(result.filePath)
@@ -200,7 +201,7 @@ export default {
     const handleExportSetting = () => {
       void openSaveDir({
         title: t('setting__backup_part_export_setting_desc'),
-        defaultPath: 'lx_setting_v2.lxmc',
+        defaultPath: BACKUP_NAMES.setting,
       }).then(result => {
         if (result.canceled) return
         exportSetting(result.filePath)
@@ -230,7 +231,7 @@ export default {
         title: t('setting__backup_part_import_setting_desc'),
         properties: ['openFile'],
         filters: [
-          { name: 'Setting', extensions: ['json', 'lxmc'] },
+          { name: 'Setting', extensions: [...BACKUP_IMPORT_EXTENSIONS] },
           { name: 'All Files', extensions: ['*'] },
         ],
       }).then(result => {
@@ -249,7 +250,7 @@ export default {
     const handleExportPlayList = () => {
       void openSaveDir({
         title: t('setting__backup_part_export_list_desc'),
-        defaultPath: 'lx_list.lxmc',
+        defaultPath: BACKUP_NAMES.playlist,
       }).then(result => {
         if (result.canceled) return
         void exportPlayList(result.filePath)
@@ -283,7 +284,7 @@ export default {
         title: t('setting__backup_part_import_list_desc'),
         properties: ['openFile'],
         filters: [
-          { name: 'Play List', extensions: ['json', 'lxmc'] },
+          { name: 'Play List', extensions: [...BACKUP_IMPORT_EXTENSIONS] },
           { name: 'All Files', extensions: ['*'] },
         ],
       }).then(result => {
@@ -312,7 +313,7 @@ export default {
       if (confirm) {
         void openSaveDir({
           title: t('setting__backup_other_export_dir'),
-          defaultPath: 'lx_list_all.txt',
+          defaultPath: BACKUP_NAMES.playlistText,
         }).then(result => {
           if (result.canceled) return
           let path = result.filePath
@@ -344,7 +345,7 @@ export default {
       if (confirm) {
         void openSaveDir({
           title: t('setting__backup_other_export_dir'),
-          defaultPath: 'lx_list_all.csv',
+          defaultPath: BACKUP_NAMES.playlistCsv,
         }).then(result => {
           if (result.canceled) return
           let path = result.filePath

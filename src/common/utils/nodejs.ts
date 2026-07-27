@@ -4,6 +4,7 @@ import { gzip, gunzip } from 'node:zlib'
 import path from 'node:path'
 import { networkInterfaces } from 'node:os'
 import { log } from '@common/utils'
+import { ensureBackupExportPath } from '@common/backupFormats'
 
 export const joinPath = (...paths: string[]): string => path.join(...paths)
 
@@ -146,7 +147,7 @@ export const gunzipData = async(buf: Buffer): Promise<string> => {
  * @param data 数据
  */
 export const saveLxConfigFile = async(path: string, data: any) => {
-  if (!path.endsWith('.lxmc')) path += '.lxmc'
+  path = ensureBackupExportPath(path)
   fs.writeFile(path, await gzipData(JSON.stringify(data)), 'binary', err => {
     console.log(err)
   })

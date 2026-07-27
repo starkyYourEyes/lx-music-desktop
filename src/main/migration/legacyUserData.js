@@ -82,6 +82,18 @@ const removeOwnedLockFile = (fsApi, lockPath, expectedIdentity, expectedOwner, l
   }
 }
 
+const removeOwnedCandidate = (fsApi, candidatePath, expectedIdentity, logger) => {
+  try {
+    const identity = fsApi.lstatSync(candidatePath)
+    if (identity.isSymbolicLink() || !identity.isFile() || !isSameNode(expectedIdentity, identity)) return false
+    fsApi.unlinkSync(candidatePath)
+    return true
+  } catch (error) {
+    if (error?.code != 'ENOENT') safeLog(logger, 'warn', `Could not remove owned migration file: ${candidatePath}`, error)
+    return false
+  }
+}
+
 const releaseOwnedLock = (fsApi, lock, logger) => {
   removeOwnedLockFile(fsApi, lock.lockPath, lock.identity, lock.owner, logger)
   closeDescriptor(fsApi, lock.fd, logger)
@@ -154,20 +166,25 @@ const acquireMigrationLock = ({ fsApi, rootPath, lockPath, isProcessAlive, logge
     assertDirectChild(rootPath, candidatePath)
     let fd
     let identity
+    let metadataWritten = false
     let linkAttempted = false
 
     try {
       fd = fsApi.openSync(candidatePath, 'wx')
-      writeAll(fsApi, fd, JSON.stringify(owner))
-      fsApi.fsyncSync(fd)
       identity = fsApi.fstatSync(fd)
+      writeAll(fsApi, fd, JSON.stringify(owner))
+      metadataWritten = true
+      fsApi.fsyncSync(fd)
       linkAttempted = true
       fsApi.linkSync(candidatePath, lockPath)
       removeOwnedLockFile(fsApi, candidatePath, identity, owner, logger)
       return { fd, identity, lockPath, owner }
     } catch (error) {
       lastError = error
-      if (identity != null) removeOwnedLockFile(fsApi, candidatePath, identity, owner, logger)
+      if (identity != null) {
+        if (metadataWritten) removeOwnedLockFile(fsApi, candidatePath, identity, owner, logger)
+        else removeOwnedCandidate(fsApi, candidatePath, identity, logger)
+      }
       if (fd != null) closeDescriptor(fsApi, fd, logger)
 
       if (!linkAttempted && error?.code == 'EEXIST') continue
@@ -201,9 +218,9 @@ const getUsableDirectory = (fsApi, directoryPath) => {
 
 const ensureDirectory = (fsApi, directoryPath, logger) => {
   try {
-    if (!fsApi.existsSync(directoryPath)) fsApi.mkdirSync(directoryPath)
+    fsApi.mkdirSync(directoryPath)
   } catch (error) {
-    safeLog(logger, 'error', `Could not create user-data directory: ${directoryPath}`, error)
+    if (error?.code != 'EEXIST') safeLog(logger, 'error', `Could not create user-data directory: ${directoryPath}`, error)
   }
   return getUsableDirectory(fsApi, directoryPath)
 }
@@ -310,6 +327,14 @@ const migrateLegacyUserData = ({
     return createResult('failed', false, new Error(`Current user-data path is not a directory: ${userDataPath}`))
   }
 
+  const prepareFreshUserData = () => {
+    const userDataPathReady = ensureDirectory(fsApi, userDataPath, logger)
+    const error = userDataPathReady ? undefined : new Error(`Could not prepare user-data path: ${userDataPath}`)
+    return createResult(userDataPathReady ? 'legacy-missing' : 'failed', userDataPathReady, error)
+  }
+
+  if (!fsApi.existsSync(legacyPath)) return prepareFreshUserData()
+
   const lock = acquireMigrationLock({ fsApi, rootPath, lockPath, isProcessAlive, logger })
   if (lock.error != null) {
     safeLog(logger, 'error', 'Could not acquire user-data migration lock', lock.error)
@@ -321,11 +346,7 @@ const migrateLegacyUserData = ({
       if (getUsableDirectory(fsApi, userDataPath)) return createResult('current-exists', true)
       return createResult('failed', false, new Error(`Current user-data path is not a directory: ${userDataPath}`))
     }
-    if (!fsApi.existsSync(legacyPath)) {
-      const userDataPathReady = ensureDirectory(fsApi, userDataPath, logger)
-      const error = userDataPathReady ? undefined : new Error(`Could not prepare user-data path: ${userDataPath}`)
-      return createResult(userDataPathReady ? 'legacy-missing' : 'failed', userDataPathReady, error)
-    }
+    if (!fsApi.existsSync(legacyPath)) return prepareFreshUserData()
 
     try {
       const legacyManifest = createInitialLegacyManifest(fsApi, legacyPath)

@@ -121,6 +121,24 @@ test('creates an empty current directory when no legacy data exists', t => {
   assert.equal(fs.existsSync(result.userDataPath), true)
 })
 
+test('fresh install does not require hard-link support', t => {
+  const appDataPath = makeRoot()
+  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  const fsApi = {
+    ...fs,
+    linkSync() {
+      const error = new Error('hard links unsupported')
+      error.code = 'ENOTSUP'
+      throw error
+    },
+  }
+
+  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
+  assert.equal(result.status, 'legacy-missing')
+  assert.equal(result.userDataPathReady, true)
+  assert.equal(fs.lstatSync(result.userDataPath).isDirectory(), true)
+})
+
 test('cleans only its temporary directory after a copy failure', t => {
   const appDataPath = makeRoot()
   t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
@@ -362,8 +380,10 @@ test('reclaims a dead owner lock and migrates', t => {
 test('does not reclaim an invalid lock solely because it is old', t => {
   const appDataPath = makeRoot()
   t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   const lockPath = `${currentPath}.migration.lock`
+  fs.mkdirSync(legacyPath)
   fs.writeFileSync(lockPath, '')
   fs.utimesSync(lockPath, new Date(0), new Date(0))
 
@@ -377,9 +397,11 @@ test('does not reclaim an invalid lock solely because it is old', t => {
 test('does not reclaim an old lock while its validated owner is alive', t => {
   const appDataPath = makeRoot()
   t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   const lockPath = `${currentPath}.migration.lock`
   const lockContents = makeLockMetadata(process.pid, '2000-01-01T00:00:00.000Z')
+  fs.mkdirSync(legacyPath)
   fs.writeFileSync(lockPath, lockContents)
 
   const result = migrateLegacyUserData({
@@ -460,6 +482,40 @@ test('closes an exclusively created lock if reading its identity fails', t => {
   })
   assert.equal(restartedResult.status, 'migrated')
   assert.equal(fs.existsSync(restartedResult.lockPath), false)
+})
+
+test('removes its candidate when writing lock metadata fails', t => {
+  const appDataPath = makeRoot()
+  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  const legacyPath = path.join(appDataPath, 'lx-music-desktop')
+  fs.mkdirSync(legacyPath)
+  const fsApi = {
+    ...fs,
+    writeSync() { throw new Error('write failed') },
+  }
+
+  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.userDataPathReady, false)
+  assert.deepEqual(fs.readdirSync(appDataPath).filter(entry => entry.endsWith('.candidate')), [])
+  assert.equal(fs.existsSync(result.lockPath), false)
+})
+
+test('removes its candidate when syncing lock metadata fails', t => {
+  const appDataPath = makeRoot()
+  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  const legacyPath = path.join(appDataPath, 'lx-music-desktop')
+  fs.mkdirSync(legacyPath)
+  const fsApi = {
+    ...fs,
+    fsyncSync() { throw new Error('sync failed') },
+  }
+
+  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.userDataPathReady, false)
+  assert.deepEqual(fs.readdirSync(appDataPath).filter(entry => entry.endsWith('.candidate')), [])
+  assert.equal(fs.existsSync(result.lockPath), false)
 })
 
 test('recovers a failed lock release after the owner process exits', t => {

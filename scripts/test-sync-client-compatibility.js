@@ -117,6 +117,34 @@ test('client does not downgrade after a malformed successful response', async() 
   assert.equal(harness.attempts.length, 1)
 })
 
+for (const [description, decryptedPayload] of [
+  ['invalid JSON', '{'],
+  ['a null value', 'null'],
+  ['an empty object', '{}'],
+  ['a non-string clientId', '{"clientId":1,"key":"client-key","serverName":"Test Server"}'],
+  ['a non-string key', '{"clientId":"client-id","key":false,"serverName":"Test Server"}'],
+  ['a non-string serverName', '{"clientId":"client-id","key":"client-key","serverName":[]}'],
+  ['an empty clientId', '{"clientId":"","key":"client-key","serverName":"Test Server"}'],
+  ['an empty key', '{"clientId":"client-id","key":"","serverName":"Test Server"}'],
+  ['an empty serverName', '{"clientId":"client-id","key":"client-key","serverName":""}'],
+]) {
+  test(`client rejects malformed decrypted auth payload with ${description}`, async() => {
+    const harness = loadClientAuth({
+      authenticate: async() => ({ text: 'rsa-response', code: 200 }),
+      rsaDecrypt: () => Buffer.from(decryptedPayload),
+    })
+    await assert.rejects(
+      harness.handleAuth(urlInfo, '123456'),
+      err => {
+        assert.equal(err.message, syncConstants.SYNC_CODE.authFailed)
+        return true
+      },
+    )
+    assert.equal(harness.attempts.length, 1)
+    assert.equal(harness.saved.length, 0)
+  })
+}
+
 test('unmarked cached keys negotiate once and persist the successful protocol', async() => {
   const harness = loadClientAuth({
     keyInfo: { clientId: 'client-id', key: 'client-key', serverName: 'Test Server' },

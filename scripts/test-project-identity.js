@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict')
 const { generateKeyPairSync } = require('node:crypto')
 const fs = require('node:fs')
+const http = require('node:http')
 const path = require('node:path')
 const test = require('node:test')
 const loadTsModule = require('./test-utils/load-ts-module')
@@ -144,6 +145,59 @@ const performCodeAuth = async(protocol, clientType, remoteAddress) => {
     payload: status == 200
       ? JSON.parse(syncTools.rsaDecrypt(Buffer.from(body, 'base64'), privateKey).toString())
       : null,
+  }
+}
+
+const performHttpCodeAuth = async(plaintext) => {
+  const {
+    authCode,
+    clients,
+    syncTools,
+    syncUtils,
+  } = getRuntimeEntries()
+  const password = 'identity-test-password'
+  const key = Buffer.from(syncUtils.toMD5(password).substring(0, 16)).toString('base64')
+  const server = http.createServer((req, res) => {
+    authCode(req, res, password).catch(() => {
+      res.writeHead(500)
+      res.end('Handler rejected')
+    })
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address == 'object')
+    const storedKeyCount = clients.size
+    const response = await new Promise((resolve, reject) => {
+      const request = http.request({
+        hostname: '127.0.0.1',
+        port: address.port,
+        path: '/ah',
+        headers: {
+          m: syncTools.aesEncrypt(plaintext, key),
+        },
+      }, (response) => {
+        let body = ''
+        response.setEncoding('utf8')
+        response.on('data', chunk => {
+          body += chunk
+        })
+        response.on('end', () => {
+          resolve({ status: response.statusCode, body })
+        })
+      })
+      request.on('error', reject)
+      request.end()
+    })
+    return { ...response, storedKeyCount, currentKeyCount: clients.size }
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close(err => err ? reject(err) : resolve())
+    })
   }
 }
 
@@ -383,6 +437,77 @@ test('authCode rejects unknown and cross-profile client identities', async() => 
     assert.equal(result.status, 401)
     assert.equal(result.payload, null)
   }
+})
+
+test('authCode returns HTTP 401 without storing a key when the public key is missing', async() => {
+  const { syncConstants } = getRuntimeEntries()
+  const result = await performHttpCodeAuth([
+    CURRENT_SYNC_PROTOCOL.syncAuthPrefix,
+    '',
+    'Test Client',
+    CURRENT_SYNC_PROTOCOL.syncDesktopId,
+  ].join('\n'))
+  assert.equal(result.status, 401)
+  assert.equal(result.body, syncConstants.SYNC_CODE.msgAuthFailed)
+  assert.equal(result.currentKeyCount, result.storedKeyCount)
+})
+
+test('authCode returns HTTP 401 without storing a key when the public key is invalid', async() => {
+  const { syncConstants } = getRuntimeEntries()
+  const result = await performHttpCodeAuth([
+    CURRENT_SYNC_PROTOCOL.syncAuthPrefix,
+    'not-a-public-key',
+    'Test Client',
+    CURRENT_SYNC_PROTOCOL.syncDesktopId,
+  ].join('\n'))
+  assert.equal(result.status, 401)
+  assert.equal(result.body, syncConstants.SYNC_CODE.msgAuthFailed)
+  assert.equal(result.currentKeyCount, result.storedKeyCount)
+})
+
+test('authCode returns HTTP 401 without storing a key when a required field is missing', async() => {
+  const { publicKey } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  })
+  const publicKeyBody = publicKey
+    .replace('-----BEGIN PUBLIC KEY-----', '')
+    .replace('-----END PUBLIC KEY-----', '')
+    .replace(/\s/g, '')
+  const { syncConstants } = getRuntimeEntries()
+  const result = await performHttpCodeAuth([
+    CURRENT_SYNC_PROTOCOL.syncAuthPrefix,
+    publicKeyBody,
+    '',
+    CURRENT_SYNC_PROTOCOL.syncDesktopId,
+  ].join('\n'))
+  assert.equal(result.status, 401)
+  assert.equal(result.body, syncConstants.SYNC_CODE.msgAuthFailed)
+  assert.equal(result.currentKeyCount, result.storedKeyCount)
+})
+
+test('authCode returns HTTP 401 without storing a key for an extra-field layout', async() => {
+  const { publicKey } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  })
+  const publicKeyBody = publicKey
+    .replace('-----BEGIN PUBLIC KEY-----', '')
+    .replace('-----END PUBLIC KEY-----', '')
+    .replace(/\s/g, '')
+  const { syncConstants } = getRuntimeEntries()
+  const result = await performHttpCodeAuth([
+    CURRENT_SYNC_PROTOCOL.syncAuthPrefix,
+    publicKeyBody,
+    'Test Client',
+    CURRENT_SYNC_PROTOCOL.syncDesktopId,
+    'unexpected',
+  ].join('\n'))
+  assert.equal(result.status, 401)
+  assert.equal(result.body, syncConstants.SYNC_CODE.msgAuthFailed)
+  assert.equal(result.currentKeyCount, result.storedKeyCount)
 })
 
 test('cached-key and WebSocket authentication follow the stored protocol', async() => {

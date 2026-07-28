@@ -8,6 +8,17 @@ import { SYNC_PROTOCOLS, getSyncProtocolCandidates, type SyncProtocol } from '@c
 
 class RetryableProtocolAuthError extends Error {}
 
+const isClientKeyInfo = (value: unknown): value is LX.Sync.ClientKeyInfo => {
+  if (value == null || typeof value != 'object') return false
+  const info = value as Record<string, unknown>
+  return typeof info.clientId == 'string' &&
+    info.clientId.length > 0 &&
+    typeof info.key == 'string' &&
+    info.key.length > 0 &&
+    typeof info.serverName == 'string' &&
+    info.serverName.length > 0
+}
+
 const authenticateWithProtocols = async<T>(
   protocols: ReadonlyArray<Readonly<SyncProtocol>>,
   authenticate: (protocol: Readonly<SyncProtocol>) => Promise<T>,
@@ -73,7 +84,13 @@ const codeAuth = async(urlInfo: LX.Sync.Client.UrlInfo, authCode: string, protoc
     }
     // console.log(msg)
     if (!msg) return Promise.reject(new Error(SYNC_CODE.authFailed))
-    const info = JSON.parse(msg) as LX.Sync.ClientKeyInfo
+    let info: unknown
+    try {
+      info = JSON.parse(msg)
+    } catch {
+      throw new Error(SYNC_CODE.authFailed)
+    }
+    if (!isClientKeyInfo(info)) throw new Error(SYNC_CODE.authFailed)
     return info
   })
 }

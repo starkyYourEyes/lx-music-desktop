@@ -56,22 +56,29 @@ const verifyByCode = (encryptMsg: string, password: string) => {
   }
   // console.log(text)
   const data = text.split('\n')
+  if (data.length != 4 || data.some(field => !field.trim())) return null
   const protocol = SYNC_PROTOCOLS.find(
     candidate => data[0] === candidate.syncAuthPrefix,
   )
   if (!protocol) return null
   const publicKey = `-----BEGIN PUBLIC KEY-----\n${data[1]}\n-----END PUBLIC KEY-----`
-  const deviceName = data[2] || 'Unknown'
+  const deviceName = data[2]
   const client = classifySyncClient(data[3], protocol)
   if (!client) return null
   const keyInfo = createClientKeyInfo(deviceName, client.isMobile, protocol.id)
+  let response
+  try {
+    response = rsaEncrypt(Buffer.from(JSON.stringify({
+      clientId: keyInfo.clientId,
+      key: keyInfo.key,
+      serverName: getComputerName(),
+    })), publicKey)
+  } catch {
+    return null
+  }
   const userSpace = getUserSpace()
   userSpace.dataManage.saveClientKeyInfo(keyInfo)
-  return rsaEncrypt(Buffer.from(JSON.stringify({
-    clientId: keyInfo.clientId,
-    key: keyInfo.key,
-    serverName: getComputerName(),
-  })), publicKey)
+  return response
 }
 
 export const authCode = async(req: http.IncomingMessage, res: http.ServerResponse, password: string) => {

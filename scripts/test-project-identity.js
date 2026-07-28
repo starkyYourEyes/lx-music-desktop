@@ -8,6 +8,13 @@ const loadTsModule = require('./test-utils/load-ts-module')
 const root = path.resolve(__dirname, '..')
 const pkg = require('../package.json')
 const { PROJECT_IDENTITY } = require('../src/common/projectIdentity')
+const {
+  CURRENT_SYNC_PROTOCOL,
+  LEGACY_SYNC_PROTOCOL,
+  SYNC_PROTOCOLS,
+  getSyncProtocol,
+  getSyncProtocolCandidates,
+} = require('../src/common/syncProtocol')
 const read = relativePath => fs.readFileSync(path.join(root, relativePath), 'utf8')
 const runtimeIdentityPath = path.join(root, 'src/common/runtimeIdentity.js')
 const runtimeIdentity = fs.existsSync(runtimeIdentityPath) ? require(runtimeIdentityPath) : {}
@@ -166,6 +173,32 @@ test('project identity contains the approved values', () => {
     issuesUrl: 'https://github.com/starkyYourEyes/lx-music-desktop/issues',
     releasesUrl: 'https://github.com/starkyYourEyes/lx-music-desktop/releases',
   })
+})
+
+test('sync compatibility profiles contain only the two approved protocols', () => {
+  assert.deepEqual(CURRENT_SYNC_PROTOCOL, {
+    id: 'current',
+    syncDesktopId: PROJECT_IDENTITY.syncDesktopId,
+    syncMobileId: PROJECT_IDENTITY.syncMobileId,
+    syncAuthPrefix: PROJECT_IDENTITY.syncAuthPrefix,
+    syncConnectMessage: PROJECT_IDENTITY.syncConnectMessage,
+  })
+  assert.deepEqual(LEGACY_SYNC_PROTOCOL, {
+    id: 'legacy',
+    syncDesktopId: 'lx_music_desktop',
+    syncMobileId: 'lx_music_mobile',
+    syncAuthPrefix: 'lx-music auth::',
+    syncConnectMessage: 'lx-music connect',
+  })
+  assert.deepEqual(SYNC_PROTOCOLS, [CURRENT_SYNC_PROTOCOL, LEGACY_SYNC_PROTOCOL])
+})
+
+test('sync protocol candidates prefer current and honor a stored marker', () => {
+  assert.deepEqual(getSyncProtocolCandidates().map(({ id }) => id), ['current', 'legacy'])
+  assert.deepEqual(getSyncProtocolCandidates('legacy').map(({ id }) => id), ['legacy'])
+  assert.equal(getSyncProtocol('legacy'), LEGACY_SYNC_PROTOCOL)
+  assert.equal(getSyncProtocol(undefined), CURRENT_SYNC_PROTOCOL)
+  assert.equal(getSyncProtocol('unexpected'), CURRENT_SYNC_PROTOCOL)
 })
 
 test('package metadata is the identity source for package author and repository', () => {

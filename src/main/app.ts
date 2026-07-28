@@ -13,6 +13,8 @@ import { migrateDBData } from './utils/migrate'
 import { openDirInExplorer } from '@common/utils/electron'
 import { setProxyByHost } from '@common/utils/request'
 import { getWebContentsNavigationDecision } from '@main/utils/webContentsNavigationGuard'
+import { getPortableUserDataPaths, migrateLegacyUserData } from './migration/legacyUserData'
+import { PROJECT_IDENTITY } from '@common/projectIdentity'
 
 export const initGlobalData = () => {
   const envParams = parseEnvParams()
@@ -125,22 +127,29 @@ export const applyElectronEnvParams = () => {
   }
 }
 
-export const setUserDataPath = () => {
-  // windows平台下如果应用目录下存在 portable 文件夹则将数据存在此文件下
-  if (process.platform == 'win32') {
-    const portablePath = path.join(path.dirname(app.getPath('exe')), '/portable')
-    if (existsSync(portablePath)) {
-      app.setPath('appData', portablePath)
-      const appDataPath = path.join(portablePath, '/userData')
-      if (!existsSync(appDataPath)) mkdirSync(appDataPath)
-      app.setPath('userData', appDataPath)
+export const setUserDataPath = (): { ready: true } | { ready: false, error: unknown } => {
+  const portablePaths = getPortableUserDataPaths({
+    platform: process.platform,
+    executablePath: app.getPath('exe'),
+  })
+
+  if (portablePaths) {
+    app.setPath('appData', portablePaths.appDataPath)
+    if (!existsSync(portablePaths.userDataPath)) mkdirSync(portablePaths.userDataPath, { recursive: true })
+    app.setPath('userData', portablePaths.userDataPath)
+  } else {
+    const migration = migrateLegacyUserData({ appDataPath: app.getPath('appData'), logger: console })
+    if (!migration.userDataPathReady) {
+      return { ready: false, error: migration.error ?? new Error('User-data migration did not produce a usable path') }
     }
+    app.setPath('userData', migration.userDataPath)
   }
 
   const userDataPath = app.getPath('userData')
   global.lxOldDataPath = userDataPath
   global.lxDataPath = path.join(userDataPath, 'LxDatas')
-  if (!existsSync(global.lxDataPath)) mkdirSync(global.lxDataPath)
+  if (!existsSync(global.lxDataPath)) mkdirSync(global.lxDataPath, { recursive: true })
+  return { ready: true }
 }
 
 export const registerDeeplink = (startApp: () => void) => {
@@ -148,9 +157,9 @@ export const registerDeeplink = (startApp: () => void) => {
     // Set the path of electron.exe and your app.
     // These two additional parameters are only available on windows.
     // console.log(process.execPath, process.argv)
-    app.setAsDefaultProtocolClient('lxmusic', process.execPath, process.argv.slice(1))
+    app.setAsDefaultProtocolClient(PROJECT_IDENTITY.protocolScheme, process.execPath, process.argv.slice(1))
   } else {
-    app.setAsDefaultProtocolClient('lxmusic')
+    app.setAsDefaultProtocolClient(PROJECT_IDENTITY.protocolScheme)
   }
 
   // deep link
@@ -206,7 +215,7 @@ export const listenerAppEvent = (startApp: () => void) => {
     })
 
     // disable create dictionary
-    // https://github.com/lyswhut/lx-music-desktop/issues/773
+    // Disable spell-check dictionary downloads.
     contents.session.setSpellCheckerDictionaryDownloadURL('http://0.0.0.0')
   })
 

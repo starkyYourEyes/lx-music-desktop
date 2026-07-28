@@ -1,5 +1,5 @@
 {
-  "name": "lx-music-desktop",
+  "name": "starky-lx-music-desktop",
   "version": "3.0.0",
   "description": "一个免费的音乐查找助手",
   "main": "./dist/main.js",
@@ -32,7 +32,6 @@
     "pack:mac:dmg": "node build-config/build-pack.js target=mac arch=x64 type=dmg",
     "pack:mac:dmg:arm64": "node build-config/build-pack.js target=mac arch=arm64 type=dmg",
     "pack:dir": "node build-config/pack.js && node build-config/build-pack.js target=dir",
-    "publish": "node publish",
     "publish:win:setup:x64": "node build-config/build-pack.js target=win arch=x64 type=setup publish=always",
     "publish:win:setup:x86": "node build-config/build-pack.js target=win arch=x86 type=setup publish=always",
     "publish:win:setup:arm64": "node build-config/build-pack.js target=win arch=arm64 type=setup publish=always",
@@ -92,7 +91,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lyswhut/lx-music-desktop.git"
+    "url": "https://github.com/starkyYourEyes/lx-music-desktop.git"
   },
   "keywords": [
     "music-player",
@@ -100,14 +99,13 @@
     "vuejs3"
   ],
   "author": {
-    "name": "lyswhut",
-    "email": "lyswhut@qq.com"
+    "name": "starkyYourEyes"
   },
   "license": "Apache-2.0",
   "bugs": {
-    "url": "https://github.com/lyswhut/lx-music-desktop/issues"
+    "url": "https://github.com/starkyYourEyes/lx-music-desktop/issues"
   },
-  "homepage": "https://github.com/lyswhut/lx-music-desktop#readme",
+  "homepage": "https://github.com/starkyYourEyes/lx-music-desktop#readme",
   "devDependencies": {
     "@babel/core": "^7.29.0",
     "@babel/eslint-parser": "^7.28.6",
@@ -128,7 +126,6 @@
     "babel-loader": "^10.0.0",
     "browserslist": "^4.28.1",
     "chalk": "^4.1.2",
-    "changelog-parser": "^3.0.1",
     "copy-webpack-plugin": "^14.0.0",
     "core-js": "^3.48.0",
     "cross-env": "^10.1.0",
@@ -138,13 +135,12 @@
     "electron": "37.6.1",
     "electron-builder": "^26.8.0",
     "electron-debug": "^3.2.0",
-    "electron-devtools-installer": "github:lyswhut/electron-devtools-installer#64596d615c1fc891eefd8aef1dfcb2c87aaadf03",
+    "electron-devtools-installer": "^4.0.0",
     "electron-to-chromium": "^1.5.286",
-    "electron-updater": "6.8.3",
     "eslint": "^8.57.1",
     "eslint-config-standard": "^17.1.0",
     "eslint-config-standard-with-typescript": "^43.0.1",
-    "eslint-formatter-friendly": "github:lyswhut/eslint-friendly-formatter#2170d1320e2fad13615a9dcf229669f0bb473a53",
+    "eslint-formatter-friendly": "^7.0.0",
     "eslint-plugin-html": "^8.1.4",
     "eslint-plugin-vue": "^9.33.0",
     "eslint-plugin-vue-pug": "^0.6.2",
@@ -160,7 +156,7 @@
     "pug": "^3.0.3",
     "pug-plain-loader": "^1.1.0",
     "rimraf": "^6.1.3",
-    "spinnies": "github:lyswhut/spinnies#233305c58694aa3b053e3ab9af9049993f918b9d",
+    "spinnies": "^0.5.1",
     "svg-sprite-loader": "^6.0.11",
     "svg-transform-loader": "^2.0.13",
     "svgo-loader": "^4.0.0",
@@ -174,7 +170,7 @@
     "webpack": "5.105.2",
     "webpack-cli": "^6.0.1",
     "webpack-dev-server": "5.2.6",
-    "webpack-hot-middleware": "github:lyswhut/webpack-hot-middleware#329c4375134b89d39da23a56a94db651247c74a1",
+    "webpack-hot-middleware": "^2.26.1",
     "webpack-merge": "^6.0.1"
   },
   "dependencies": {
@@ -190,9 +186,8 @@
     "image-size": "^1.1.0",
     "jschardet": "^3.1.4",
     "long": "^5.3.2",
-    "message2call": "^0.1.3",
     "music-metadata": "^11.12.0",
-    "needle": "github:lyswhut/needle#93299ac841b7e9a9f82ca7279b88aaaeda404060",
+    "needle": "^3.5.0",
     "node-id3": "^0.2.9",
     "sortablejs": "^1.15.7",
     "tunnel": "^0.0.6",

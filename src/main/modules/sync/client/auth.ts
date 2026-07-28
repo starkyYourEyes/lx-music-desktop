@@ -4,6 +4,7 @@ import log from '../log'
 import { aesDecrypt, aesEncrypt, getComputerName, rsaDecrypt } from '../utils'
 import { toMD5 } from '@common/utils/nodejs'
 import { SYNC_CODE } from '@common/constants_sync'
+import { PROJECT_IDENTITY } from '@common/projectIdentity'
 
 
 const hello = async(urlInfo: LX.Sync.Client.UrlInfo) => request(`${urlInfo.httpProtocol}//${urlInfo.hostPath}/hello`)
@@ -33,7 +34,7 @@ const codeAuth = async(urlInfo: LX.Sync.Client.UrlInfo, serverId: string, authCo
   publicKey = publicKey.replace(/\n/g, '')
     .replace('-----BEGIN PUBLIC KEY-----', '')
     .replace('-----END PUBLIC KEY-----', '')
-  const msg = aesEncrypt(`${SYNC_CODE.authMsg}\n${publicKey}\n${getComputerName()}\nlx_music_desktop`, key)
+  const msg = aesEncrypt(`${SYNC_CODE.authMsg}\n${publicKey}\n${getComputerName()}\n${PROJECT_IDENTITY.syncDesktopId}`, key)
   // console.log(msg, key)
   return request(`${urlInfo.httpProtocol}//${urlInfo.hostPath}/ah`, { headers: { m: msg } }).then(async({ text, code }) => {
     // console.log(text)

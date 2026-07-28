@@ -72,7 +72,7 @@ const toBigintArray = (data) => {
   return jArr
 }
 
-// https://github.com/lyswhut/lx-music-desktop/issues/445#issuecomment-1139338682
+// Clamp decoded signed 64-bit lyric timestamps.
 const MAX = 9223372036854775807n
 const MIN = -9223372036854775808n
 const toLong = str => {

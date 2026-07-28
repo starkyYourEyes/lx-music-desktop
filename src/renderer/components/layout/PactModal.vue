@@ -19,7 +19,7 @@
         <p><strong>五、免责声明</strong></p><br>
         <p>5.1&nbsp;由于使用本项目产生的包括由于本协议或由于使用或无法使用本项目而引起的任何性质的任何直接、间接、特殊、偶然或结果性损害（包括但不限于因商誉损失、停工、计算机故障或故障引起的损害赔偿，或任何及所有其他商业损害或损失）由使用者负责。</p><br>
         <p><strong>六、使用限制</strong></p><br>
-        <p>6.1&nbsp;本项目完全免费，且开源发布于&nbsp;<span class="hover underline" @click="openUrl('https://github.com/lyswhut/lx-music-desktop#readme')">GitHub</span>&nbsp;面向全世界人用作对技术的学习交流，本项目不对项目内的技术可能存在违反当地法律法规的行为作保证。</p><br>
+        <p>6.1&nbsp;本项目完全免费，且开源发布于&nbsp;<span class="hover underline" @click="openUrl(projectIdentity.repositoryUrl + '#readme')">GitHub</span>&nbsp;面向全世界人用作对技术的学习交流，本项目不对项目内的技术可能存在违反当地法律法规的行为作保证。</p><br>
         <p>6.2&nbsp;<strong>禁止在违反当地法律法规的情况下使用本项目。</strong>&nbsp;对于使用者在明知或不知当地法律法规不允许的情况下使用本项目所造成的任何违法违规行为由使用者承担，本项目不承担由此造成的任何直接、间接、特殊、偶然或结果性责任。</p><br>
         <p><strong>七、版权保护</strong></p><br>
         <p>7.1&nbsp;音乐平台不易，请尊重版权，支持正版。</p><br>
@@ -39,11 +39,12 @@
 </template>
 
 <script>
-import { checkUpdate, quitApp } from '@renderer/utils/ipc'
+import { quitApp } from '@renderer/utils/ipc'
 import { openUrl } from '@common/utils/electron'
 import { isShowPact } from '@renderer/store'
 import { appSetting, saveAgreePact } from '@renderer/store/setting'
 import { computed } from '@common/utils/vueTools'
+import { PROJECT_IDENTITY } from '@common/projectIdentity'
 
 export default {
   setup() {
@@ -53,6 +54,7 @@ export default {
       isShowPact,
       isAgreePact,
       appSetting,
+      projectIdentity: PROJECT_IDENTITY,
     }
   },
   data() {
@@ -86,11 +88,9 @@ export default {
     handleClick() {
       saveAgreePact(true)
       window.setTimeout(() => {
-        this.$dialog({
+        void this.$dialog({
           message: Buffer.from('e69cace8bdafe4bbb6e5ae8ce585a8e5858de8b4b9e4b894e5bc80e6ba90efbc8ce5a682e69e9ce4bda0e698afe88ab1e992b1e8b4ade4b9b0e79a84efbc8ce8afb7e79bb4e68ea5e7bb99e5b7aee8af84efbc810a0a5468697320736f667477617265206973206672656520616e64206f70656e20736f757263652e', 'hex').toString(),
           confirmButtonText: Buffer.from('e5a5bde79a8420284f4b29', 'hex').toString(),
-        }).then(() => {
-          checkUpdate()
         })
       }, 2e3)
     },

@@ -1,5 +1,6 @@
 /* eslint-disable no-template-curly-in-string */
 
+const { PROJECT_IDENTITY } = require('../src/common/projectIdentity')
 const builder = require('electron-builder')
 const fs = require('fs')
 const path = require('path')
@@ -80,8 +81,8 @@ const getPackageFiles = (packageName) => {
 * @see https://www.electron.build/configuration/configuration
 */
 const options = {
-  appId: 'cn.toside.music.desktop',
-  productName: 'lx-music-desktop',
+  appId: PROJECT_IDENTITY.appId,
+  productName: PROJECT_IDENTITY.productName,
   electronDist: './node_modules/electron/dist',
   toolsets: {
     winCodeSign: '1.1.0',
@@ -89,9 +90,9 @@ const options = {
   beforePack,
   afterPack,
   protocols: {
-    name: 'lx-music-protocol',
+    name: PROJECT_IDENTITY.protocolName,
     schemes: [
-      'lxmusic',
+      PROJECT_IDENTITY.protocolScheme,
     ],
   },
   directories: {
@@ -123,8 +124,8 @@ const options = {
   publish: [
     {
       provider: 'github',
-      owner: 'lyswhut',
-      repo: 'lx-music-desktop',
+      owner: PROJECT_IDENTITY.repositoryOwner,
+      repo: PROJECT_IDENTITY.repositoryName,
     },
   ],
 }
@@ -135,7 +136,7 @@ const options = {
 const winOptions = {
   win: {
     icon: './resources/icons/icon.ico',
-    legalTrademarks: 'lyswhut',
+    legalTrademarks: PROJECT_IDENTITY.authorName,
     // artifactName: '${productName}-v${version}-${env.ARCH}-${env.TARGET}.${ext}',
   },
   nsis: {
@@ -153,7 +154,7 @@ const winOptions = {
  */
 const linuxOptions = {
   linux: {
-    maintainer: 'lyswhut <lyswhut@qq.com>',
+    maintainer: PROJECT_IDENTITY.authorName,
     // artifactName: '${productName}-${version}.${env.ARCH}.${ext}',
     icon: './resources/icons',
     category: 'Utility;AudioVideo;Audio;Player;Music;',
@@ -163,11 +164,11 @@ const linuxOptions = {
       // https://specifications.freedesktop.org/desktop-entry-spec/latest/example.html
       // https://developer.gnome.org/documentation/guidelines/maintainer/integrating.html#desktop-files
       entry: {
-        Name: 'LX Music',
-        'Name[zh_CN]': 'LX Music',
-        'Name[zh_TW]': 'LX Music',
+        Name: PROJECT_IDENTITY.displayName,
+        'Name[zh_CN]': PROJECT_IDENTITY.displayName,
+        'Name[zh_TW]': PROJECT_IDENTITY.displayName,
         Encoding: 'UTF-8',
-        MimeType: 'x-scheme-handler/lxmusic',
+        MimeType: `x-scheme-handler/${PROJECT_IDENTITY.protocolScheme}`,
         StartupNotify: 'false',
       },
     },

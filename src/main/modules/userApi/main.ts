@@ -6,6 +6,7 @@ import path from 'node:path'
 import { openDevTools as handleOpenDevTools } from '@main/utils'
 import USER_API_RENDERER_EVENT_NAME from './rendererEvent/name'
 import { getScript } from './utils'
+import { PROJECT_IDENTITY } from '@common/projectIdentity'
 
 let browserWindow: Electron.BrowserWindow | null = null
 
@@ -76,7 +77,7 @@ export const createWindow = async(userApi: LX.UserApi.UserApiInfo) => {
   /**
    * Initial window options
    */
-  const userApiSession = session.fromPartition('lx-user-api')
+  const userApiSession = session.fromPartition(PROJECT_IDENTITY.userApiPartition)
   browserWindow = new BrowserWindow({
     // enableRemoteModule: false,
     resizable: false,

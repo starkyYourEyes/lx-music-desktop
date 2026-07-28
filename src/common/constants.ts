@@ -1,4 +1,7 @@
-export const URL_SCHEME_RXP = /^lxmusic:\/\//
+import { PROJECT_IDENTITY } from './projectIdentity'
+import { createUrlSchemeRxp } from './runtimeIdentity'
+
+export const URL_SCHEME_RXP = createUrlSchemeRxp(PROJECT_IDENTITY.protocolScheme)
 
 export const SPLIT_CHAR = {
   DISLIKE_NAME: '@',
@@ -40,7 +43,6 @@ export const DATA_KEYS = {
   listScrollPosition: 'listScrollPosition',
   listPrevSelectId: 'listPrevSelectId',
   listUpdateInfo: 'listUpdateInfo',
-  ignoreVersion: 'ignoreVersion',
 
   leaderboardSetting: 'leaderboardSetting',
   songListSetting: 'songListSetting',
@@ -48,8 +50,6 @@ export const DATA_KEYS = {
   neteaseAccount: 'neteaseAccount',
   qqMusicAccount: 'qqMusicAccount',
   listeningTimeStats: 'listeningTimeStats',
-
-  lastStartInfo: 'lastStartInfo',
 } as const
 
 export const RECOMMEND_HOME_SECTION_IDS = [

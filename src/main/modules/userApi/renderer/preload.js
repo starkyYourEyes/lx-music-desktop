@@ -195,6 +195,8 @@ const initEnv = (userApi) => {
       let options = {
         headers,
         agent: getRequestAgent(url),
+        use_proxy_from_env_var: false,
+        parse: false,
       }
       let data
       if (body) {

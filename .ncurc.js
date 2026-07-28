@@ -23,7 +23,6 @@ module.exports = {
   // target: 'newest',
   // filter: [
   //   'electron-builder',
-  //   'electron-updater',
   // ],
 
   // target: 'patch',

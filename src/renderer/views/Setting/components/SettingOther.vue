@@ -18,7 +18,7 @@ dd
   div
     .p
       | 地址
-      input.input.gap-left(type="text" :value="appSetting['webdav.url']" placeholder="https://dav.jianguoyun.com/dav/lx-music" @change="handleWebDAVUrlChange")
+      input.input.gap-left(type="text" :value="appSetting['webdav.url']" :placeholder="PROJECT_IDENTITY.defaultWebdavUrl" @change="handleWebDAVUrlChange")
     .p
       | 用户名
       input.input.gap-left(type="text" :value="appSetting['webdav.username']" placeholder="name@example.com" @change="handleWebDAVUsernameChange")
@@ -103,6 +103,7 @@ import { overwriteListFull } from '@renderer/store/list/listManage'
 import { dislikeRuleCount } from '@renderer/store/dislikeList'
 import DislikeListModal from './DislikeListModal.vue'
 import { TRAY_AUTO_ID } from '@common/constants'
+import { PROJECT_IDENTITY } from '@common/projectIdentity'
 
 export default {
   name: 'SettingOther',
@@ -257,6 +258,7 @@ export default {
     }
 
     return {
+      PROJECT_IDENTITY,
       appSetting,
       updateSetting,
       trayThemeList,

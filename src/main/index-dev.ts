@@ -7,7 +7,7 @@
 
 import { app } from 'electron'
 import electronDebug from 'electron-debug'
-import installExtension, { VUEJS_DEVTOOLS } from 'electron-devtools-installer'
+import { installExtension, VUEJS_DEVTOOLS } from 'electron-devtools-installer'
 import { openDevTools } from './utils'
 // Install `electron-debug` with `devtron`
 electronDebug({
@@ -20,8 +20,8 @@ app.on('ready', () => {
   global.lx.event_app.on('main_window_created', (win) => {
     openDevTools(win.webContents)
     installExtension(VUEJS_DEVTOOLS, { session: win.webContents.session })
-      .then((name: string) => {
-        console.log(`[main window] Added Extension:  ${name}`)
+      .then((extension) => {
+        console.log(`[main window] Added Extension:  ${extension.name}`)
       })
       .catch((err: Error) => {
         console.log('[main window] An error occurred: ', err)
@@ -30,8 +30,8 @@ app.on('ready', () => {
   global.lx.event_app.on('desktop_lyric_window_created', (win) => {
     openDevTools(win.webContents)
     installExtension(VUEJS_DEVTOOLS, { session: win.webContents.session })
-      .then((name: string) => {
-        console.log(`[lyric window] Added Extension:  ${name}`)
+      .then((extension) => {
+        console.log(`[lyric window] Added Extension:  ${extension.name}`)
       })
       .catch((err: Error) => {
         console.log('[lyric window] An error occurred: ', err)

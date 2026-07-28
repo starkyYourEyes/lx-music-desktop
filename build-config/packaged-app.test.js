@@ -22,6 +22,6 @@ test('packaged application contains a valid manifest and main process bundle', (
   const manifest = JSON.parse(extractVerifiedFile('package.json').toString('utf8'))
   const mainBundle = extractVerifiedFile(manifest.main.replace(/^\.\//, '')).toString('utf8')
 
-  assert.equal(manifest.name, 'lx-music-desktop')
+  assert.equal(manifest.name, 'starky-lx-music-desktop')
   assert.doesNotMatch(mainBundle, /Worker__webpack_require__\.wc/)
 })

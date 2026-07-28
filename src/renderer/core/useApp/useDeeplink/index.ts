@@ -1,5 +1,6 @@
 import { onBeforeUnmount } from '@common/utils/vueTools'
 import { clearEnvParamsDeeplink, focusWindow, onDeeplink } from '@renderer/utils/ipc'
+import { PROJECT_IDENTITY } from '@common/projectIdentity'
 
 import { useDialog } from './utils'
 import useMusicAction from './useMusicAction'
@@ -19,7 +20,7 @@ export default () => {
   const handleLinkAction = async(link: string) => {
     // console.log(link)
     const [url, search] = link.split('?')
-    const [type, action, ...paths] = url.replace('lxmusic://', '').split('/')
+    const [type, action, ...paths] = url.replace(PROJECT_IDENTITY.protocolPrefix, '').split('/')
     const params: {
       paths: string[]
       data?: any

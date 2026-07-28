@@ -263,7 +263,7 @@ If the cartridge misses the outer groove, change only the `18deg` value in `.ton
 ### Task 6: Rebuild and verify the portable executable
 
 **Files:**
-- Generate: `build/lx-music-desktop-v3.0.0-x64-portable.exe`
+- Generate: `build/starky-lx-music-desktop-v3.0.0-x64-portable.exe`
 
 - [ ] **Step 1: Build all renderer and main targets**
 
@@ -281,11 +281,11 @@ $env:ELECTRON_BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-
 npm run pack:win:portable:x64
 ```
 
-Expected: exit code 0 and a new `build/lx-music-desktop-v3.0.0-x64-portable.exe`.
+Expected: exit code 0 and a new `build/starky-lx-music-desktop-v3.0.0-x64-portable.exe`.
 
 - [ ] **Step 3: Verify archive integrity and smoke launch**
 
-Run the project-provided 7-Zip binary against the EXE and expect `Everything is Ok`. Launch the portable EXE, confirm the extracted `lx-music-desktop` processes remain responsive for at least 10 seconds, then stop only those newly launched processes.
+Run the project-provided 7-Zip binary against the EXE and expect `Everything is Ok`. Launch the portable EXE, confirm the extracted `starky-lx-music-desktop` processes remain responsive for at least 10 seconds, then stop only those newly launched processes.
 
 - [ ] **Step 4: Record artifact details**
 

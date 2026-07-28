@@ -3,9 +3,10 @@ import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs/promises'
 import { checkPath } from '@common/utils/nodejs'
+import { PROJECT_IDENTITY } from '@common/projectIdentity'
 
 const getTempDir = async() => {
-  const tempDir = path.join(os.tmpdir(), 'lxmusic_temp')
+  const tempDir = path.join(os.tmpdir(), PROJECT_IDENTITY.tempDirectoryName)
   if (!await checkPath(tempDir)) {
     await fs.mkdir(tempDir, { recursive: true })
   }

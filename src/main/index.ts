@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import './utils/logInit'
+import { initLog } from './utils/logInit'
 import '@common/error'
 import {
   initGlobalData,
@@ -22,15 +22,20 @@ const init = () => {
   })
 }
 
-initGlobalData()
-initSingleInstanceHandle()
-applyElectronEnvParams()
-setUserDataPath()
-registerDeeplink(init)
-listenerAppEvent(init)
+const userDataStatus = setUserDataPath()
+if (!userDataStatus.ready) {
+  console.error('User data is unavailable; startup has been aborted.', userDataStatus.error)
+  app.exit(1)
+} else {
+  initSingleInstanceHandle()
+  initLog()
+  initGlobalData()
+  applyElectronEnvParams()
+  registerDeeplink(init)
+  listenerAppEvent(init)
 
-
-// https://github.com/electron/electron/issues/16809
-void app.whenReady().then(() => {
-  isLinux ? setTimeout(init, 300) : init()
-})
+  // https://github.com/electron/electron/issues/16809
+  void app.whenReady().then(() => {
+    isLinux ? setTimeout(init, 300) : init()
+  })
+}

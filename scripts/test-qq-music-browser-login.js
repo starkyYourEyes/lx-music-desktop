@@ -12,7 +12,13 @@ const browserAuthModule = {
 
 const { createQQMusicLoginService } = loadTsModule(
   path.join(__dirname, '../src/main/modules/qqMusic/login.ts'),
-  { './browserAuth': browserAuthModule, './auth': auth },
+  {
+    './browserAuth': browserAuthModule,
+    './auth': auth,
+    '@main/utils': {
+      getProxy: () => null,
+    },
+  },
 )
 
 const createSession = (checks, qrimg = 'data:image/png;base64,qr') => {

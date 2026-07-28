@@ -1,3 +1,4 @@
+import { getProxy as getAppProxy } from '@main/utils'
 import {
   createQQMusicBrowserAuthSession,
   type QQMusicBrowserAuthSession,
@@ -21,6 +22,7 @@ interface LoginEntry {
 }
 
 const QR_SESSION_TTL_MS = 5 * 60 * 1000
+const CREATE_DEADLINE_MS = 15_000
 const CREATE_ERROR = 'QQ Music login QR creation failed'
 const CHECK_ERROR = 'QQ Music login check failed'
 const EXPIRED_RESULT: QQMusicInternalLoginCheck = {
@@ -32,8 +34,18 @@ const defaultDiagnostic = (event: QQMusicLoginDiagnostic) => {
   console.warn('[QQ Music login diagnostic]', event)
 }
 
+const createDefaultBrowserAuthSession = () => {
+  const startedAt = Date.now()
+  return createQQMusicBrowserAuthSession({
+    signal: new AbortController().signal,
+    startedAt,
+    deadlineAt: startedAt + CREATE_DEADLINE_MS,
+    proxy: getAppProxy(),
+  })
+}
+
 export const createQQMusicLoginService = ({
-  createBrowserAuthSession = createQQMusicBrowserAuthSession,
+  createBrowserAuthSession = createDefaultBrowserAuthSession,
   idFactory = () => crypto.randomUUID(),
   now = Date.now,
   ttlMs = QR_SESSION_TTL_MS,

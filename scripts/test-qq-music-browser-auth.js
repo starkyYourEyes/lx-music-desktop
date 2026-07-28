@@ -15,6 +15,9 @@ const browserAuth = loadTsModule(
       session: {},
     },
     './auth': auth,
+    '@main/utils/sessionProxy': {
+      configureSessionProxy: async() => {},
+    },
     '@main/utils/webContentsNavigationGuard': {
       registerWebContentsNavigationGuard: () => () => {},
     },
@@ -119,5 +122,22 @@ assert.doesNotMatch(
   /setUserAgent|BROWSER_USER_AGENT/,
   'QQ OAuth must keep Chromium UA and Client Hints internally consistent',
 )
+assert.strictEqual(
+  browserAuth.isExpectedAllowedNavigationAbort(
+    { code: 'ERR_ABORTED', errno: -3 },
+    true,
+  ),
+  true,
+)
+assert.strictEqual(
+  browserAuth.isExpectedAllowedNavigationAbort(
+    { code: 'ERR_ABORTED', errno: -3 },
+    false,
+  ),
+  false,
+)
+assert.match(browserAuthSource, /configureSessionProxy/)
+assert.match(browserAuthSource, /deadlineAt/)
+assert.doesNotMatch(browserAuthSource, /await\s+withTimeout\(win\.loadURL/)
 
 console.log('QQ Music browser auth helper tests passed')

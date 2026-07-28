@@ -5,6 +5,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const test = require('node:test')
+const loadTsModule = require('./test-utils/load-ts-module')
 
 const {
   MIGRATION_MARKER_FILE,
@@ -14,6 +15,130 @@ const {
 
 const makeRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'starky-user-data-test-'))
 const silentLogger = { info() {}, warn() {}, error() {} }
+
+const runMainStartup = ({ appDataPath, lockCreatesDefaultUserData, mutateLegacyDuringCopy = false }) => {
+  const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
+  let exitCode
+  const paths = {
+    appData: appDataPath,
+    exe: path.join(appDataPath, 'LX Music.exe'),
+    userData: currentPath,
+  }
+  const electronApp = {
+    commandLine: { appendSwitch() {} },
+    disableHardwareAcceleration() {},
+    exit(code) {
+      exitCode = code
+    },
+    getPath(name) {
+      return paths[name]
+    },
+    on() {},
+    quit() {},
+    requestSingleInstanceLock() {
+      if (lockCreatesDefaultUserData) fs.mkdirSync(paths.userData, { recursive: true })
+      return true
+    },
+    setPath(name, value) {
+      paths[name] = value
+    },
+    whenReady() {
+      return new Promise(() => {})
+    },
+  }
+  const electron = {
+    app: electronApp,
+    dialog: {},
+    nativeTheme: {
+      addListener() {},
+      shouldUseDarkColors: false,
+    },
+    screen: {},
+    shell: {},
+  }
+  const writeFileLog = message => {
+    const logPath = path.join(electronApp.getPath('userData'), 'logs', 'main.log')
+    fs.mkdirSync(path.dirname(logPath), { recursive: true })
+    fs.appendFileSync(logPath, `${message}\n`)
+  }
+  const fileLogger = {
+    error: () => writeFileLog('error'),
+    info: () => writeFileLog('info'),
+    warn: () => writeFileLog('warn'),
+  }
+  const appModule = loadTsModule(path.join(__dirname, '../src/main/app.ts'), {
+    electron,
+    '@common/config': { navigationUrlWhiteList: [] },
+    '@common/constants': { URL_SCHEME_RXP: /^starkylx:\/\// },
+    '@common/defaultSetting': {},
+    '@common/projectIdentity': require('../src/common/projectIdentity'),
+    '@common/utils': { isMac: false, log: fileLogger },
+    '@common/utils/electron': { openDirInExplorer() {} },
+    '@common/utils/request': { setProxyByHost() {} },
+    '@main/event': {
+      createAppEvent: () => ({}),
+      createDislikeEvent: () => ({}),
+      createListEvent: () => ({}),
+    },
+    '@main/utils/webContentsNavigationGuard': { getWebContentsNavigationDecision() {} },
+    './modules/winMain': { isExistWindow: () => false, showWindow() {} },
+    './utils': {
+      getProxy() {},
+      getTheme() {},
+      initHotKey: async() => ({}),
+      initSetting: async() => ({}),
+      parseEnvParams: () => ({ cmdParams: {}, deeplink: null }),
+    },
+    './utils/migrate': { migrateDBData: async() => {} },
+    './worker': () => ({}),
+  })
+
+  const originalCpSync = fs.cpSync
+  const originalConsole = {
+    error: console.error,
+    info: console.info,
+    warn: console.warn,
+  }
+  if (mutateLegacyDuringCopy) {
+    fs.cpSync = (source, destination, options) => {
+      originalCpSync(source, destination, options)
+      fs.writeFileSync(path.join(source, 'LxDatas', 'config.json'), 'changed')
+    }
+  }
+  console.error = () => {}
+  console.info = () => {}
+  console.warn = () => {}
+  try {
+    loadTsModule(path.join(__dirname, '../src/main/index.ts'), {
+      electron,
+      './utils/logInit': {
+        initLog() {
+          const logPath = path.join(electronApp.getPath('userData'), 'logs', 'startup.log')
+          fs.mkdirSync(path.dirname(logPath), { recursive: true })
+          fs.writeFileSync(logPath, 'started')
+        },
+      },
+      '@common/error': {},
+      '@common/utils': { isLinux: false, log: fileLogger },
+      '@main/app': { initAppSetting: async() => {} },
+      '@main/modules': () => {},
+      './app': {
+        ...appModule,
+        applyElectronEnvParams() {},
+        initGlobalData() {},
+        listenerAppEvent() {},
+        registerDeeplink() {},
+      },
+    })
+  } finally {
+    fs.cpSync = originalCpSync
+    console.error = originalConsole.error
+    console.info = originalConsole.info
+    console.warn = originalConsole.warn
+  }
+
+  return { currentPath, exitCode, paths }
+}
 
 const makeLockMetadata = (pid, createdAt = new Date().toISOString()) => JSON.stringify({
   version: 1,
@@ -152,6 +277,46 @@ test('cleans only its temporary directory after a copy failure', t => {
   assert.equal(fs.readFileSync(path.join(legacyPath, 'value'), 'utf8'), 'old')
   assert.equal(fs.existsSync(result.tempPath), false)
   assert.equal(fs.existsSync(result.userDataPath), true)
+})
+
+test('preserves a replacement that appears at the owned temporary-directory path', t => {
+  const appDataPath = makeRoot()
+  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  const legacyPath = path.join(appDataPath, 'lx-music-desktop')
+  fs.mkdirSync(legacyPath)
+  fs.writeFileSync(path.join(legacyPath, 'value'), 'old')
+  const warnings = []
+  let tempPath
+  let movedTempPath
+  const fsApi = {
+    ...fs,
+    mkdtempSync(prefix) {
+      tempPath = fs.mkdtempSync(prefix)
+      movedTempPath = `${tempPath}-moved`
+      return tempPath
+    },
+    cpSync(source, destination, options) {
+      fs.cpSync(source, destination, options)
+      fs.renameSync(tempPath, movedTempPath)
+      fs.mkdirSync(tempPath)
+      fs.writeFileSync(path.join(tempPath, 'replacement'), 'unowned')
+      throw new Error('copy interrupted after temporary-directory replacement')
+    },
+  }
+
+  const result = migrateLegacyUserData({
+    appDataPath,
+    fsApi,
+    logger: {
+      ...silentLogger,
+      warn: (...args) => warnings.push(args),
+    },
+  })
+
+  assert.equal(result.status, 'failed')
+  assert.equal(fs.readFileSync(path.join(tempPath, 'replacement'), 'utf8'), 'unowned')
+  assert.equal(fs.existsSync(movedTempPath), true)
+  assert.equal(warnings.some(args => args[0] == 'Could not verify owned user-data migration temporary directory'), true)
 })
 
 test('does not delete a pre-existing deterministic temporary-path occupant', t => {
@@ -629,14 +794,38 @@ test('portable mode resolves package-local paths without invoking migration', ()
   }), null)
 })
 
-test('startup exits cleanly when installed user data is not ready', () => {
-  const appSource = fs.readFileSync(path.join(__dirname, '../src/main/app.ts'), 'utf8')
-  const indexSource = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8')
-  const singleInstanceIndex = indexSource.indexOf('initSingleInstanceHandle()')
-  const userDataIndex = indexSource.indexOf('const userDataStatus = setUserDataPath()')
+test('startup migrates legacy data before Electron materializes the default user-data directory', t => {
+  const appDataPath = makeRoot()
+  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  const legacyConfigPath = path.join(appDataPath, 'lx-music-desktop', 'LxDatas', 'config.json')
+  fs.mkdirSync(path.dirname(legacyConfigPath), { recursive: true })
+  fs.writeFileSync(legacyConfigPath, 'legacy')
 
-  assert.ok(singleInstanceIndex >= 0 && singleInstanceIndex < userDataIndex)
-  assert.match(appSource, /if \(!migration\.userDataPathReady\) \{\s*return \{ ready: false, error:/)
-  assert.match(indexSource, /if \(!userDataStatus\.ready\) \{[\s\S]*log\.error\([\s\S]*app\.exit\(1\)[\s\S]*\} else \{[\s\S]*registerDeeplink\(init\)[\s\S]*listenerAppEvent\(init\)[\s\S]*app\.whenReady\(\)/)
-  assert.match(appSource, /if \(!app\.requestSingleInstanceLock\(\)\) \{[\s\S]*process\.exit\(0\)/)
+  const { currentPath, paths } = runMainStartup({
+    appDataPath,
+    lockCreatesDefaultUserData: true,
+  })
+
+  const migratedConfigPath = path.join(currentPath, 'LxDatas', 'config.json')
+  assert.equal(fs.existsSync(migratedConfigPath), true, 'legacy config must exist before the Electron lock creates userData')
+  assert.equal(fs.readFileSync(migratedConfigPath, 'utf8'), 'legacy')
+  assert.equal(paths.userData, currentPath)
+  assert.equal(fs.readFileSync(path.join(currentPath, 'logs', 'startup.log'), 'utf8'), 'started')
+})
+
+test('startup migration failure cannot materialize the new user-data directory through file logging', t => {
+  const appDataPath = makeRoot()
+  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  const legacyConfigPath = path.join(appDataPath, 'lx-music-desktop', 'LxDatas', 'config.json')
+  fs.mkdirSync(path.dirname(legacyConfigPath), { recursive: true })
+  fs.writeFileSync(legacyConfigPath, 'legacy')
+
+  const { currentPath, exitCode } = runMainStartup({
+    appDataPath,
+    lockCreatesDefaultUserData: false,
+    mutateLegacyDuringCopy: true,
+  })
+
+  assert.equal(exitCode, 1)
+  assert.equal(fs.existsSync(currentPath), false, 'a failed migration must remain retryable on the next launch')
 })

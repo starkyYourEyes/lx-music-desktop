@@ -1,7 +1,9 @@
 const assert = require('node:assert/strict')
+const { generateKeyPairSync } = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 const test = require('node:test')
+const loadTsModule = require('./test-utils/load-ts-module')
 
 const root = path.resolve(__dirname, '..')
 const pkg = require('../package.json')
@@ -9,6 +11,131 @@ const { PROJECT_IDENTITY } = require('../src/common/projectIdentity')
 const read = relativePath => fs.readFileSync(path.join(root, relativePath), 'utf8')
 const runtimeIdentityPath = path.join(root, 'src/common/runtimeIdentity.js')
 const runtimeIdentity = fs.existsSync(runtimeIdentityPath) ? require(runtimeIdentityPath) : {}
+
+let runtimeEntries
+const getRuntimeEntries = () => {
+  if (runtimeEntries) return runtimeEntries
+  const constants = loadTsModule(path.join(root, 'src/common/constants.ts'), {
+    './projectIdentity': { PROJECT_IDENTITY },
+    './runtimeIdentity': runtimeIdentity,
+  })
+  const syncConstants = loadTsModule(path.join(root, 'src/common/constants_sync.ts'), {
+    './projectIdentity': { PROJECT_IDENTITY },
+  })
+  const parseEnvParams = loadTsModule(path.join(root, 'src/main/utils/index.ts'), {
+    electron: {
+      nativeTheme: { shouldUseDarkColors: false },
+      powerSaveBlocker: {
+        isStarted: () => false,
+        start: () => 1,
+        stop() {},
+      },
+    },
+    '@common/constants': constants,
+    '@common/defaultHotKey': { global: {}, local: {} },
+    '@common/defaultSetting': { version: 1 },
+    '@common/theme/index.json': [],
+    '@common/utils': {
+      encodePath: value => value,
+      isUrl: () => false,
+      throttle: callback => callback,
+    },
+    '@common/utils/migrateSetting': value => value,
+    '@common/utils/nodejs': { joinPath: path.join },
+    '@main/utils/store': () => ({}),
+    './migrate': {
+      migrateDataJson: async() => {},
+      migrateHotKey: async() => null,
+      migrateUserApi: async() => {},
+      parseDataFile: async() => null,
+    },
+  }).parseEnvParams
+  const syncTools = loadTsModule(path.join(root, 'src/main/modules/sync/server/utils/tools.ts'))
+  const syncUtils = loadTsModule(path.join(root, 'src/main/modules/sync/server/utils/index.ts'))
+  const userData = loadTsModule(path.join(root, 'src/main/modules/sync/server/user/data.ts'), {
+    '@common/constants_sync': syncConstants,
+    '@common/utils/common': { throttle: callback => callback },
+    '../../utils': { exists: async() => false },
+    '../utils': syncUtils,
+  })
+  const clients = new Map()
+  const userSpace = {
+    dataManage: {
+      getClientKeyInfo: clientId => clients.get(clientId) ?? null,
+      saveClientKeyInfo: keyInfo => clients.set(keyInfo.clientId, keyInfo),
+    },
+  }
+  const syncAuth = loadTsModule(path.join(root, 'src/main/modules/sync/server/server/auth.ts'), {
+    '@common/constants_sync': syncConstants,
+    '@common/projectIdentity': { PROJECT_IDENTITY },
+    '@common/runtimeIdentity': runtimeIdentity,
+    '../../utils': { getComputerName: () => 'Test Server' },
+    '../user': {
+      createClientKeyInfo: userData.createClientKeyInfo,
+      getUserSpace: () => userSpace,
+    },
+    '../utils': syncUtils,
+    '../utils/tools': syncTools,
+  })
+  return runtimeEntries = {
+    ...syncAuth,
+    parseEnvParams,
+    syncConstants,
+    syncTools,
+    syncUtils,
+  }
+}
+
+const createCodeAuthRequest = (clientType, remoteAddress) => {
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  })
+  const publicKeyBody = publicKey
+    .replace('-----BEGIN PUBLIC KEY-----', '')
+    .replace('-----END PUBLIC KEY-----', '')
+    .replace(/\s/g, '')
+  const password = 'identity-test-password'
+  const { syncConstants, syncTools, syncUtils } = getRuntimeEntries()
+  const key = Buffer.from(syncUtils.toMD5(password).substring(0, 16)).toString('base64')
+  const plaintext = [
+    syncConstants.SYNC_CODE.authMsg,
+    publicKeyBody,
+    'Test Client',
+    clientType,
+  ].join('\n')
+  return {
+    password,
+    privateKey,
+    request: {
+      headers: { m: syncTools.aesEncrypt(plaintext, key) },
+      socket: { remoteAddress },
+    },
+  }
+}
+
+const performCodeAuth = async(clientType, remoteAddress) => {
+  const { authCode, syncTools } = getRuntimeEntries()
+  const { password, privateKey, request } = createCodeAuthRequest(clientType, remoteAddress)
+  let status
+  let body
+  await authCode(request, {
+    writeHead(value) {
+      status = value
+    },
+    end(value) {
+      body = value
+    },
+  }, password)
+  return {
+    status,
+    body,
+    payload: status == 200
+      ? JSON.parse(syncTools.rsaDecrypt(Buffer.from(body, 'base64'), privateKey).toString())
+      : null,
+  }
+}
 
 test('project identity contains the approved values', () => {
   assert.deepEqual(PROJECT_IDENTITY, {
@@ -100,20 +227,6 @@ test('runtime identifiers are consumed from the shared identity', () => {
     /(?<!starky-)\blx-music request\b/,
     /\blxmusic_temp\b/,
   ]) assert.doesNotMatch(productionSources, oldPattern)
-
-  const serverAuth = read('src/main/modules/sync/server/server/auth.ts')
-  assert.match(serverAuth, /classifySyncClient\(data\[3\], PROJECT_IDENTITY\)/)
-  assert.match(serverAuth, /createClientKeyInfo\(deviceName, client\.isMobile\)/)
-
-  const runtimeIdentity = read('src/common/runtimeIdentity.js')
-  assert.match(runtimeIdentity, /syncDesktopId/)
-  assert.match(runtimeIdentity, /syncMobileId/)
-
-  const constants = read('src/common/constants.ts')
-  assert.match(constants, /createUrlSchemeRxp\(PROJECT_IDENTITY\.protocolScheme\)/)
-
-  const mainUtils = read('src/main/utils/index.ts')
-  assert.match(mainUtils, /URL_SCHEME_RXP\.test\(param\)/)
 })
 
 test('project protocol recognition requires the exact anchored scheme and separators', () => {
@@ -169,4 +282,62 @@ test('sync client classification accepts only the approved desktop and mobile id
     `${PROJECT_IDENTITY.syncDesktopId} `,
     PROJECT_IDENTITY.syncMobileId.toUpperCase(),
   ]) assert.equal(runtimeIdentity.classifySyncClient(value, PROJECT_IDENTITY), null, String(value))
+})
+
+test('parseEnvParams accepts only the current deep-link protocol', () => {
+  const { parseEnvParams } = getRuntimeEntries()
+
+  assert.deepEqual(
+    parseEnvParams(['electron', 'app.js', '-hidden', 'starkylx://music/play']),
+    {
+      cmdParams: { hidden: true },
+      deeplink: 'starkylx://music/play',
+    },
+  )
+  assert.deepEqual(
+    parseEnvParams(['electron', 'app.js', '-hidden', 'lxmusic://music/play']),
+    {
+      cmdParams: { hidden: true },
+      deeplink: null,
+    },
+  )
+})
+
+test('authCode accepts current desktop and mobile identities', async() => {
+  const desktop = await performCodeAuth(PROJECT_IDENTITY.syncDesktopId, '127.0.0.11')
+  const mobile = await performCodeAuth(PROJECT_IDENTITY.syncMobileId, '127.0.0.12')
+
+  for (const result of [desktop, mobile]) {
+    assert.equal(result.status, 200)
+    assert.equal(typeof result.payload.clientId, 'string')
+    assert.equal(typeof result.payload.key, 'string')
+    assert.equal(result.payload.serverName, 'Test Server')
+  }
+})
+
+test('authCode rejects legacy desktop and mobile identities', async() => {
+  const { syncConstants } = getRuntimeEntries()
+  for (const [index, clientType] of ['lx_music_desktop', 'lx_music_mobile'].entries()) {
+    const result = await performCodeAuth(clientType, `127.0.0.${20 + index}`)
+    assert.equal(result.status, 401)
+    assert.equal(result.body, syncConstants.SYNC_CODE.msgAuthFailed)
+    assert.equal(result.payload, null)
+  }
+})
+
+test('authConnect accepts only the current connection message', async() => {
+  const { authConnect, syncTools } = getRuntimeEntries()
+  const authorized = await performCodeAuth(PROJECT_IDENTITY.syncDesktopId, '127.0.0.31')
+  const createRequest = (message, remoteAddress) => ({
+    socket: { remoteAddress },
+    url: `/socket?i=${encodeURIComponent(authorized.payload.clientId)}&t=${encodeURIComponent(syncTools.aesEncrypt(message, authorized.payload.key))}`,
+  })
+
+  await assert.doesNotReject(
+    authConnect(createRequest(PROJECT_IDENTITY.syncConnectMessage, '127.0.0.32')),
+  )
+  await assert.rejects(
+    authConnect(createRequest('lx-music connect', '127.0.0.33')),
+    /failed/,
+  )
 })

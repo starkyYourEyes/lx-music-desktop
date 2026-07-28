@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import './utils/logInit'
+import { initLog } from './utils/logInit'
 import '@common/error'
 import {
   initGlobalData,
@@ -9,7 +9,7 @@ import {
   registerDeeplink,
   listenerAppEvent,
 } from './app'
-import { isLinux, log } from '@common/utils'
+import { isLinux } from '@common/utils'
 import { initAppSetting } from '@main/app'
 import registerModules from '@main/modules'
 
@@ -22,16 +22,15 @@ const init = () => {
   })
 }
 
-initGlobalData()
-// This exits when Electron cannot acquire its single-instance lock, so the
-// migration below is serialized against other cooperating app processes.
-initSingleInstanceHandle()
-applyElectronEnvParams()
 const userDataStatus = setUserDataPath()
 if (!userDataStatus.ready) {
-  log.error('User data is unavailable; startup has been aborted.', userDataStatus.error)
+  console.error('User data is unavailable; startup has been aborted.', userDataStatus.error)
   app.exit(1)
 } else {
+  initSingleInstanceHandle()
+  initLog()
+  initGlobalData()
+  applyElectronEnvParams()
   registerDeeplink(init)
   listenerAppEvent(init)
 

@@ -138,7 +138,7 @@ export const setUserDataPath = (): { ready: true } | { ready: false, error: unkn
     if (!existsSync(portablePaths.userDataPath)) mkdirSync(portablePaths.userDataPath, { recursive: true })
     app.setPath('userData', portablePaths.userDataPath)
   } else {
-    const migration = migrateLegacyUserData({ appDataPath: app.getPath('appData'), logger: log })
+    const migration = migrateLegacyUserData({ appDataPath: app.getPath('appData'), logger: console })
     if (!migration.userDataPathReady) {
       return { ready: false, error: migration.error ?? new Error('User-data migration did not produce a usable path') }
     }

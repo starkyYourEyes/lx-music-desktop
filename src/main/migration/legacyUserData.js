@@ -198,12 +198,49 @@ const acquireMigrationLock = ({ fsApi, rootPath, lockPath, isProcessAlive, logge
   return { error: lastError }
 }
 
-const removeOwnedTemp = (fsApi, tempPath, logger) => {
-  if (tempPath == null) return
+const createTempOwnership = (fsApi, rootPath, tempPath) => {
+  assertDirectChild(rootPath, tempPath)
+  const identity = fsApi.lstatSync(tempPath)
+  if (identity.isSymbolicLink() || !identity.isDirectory()) {
+    throw new Error(`Migration temporary path must be a non-link directory: ${tempPath}`)
+  }
+
+  const nonce = crypto.randomBytes(16).toString('hex')
+  const markerPath = path.join(tempPath, `.migration-owner-${nonce}`)
+  fsApi.writeFileSync(markerPath, nonce, { flag: 'wx' })
+  const markerIdentity = fsApi.lstatSync(markerPath)
+  if (markerIdentity.isSymbolicLink() || !markerIdentity.isFile()) {
+    throw new Error(`Migration ownership marker must be a regular file: ${markerPath}`)
+  }
+  return { rootPath, tempPath, identity, markerPath, markerIdentity, nonce }
+}
+
+const removeOwnedTemp = (fsApi, ownership, logger) => {
+  if (ownership == null) return
   try {
-    fsApi.rmSync(tempPath, { recursive: true, force: true })
+    assertDirectChild(ownership.rootPath, ownership.tempPath)
+    const identity = fsApi.lstatSync(ownership.tempPath)
+    if (identity.isSymbolicLink() || !identity.isDirectory() || !isSameNode(ownership.identity, identity)) {
+      throw new Error(`Migration temporary directory ownership changed: ${ownership.tempPath}`)
+    }
+
+    const markerBefore = fsApi.lstatSync(ownership.markerPath)
+    if (
+      markerBefore.isSymbolicLink() ||
+      !markerBefore.isFile() ||
+      !isSameNode(ownership.markerIdentity, markerBefore) ||
+      fsApi.readFileSync(ownership.markerPath, 'utf8') != ownership.nonce
+    ) {
+      throw new Error(`Migration temporary directory marker changed: ${ownership.markerPath}`)
+    }
+    const markerAfter = fsApi.lstatSync(ownership.markerPath)
+    if (!isSameNode(markerBefore, markerAfter)) {
+      throw new Error(`Migration temporary directory marker changed while inspected: ${ownership.markerPath}`)
+    }
+
+    fsApi.rmSync(ownership.tempPath, { recursive: true, force: true })
   } catch (error) {
-    safeLog(logger, 'warn', 'Could not remove user-data migration temporary directory', error)
+    safeLog(logger, 'warn', 'Could not verify owned user-data migration temporary directory', error)
   }
 }
 
@@ -306,6 +343,7 @@ const migrateLegacyUserData = ({
   const tempPrefix = `${userDataPath}${TEMP_SUFFIX}-`
   const lockPath = `${userDataPath}${LOCK_SUFFIX}`
   let tempPath
+  let tempOwnership
 
   assertDirectChild(rootPath, legacyPath)
   assertDirectChild(rootPath, userDataPath)
@@ -356,6 +394,7 @@ const migrateLegacyUserData = ({
         throw new Error(`Unexpected migration temporary path: ${createdTempPath}`)
       }
       tempPath = createdTempPath
+      tempOwnership = createTempOwnership(fsApi, rootPath, tempPath)
       const payloadPath = path.join(tempPath, 'payload')
 
       fsApi.cpSync(legacyPath, payloadPath, {
@@ -399,7 +438,7 @@ const migrateLegacyUserData = ({
       const userDataPathReady = ensureDirectory(fsApi, userDataPath, logger)
       return createResult('failed', userDataPathReady, error)
     } finally {
-      removeOwnedTemp(fsApi, tempPath, logger)
+      removeOwnedTemp(fsApi, tempOwnership, logger)
     }
   } finally {
     releaseOwnedLock(fsApi, lock, logger)

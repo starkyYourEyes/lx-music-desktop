@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict')
+const { execFileSync } = require('node:child_process')
 const fs = require('node:fs')
+const os = require('node:os')
 const path = require('node:path')
 const test = require('node:test')
 
@@ -209,28 +211,32 @@ test('runtime support audit rejects a missing SettingAbout identity binding', ()
 const compareStrings = (left, right) => left < right ? -1 : left > right ? 1 : 0
 const compareTextFilePaths = (left, right) => compareStrings(left.path, right.path)
 
-const walkTextFiles = directory => {
-  const ignored = new Set(['.git', '.claude', '.codegraph', '.worktrees', 'build', 'dist', 'node_modules'])
+const listTrackedTextFiles = repositoryPath => {
+  const trackedPaths = execFileSync('git', ['ls-files', '-z'], {
+    cwd: repositoryPath,
+    encoding: 'utf8',
+  }).split('\0').filter(Boolean).sort(compareStrings)
   const files = []
-  const visit = current => {
-    const entries = fs.readdirSync(current, { withFileTypes: true })
-      .sort((left, right) => compareStrings(left.name, right.name))
-    for (const entry of entries) {
-      if (ignored.has(entry.name)) continue
-      const fullPath = path.join(current, entry.name)
-      if (entry.isDirectory()) visit(fullPath)
-      else {
-        const buffer = fs.readFileSync(fullPath)
-        if (!buffer.includes(0)) {
-          files.push({
-            path: path.relative(root, fullPath).replace(/\\/g, '/'),
-            text: buffer.toString('utf8'),
-          })
-        }
-      }
+  for (const trackedPath of trackedPaths) {
+    const fullPath = path.join(repositoryPath, trackedPath)
+    let stats
+    try {
+      stats = fs.lstatSync(fullPath)
+    } catch (error) {
+      if (error.code == 'ENOENT') continue
+      throw error
+    }
+    if (!stats.isFile() && !stats.isSymbolicLink()) continue
+    const buffer = stats.isSymbolicLink()
+      ? Buffer.from(fs.readlinkSync(fullPath))
+      : fs.readFileSync(fullPath)
+    if (!buffer.includes(0)) {
+      files.push({
+        path: trackedPath.replace(/\\/g, '/'),
+        text: buffer.toString('utf8'),
+      })
     }
   }
-  visit(directory)
   return files.sort(compareTextFilePaths)
 }
 
@@ -322,8 +328,28 @@ const findRemovedSourceViolations = files => {
   return violations.sort(compareStrings)
 }
 
+test('repository audit ignores untracked scratch while scanning tracked production files', t => {
+  const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'starky-audit-test-'))
+  t.after(() => fs.rmSync(repositoryPath, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(repositoryPath, 'src'))
+  fs.mkdirSync(path.join(repositoryPath, 'scratch'))
+  fs.writeFileSync(path.join(repositoryPath, '.gitignore'), 'scratch/\n')
+  fs.writeFileSync(path.join(repositoryPath, 'src', 'tracked.js'), 'cn.toside.music.desktop\n')
+  fs.writeFileSync(path.join(repositoryPath, 'scratch', 'notes.txt'), 'https://github.com/lyswhut/lx-music-desktop\n')
+  execFileSync('git', ['init', '--quiet'], { cwd: repositoryPath })
+  execFileSync('git', ['-c', 'core.autocrlf=false', 'add', '.gitignore', 'src/tracked.js'], { cwd: repositoryPath })
+
+  const files = listTrackedTextFiles(repositoryPath)
+
+  assert.deepEqual(files.map(file => file.path), ['.gitignore', 'src/tracked.js'])
+  assert.deepEqual(
+    findRuntimeIdentifierViolations(files),
+    ['src/tracked.js: /cn\\.toside\\.music\\.desktop/'],
+  )
+})
+
 test('upstream author and URL appear only in attribution and migration records', () => {
-  const files = walkTextFiles(root)
+  const files = listTrackedTextFiles(root)
   const readme = files.find(file => file.path === 'README.md')
   assert.ok(readme, 'README.md must be present')
   assert.equal(hasOnlyIntendedReadmeAttribution(readme.text), true)
@@ -340,25 +366,26 @@ test('upstream author and URL appear only in attribution and migration records',
 })
 
 test('old runtime identifiers are isolated from production configuration', () => {
-  const productionRoots = ['src', 'build-config', '.github']
-  const production = productionRoots.flatMap(relativePath => walkTextFiles(path.join(root, relativePath)))
+  const productionRoots = ['src/', 'build-config/', '.github/']
+  const production = listTrackedTextFiles(root)
+    .filter(file => productionRoots.some(relativePath => file.path.startsWith(relativePath)))
     .filter(file => file.path != 'src/main/migration/legacyUserData.js')
   const violations = findRuntimeIdentifierViolations(production)
   assert.deepEqual(violations, [])
 })
 
 test('legacy backup extension is isolated to compatibility code and records', () => {
-  const violations = findLegacyBackupViolations(walkTextFiles(root))
+  const violations = findLegacyBackupViolations(listTrackedTextFiles(root))
   assert.deepEqual(violations.map(file => file.path), [])
 })
 
 test('removed updater and release sources cannot be reintroduced', () => {
-  const violations = findRemovedSourceViolations(walkTextFiles(root))
+  const violations = findRemovedSourceViolations(listTrackedTextFiles(root))
   assert.deepEqual(violations, [])
 })
 
-test('repository text walk returns paths in deterministic order', () => {
-  const paths = walkTextFiles(root).map(file => file.path)
+test('tracked repository text files are returned in deterministic order', () => {
+  const paths = listTrackedTextFiles(root).map(file => file.path)
   assert.deepEqual(paths, [...paths].sort(compareStrings))
 })
 

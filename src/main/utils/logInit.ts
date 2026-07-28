@@ -1,4 +1,6 @@
 import log from 'electron-log/node'
 
-log.transports.file.level = 'info'
-// log.initialize()
+export const initLog = () => {
+  log.transports.file.level = 'info'
+  // log.initialize()
+}

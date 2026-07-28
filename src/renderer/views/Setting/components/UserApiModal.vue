@@ -27,7 +27,7 @@ material-modal(:show="modelValue" :bg-close="!githubAction" :close-btn="!githubA
     div(:class="$style.note")
       p(:class="[$style.ruleLink]")
         | {{ $t('user_api__readme') }}
-        span.hover.underline(aria-label="https://lxmusic.toside.cn/desktop/custom-source" @click="handleOpenUrl('https://lyswhut.github.io/lx-music-doc/desktop/custom-source')") FAQ
+        span.hover.underline(:aria-label="projectIdentity.repositoryUrl + '#readme'" @click="handleOpenUrl(projectIdentity.repositoryUrl + '#readme')") FAQ
       p {{ $t('user_api__note') }}
     div(v-if="githubStatus" :class="$style.githubStatus" role="status" aria-live="polite") {{ githubStatus }}
     div(:class="$style.footer")
@@ -49,6 +49,7 @@ import { userApi } from '@renderer/store'
 import { appSetting, updateSetting } from '@renderer/store/setting'
 import { computed, ref } from '@common/utils/vueTools'
 import { dialog } from '@renderer/plugins/Dialog'
+import { PROJECT_IDENTITY } from '@common/projectIdentity'
 
 import UserApiOnlineImportModal from './UserApiOnlineImportModal.vue'
 
@@ -72,6 +73,7 @@ export default {
       apiList,
       appSetting,
       isShowOnlineImportModal,
+      projectIdentity: PROJECT_IDENTITY,
     }
   },
   data() {

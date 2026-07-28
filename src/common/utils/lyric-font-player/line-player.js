@@ -29,7 +29,7 @@ const parseExtendedLyric = (lrcLinesMap, extendedLyric) => {
     if (result) {
       const timeField = result[0]
       const text = line.replace(timeFieldExp, '').trim()
-      // https://github.com/lyswhut/lx-music-desktop/issues/1499
+      // Ignore marker-only lyric lines.
       if (text && text != '//') {
         const times = timeField.match(timeExp)
         if (times == null) continue

@@ -47,3 +47,24 @@ test('user API preload needle wrapper preserves fork proxy and parsing behavior'
   assert.match(preloadOptions, /use_proxy_from_env_var:\s*false/)
   assert.match(preloadOptions, /parse:\s*false/)
 })
+
+test('legacy release and documentation files are removed', () => {
+  for (const relativePath of [
+    'FAQ.md',
+    'CHANGELOG.md',
+    'publish',
+    '.github/workflows/publish-version-info.yml',
+  ]) assert.equal(fs.existsSync(path.join(root, relativePath)), false, relativePath)
+})
+
+test('current support and release entry points target this repository', () => {
+  const currentUrl = 'https://github.com/starkyYourEyes/lx-music-desktop'
+  const read = relativePath => fs.readFileSync(path.join(root, relativePath), 'utf8')
+  assert.match(read('README.md'), new RegExp(currentUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.match(read('UPSTREAM.md'), /lyswhut\/lx-music-desktop/)
+  for (const file of ['.github/ISSUE_TEMPLATE/bug.yml', '.github/ISSUE_TEMPLATE/feature.yml']) {
+    const source = read(file)
+    assert.match(source, /starkyYourEyes\/lx-music-desktop/)
+    assert.doesNotMatch(source, /lyswhut\.github|github\.com\/lyswhut/)
+  }
+})

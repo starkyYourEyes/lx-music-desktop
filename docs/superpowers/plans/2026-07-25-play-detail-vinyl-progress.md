@@ -15,7 +15,7 @@
 - Modify `scripts/test-play-detail-refinement.js`: extend the existing structural contract for the new label proportion, footer metadata/favorite composition, and progress marker/tooltip behavior.
 - Modify `src/renderer/components/layout/PlayDetail/Turntable.vue`: change only the center-label inset from 27 percent to 19 percent.
 - Modify `src/renderer/components/layout/PlayDetail/PlayBar.vue`: render track metadata and the reused homepage favorite control, expose a clamped reactive progress position, and style the detail-only marker and tooltip.
-- Generate `build/lx-music-desktop-v3.0.0-x64-portable.exe`: final Windows x64 portable artifact.
+- Generate `build/starky-lx-music-desktop-v3.0.0-x64-portable.exe`: final Windows x64 portable artifact.
 
 ### Task 1: Extend the play-detail regression contract
 
@@ -466,7 +466,7 @@ Expected: no whitespace errors; only the planned files and the pre-existing unre
 ### Task 6: Build and verify the Windows x64 portable executable
 
 **Files:**
-- Generate: `build/lx-music-desktop-v3.0.0-x64-portable.exe`
+- Generate: `build/starky-lx-music-desktop-v3.0.0-x64-portable.exe`
 
 - [ ] **Step 1: Build all production targets**
 
@@ -488,14 +488,14 @@ $env:ELECTRON_BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-
 npm run pack:win:portable:x64
 ```
 
-Expected: exit code 0 and a newly generated `build/lx-music-desktop-v3.0.0-x64-portable.exe`.
+Expected: exit code 0 and a newly generated `build/starky-lx-music-desktop-v3.0.0-x64-portable.exe`.
 
 - [ ] **Step 3: Verify the portable archive and artifact metadata**
 
 Run:
 
 ```powershell
-$artifact = Resolve-Path 'build/lx-music-desktop-v3.0.0-x64-portable.exe'
+$artifact = Resolve-Path 'build/starky-lx-music-desktop-v3.0.0-x64-portable.exe'
 7z t $artifact
 Get-Item $artifact | Select-Object FullName, Length, LastWriteTime
 Get-FileHash $artifact -Algorithm SHA256
@@ -508,18 +508,18 @@ Expected: 7-Zip reports `Everything is Ok`; the artifact exists with a non-zero 
 Run this from PowerShell, recording the baseline process IDs first and stopping only new processes created by the portable executable:
 
 ```powershell
-$artifact = (Resolve-Path 'build/lx-music-desktop-v3.0.0-x64-portable.exe').Path
-$before = @(Get-Process 'lx-music-desktop' -ErrorAction SilentlyContinue | ForEach-Object Id)
+$artifact = (Resolve-Path 'build/starky-lx-music-desktop-v3.0.0-x64-portable.exe').Path
+$before = @(Get-Process 'starky-lx-music-desktop' -ErrorAction SilentlyContinue | ForEach-Object Id)
 $smokeData = Join-Path $env:TEMP ('lx-music-portable-smoke-' + [guid]::NewGuid().ToString('N'))
 $launcher = Start-Process -FilePath $artifact -ArgumentList "--user-data-dir=$smokeData" -PassThru
 Start-Sleep -Seconds 15
-$newProcesses = @(Get-Process 'lx-music-desktop' -ErrorAction SilentlyContinue | Where-Object { $_.Id -notin $before })
-if (-not $newProcesses) { throw 'Portable executable did not start lx-music-desktop processes' }
+$newProcesses = @(Get-Process 'starky-lx-music-desktop' -ErrorAction SilentlyContinue | Where-Object { $_.Id -notin $before })
+if (-not $newProcesses) { throw 'Portable executable did not start starky-lx-music-desktop processes' }
 if ($newProcesses | Where-Object { -not $_.Responding }) { throw 'Portable executable started an unresponsive process' }
 $newProcesses | Stop-Process
 ```
 
-Expected: at least one new responsive `lx-music-desktop` process remains alive after 15 seconds, and only those new process IDs are stopped.
+Expected: at least one new responsive `starky-lx-music-desktop` process remains alive after 15 seconds, and only those new process IDs are stopped.
 
 - [ ] **Step 5: Report the deliverable**
 

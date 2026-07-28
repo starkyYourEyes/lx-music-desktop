@@ -22,8 +22,8 @@
               {{ $t('songlist__import_input_tip_4') }}
               <span
                 class="hover underline"
-                aria-label="https://lyswhut.github.io/lx-music-doc/desktop/faq/cannot-open-songlist"
-                @click="openUrl('https://lyswhut.github.io/lx-music-doc/desktop/faq/cannot-open-songlist')"
+                :aria-label="projectIdentity.repositoryUrl + '#readme'"
+                @click="openUrl(projectIdentity.repositoryUrl + '#readme')"
               >FAQ</span>
             </li>
           </ul>
@@ -40,6 +40,7 @@ import { setOpenSongListInputInfo } from '@renderer/store/songList/action'
 import { ref, watch } from '@common/utils/vueTools'
 import { useRoute, useRouter } from '@common/utils/vueRouter'
 import { openUrl } from '@common/utils/electron'
+import { PROJECT_IDENTITY } from '@common/projectIdentity'
 
 const props = defineProps({
   modelValue: Boolean,
@@ -55,6 +56,7 @@ const router = useRouter()
 const route = useRoute()
 const text = ref('')
 const source = ref('')
+const projectIdentity = PROJECT_IDENTITY
 
 watch(() => props.modelValue, (visible) => {
   if (!visible) return

@@ -19,7 +19,7 @@ dd.gap-top
   div
     .p
       | {{ $t('setting__open_api_tip') }}
-      strong.hover.underline(aria-label="https://lyswhut.github.io/lx-music-doc/desktop/faq/open-api" @click="openUrl('https://lyswhut.github.io/lx-music-doc/desktop/open-api')") {{ $t('setting__open_api_tip_link') }}
+      strong.hover.underline(:aria-label="projectIdentity.repositoryUrl + '#readme'" @click="openUrl(projectIdentity.repositoryUrl + '#readme')") {{ $t('setting__open_api_tip_link') }}
 </template>
 
 <script>
@@ -28,6 +28,7 @@ import { openAPI } from '@renderer/store'
 import { openUrl } from '@common/utils/electron'
 import { appSetting, updateSetting } from '@renderer/store/setting'
 import { debounce } from '@common/utils'
+import { PROJECT_IDENTITY } from '@common/projectIdentity'
 
 export default {
   name: 'SettingOpenAPI',
@@ -42,6 +43,7 @@ export default {
       openAPI,
       openUrl,
       setPort,
+      projectIdentity: PROJECT_IDENTITY,
     }
   },
 }

@@ -161,7 +161,7 @@
 - Live QQ data returned 2 featured playlists, 12 private playlists, 12 related-song groups / 36 songs, 12 guide playlists, and 5 Brush Mode songs; duplicate Daily 30 Feed cards: 0.
 - `npm run build` and `npm run pack:win:portable:x64` completed successfully.
 - The final NSIS archive passed `7z t`; isolated startup remained stable for 20 seconds with no fatal/error log match.
-- Artifact: `build/lx-music-desktop-v3.0.0-x64-portable.exe` (`101607399` bytes, SHA-256 `5E467E0E9A859024DFF6B5158C715D9BFA2F62FB80B30F0ADF050F1EC074BC9A`).
+- Artifact: `build/starky-lx-music-desktop-v3.0.0-x64-portable.exe` (`101607399` bytes, SHA-256 `5E467E0E9A859024DFF6B5158C715D9BFA2F62FB80B30F0ADF050F1EC074BC9A`).
 
 ### Task 10: Make Radio Cards Follow Their Current Song
 
@@ -199,7 +199,7 @@
 - `16/16` QQ Music and provider recommendation tests, all three TypeScript projects, and ESLint for 26 changed TypeScript/Vue files passed.
 - `npm run build` and `npm run pack:win:portable:x64` completed successfully; `7z t` reported `Everything is Ok`.
 - The final portable build remained stable for 15 seconds with seven related processes and no fatal/error log match; all seven verification processes were then closed.
-- Artifact: `build/lx-music-desktop-v3.0.0-x64-portable.exe` (`101606252` bytes, SHA-256 `13889321D98A23FD7CDA3BC2A9892D00D325CBEF8498AF0C34431F16A6C27B03`).
+- Artifact: `build/starky-lx-music-desktop-v3.0.0-x64-portable.exe` (`101606252` bytes, SHA-256 `13889321D98A23FD7CDA3BC2A9892D00D325CBEF8498AF0C34431F16A6C27B03`).
 
 ### Task 11: Keep Each Radio Card On Its Last Played Song
 
@@ -231,7 +231,7 @@
 - Full `npm run lint` and `git diff --check` passed.
 - `npm run build` and `npm run pack:win:portable:x64` completed successfully; `7z t` reported `Everything is Ok`.
 - The final portable build remained stable for 15 seconds with seven related processes, one main process, 46 isolated user-data files, and no fatal/uncaught/unhandled log match. The verification process tree closed and the temporary extraction directory was removed.
-- Artifact: `build/lx-music-desktop-v3.0.0-x64-portable.exe` (`101607846` bytes, SHA-256 `D2D68F7965A3E4D63BBF70669726589D1DB79570CB9542D7272C3F1FC18DDA9E`).
+- Artifact: `build/starky-lx-music-desktop-v3.0.0-x64-portable.exe` (`101607846` bytes, SHA-256 `D2D68F7965A3E4D63BBF70669726589D1DB79570CB9542D7272C3F1FC18DDA9E`).
 
 ### Task 12: Stop Refreshing Recommendations On Page Re-entry
 
@@ -262,4 +262,4 @@
 - ESLint passed for `useQQHomeRecommendData.ts`, and `git diff --check` reported no whitespace errors.
 - `npm run build` and `npm run pack:win:portable:x64` completed successfully; `7z t` reported `Everything is Ok`.
 - The final portable build remained stable for 15 seconds with seven related processes, one main process, 46 isolated user-data files, and no fatal/uncaught/unhandled log match. The verification process tree closed successfully.
-- Artifact: `build/lx-music-desktop-v3.0.0-x64-portable.exe` (`101607813` bytes, SHA-256 `0B952BFC7E050967D740DE8F5A140A5424E22E28F5F72555D034285D7D8B9520`).
+- Artifact: `build/starky-lx-music-desktop-v3.0.0-x64-portable.exe` (`101607813` bytes, SHA-256 `0B952BFC7E050967D740DE8F5A140A5424E22E28F5F72555D034285D7D8B9520`).

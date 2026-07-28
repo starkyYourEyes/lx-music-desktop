@@ -14,7 +14,7 @@
   - `npm run pack:win:portable:x64`
   - `npm run pack:win:7z:x64`
 - 打包时需要把 `@neteasecloudmusicapienhanced/api` 作为运行时依赖带入产物。
-- Windows 绿色包 release 上传使用的是 `build/lx-music-desktop-v3.0.0-win_x64-green.7z`。
+- Windows 绿色包 release 上传使用的是 `build/starky-lx-music-desktop-v3.0.0-win_x64-green.7z`。
 
 关键文件：
 

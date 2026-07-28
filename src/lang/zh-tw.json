@@ -337,6 +337,8 @@
   "setting__backup_all_export_desc": "選取備份儲存位置",
   "setting__backup_all_import": "匯入",
   "setting__backup_all_import_desc": "選取備份檔案",
+  "setting__backup_export_failed": "備份儲存失敗：\n{message}",
+  "setting__backup_export_overwrite_confirm": "備份檔案已存在：\n{path}\n\n是否覆寫？",
   "setting__backup_other": "其他備份格式（目前不支援復原此類備份檔案）",
   "setting__backup_other_export_dir": "選取檔案儲存位置",
   "setting__backup_other_export_list_csv": "匯出 CSV 格式清單",

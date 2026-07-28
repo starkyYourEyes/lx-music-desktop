@@ -1,5 +1,5 @@
 import { toRaw } from '@common/utils/vueTools'
-import { openSaveDir, showSelectDialog } from '@renderer/utils/ipc'
+import { showSelectDialog } from '@renderer/utils/ipc'
 import { useI18n } from '@renderer/plugins/i18n'
 import { filterFileName, toNewMusicInfo, fixNewMusicInfoQuality, filterMusicList } from '@renderer/utils'
 import { getListMusics, updateUserList, addListMusics, overwriteListMusics, createUserList } from '@renderer/store/list/action'
@@ -7,23 +7,24 @@ import { defaultList, loveList, userLists } from '@renderer/store/list/state'
 import useImportTip from '@renderer/utils/compositions/useImportTip'
 import { dialog } from '@renderer/plugins/Dialog'
 import { BACKUP_IMPORT_EXTENSIONS, createPlaylistPartBackupName } from '@common/backupFormats'
+import useBackupExport from '@renderer/utils/compositions/useBackupExport'
 
 
 export default () => {
   const t = useI18n()
   const showImportTip = useImportTip()
+  const saveBackup = useBackupExport()
 
-  const handleExportList = (listInfo: LX.List.MyListInfo) => {
+  const handleExportList = async(listInfo: LX.List.MyListInfo) => {
     if (!listInfo) return
-    void openSaveDir({
+    await saveBackup({
       title: t('lists__export_part_desc'),
       defaultPath: createPlaylistPartBackupName(filterFileName(listInfo.name)),
-    }).then(async result => {
-      if (result.canceled || !result.filePath) return
-      void window.lx.worker.main.saveLxConfigFile(result.filePath, {
+    }, async() => {
+      return {
         type: 'playListPart_v2',
         data: { ...toRaw(listInfo), list: toRaw(await getListMusics(listInfo.id)) },
-      })
+      }
     })
   }
   const handleImportList = (listInfo: LX.List.MyListInfo, index: number) => {

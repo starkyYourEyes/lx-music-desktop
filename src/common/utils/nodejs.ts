@@ -143,24 +143,43 @@ export const gunzipData = async(buf: Buffer): Promise<string> => {
 
 /**
  * 保存lx配置文件
- * @param path 保存路径
+ * @param filePath 保存路径
  * @param data 数据
  */
-export const saveLxConfigFile = async(path: string, data: any) => {
-  path = ensureBackupExportPath(path)
-  fs.writeFile(path, await gzipData(JSON.stringify(data)), 'binary', err => {
-    console.log(err)
-  })
+export interface SaveLxConfigFileOptions {
+  allowOverwrite?: boolean
+}
+
+export const saveLxConfigFile = async(
+  filePath: string,
+  data: any,
+  { allowOverwrite = false }: SaveLxConfigFileOptions = {},
+): Promise<string> => {
+  const finalPath = ensureBackupExportPath(filePath)
+  try {
+    await fs.promises.writeFile(
+      finalPath,
+      await gzipData(JSON.stringify(data)),
+      { flag: allowOverwrite ? 'w' : 'wx' },
+    )
+  } catch (error) {
+    const fileError = error as NodeJS.ErrnoException
+    if (fileError.code == 'EEXIST') {
+      fileError.name = 'BackupFileExistsError'
+    }
+    throw error
+  }
+  return finalPath
 }
 
 /**
  * 读取lx配置文件
- * @param path 文件路径
+ * @param filePath 文件路径
  * @returns 数据
  */
-export const readLxConfigFile = async(path: string): Promise<any> => {
-  let isJSON = path.endsWith('.json')
-  let data: string | Buffer = await fs.promises.readFile(path, isJSON ? 'utf8' : 'binary')
+export const readLxConfigFile = async(filePath: string): Promise<any> => {
+  let isJSON = path.extname(filePath).toLowerCase() == '.json'
+  let data: string | Buffer = await fs.promises.readFile(filePath, isJSON ? 'utf8' : 'binary')
   if (!data) return data
   if (!isJSON) data = await gunzipData(Buffer.from(data, 'binary'))
   data = JSON.parse(data)

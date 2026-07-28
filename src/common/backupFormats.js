@@ -1,6 +1,9 @@
 const { PROJECT_IDENTITY } = require('./projectIdentity')
 
 const LEGACY_BACKUP_EXTENSION = 'lxmc'
+const BACKUP_EXPORT_EXTENSIONS = Object.freeze([
+  PROJECT_IDENTITY.backupExtension,
+])
 const BACKUP_IMPORT_EXTENSIONS = Object.freeze([
   'json',
   PROJECT_IDENTITY.backupExtension,
@@ -23,6 +26,7 @@ const createListCsvName = name => `starky_list_${name}.csv`
 
 module.exports = {
   LEGACY_BACKUP_EXTENSION,
+  BACKUP_EXPORT_EXTENSIONS,
   BACKUP_IMPORT_EXTENSIONS,
   BACKUP_NAMES,
   ensureBackupExportPath,

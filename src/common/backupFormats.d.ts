@@ -1,4 +1,5 @@
 export const LEGACY_BACKUP_EXTENSION: string
+export const BACKUP_EXPORT_EXTENSIONS: readonly string[]
 export const BACKUP_IMPORT_EXTENSIONS: readonly string[]
 export const BACKUP_NAMES: Readonly<{
   allData: string

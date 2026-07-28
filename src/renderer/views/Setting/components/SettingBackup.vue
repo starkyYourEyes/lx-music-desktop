@@ -32,7 +32,6 @@ import {
 } from '@renderer/utils'
 import {
   showSelectDialog,
-  openSaveDir,
 } from '@renderer/utils/ipc'
 // import { currentStting } from '../setting'
 import { dialog } from '@renderer/plugins/Dialog'
@@ -44,12 +43,14 @@ import { defaultList, loveList, userLists } from '@renderer/store/list/state'
 import { appSetting, updateSetting } from '@renderer/store/setting'
 import migrateSetting from '@common/utils/migrateSetting'
 import { BACKUP_IMPORT_EXTENSIONS, BACKUP_NAMES } from '@common/backupFormats'
+import useBackupExport from '@renderer/utils/compositions/useBackupExport'
 
 
 export default {
   name: 'SettingBackup',
   setup() {
     const t = useI18n()
+    const saveBackup = useBackupExport()
     // const setting = useRefGetter('setting')
     // const settingVersion = useRefGetter('settingVersion')
     // const setSettingVersion = useCommit('setSettingVersion')
@@ -173,38 +174,28 @@ export default {
       })
     }
 
-    const exportAllData = async(path) => {
-      let allData = {
-        type: 'allData_v2',
-        setting: { ...appSetting },
-        playList: await getAllLists(),
-      }
-      void window.lx.worker.main.saveLxConfigFile(path, allData)
-    }
-    const handleExportAllData = () => {
-      void openSaveDir({
+    const handleExportAllData = async() => {
+      await saveBackup({
         title: t('setting__backup_all_export_desc'),
         defaultPath: BACKUP_NAMES.allData,
-      }).then(result => {
-        if (result.canceled) return
-        void exportAllData(result.filePath)
+      }, async() => {
+        return {
+          type: 'allData_v2',
+          setting: { ...appSetting },
+          playList: await getAllLists(),
+        }
       })
     }
 
-    const exportSetting = (path) => {
-      const data = {
-        type: 'setting_v2',
-        data: { ...appSetting },
-      }
-      void window.lx.worker.main.saveLxConfigFile(path, data)
-    }
-    const handleExportSetting = () => {
-      void openSaveDir({
+    const handleExportSetting = async() => {
+      await saveBackup({
         title: t('setting__backup_part_export_setting_desc'),
         defaultPath: BACKUP_NAMES.setting,
-      }).then(result => {
-        if (result.canceled) return
-        exportSetting(result.filePath)
+      }, () => {
+        return {
+          type: 'setting_v2',
+          data: { ...appSetting },
+        }
       })
     }
 
@@ -240,20 +231,15 @@ export default {
       })
     }
 
-    const exportPlayList = async(path) => {
-      const data = {
-        type: 'playList_v2',
-        data: await getAllLists(),
-      }
-      void window.lx.worker.main.saveLxConfigFile(path, data)
-    }
-    const handleExportPlayList = () => {
-      void openSaveDir({
+    const handleExportPlayList = async() => {
+      await saveBackup({
         title: t('setting__backup_part_export_list_desc'),
         defaultPath: BACKUP_NAMES.playlist,
-      }).then(result => {
-        if (result.canceled) return
-        void exportPlayList(result.filePath)
+      }, async() => {
+        return {
+          type: 'playList_v2',
+          data: await getAllLists(),
+        }
       })
     }
 

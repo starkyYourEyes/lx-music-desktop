@@ -337,6 +337,8 @@
   "setting__backup_all_export_desc": "Save the backup to ...",
   "setting__backup_all_import": "Import",
   "setting__backup_all_import_desc": "Choose a backup file",
+  "setting__backup_export_failed": "Failed to save backup:\n{message}",
+  "setting__backup_export_overwrite_confirm": "The backup file already exists:\n{path}\n\nOverwrite it?",
   "setting__backup_other": "Other Backup Formats (Restoring such backup files is not currently supported)",
   "setting__backup_other_export_dir": "Choose where to save the file",
   "setting__backup_other_export_list_csv": "Export lists in CSV format",

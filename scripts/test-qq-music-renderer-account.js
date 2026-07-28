@@ -282,6 +282,34 @@ const testQrPolling = async() => {
   let loginSuccessCount = 0
   const isLoggedIn = ref(false)
   const originalWindow = global.window
+  const originalHTMLImageElement = global.HTMLImageElement
+  const animationFrames = []
+  const measures = []
+  let performanceNow = 100
+
+  class FakeHTMLImageElement {
+    constructor({
+      connected = true,
+      naturalWidth = 218,
+      naturalHeight = 218,
+      width = 218,
+      height = 218,
+      display = 'block',
+      visibility = 'visible',
+      opacity = '1',
+    } = {}) {
+      this.isConnected = connected
+      this.naturalWidth = naturalWidth
+      this.naturalHeight = naturalHeight
+      this.bounds = { width, height }
+      this.style = { display, visibility, opacity }
+    }
+
+    getBoundingClientRect() {
+      return this.bounds
+    }
+  }
+  global.HTMLImageElement = FakeHTMLImageElement
 
   global.window = {
     setTimeout(callback, delay) {
@@ -295,6 +323,15 @@ const testQrPolling = async() => {
     },
     crypto: {
       randomUUID: () => makeRequestId(++requestIndex),
+    },
+    requestAnimationFrame(callback) {
+      animationFrames.push(callback)
+      return animationFrames.length
+    },
+    getComputedStyle: image => image.style,
+    performance: {
+      now: () => performanceNow,
+      measure: (name, options) => measures.push({ name, options }),
     },
   }
 
@@ -317,9 +354,12 @@ const testQrPolling = async() => {
     accountStatus = null
     loginSuccessCount = 0
     isLoggedIn.value = false
+    animationFrames.length = 0
+    measures.length = 0
+    performanceNow = 100
   }
 
-  const { useQQMusicLoginQr } = loadTsModule(
+  const { isRenderedQQMusicQrImage, useQQMusicLoginQr } = loadTsModule(
     path.join(__dirname, '../src/renderer/views/Recommend/useQQMusicLoginQr.ts'),
     {
       '@common/utils/vueTools': {
@@ -359,6 +399,7 @@ const testQrPolling = async() => {
 
   try {
     reset()
+    performanceNow = 100
     createResults.push({ key: 'first', qrimg: 'data:first' })
     const pendingResults = [
       { state: 'waiting', message: '', isLoggedIn: false, profile: null },
@@ -377,6 +418,64 @@ const testQrPolling = async() => {
     assert.strictEqual(polling.qrImg.value, 'data:first')
     assert.strictEqual(polling.qrStatusText.value, '请使用手机 QQ 扫码登录')
     assert.strictEqual(timers.size, 1)
+
+    const image = new FakeHTMLImageElement()
+    performanceNow = 2_450
+    polling.handleQrImageLoad({ currentTarget: image })
+    assert.strictEqual(measures.length, 0)
+    assert.strictEqual(animationFrames.length, 1)
+    polling.handleQrImageLoad({ currentTarget: image })
+    assert.strictEqual(animationFrames.length, 2)
+    animationFrames.shift()()
+    animationFrames.shift()()
+    assert.deepStrictEqual(measures, [{
+      name: 'qq-music-login-qr-visible',
+      options: {
+        start: 100,
+        end: 2450,
+      },
+    }])
+
+    polling.handleQrImageLoad({ currentTarget: image })
+    assert.strictEqual(animationFrames.length, 0)
+    assert.strictEqual(measures.length, 1)
+
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ naturalWidth: 0 })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ naturalHeight: 0 })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ connected: false })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ width: 0 })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ height: 0 })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ display: 'none' })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ visibility: 'hidden' })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ visibility: 'collapse' })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ opacity: '0' })),
+      false,
+    )
 
     takeTimer()
     await settle()
@@ -444,6 +543,10 @@ const testQrPolling = async() => {
     await settle()
     assert.strictEqual(expiring.qrStatusText.value, '二维码已过期，请重新获取')
     assert.strictEqual(timers.size, 0)
+    expiring.handleQrImageLoad({
+      currentTarget: new FakeHTMLImageElement(),
+    })
+    assert.strictEqual(animationFrames.length, 0)
     expiring.handleShowLogin()
     await settle()
     const expiryReplacementId = createIds[1]
@@ -475,6 +578,10 @@ const testQrPolling = async() => {
     const replacing = useQQMusicLoginQr(async() => {})
     await replacing.handleCreateLoginQr()
     const refreshOldRequestId = createIds[0]
+    replacing.handleQrImageLoad({
+      currentTarget: new FakeHTMLImageElement(),
+    })
+    assert.strictEqual(animationFrames.length, 1)
 
     const cancelGate = deferred()
     cancelGates.push(cancelGate)
@@ -487,6 +594,23 @@ const testQrPolling = async() => {
     const refreshCurrentRequestId = createIds[1]
     assert.notStrictEqual(refreshCurrentRequestId, refreshOldRequestId)
     assert.strictEqual(replacing.qrInfo.value.key, refreshCurrentRequestId)
+    const measureCountBeforeStaleFrame = measures.length
+    animationFrames.shift()()
+    assert.strictEqual(measures.length, measureCountBeforeStaleFrame)
+
+    reset()
+    performanceNow = 3_000
+    createResults.push({ qrimg: 'data:stale-visible' })
+    const staleVisibility = useQQMusicLoginQr(async() => {})
+    await staleVisibility.handleCreateLoginQr()
+    staleVisibility.handleQrImageLoad({
+      currentTarget: new FakeHTMLImageElement(),
+    })
+    assert.strictEqual(animationFrames.length, 1)
+    const measureCount = measures.length
+    staleVisibility.handleCloseLogin()
+    animationFrames.shift()()
+    assert.strictEqual(measures.length, measureCount)
 
     reset()
     createResults.push(
@@ -523,6 +647,7 @@ const testQrPolling = async() => {
     assert.strictEqual(timers.size, 0)
   } finally {
     global.window = originalWindow
+    global.HTMLImageElement = originalHTMLImageElement
   }
 }
 

@@ -206,11 +206,16 @@ test('runtime support audit rejects a missing SettingAbout identity binding', ()
   )
 })
 
+const compareStrings = (left, right) => left < right ? -1 : left > right ? 1 : 0
+const compareTextFilePaths = (left, right) => compareStrings(left.path, right.path)
+
 const walkTextFiles = directory => {
   const ignored = new Set(['.git', '.claude', '.codegraph', '.worktrees', 'build', 'dist', 'node_modules'])
   const files = []
   const visit = current => {
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+    const entries = fs.readdirSync(current, { withFileTypes: true })
+      .sort((left, right) => compareStrings(left.name, right.name))
+    for (const entry of entries) {
       if (ignored.has(entry.name)) continue
       const fullPath = path.join(current, entry.name)
       if (entry.isDirectory()) visit(fullPath)
@@ -226,13 +231,12 @@ const walkTextFiles = directory => {
     }
   }
   visit(directory)
-  return files
+  return files.sort(compareTextFilePaths)
 }
 
 const upstreamRecordAllowed = [
   /^LICENSE$/,
   /^licenses\//,
-  /^README\.md$/,
   /^UPSTREAM\.md$/,
   /^docs\/superpowers\/(?:specs|plans)\//,
   /^doc\/MOBILE_PORTING_CHANGES\.md$/,
@@ -240,10 +244,25 @@ const upstreamRecordAllowed = [
   /^src\/main\/migration\/legacyUserData\.js$/,
 ]
 const upstreamIdentityPattern = /lyswhut|github\.com\/lyswhut|lyswhut\.github\.io/i
-const findUpstreamRecordViolations = files => files.filter(file =>
-  upstreamIdentityPattern.test(file.text) &&
-  !upstreamRecordAllowed.some(pattern => pattern.test(file.path)),
-)
+const readmeAttributionHeading = '## 许可证与来源'
+const readmeAttributionLink = '[lyswhut/lx-music-desktop](https://github.com/lyswhut/lx-music-desktop)'
+const hasOnlyIntendedReadmeAttribution = text => {
+  const sectionIndex = text.indexOf(readmeAttributionHeading)
+  const attributionIndex = text.indexOf(readmeAttributionLink)
+  if (sectionIndex < 0 || attributionIndex < sectionIndex + readmeAttributionHeading.length) return false
+
+  const nextSectionIndex = text.indexOf('\n## ', sectionIndex + readmeAttributionHeading.length)
+  if (nextSectionIndex >= 0 && attributionIndex >= nextSectionIndex) return false
+
+  const withoutAttribution = text.slice(0, attributionIndex) +
+    text.slice(attributionIndex + readmeAttributionLink.length)
+  return !upstreamIdentityPattern.test(withoutAttribution)
+}
+const findUpstreamRecordViolations = files => files.filter(file => {
+  if (file.path === 'README.md') return !hasOnlyIntendedReadmeAttribution(file.text)
+  return upstreamIdentityPattern.test(file.text) &&
+    !upstreamRecordAllowed.some(pattern => pattern.test(file.path))
+}).sort(compareTextFilePaths)
 
 const runtimeIdentifierPatterns = [
   /cn\.toside\.music\.desktop/,
@@ -252,19 +271,22 @@ const runtimeIdentifierPatterns = [
   /\blx_music_(?:desktop|mobile)\b/,
   /(?<!starky-)\blx-user-api\b/,
   /(?<!starky-)\blx-music request\b/,
+  /(?<!starky-)\blx-music auth::/,
+  /(?<!starky-)\blx-music connect\b/,
   /\blxmusic_temp\b/,
+  /\/dav\/lx-music\b/,
   /lx-music-desktop-version-info/,
   /gitee\.com\/lyswhut/,
   /cdn\.stsky\.cn\/lx-music/,
 ]
 const findRuntimeIdentifierViolations = files => {
   const violations = []
-  for (const file of files) {
+  for (const file of [...files].sort(compareTextFilePaths)) {
     for (const pattern of runtimeIdentifierPatterns) {
       if (pattern.test(file.text)) violations.push(`${file.path}: ${pattern}`)
     }
   }
-  return violations
+  return violations.sort(compareStrings)
 }
 
 const legacyBackupAllowed = [
@@ -273,11 +295,11 @@ const legacyBackupAllowed = [
   /^README\.md$/,
   /^docs\/superpowers\/(?:specs|plans)\//,
 ]
-const legacyBackupPattern = /\.lxmc\b/
+const legacyBackupPattern = /\blxmc\b/i
 const findLegacyBackupViolations = files => files.filter(file =>
   legacyBackupPattern.test(file.text) &&
   !legacyBackupAllowed.some(pattern => pattern.test(file.path)),
-)
+).sort(compareTextFilePaths)
 
 const removedSourceGuardTests = new Set([
   'scripts/test-updater-removal.js',
@@ -289,16 +311,31 @@ const removedSourcePatterns = [
   /git\+ssh:\/\/git@github\.com\/lyswhut/,
   /lx-music-desktop-version-info/,
 ]
-const createRemovedSourceCorpus = files => files
-  .filter(file =>
-    !/^docs\/superpowers\//.test(file.path) &&
-    !removedSourceGuardTests.has(file.path),
-  )
-  .map(file => file.text)
-  .join('\n')
+const findRemovedSourceViolations = files => {
+  const violations = []
+  for (const file of [...files].sort(compareTextFilePaths)) {
+    if (/^docs\/superpowers\//.test(file.path) || removedSourceGuardTests.has(file.path)) continue
+    for (const pattern of removedSourcePatterns) {
+      if (pattern.test(file.text)) violations.push(`${file.path}: ${pattern}`)
+    }
+  }
+  return violations.sort(compareStrings)
+}
 
 test('upstream author and URL appear only in attribution and migration records', () => {
-  const violations = findUpstreamRecordViolations(walkTextFiles(root))
+  const files = walkTextFiles(root)
+  const readme = files.find(file => file.path === 'README.md')
+  assert.ok(readme, 'README.md must be present')
+  assert.equal(hasOnlyIntendedReadmeAttribution(readme.text), true)
+  const readmeWithoutAttribution = readme.text.replace(readmeAttributionLink, '')
+  assert.notEqual(readmeWithoutAttribution, readme.text, 'README attribution probe must alter the in-memory source')
+  assert.deepEqual(
+    findUpstreamRecordViolations([{ path: readme.path, text: readmeWithoutAttribution }])
+      .map(file => file.path),
+    ['README.md'],
+  )
+
+  const violations = findUpstreamRecordViolations(files)
   assert.deepEqual(violations.map(file => file.path), [])
 })
 
@@ -316,8 +353,13 @@ test('legacy backup extension is isolated to compatibility code and records', ()
 })
 
 test('removed updater and release sources cannot be reintroduced', () => {
-  const allText = createRemovedSourceCorpus(walkTextFiles(root))
-  for (const pattern of removedSourcePatterns) assert.doesNotMatch(allText, pattern)
+  const violations = findRemovedSourceViolations(walkTextFiles(root))
+  assert.deepEqual(violations, [])
+})
+
+test('repository text walk returns paths in deterministic order', () => {
+  const paths = walkTextFiles(root).map(file => file.path)
+  assert.deepEqual(paths, [...paths].sort(compareStrings))
 })
 
 test('repository audits reject adversarial detached values', () => {
@@ -341,10 +383,60 @@ test('repository audits reject adversarial detached values', () => {
     text: 'backup.lxmc',
   }])
   assert.deepEqual(backupViolations.map(file => file.path), [productionPath])
+})
 
-  const removedSourceCorpus = createRemovedSourceCorpus([{
+test('legacy backup audit rejects bare and uppercase tokens without matching the new extension', () => {
+  const productionPath = 'src/adversarial-probe.js'
+  const legacyResults = [
+    'picker accepts lxmc',
+    'backup.LXMC',
+  ].map(text => findLegacyBackupViolations([{
+    path: productionPath,
+    text,
+  }]).map(file => file.path))
+  assert.deepEqual(legacyResults, [[productionPath], [productionPath]])
+
+  const approvedResults = findLegacyBackupViolations([{
+    path: productionPath,
+    text: 'backup.slxmc',
+  }])
+  assert.deepEqual(approvedResults, [])
+})
+
+test('runtime audit rejects the complete old identity contract without matching current values', () => {
+  const productionPath = 'src/adversarial-probe.js'
+  const results = [
+    'lx-music auth::',
+    'lx-music connect',
+    'https://dav.jianguoyun.com/dav/lx-music',
+    'starky-lx-music auth::',
+    'starky-lx-music connect',
+    'https://dav.jianguoyun.com/dav/starky-lx-music',
+  ].map(text => findRuntimeIdentifierViolations([{
+    path: productionPath,
+    text,
+  }]).length)
+  assert.deepEqual(results, [1, 1, 1, 0, 0, 0])
+})
+
+test('README attribution does not allow an extra operational upstream link', () => {
+  const adversarialReadme = [
+    '## 许可证与来源',
+    `本项目基于 ${readmeAttributionLink}。`,
+    '',
+    'Releases: https://github.com/lyswhut/lx-music-desktop/releases',
+  ].join('\n')
+  const violations = findUpstreamRecordViolations([{
+    path: 'README.md',
+    text: adversarialReadme,
+  }])
+  assert.deepEqual(violations.map(file => file.path), ['README.md'])
+})
+
+test('removed-source diagnostics identify the violating file and pattern', () => {
+  const violations = findRemovedSourceViolations([{
     path: 'package.json',
     text: 'electron-updater',
   }])
-  assert.match(removedSourceCorpus, removedSourcePatterns[0])
+  assert.deepEqual(violations, ['package.json: /electron-updater/'])
 })

@@ -52,6 +52,25 @@ export const mergeCookieValues = (values: string[]): string => {
   return [...cookies.values()].join('; ')
 }
 
+type CookieUpdateValue = string | number | null | undefined
+
+export const mergeCookieUpdates = (
+  cookie: string,
+  updates: Record<string, CookieUpdateValue>,
+): string => {
+  const cookies = new Map<string, string>()
+  for (const item of cookie.split(';')) {
+    const pair = getCookiePair(item)
+    if (pair) cookies.set(pair.name, pair.value)
+  }
+  for (const [name, rawValue] of Object.entries(updates)) {
+    const value = String(rawValue ?? '').trim()
+    if (!name || !value || value == '0') continue
+    cookies.set(name, value)
+  }
+  return [...cookies].map(([name, value]) => `${name}=${value}`).join('; ')
+}
+
 export const getCookieValue = (cookie: string, name: string): string => {
   let result = ''
   for (const item of cookie.split(';')) {

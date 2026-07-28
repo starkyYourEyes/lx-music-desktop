@@ -7,6 +7,7 @@ const {
   getGtk,
   getSetCookieValues,
   mergeCookieValues,
+  mergeCookieUpdates,
   getCookieValue,
   getQQMusicAccountUin,
   redactQQMusicSecret,
@@ -38,6 +39,40 @@ const fallbackHeaders = {
   get: () => 'a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT, b=2; Path=/',
 }
 assert.strictEqual(mergeCookieValues(getSetCookieValues(fallbackHeaders)), 'a=1; b=2')
+assert.strictEqual(
+  mergeCookieUpdates(
+    'uin=o123; qqmusic_key=old=value; keep=unchanged; malformed',
+    {
+      qqmusic_key: 'new=value=with=equals',
+      qm_keyst: 'new=value=with=equals',
+      empty: '',
+      zero: 0,
+      missing: undefined,
+    },
+  ),
+  'uin=o123; qqmusic_key=new=value=with=equals; keep=unchanged; qm_keyst=new=value=with=equals',
+)
+assert.strictEqual(
+  mergeCookieUpdates('duplicate=old; duplicate=latest; keep=yes', {
+    duplicate: 'rotated',
+  }),
+  'duplicate=rotated; keep=yes',
+)
+assert.strictEqual(
+  mergeCookieUpdates('uin=o123; keep=yes', {}),
+  'uin=o123; keep=yes',
+)
+assert.strictEqual(
+  mergeCookieUpdates(
+    'psrf_qqaccess_token=access-old; psrf_qqrefresh_token=refresh-old; qqmusic_key=key-old',
+    {
+      psrf_qqaccess_token: '',
+      psrf_qqrefresh_token: 0,
+      qqmusic_key: null,
+    },
+  ),
+  'psrf_qqaccess_token=access-old; psrf_qqrefresh_token=refresh-old; qqmusic_key=key-old',
+)
 assert.strictEqual(getCookieValue('uin=old; uin=new', 'uin'), 'new')
 assert.strictEqual(getQQMusicAccountUin('uin=o123; qqmusic_key=secret'), 'o123')
 assert.strictEqual(getQQMusicAccountUin('qqmusic_uin=456; qm_keyst=alternate'), '456')

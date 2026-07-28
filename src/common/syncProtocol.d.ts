@@ -8,6 +8,6 @@ export interface SyncProtocol {
 
 export const CURRENT_SYNC_PROTOCOL: Readonly<SyncProtocol>
 export const LEGACY_SYNC_PROTOCOL: Readonly<SyncProtocol>
-export const SYNC_PROTOCOLS: readonly Readonly<SyncProtocol>[]
+export const SYNC_PROTOCOLS: ReadonlyArray<Readonly<SyncProtocol>>
 export function getSyncProtocol(protocolId?: unknown): Readonly<SyncProtocol>
-export function getSyncProtocolCandidates(protocolId?: LX.Sync.SyncProtocolId): readonly Readonly<SyncProtocol>[]
+export function getSyncProtocolCandidates(protocolId?: LX.Sync.SyncProtocolId): ReadonlyArray<Readonly<SyncProtocol>>

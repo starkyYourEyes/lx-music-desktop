@@ -6,7 +6,16 @@ import {
   type QQMusicLoginQr,
 } from './login'
 import { getQQMusicAccountUin } from './auth'
-import { createQQMusicSongService, isQQMusicAuthError } from './song'
+import {
+  createQQMusicCredentialService,
+  isQQMusicCredentialRefreshError,
+  type QQMusicCredentialService,
+  type QQMusicCredentialRefreshErrorKind,
+} from './credential'
+import {
+  createQQMusicSongService,
+  isQQMusicAuthError,
+} from './song'
 import { createQQMusicDailyRecommendService } from './dailyRecommend'
 import { createQQMusicHomeRecommendService } from './homeRecommend'
 import { createQQMusicPlaylistDetailService } from './playlistDetail'
@@ -55,6 +64,24 @@ interface PlaylistDetailService {
   getPlaylistDetail: (id: string, page?: number) => Promise<LX.QQMusic.PlaylistDetailInfo>
 }
 
+type QQMusicRefreshTrigger = 'scheduled' | 'preflight' | 'auth-error'
+type QQMusicRefreshOutcome =
+  | { status: 'success', account: QQMusicAccountData }
+  | { status: QQMusicCredentialRefreshErrorKind | 'stale' }
+
+interface QQMusicRefreshDiagnostic {
+  trigger: QQMusicRefreshTrigger
+  outcome: QQMusicRefreshOutcome['status']
+}
+
+const defaultRefreshDiagnostic = (event: QQMusicRefreshDiagnostic) => {
+  console.warn('[QQ Music refresh diagnostic]', event)
+}
+
+const isSameAccount = (left: QQMusicAccountData, right: QQMusicAccountData) => {
+  return left.cookie == right.cookie && left.updatedAt == right.updatedAt
+}
+
 const emptyAccount = (updatedAt = 0): QQMusicAccountData => ({
   cookie: '',
   profile: null,
@@ -86,6 +113,8 @@ export const createQQMusicAccountService = ({
   dailyRecommendService,
   homeRecommendService,
   playlistDetailService,
+  credentialService,
+  onRefreshDiagnostic = defaultRefreshDiagnostic,
   now = Date.now,
 }: {
   store: AccountStore
@@ -94,11 +123,105 @@ export const createQQMusicAccountService = ({
   dailyRecommendService: DailyRecommendService
   homeRecommendService: HomeRecommendService
   playlistDetailService: PlaylistDetailService
+  credentialService: QQMusicCredentialService
+  onRefreshDiagnostic?: (event: QQMusicRefreshDiagnostic) => void
   now?: () => number
 }) => {
   let loginGeneration = 0
+  let lastSuccessfulRefresh: {
+    source: QQMusicAccountData
+    refreshed: QQMusicAccountData
+  } | undefined
+  let refreshInFlight: {
+    account: QQMusicAccountData
+    promise: Promise<QQMusicRefreshOutcome>
+  } | undefined
 
-  const clearAccount = () => store.set(DATA_KEYS.qqMusicAccount, emptyAccount(now()))
+  const getNextUpdatedAt = (previousUpdatedAt: number) => {
+    return Math.max(now(), previousUpdatedAt + 1)
+  }
+
+  const clearAccount = () => {
+    const account = getAccountData(store)
+    lastSuccessfulRefresh = undefined
+    store.set(
+      DATA_KEYS.qqMusicAccount,
+      emptyAccount(getNextUpdatedAt(account.updatedAt)),
+    )
+  }
+
+  const clearMatchingAccount = (account: QQMusicAccountData) => {
+    const current = getAccountData(store)
+    if (!isSameAccount(current, account)) return false
+    clearAccount()
+    return true
+  }
+
+  const performRefresh = async(
+    account: QQMusicAccountData,
+    trigger: QQMusicRefreshTrigger,
+  ): Promise<QQMusicRefreshOutcome> => {
+    try {
+      const cookie = await credentialService.refresh(account.cookie)
+      const current = getAccountData(store)
+      if (!isSameAccount(current, account)) {
+        onRefreshDiagnostic({ trigger, outcome: 'stale' })
+        return { status: 'stale' }
+      }
+      const refreshedUin = getQQMusicAccountUin(cookie)
+      if (!refreshedUin || refreshedUin != account.profile?.uin) {
+        onRefreshDiagnostic({ trigger, outcome: 'transient' })
+        return { status: 'transient' }
+      }
+      const refreshed: QQMusicAccountData = {
+        cookie,
+        profile: account.profile,
+        updatedAt: getNextUpdatedAt(current.updatedAt),
+      }
+      store.set(DATA_KEYS.qqMusicAccount, refreshed)
+      lastSuccessfulRefresh = { source: account, refreshed }
+      onRefreshDiagnostic({ trigger, outcome: 'success' })
+      return { status: 'success', account: refreshed }
+    } catch (error) {
+      const current = getAccountData(store)
+      if (!isSameAccount(current, account)) {
+        onRefreshDiagnostic({ trigger, outcome: 'stale' })
+        return { status: 'stale' }
+      }
+      const outcome = isQQMusicCredentialRefreshError(error)
+        ? error.kind
+        : 'transient'
+      if (outcome == 'invalid') clearMatchingAccount(account)
+      onRefreshDiagnostic({ trigger, outcome })
+      return { status: outcome }
+    }
+  }
+
+  const refreshAccount = async(
+    account: QQMusicAccountData,
+    trigger: QQMusicRefreshTrigger,
+  ): Promise<QQMusicRefreshOutcome> => {
+    if (refreshInFlight) {
+      if (isSameAccount(refreshInFlight.account, account)) {
+        return refreshInFlight.promise
+      }
+      await refreshInFlight.promise
+      if (!isSameAccount(getAccountData(store), account)) {
+        return { status: 'stale' }
+      }
+      return refreshAccount(account, trigger)
+    }
+    const entry = {
+      account,
+      promise: performRefresh(account, trigger),
+    }
+    refreshInFlight = entry
+    try {
+      return await entry.promise
+    } finally {
+      if (refreshInFlight === entry) refreshInFlight = undefined
+    }
+  }
 
   const getExpiredLoginCheck = () => ({
     state: 'expired' as const,
@@ -138,10 +261,12 @@ export const createQQMusicAccountService = ({
       uin,
       nickname: 'QQ 音乐账号',
     }
+    const current = getAccountData(store)
+    lastSuccessfulRefresh = undefined
     store.set(DATA_KEYS.qqMusicAccount, {
       cookie: result.cookie,
       profile,
-      updatedAt: now(),
+      updatedAt: getNextUpdatedAt(current.updatedAt),
     } satisfies QQMusicAccountData)
     return {
       state: result.state,
@@ -156,18 +281,26 @@ export const createQQMusicAccountService = ({
     clearAccount()
   }
 
-  const runAuthenticatedRequest = async<T>(request: () => Promise<T>) => {
+  const runAuthenticatedRequest = async<T>(
+    request: () => Promise<T>,
+  ): Promise<T> => {
     const account = getAccountData(store)
     try {
       return await request()
     } catch (error) {
-      if (isQQMusicAuthError(error)) {
-        const currentAccount = getAccountData(store)
-        if (currentAccount.cookie == account.cookie && currentAccount.updatedAt == account.updatedAt) {
-          clearAccount()
+      if (!isQQMusicAuthError(error)) throw error
+      const current = getAccountData(store)
+      if (!isSameAccount(current, account)) {
+        if (lastSuccessfulRefresh &&
+          isSameAccount(lastSuccessfulRefresh.source, account) &&
+          isSameAccount(lastSuccessfulRefresh.refreshed, current)) {
+          return request()
         }
+        throw error
       }
-      throw error
+      const outcome = await refreshAccount(account, 'auth-error')
+      if (outcome.status != 'success') throw error
+      return request()
     }
   }
 
@@ -205,6 +338,7 @@ const getAccountService = () => {
   if (accountService) return accountService
   const store = getStore(STORE_NAMES.DATA)
   const loginService = createQQMusicLoginService()
+  const credentialService = createQQMusicCredentialService()
   const getCookie = () => getAccountData(store).cookie
   const songService = createQQMusicSongService({ getCookie })
   const dailyRecommendService = createQQMusicDailyRecommendService({ getCookie })
@@ -217,6 +351,7 @@ const getAccountService = () => {
     dailyRecommendService,
     homeRecommendService,
     playlistDetailService,
+    credentialService,
   })
   return accountService
 }

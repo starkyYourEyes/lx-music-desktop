@@ -25,6 +25,19 @@ let singletonGetHomeRecommendCookie
 let singletonGetPlaylistDetailCookie
 let storeFactoryCallCount = 0
 class QQMusicAuthError extends Error {}
+class QQMusicCredentialRefreshError extends Error {
+  constructor(kind) {
+    super(`QQ Music credential refresh ${kind}`)
+    this.name = 'QQMusicCredentialRefreshError'
+    this.kind = kind
+  }
+}
+const unavailableCredentialService = {
+  refresh: async() => {
+    throw new QQMusicCredentialRefreshError('unavailable')
+  },
+  getRefreshDueAt: () => null,
+}
 const loginService = {
   createLoginQr: async() => ({ key: 'opaque', qrimg: 'data:image/png;base64,AA==' }),
   checkLoginQr: async() => pendingLoginPromise ?? loginResult,
@@ -91,11 +104,17 @@ const {
       createQQMusicLoginService: () => loginService,
     },
     './auth': { getQQMusicAccountUin },
+    './credential': {
+      createQQMusicCredentialService: () => unavailableCredentialService,
+      isQQMusicCredentialRefreshError: error =>
+        error instanceof QQMusicCredentialRefreshError,
+    },
     './song': {
       createQQMusicSongService: options => {
         singletonGetCookie = options.getCookie
         return songService
       },
+      QQMusicAuthError,
       isQQMusicAuthError: error => error instanceof QQMusicAuthError,
     },
     './dailyRecommend': {
@@ -127,6 +146,8 @@ const createFacade = () => createQQMusicAccountService({
   dailyRecommendService,
   homeRecommendService,
   playlistDetailService,
+  credentialService: unavailableCredentialService,
+  onRefreshDiagnostic: () => {},
   now: () => 123456,
 })
 
@@ -199,10 +220,11 @@ const main = async() => {
 
   songError = new QQMusicAuthError('expired')
   await assert.rejects(restarted.getGuessLikeSongs(), QQMusicAuthError)
-  assert.deepStrictEqual(restarted.getAccountStatus(), {
-    isLoggedIn: false,
-    profile: null,
-  })
+  assert.strictEqual(restarted.getAccountStatus().isLoggedIn, true)
+  assert.strictEqual(
+    data.get('qqMusicAccount').cookie,
+    'uin=o123; qqmusic_key=secret',
+  )
   assert.deepStrictEqual(data.get('neteaseAccount'), { cookie: 'keep-netease' })
 
   songError = null
@@ -350,19 +372,22 @@ const main = async() => {
   data.set('qqMusicAccount', accountB)
   dailyRecommendError = new QQMusicAuthError('expired')
   await assert.rejects(raceFacade.getDailyRecommendSongs(), QQMusicAuthError)
-  assert.strictEqual(raceFacade.getAccountStatus().isLoggedIn, false)
+  assert.strictEqual(raceFacade.getAccountStatus().isLoggedIn, true)
+  assert.deepStrictEqual(data.get('qqMusicAccount'), accountB)
   dailyRecommendError = null
 
   data.set('qqMusicAccount', accountB)
   homeRecommendError = new QQMusicAuthError('expired')
   await assert.rejects(raceFacade.getHomeRecommendation(), QQMusicAuthError)
-  assert.strictEqual(raceFacade.getAccountStatus().isLoggedIn, false)
+  assert.strictEqual(raceFacade.getAccountStatus().isLoggedIn, true)
+  assert.deepStrictEqual(data.get('qqMusicAccount'), accountB)
   homeRecommendError = null
 
   data.set('qqMusicAccount', accountB)
   playlistDetailError = new QQMusicAuthError('expired')
   await assert.rejects(raceFacade.getPlaylistDetail('211111', 1), QQMusicAuthError)
-  assert.strictEqual(raceFacade.getAccountStatus().isLoggedIn, false)
+  assert.strictEqual(raceFacade.getAccountStatus().isLoggedIn, true)
+  assert.deepStrictEqual(data.get('qqMusicAccount'), accountB)
   playlistDetailError = null
 }
 

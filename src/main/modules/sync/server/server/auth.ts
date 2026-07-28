@@ -10,8 +10,8 @@ import { getUserSpace, createClientKeyInfo } from '../user'
 import { toMD5 } from '../utils'
 import { getComputerName } from '../../utils'
 import { SYNC_CODE } from '@common/constants_sync'
-import { PROJECT_IDENTITY } from '@common/projectIdentity'
 import { classifySyncClient } from '@common/runtimeIdentity'
+import { SYNC_PROTOCOLS, getSyncProtocol } from '@common/syncProtocol'
 
 const requestIps = new Map<string, number>()
 
@@ -31,8 +31,9 @@ const verifyByKey = (encryptMsg: string, userId: string) => {
     return null
   }
   // console.log(text)
-  if (text.startsWith(SYNC_CODE.authMsg)) {
-    const deviceName = text.replace(SYNC_CODE.authMsg, '') || 'Unknown'
+  const protocol = getSyncProtocol(keyInfo.syncProtocol)
+  if (text.startsWith(protocol.syncAuthPrefix)) {
+    const deviceName = text.replace(protocol.syncAuthPrefix, '') || 'Unknown'
     if (deviceName != keyInfo.deviceName) {
       keyInfo.deviceName = deviceName
       userSpace.dataManage.saveClientKeyInfo(keyInfo)
@@ -54,22 +55,23 @@ const verifyByCode = (encryptMsg: string, password: string) => {
     return null
   }
   // console.log(text)
-  if (text.startsWith(SYNC_CODE.authMsg)) {
-    const data = text.split('\n')
-    const publicKey = `-----BEGIN PUBLIC KEY-----\n${data[1]}\n-----END PUBLIC KEY-----`
-    const deviceName = data[2] || 'Unknown'
-    const client = classifySyncClient(data[3], PROJECT_IDENTITY)
-    if (!client) return null
-    const keyInfo = createClientKeyInfo(deviceName, client.isMobile)
-    const userSpace = getUserSpace()
-    userSpace.dataManage.saveClientKeyInfo(keyInfo)
-    return rsaEncrypt(Buffer.from(JSON.stringify({
-      clientId: keyInfo.clientId,
-      key: keyInfo.key,
-      serverName: getComputerName(),
-    })), publicKey)
-  }
-  return null
+  const data = text.split('\n')
+  const protocol = SYNC_PROTOCOLS.find(
+    candidate => data[0] === candidate.syncAuthPrefix,
+  )
+  if (!protocol) return null
+  const publicKey = `-----BEGIN PUBLIC KEY-----\n${data[1]}\n-----END PUBLIC KEY-----`
+  const deviceName = data[2] || 'Unknown'
+  const client = classifySyncClient(data[3], protocol)
+  if (!client) return null
+  const keyInfo = createClientKeyInfo(deviceName, client.isMobile, protocol.id)
+  const userSpace = getUserSpace()
+  userSpace.dataManage.saveClientKeyInfo(keyInfo)
+  return rsaEncrypt(Buffer.from(JSON.stringify({
+    clientId: keyInfo.clientId,
+    key: keyInfo.key,
+    serverName: getComputerName(),
+  })), publicKey)
 }
 
 export const authCode = async(req: http.IncomingMessage, res: http.ServerResponse, password: string) => {
@@ -115,7 +117,7 @@ const verifyConnection = (encryptMsg: string, userId: string) => {
     return false
   }
   // console.log(text)
-  return text == SYNC_CODE.msgConnect
+  return text == getSyncProtocol(keyInfo.syncProtocol).syncConnectMessage
 }
 export const authConnect = async(req: http.IncomingMessage) => {
   let ip = getAvailableIP(req)

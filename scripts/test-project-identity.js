@@ -76,6 +76,7 @@ const getRuntimeEntries = () => {
     '@common/constants_sync': syncConstants,
     '@common/projectIdentity': { PROJECT_IDENTITY },
     '@common/runtimeIdentity': runtimeIdentity,
+    '@common/syncProtocol': require('../src/common/syncProtocol'),
     '../../utils': { getComputerName: () => 'Test Server' },
     '../user': {
       createClientKeyInfo: userData.createClientKeyInfo,
@@ -87,13 +88,14 @@ const getRuntimeEntries = () => {
   return runtimeEntries = {
     ...syncAuth,
     parseEnvParams,
+    clients,
     syncConstants,
     syncTools,
     syncUtils,
   }
 }
 
-const createCodeAuthRequest = (clientType, remoteAddress) => {
+const createCodeAuthRequest = (protocol, clientType, remoteAddress) => {
   const { publicKey, privateKey } = generateKeyPairSync('rsa', {
     modulusLength: 2048,
     publicKeyEncoding: { type: 'spki', format: 'pem' },
@@ -104,10 +106,10 @@ const createCodeAuthRequest = (clientType, remoteAddress) => {
     .replace('-----END PUBLIC KEY-----', '')
     .replace(/\s/g, '')
   const password = 'identity-test-password'
-  const { syncConstants, syncTools, syncUtils } = getRuntimeEntries()
+  const { syncTools, syncUtils } = getRuntimeEntries()
   const key = Buffer.from(syncUtils.toMD5(password).substring(0, 16)).toString('base64')
   const plaintext = [
-    syncConstants.SYNC_CODE.authMsg,
+    protocol.syncAuthPrefix,
     publicKeyBody,
     'Test Client',
     clientType,
@@ -122,9 +124,10 @@ const createCodeAuthRequest = (clientType, remoteAddress) => {
   }
 }
 
-const performCodeAuth = async(clientType, remoteAddress) => {
+const performCodeAuth = async(protocol, clientType, remoteAddress) => {
   const { authCode, syncTools } = getRuntimeEntries()
-  const { password, privateKey, request } = createCodeAuthRequest(clientType, remoteAddress)
+  const { password, privateKey, request } =
+    createCodeAuthRequest(protocol, clientType, remoteAddress)
   let status
   let body
   await authCode(request, {
@@ -142,6 +145,23 @@ const performCodeAuth = async(clientType, remoteAddress) => {
       ? JSON.parse(syncTools.rsaDecrypt(Buffer.from(body, 'base64'), privateKey).toString())
       : null,
   }
+}
+
+const performCachedAuth = async(protocol, keyInfo, remoteAddress) => {
+  const { authCode, syncTools } = getRuntimeEntries()
+  let status
+  let body
+  await authCode({
+    headers: {
+      i: keyInfo.clientId,
+      m: syncTools.aesEncrypt(protocol.syncAuthPrefix + 'Test Client', keyInfo.key),
+    },
+    socket: { remoteAddress },
+  }, {
+    writeHead(value) { status = value },
+    end(value) { body = value },
+  }, 'unused')
+  return { status, body }
 }
 
 test('project identity contains the approved values', () => {
@@ -235,21 +255,21 @@ test('electron builder consumes the shared identity', () => {
 
 test('runtime identifiers are consumed from the shared identity', () => {
   const expectedImports = [
-    'src/common/constants.ts',
-    'src/common/constants_sync.ts',
-    'src/main/app.ts',
-    'src/main/modules/sync/client/auth.ts',
-    'src/main/modules/sync/server/server/auth.ts',
-    'src/main/modules/userApi/main.ts',
-    'src/renderer/core/useApp/useDeeplink/index.ts',
-    'src/renderer/utils/musicSdk/options.js',
-    'src/renderer/worker/main/music.ts',
+    ['src/common/constants.ts', /projectIdentity/],
+    ['src/common/constants_sync.ts', /projectIdentity/],
+    ['src/main/app.ts', /projectIdentity/],
+    ['src/main/modules/sync/client/auth.ts', /syncProtocol/],
+    ['src/main/modules/sync/server/server/auth.ts', /syncProtocol/],
+    ['src/main/modules/userApi/main.ts', /projectIdentity/],
+    ['src/renderer/core/useApp/useDeeplink/index.ts', /projectIdentity/],
+    ['src/renderer/utils/musicSdk/options.js', /projectIdentity/],
+    ['src/renderer/worker/main/music.ts', /projectIdentity/],
   ]
-  for (const relativePath of expectedImports) {
-    assert.match(read(relativePath), /projectIdentity/, relativePath)
+  for (const [relativePath, dependency] of expectedImports) {
+    assert.match(read(relativePath), dependency, relativePath)
   }
 
-  const productionSources = expectedImports.map(read).join('\n')
+  const productionSources = expectedImports.map(([relativePath]) => read(relativePath)).join('\n')
   for (const oldPattern of [
     /\blxmusic:\/\//,
     /(?<!starky_)\blx_music_desktop\b/,
@@ -336,41 +356,105 @@ test('parseEnvParams accepts only the current deep-link protocol', () => {
   )
 })
 
-test('authCode accepts current desktop and mobile identities', async() => {
-  const desktop = await performCodeAuth(PROJECT_IDENTITY.syncDesktopId, '127.0.0.11')
-  const mobile = await performCodeAuth(PROJECT_IDENTITY.syncMobileId, '127.0.0.12')
-
-  for (const result of [desktop, mobile]) {
+test('authCode accepts desktop and mobile clients from both sync protocols', async() => {
+  const cases = [
+    [CURRENT_SYNC_PROTOCOL, CURRENT_SYNC_PROTOCOL.syncDesktopId, false],
+    [CURRENT_SYNC_PROTOCOL, CURRENT_SYNC_PROTOCOL.syncMobileId, true],
+    [LEGACY_SYNC_PROTOCOL, LEGACY_SYNC_PROTOCOL.syncDesktopId, false],
+    [LEGACY_SYNC_PROTOCOL, LEGACY_SYNC_PROTOCOL.syncMobileId, true],
+  ]
+  for (const [index, [protocol, clientType, isMobile]] of cases.entries()) {
+    const result = await performCodeAuth(protocol, clientType, `127.0.1.${index + 1}`)
     assert.equal(result.status, 200)
-    assert.equal(typeof result.payload.clientId, 'string')
-    assert.equal(typeof result.payload.key, 'string')
-    assert.equal(result.payload.serverName, 'Test Server')
+    const stored = getRuntimeEntries().clients.get(result.payload.clientId)
+    assert.equal(stored.syncProtocol, protocol.id)
+    assert.equal(stored.isMobile, isMobile)
   }
 })
 
-test('authCode rejects legacy desktop and mobile identities', async() => {
-  const { syncConstants } = getRuntimeEntries()
-  for (const [index, clientType] of ['lx_music_desktop', 'lx_music_mobile'].entries()) {
-    const result = await performCodeAuth(clientType, `127.0.0.${20 + index}`)
+test('authCode rejects unknown and cross-profile client identities', async() => {
+  const cases = [
+    [CURRENT_SYNC_PROTOCOL, LEGACY_SYNC_PROTOCOL.syncDesktopId],
+    [LEGACY_SYNC_PROTOCOL, CURRENT_SYNC_PROTOCOL.syncDesktopId],
+    [LEGACY_SYNC_PROTOCOL, 'unknown'],
+  ]
+  for (const [index, [protocol, clientType]] of cases.entries()) {
+    const result = await performCodeAuth(protocol, clientType, `127.0.2.${index + 1}`)
     assert.equal(result.status, 401)
-    assert.equal(result.body, syncConstants.SYNC_CODE.msgAuthFailed)
     assert.equal(result.payload, null)
   }
 })
 
-test('authConnect accepts only the current connection message', async() => {
-  const { authConnect, syncTools } = getRuntimeEntries()
-  const authorized = await performCodeAuth(PROJECT_IDENTITY.syncDesktopId, '127.0.0.31')
-  const createRequest = (message, remoteAddress) => ({
-    socket: { remoteAddress },
-    url: `/socket?i=${encodeURIComponent(authorized.payload.clientId)}&t=${encodeURIComponent(syncTools.aesEncrypt(message, authorized.payload.key))}`,
-  })
+test('cached-key and WebSocket authentication follow the stored protocol', async() => {
+  const { authConnect, syncConstants, syncTools } = getRuntimeEntries()
+  for (const [index, protocol] of SYNC_PROTOCOLS.entries()) {
+    const authorized = await performCodeAuth(
+      protocol,
+      protocol.syncDesktopId,
+      `127.0.3.${index + 1}`,
+    )
+    const cached = await performCachedAuth(
+      protocol,
+      authorized.payload,
+      `127.0.4.${index + 1}`,
+    )
+    assert.equal(cached.status, 200)
+    assert.equal(
+      syncTools.aesDecrypt(cached.body, authorized.payload.key),
+      syncConstants.SYNC_CODE.helloMsg,
+    )
 
-  await assert.doesNotReject(
-    authConnect(createRequest(PROJECT_IDENTITY.syncConnectMessage, '127.0.0.32')),
+    const token = syncTools.aesEncrypt(protocol.syncConnectMessage, authorized.payload.key)
+    await assert.doesNotReject(authConnect({
+      socket: { remoteAddress: `127.0.5.${index + 1}` },
+      url: `/socket?i=${encodeURIComponent(authorized.payload.clientId)}&t=${encodeURIComponent(token)}`,
+    }))
+  }
+})
+
+test('legacy keys reject current cached and connection messages', async() => {
+  const { authConnect, syncTools } = getRuntimeEntries()
+  const authorized = await performCodeAuth(
+    LEGACY_SYNC_PROTOCOL,
+    LEGACY_SYNC_PROTOCOL.syncDesktopId,
+    '127.0.6.1',
   )
-  await assert.rejects(
-    authConnect(createRequest('lx-music connect', '127.0.0.33')),
-    /failed/,
+  const cached = await performCachedAuth(
+    CURRENT_SYNC_PROTOCOL,
+    authorized.payload,
+    '127.0.6.2',
   )
+  assert.equal(cached.status, 401)
+
+  const token = syncTools.aesEncrypt(
+    CURRENT_SYNC_PROTOCOL.syncConnectMessage,
+    authorized.payload.key,
+  )
+  await assert.rejects(authConnect({
+    socket: { remoteAddress: '127.0.6.3' },
+    url: `/socket?i=${encodeURIComponent(authorized.payload.clientId)}&t=${encodeURIComponent(token)}`,
+  }), /failed/)
+})
+
+test('unmarked server keys default to the current protocol', async() => {
+  const { clients } = getRuntimeEntries()
+  const authorized = await performCodeAuth(
+    CURRENT_SYNC_PROTOCOL,
+    CURRENT_SYNC_PROTOCOL.syncDesktopId,
+    '127.0.7.1',
+  )
+  delete clients.get(authorized.payload.clientId).syncProtocol
+
+  const current = await performCachedAuth(
+    CURRENT_SYNC_PROTOCOL,
+    authorized.payload,
+    '127.0.7.2',
+  )
+  const legacy = await performCachedAuth(
+    LEGACY_SYNC_PROTOCOL,
+    authorized.payload,
+    '127.0.7.3',
+  )
+  assert.equal(current.status, 200)
+  assert.equal(legacy.status, 401)
 })

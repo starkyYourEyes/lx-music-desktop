@@ -401,6 +401,46 @@ const testCleanupHasIndependentSettlementBudget = async() => {
   )
 }
 
+const testDestroyReusesCleanupPromise = async() => {
+  harness = createHarness()
+  harness.proxyGate.resolve()
+  const cleanupGate = deferred()
+  const cleanupCalls = {
+    auth: 0,
+    storage: 0,
+    cache: 0,
+  }
+  harness.loginSession.clearAuthCache = async() => {
+    cleanupCalls.auth++
+    await cleanupGate.promise
+  }
+  harness.loginSession.clearStorageData = async() => {
+    cleanupCalls.storage++
+    await cleanupGate.promise
+  }
+  harness.loginSession.clearCache = async() => {
+    cleanupCalls.cache++
+    await cleanupGate.promise
+  }
+  const authSession = await createSession(new AbortController(), {
+    cleanupTimeoutMs: 1_000,
+  })
+
+  const firstCleanup = authSession.destroy()
+  const repeatedCleanup = authSession.destroy()
+
+  assert.strictEqual(repeatedCleanup, firstCleanup)
+  assert.equal(harness.destroyCount, 1)
+  await settle()
+  assert.deepEqual(cleanupCalls, { auth: 1, storage: 1, cache: 1 })
+
+  cleanupGate.resolve()
+  await withWatchdog(firstCleanup, 250, 'partition cleanup did not settle')
+  assert.strictEqual(authSession.destroy(), firstCleanup)
+  assert.deepEqual(cleanupCalls, { auth: 1, storage: 1, cache: 1 })
+  assert.equal(harness.destroyCount, 1)
+}
+
 const testAbortDuringFrameDiscoveryDestroysOnce = async() => {
   harness = createHarness()
   harness.proxyGate.resolve()
@@ -705,6 +745,7 @@ const main = async() => {
   await testOneDeadlineIncludesProxySetup()
   await testStageSettlementAfterDeadlineCannotWin()
   await testCleanupHasIndependentSettlementBudget()
+  await testDestroyReusesCleanupPromise()
   await testAbortDuringFrameDiscoveryDestroysOnce()
   await testAbortDuringCaptureDestroysOnce()
   await testFatalLoadInterruptsHungCapture()

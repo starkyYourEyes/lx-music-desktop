@@ -508,12 +508,14 @@ export const createQQMusicBrowserAuthSession = async({
   const settlePartitionCleanup = async(): Promise<void> => {
     let timer: ReturnType<typeof setTimeout> | undefined
     const cleanup = Promise.allSettled([
-      Promise.resolve().then(() => loginSession.clearAuthCache()),
-      Promise.resolve().then(() => loginSession.clearStorageData()),
-      Promise.resolve().then(() => loginSession.clearCache()),
+      Promise.resolve().then(async() => loginSession.clearAuthCache()),
+      Promise.resolve().then(async() => loginSession.clearStorageData()),
+      Promise.resolve().then(async() => loginSession.clearCache()),
     ]).then(() => true)
     const timeout = new Promise<boolean>(resolve => {
-      timer = setTimeout(() => resolve(false), cleanupTimeoutMs)
+      timer = setTimeout(() => {
+        resolve(false)
+      }, cleanupTimeoutMs)
     })
     const completed = await Promise.race([cleanup, timeout])
     if (timer) clearTimeout(timer)
@@ -525,6 +527,8 @@ export const createQQMusicBrowserAuthSession = async({
     })
   }
 
+  // Async would wrap cleanupPromise and break the stable identity required for idempotent teardown.
+  // eslint-disable-next-line @typescript-eslint/promise-function-async
   const destroy = (): Promise<void> => {
     if (cleanupPromise) return cleanupPromise
     destroyed = true

@@ -41,16 +41,29 @@ test('application updater files and wiring are absent', () => {
     /showChangeLog/,
     /ignoreVersion/,
     /lastStartInfo/,
+    /quit_update/,
+    /update_download_update/,
     /update_(?:check|available|error|progress|downloaded|not_available)/,
   ]) assert.doesNotMatch(source, pattern)
 })
 
 test('application update translations and dependency are absent', () => {
   const pkg = require('../package.json')
-  assert.equal(Object.hasOwn(pkg.devDependencies, 'electron-updater'), false)
+  assert.equal(Object.hasOwn(pkg.devDependencies, 'electron-updater'), false, 'package.json devDependencies')
+  const lock = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'))
+  assert.ok(lock.packages && typeof lock.packages === 'object', 'package-lock.json must contain a packages map')
+  assert.equal(
+    Object.hasOwn(lock.packages, 'node_modules/electron-updater'),
+    false,
+    'package-lock.json packages map',
+  )
   for (const locale of ['en-us', 'zh-cn', 'zh-tw']) {
     const messages = JSON.parse(fs.readFileSync(path.join(root, `src/lang/${locale}.json`), 'utf8'))
-    const staleKeys = Object.keys(messages).filter(key => key.startsWith('update__') || key.startsWith('setting__update_'))
+    const staleKeys = Object.keys(messages).filter(key => (
+      key === 'setting__update' ||
+      key.startsWith('update__') ||
+      key.startsWith('setting__update_')
+    ))
     assert.deepEqual(staleKeys, [], locale)
   }
 })

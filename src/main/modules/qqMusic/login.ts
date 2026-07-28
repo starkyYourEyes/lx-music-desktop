@@ -34,7 +34,7 @@ interface LoginEntryBase {
   startedAt: number
   abortController: AbortController
   expiresAt: number
-  expiryTimer?: ReturnType<typeof setTimeout>
+  expiryTimer: ReturnType<typeof setTimeout>
 }
 
 interface PendingLoginEntry extends LoginEntryBase {
@@ -113,6 +113,14 @@ export const createQQMusicLoginService = ({
   const entries = new Map<string, LoginEntry>()
   const tombstones = new Map<string, number>()
 
+  const reportDiagnostic = (
+    event: QQMusicBrowserAuthDiagnostic | QQMusicLoginDiagnostic,
+  ) => {
+    try {
+      onDiagnostic(event)
+    } catch {}
+  }
+
   const pruneTombstones = () => {
     const currentTime = now()
     for (const [requestId, expiresAt] of tombstones) {
@@ -148,10 +156,20 @@ export const createQQMusicLoginService = ({
     })
   }
 
+  const destroyAuth = (auth: QQMusicBrowserAuthSession) => {
+    try {
+      trackCleanup(auth.destroy())
+    } catch {}
+  }
+
   const disposeDetachedEntry = (entry: LoginEntry) => {
-    if (entry.expiryTimer) clearTimer(entry.expiryTimer)
-    entry.abortController.abort()
-    if (entry.state == 'active') trackCleanup(entry.auth.destroy())
+    try {
+      clearTimer(entry.expiryTimer)
+    } catch {}
+    try {
+      entry.abortController.abort()
+    } catch {}
+    if (entry.state == 'active') destroyAuth(entry.auth)
   }
 
   const disposeEntry = (requestId: string) => {
@@ -168,18 +186,22 @@ export const createQQMusicLoginService = ({
   ): Promise<QQMusicLoginQr> => {
     assertRequestId(requestId)
     if (consumeTombstone(requestId)) {
-      onDiagnostic({ stage: 'cancelled', elapsedMs: 0 })
+      reportDiagnostic({ stage: 'cancelled', elapsedMs: 0 })
       throw new Error(CREATE_ERROR)
     }
 
     const deadlineAt = startedAt + createDeadlineMs
     const abortController = new AbortController()
+    const expiryTimer = setTimer(() => {
+      disposeEntry(requestId)
+    }, ttlMs)
     const pendingEntry: PendingLoginEntry = {
       state: 'pending',
       requestId,
       startedAt,
       abortController,
       expiresAt: now() + ttlMs,
+      expiryTimer,
     }
 
     const previousEntries = [...entries.entries()]
@@ -188,13 +210,13 @@ export const createQQMusicLoginService = ({
       if (entries.get(previousId) === previousEntry) entries.delete(previousId)
       disposeDetachedEntry(previousEntry)
     }
-    onDiagnostic({
+    reportDiagnostic({
       stage: 'session-registered',
       elapsedMs: Math.max(0, now() - startedAt),
     })
     if (now() >= deadlineAt) {
       disposeEntry(requestId)
-      onDiagnostic({
+      reportDiagnostic({
         stage: 'timed-out',
         elapsedMs: Math.max(0, now() - startedAt),
       })
@@ -232,16 +254,16 @@ export const createQQMusicLoginService = ({
         startedAt,
         deadlineAt,
         proxy: getProxy(),
-        onDiagnostic,
+        onDiagnostic: reportDiagnostic,
       })
     }).then(auth => {
       if (now() >= deadlineAt) {
-        trackCleanup(auth.destroy())
+        destroyAuth(auth)
         throw new Error(CREATE_TIMEOUT_ERROR)
       }
       if (entries.get(requestId) !== pendingEntry ||
         abortController.signal.aborted) {
-        trackCleanup(auth.destroy())
+        destroyAuth(auth)
         throw new Error(CREATE_ERROR)
       }
       return auth
@@ -259,17 +281,17 @@ export const createQQMusicLoginService = ({
       const timedOut = deadlineReached || now() >= deadlineAt
       if (entries.get(requestId) === pendingEntry) disposeEntry(requestId)
       if (timedOut) {
-        onDiagnostic({
+        reportDiagnostic({
           stage: 'timed-out',
           elapsedMs: Math.max(0, now() - startedAt),
         })
       } else if (wasCancelled) {
-        onDiagnostic({
+        reportDiagnostic({
           stage: 'cancelled',
           elapsedMs: Math.max(0, now() - startedAt),
         })
       } else {
-        onDiagnostic({
+        reportDiagnostic({
           stage: 'browser-auth-error',
           reason: 'create-failed',
           elapsedMs: Math.max(0, now() - startedAt),
@@ -283,9 +305,13 @@ export const createQQMusicLoginService = ({
 
     if (now() >= deadlineAt) {
       if (entries.get(requestId) === pendingEntry) disposeEntry(requestId)
-      else pendingEntry.abortController.abort()
-      trackCleanup(auth.destroy())
-      onDiagnostic({
+      else {
+        try {
+          pendingEntry.abortController.abort()
+        } catch {}
+      }
+      destroyAuth(auth)
+      reportDiagnostic({
         stage: 'timed-out',
         elapsedMs: Math.max(0, now() - startedAt),
       })
@@ -305,7 +331,7 @@ export const createQQMusicLoginService = ({
 
     if (entries.get(requestId) !== pendingEntry ||
       abortController.signal.aborted) {
-      trackCleanup(auth.destroy())
+      destroyAuth(auth)
       throw new Error(CREATE_ERROR)
     }
 
@@ -331,16 +357,19 @@ export const createQQMusicLoginService = ({
       result = await entry.auth.check()
     } catch {
       if (entries.get(requestId) !== entry) return EXPIRED_RESULT
-      disposeEntry(requestId)
-      onDiagnostic({
+      entry.consecutiveCheckFailures++
+      reportDiagnostic({
         stage: 'browser-auth-error',
         reason: 'check-failed',
         elapsedMs: Math.max(0, now() - entry.startedAt),
       })
-      throw new Error(CHECK_ERROR)
+      if (entry.consecutiveCheckFailures < 3) throw new Error(CHECK_ERROR)
+      disposeEntry(requestId)
+      return EXPIRED_RESULT
     }
 
     if (entries.get(requestId) !== entry) return EXPIRED_RESULT
+    entry.consecutiveCheckFailures = 0
     if (result.state == 'expired' || result.state == 'success') {
       disposeEntry(requestId)
     }
@@ -352,7 +381,7 @@ export const createQQMusicLoginService = ({
     const entry = entries.get(requestId)
     if (entry) {
       disposeEntry(requestId)
-      onDiagnostic({
+      reportDiagnostic({
         stage: 'cancelled',
         elapsedMs: Math.max(0, now() - entry.startedAt),
       })
@@ -361,9 +390,16 @@ export const createQQMusicLoginService = ({
     addTombstone(requestId)
   }
 
+  const disposeAll = async(): Promise<void> => {
+    for (const requestId of [...entries.keys()]) disposeEntry(requestId)
+    tombstones.clear()
+    await Promise.allSettled([...cleanupTasks])
+  }
+
   return {
     createLoginQr,
     checkLoginQr,
     cancelLoginQr,
+    disposeAll,
   }
 }

@@ -26,14 +26,13 @@ export const exportBackupFile = async({
   showError,
 }: BackupExportOptions): Promise<string | null> => {
   const finalPath = ensureBackupExportPath(selectedPath)
-  const allowOverwrite = finalPath == selectedPath
 
   try {
     const data = await createData()
     try {
-      return await saveFile(finalPath, data, { allowOverwrite })
+      return await saveFile(finalPath, data, { allowOverwrite: false })
     } catch (error) {
-      if (allowOverwrite || !isFileExistsError(error)) throw error
+      if (!isFileExistsError(error)) throw error
       if (!await confirmOverwrite(finalPath)) return null
       return await saveFile(finalPath, data, { allowOverwrite: true })
     }

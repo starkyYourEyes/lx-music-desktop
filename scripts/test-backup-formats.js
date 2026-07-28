@@ -155,27 +155,57 @@ test('declining derived-target overwrite preserves the existing file', async t =
   assert.deepEqual(await readLxConfigFile(finalPath), originalData)
 })
 
-test('an exact path confirmed by the native dialog may be overwritten', async t => {
+test('an exact path is overwritten only after current-target confirmation', async t => {
   const tempDir = await createTempDir(t)
   const selectedPath = path.join(tempDir, 'confirmed.slxmc')
   const replacementData = { type: 'setting_v2', data: { marker: 'replacement' } }
   await fs.promises.writeFile(selectedPath, gzipSync(JSON.stringify({ marker: 'original' })))
-  let confirmCount = 0
+  const confirmations = []
+  const saveOptions = []
 
   const result = await backupExportModule.exportBackupFile({
     selectedPath,
     createData: () => replacementData,
-    saveFile: saveLxConfigFile,
-    confirmOverwrite: async() => {
-      confirmCount++
+    saveFile: async(filePath, value, options) => {
+      saveOptions.push(options)
+      return saveLxConfigFile(filePath, value, options)
+    },
+    confirmOverwrite: async(filePath) => {
+      confirmations.push(filePath)
       return true
     },
     showError: error => assert.fail(error),
   })
 
   assert.equal(result, selectedPath)
-  assert.equal(confirmCount, 0)
+  assert.deepEqual(confirmations, [selectedPath])
+  assert.deepEqual(saveOptions, [{ allowOverwrite: false }, { allowOverwrite: true }])
   assert.deepEqual(await readLxConfigFile(selectedPath), replacementData)
+})
+
+test('a target created during data preparation is preserved when overwrite is declined', async t => {
+  const tempDir = await createTempDir(t)
+  const selectedPath = path.join(tempDir, 'concurrent.slxmc')
+  const originalData = { type: 'setting_v2', data: { marker: 'concurrent' } }
+  const confirmations = []
+
+  const result = await backupExportModule.exportBackupFile({
+    selectedPath,
+    createData: async() => {
+      await fs.promises.writeFile(selectedPath, gzipSync(JSON.stringify(originalData)))
+      return { type: 'setting_v2', data: { marker: 'replacement' } }
+    },
+    saveFile: saveLxConfigFile,
+    confirmOverwrite: async(filePath) => {
+      confirmations.push(filePath)
+      return false
+    },
+    showError: error => assert.fail(error),
+  })
+
+  assert.equal(result, null)
+  assert.deepEqual(confirmations, [selectedPath])
+  assert.deepEqual(await readLxConfigFile(selectedPath), originalData)
 })
 
 test('backup export failures are routed to a visible error handler', async t => {

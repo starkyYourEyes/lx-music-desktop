@@ -8,7 +8,7 @@ import log from '../log'
 import { arrRemove, dateFormat } from '@common/utils/common'
 import { aesEncrypt } from '../utils'
 import { sendClientStatus } from '@main/modules/winMain'
-import { createMsg2call } from 'message2call'
+import { createSyncRpc } from '@common/utils/syncRpc'
 import { SYNC_CLOSE_CODE, SYNC_CODE } from '@common/constants_sync'
 import { getAddress } from '@common/utils/nodejs'
 
@@ -162,7 +162,7 @@ export const connect = (urlInfo: LX.Sync.Client.UrlInfo, keyInfo: LX.Sync.Client
   let closeEvents: Array<(err: Error) => (void | Promise<void>)> = []
   let disconnected = true
 
-  const message2read = createMsg2call<LX.Sync.ServerSyncActions>({
+  const syncRpc = createSyncRpc<LX.Sync.ServerSyncActions>({
     funcsObj: {
       ...callObj,
       finished() {
@@ -200,11 +200,11 @@ export const connect = (urlInfo: LX.Sync.Client.UrlInfo, keyInfo: LX.Sync.Client
     },
   })
 
-  client.remote = message2read.remote
-  client.remoteQueueList = message2read.createQueueRemote('list')
-  client.remoteQueueDislike = message2read.createQueueRemote('dislike')
-  client.remoteQueueParty = message2read.createQueueRemote('party')
-  client.remoteQueueUserApi = message2read.createQueueRemote('userApi')
+  client.remote = syncRpc.remote
+  client.remoteQueueList = syncRpc.createQueueRemote('list')
+  client.remoteQueueDislike = syncRpc.createQueueRemote('dislike')
+  client.remoteQueueParty = syncRpc.createQueueRemote('party')
+  client.remoteQueueUserApi = syncRpc.createQueueRemote('userApi')
 
   client.addEventListener('message', ({ data }) => {
     if (data == 'ping') return
@@ -218,7 +218,7 @@ export const connect = (urlInfo: LX.Sync.Client.UrlInfo, keyInfo: LX.Sync.Client
           client?.close(SYNC_CLOSE_CODE.failed)
           return
         }
-        message2read.message(syncData)
+        syncRpc.message(syncData)
       }).catch((error) => {
         log.error('decrypt msg error: ', error)
         client?.close(SYNC_CLOSE_CODE.failed)
@@ -259,7 +259,7 @@ export const connect = (urlInfo: LX.Sync.Client.UrlInfo, keyInfo: LX.Sync.Client
     }
     closeEvents = []
     disconnected = true
-    message2read.destroy()
+    syncRpc.destroy()
     switch (code) {
       case SYNC_CLOSE_CODE.normal:
       // case SYNC_CLOSE_CODE.failed:

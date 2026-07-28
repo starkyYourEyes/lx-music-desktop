@@ -4,7 +4,7 @@ import { registerLocalSyncEvent, callObj, sync, unregisterLocalSyncEvent } from 
 import { authCode, authConnect } from './auth'
 import { SYNC_CLOSE_CODE, SYNC_CODE } from '@common/constants_sync'
 import { getUserSpace, releaseUserSpace, getServerId, initServerInfo } from '../user'
-import { createMsg2call } from 'message2call'
+import { createSyncRpc } from '@common/utils/syncRpc'
 import log from '../../log'
 import { sendServerStatus } from '@main/modules/winMain'
 import { decryptMsg, encryptMsg, generateCode as handleGenerateCode } from '../utils/tools'
@@ -178,7 +178,7 @@ const handleStartServer = async(port = 9527, ip = '0.0.0.0') => await new Promis
     // let events: Partial<{ [K in keyof LX.Sync.ActionSyncType]: Array<(data: LX.Sync.ActionSyncType[K]) => void> }> = {}
     let closeEvents: Array<(err: Error) => (void | Promise<void>)> = []
     let disconnected = false
-    const msg2call = createMsg2call<LX.Sync.ClientSyncActions>({
+    const syncRpc = createSyncRpc<LX.Sync.ClientSyncActions>({
       funcsObj: callObj,
       timeout: 120 * 1000,
       sendMessage(data) {
@@ -203,10 +203,10 @@ const handleStartServer = async(port = 9527, ip = '0.0.0.0') => await new Promis
         // socket.close(SYNC_CLOSE_CODE.failed)
       },
     })
-    socket.remote = msg2call.remote
-    socket.remoteQueueList = msg2call.createQueueRemote('list')
-    socket.remoteQueueDislike = msg2call.createQueueRemote('dislike')
-    socket.remoteQueueUserApi = msg2call.createQueueRemote('userApi')
+    socket.remote = syncRpc.remote
+    socket.remoteQueueList = syncRpc.createQueueRemote('list')
+    socket.remoteQueueDislike = syncRpc.createQueueRemote('dislike')
+    socket.remoteQueueUserApi = syncRpc.createQueueRemote('userApi')
     socket.addEventListener('message', ({ data }) => {
       if (typeof data != 'string') return
       void decryptMsg(socket.keyInfo, data).then((data) => {
@@ -218,7 +218,7 @@ const handleStartServer = async(port = 9527, ip = '0.0.0.0') => await new Promis
           socket.close(SYNC_CLOSE_CODE.failed)
           return
         }
-        msg2call.message(syncData)
+        syncRpc.message(syncData)
       }).catch(err => {
         log.error('decrypt message error:', err)
         log.error(err.message)
@@ -234,7 +234,7 @@ const handleStartServer = async(port = 9527, ip = '0.0.0.0') => await new Promis
       }
       closeEvents = []
       disconnected = true
-      msg2call.destroy()
+      syncRpc.destroy()
       if (socket.isReady) {
         log.info('deconnection', socket.userInfo.name, socket.keyInfo.deviceName)
         // events = {}

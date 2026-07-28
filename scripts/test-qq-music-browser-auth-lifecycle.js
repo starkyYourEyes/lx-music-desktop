@@ -19,6 +19,20 @@ const settle = async() => {
   await new Promise(resolve => setImmediate(resolve))
 }
 
+const withWatchdog = async(promise, timeoutMs, message) => {
+  let timer
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 let harness
 
 class FakeBrowserWindow extends EventEmitter {
@@ -276,6 +290,408 @@ const testExpiredCreationObservesLateProxyRejection = async() => {
   }
 }
 
+const testFatalMainFrameFailureExpiresCapturedQr = async() => {
+  harness = createHarness()
+  harness.proxyGate.resolve()
+  const authSession = await createSession(new AbortController())
+
+  harness.webContents.emit(
+    'did-fail-load',
+    {},
+    -105,
+    'ERR_NAME_NOT_RESOLVED',
+    'https://graph.qq.com/oauth2.0/show',
+    true,
+  )
+  await settle()
+
+  assert.deepEqual(await authSession.check(), {
+    state: 'expired',
+    message: '二维码已失效，请重新获取',
+  })
+  assert.equal(harness.destroyCount, 1)
+}
+
+const testAbortDuringProxySetupDestroysOnce = async() => {
+  harness = createHarness()
+  const controller = new AbortController()
+  const pending = createSession(controller)
+  await settle()
+  controller.abort()
+  await assert.rejects(pending, /QQ Music login QR creation failed/)
+  assert.equal(harness.destroyCount, 1)
+  harness.proxyGate.resolve()
+  await settle()
+  assert.equal(harness.destroyCount, 1)
+}
+
+const testOneDeadlineIncludesProxySetup = async() => {
+  harness = createHarness()
+  const startedAt = Date.now()
+  const pending = auth.createQQMusicBrowserAuthSession({
+    signal: new AbortController().signal,
+    startedAt,
+    deadlineAt: startedAt + 25,
+    proxy: null,
+    cleanupTimeoutMs: 10,
+    onDiagnostic: event => harness.events.push(event.stage),
+  })
+
+  await assert.rejects(pending, /QQ Music login QR creation failed/)
+  assert.equal(harness.destroyCount, 1)
+  assert.equal(harness.events.includes('timed-out'), true)
+  harness.proxyGate.resolve()
+}
+
+const testStageSettlementAfterDeadlineCannotWin = async() => {
+  harness = createHarness()
+  const originalNow = Date.now
+  let now = 100
+  Date.now = () => now
+  try {
+    const pending = auth.createQQMusicBrowserAuthSession({
+      signal: new AbortController().signal,
+      startedAt: 100,
+      deadlineAt: 10_100,
+      proxy: null,
+      cleanupTimeoutMs: 10,
+      onDiagnostic: event => harness.events.push(event.stage),
+    })
+    await settle()
+    assert.equal(harness.events.includes('proxy-direct-started'), true)
+
+    now = 10_101
+    harness.proxyGate.resolve()
+    await assert.rejects(pending, /QQ Music login QR creation failed/)
+    assert.equal(harness.events.includes('navigation-started'), false)
+    assert.equal(harness.events.includes('timed-out'), true)
+    assert.equal(harness.destroyCount, 1)
+  } finally {
+    Date.now = originalNow
+  }
+}
+
+const testCleanupHasIndependentSettlementBudget = async() => {
+  harness = createHarness()
+  harness.proxyGate.resolve()
+  harness.loginSession.clearAuthCache = () => new Promise(() => {})
+  harness.loginSession.clearStorageData = () => new Promise(() => {})
+  harness.loginSession.clearCache = () => new Promise(() => {})
+  const diagnostics = []
+  const authSession = await createSession(new AbortController(), {
+    cleanupTimeoutMs: 15,
+    onDiagnostic: event => diagnostics.push(event),
+  })
+
+  const startedAt = Date.now()
+  await withWatchdog(
+    authSession.destroy(),
+    250,
+    'partition cleanup did not settle within its test budget',
+  )
+  assert.ok(Date.now() - startedAt < 250)
+  assert.equal(harness.destroyCount, 1)
+  assert.equal(
+    diagnostics.some(event => event.stage == 'partition-cleanup-timed-out'),
+    true,
+  )
+  assert.doesNotMatch(
+    JSON.stringify(diagnostics),
+    /https?:|base64|cookie|qq-music-login:|authorizeUrl|target/i,
+  )
+}
+
+const testAbortDuringFrameDiscoveryDestroysOnce = async() => {
+  harness = createHarness()
+  harness.proxyGate.resolve()
+  harness.webContents.mainFrame.frames = []
+  const controller = new AbortController()
+  const pending = createSession(controller)
+  await settle()
+  assert.equal(harness.events.includes('navigation-started'), true)
+
+  controller.abort()
+  await assert.rejects(pending, /QQ Music login QR creation failed/)
+  assert.equal(harness.destroyCount, 1)
+}
+
+const testAbortDuringCaptureDestroysOnce = async() => {
+  harness = createHarness()
+  harness.proxyGate.resolve()
+  const capture = deferred()
+  harness.webContents.capturePage = () => capture.promise
+  const controller = new AbortController()
+  const pending = createSession(controller)
+  await settle()
+  assert.equal(harness.events.includes('qr-image-ready'), true)
+
+  controller.abort()
+  await assert.rejects(pending, /QQ Music login QR creation failed/)
+  assert.equal(harness.destroyCount, 1)
+  capture.resolve({
+    isEmpty: () => false,
+    toDataURL: () => 'data:image/png;base64,late',
+  })
+  await settle()
+  assert.equal(harness.destroyCount, 1)
+}
+
+const testFatalLoadInterruptsHungCapture = async() => {
+  harness = createHarness()
+  harness.proxyGate.resolve()
+  const capture = deferred()
+  harness.webContents.capturePage = () => capture.promise
+  const pending = createSession(new AbortController())
+  await settle()
+  assert.equal(harness.events.includes('qr-image-ready'), true)
+
+  harness.webContents.emit(
+    'did-fail-load',
+    {},
+    -105,
+    'ERR_NAME_NOT_RESOLVED',
+    'https://graph.qq.com/oauth2.0/show',
+    true,
+  )
+  await assert.rejects(pending, /QQ Music login QR creation failed/)
+  assert.equal(harness.destroyCount, 1)
+  capture.resolve({
+    isEmpty: () => false,
+    toDataURL: () => 'data:image/png;base64,late',
+  })
+}
+
+const testExpectedInitialAbortEventIsOneShot = async() => {
+  harness = createHarness()
+  harness.proxyGate.resolve()
+  const authSession = await createSession(new AbortController())
+  harness.webContents.emit(
+    'will-redirect',
+    { preventDefault() {} },
+    'https://graph.qq.com/oauth2.0/authorize',
+    false,
+    true,
+  )
+  harness.webContents.emit(
+    'did-fail-load',
+    {},
+    -3,
+    'ERR_ABORTED',
+    'https://graph.qq.com/oauth2.0/show',
+    true,
+  )
+  await settle()
+  assert.equal((await authSession.check()).state, 'waiting')
+  assert.equal(harness.destroyCount, 0)
+
+  const error = new Error('ERR_ABORTED')
+  error.code = 'ERR_ABORTED'
+  error.errno = -3
+  harness.navigation.reject(error)
+  await settle()
+  assert.equal((await authSession.check()).state, 'waiting')
+
+  harness.webContents.emit(
+    'did-fail-load',
+    {},
+    -3,
+    'ERR_ABORTED',
+    'https://graph.qq.com/oauth2.0/show',
+    true,
+  )
+  await settle()
+  assert.equal((await authSession.check()).state, 'expired')
+  assert.equal(harness.destroyCount, 1)
+}
+
+const testSubframeCannotArmInitialAbortExemption = async() => {
+  harness = createHarness()
+  harness.proxyGate.resolve()
+  const authSession = await createSession(new AbortController())
+  harness.webContents.emit('will-frame-navigate', {
+    preventDefault() {},
+    url: 'https://graph.qq.com/oauth2.0/authorize',
+    isMainFrame: false,
+  })
+  const error = new Error('ERR_ABORTED')
+  error.code = 'ERR_ABORTED'
+  error.errno = -3
+  harness.navigation.reject(error)
+  await settle()
+
+  assert.equal((await authSession.check()).state, 'expired')
+  assert.equal(harness.destroyCount, 1)
+}
+
+const testUnexpectedWindowCloseIsTerminal = async() => {
+  harness = createHarness()
+  harness.proxyGate.resolve()
+  const authSession = await createSession(new AbortController())
+  harness.window.emit('closed')
+  await settle()
+
+  assert.equal((await authSession.check()).state, 'expired')
+  assert.equal(harness.destroyCount, 1)
+}
+
+const testTerminalDuringCookieReadCannotReturnCredentials = async() => {
+  harness = createHarness()
+  harness.proxyGate.resolve()
+  const cookieGate = deferred()
+  let cookieReads = 0
+  harness.loginSession.cookies.get = async() => {
+    cookieReads++
+    return cookieGate.promise
+  }
+  const authSession = await createSession(new AbortController())
+  const checking = authSession.check()
+  await Promise.resolve()
+  assert.equal(cookieReads, 1)
+
+  harness.webContents.emit(
+    'did-fail-load',
+    {},
+    -105,
+    'ERR_NAME_NOT_RESOLVED',
+    'https://graph.qq.com/oauth2.0/show',
+    true,
+  )
+  cookieGate.resolve([
+    { name: 'uin', value: 'o123', domain: '.qq.com' },
+    { name: 'qqmusic_key', value: 'must-not-escape', domain: '.qq.com' },
+  ])
+  const result = await checking
+
+  assert.deepEqual(result, {
+    state: 'expired',
+    message: '二维码已失效，请重新获取',
+  })
+  assert.equal(Object.hasOwn(result, 'cookie'), false)
+  assert.doesNotMatch(JSON.stringify(result), /must-not-escape/)
+  assert.equal(harness.destroyCount, 1)
+}
+
+const testTerminalDuringCookieRejectionIsExpired = async() => {
+  harness = createHarness()
+  harness.proxyGate.resolve()
+  const cookieGate = deferred()
+  harness.loginSession.cookies.get = async() => cookieGate.promise
+  const authSession = await createSession(new AbortController())
+  const checking = authSession.check()
+  await Promise.resolve()
+
+  harness.webContents.emit(
+    'did-fail-load',
+    {},
+    -105,
+    'ERR_NAME_NOT_RESOLVED',
+    'https://graph.qq.com/oauth2.0/show',
+    true,
+  )
+  cookieGate.reject(new Error('must-not-escape'))
+  const result = await checking
+
+  assert.deepEqual(result, {
+    state: 'expired',
+    message: '二维码已失效，请重新获取',
+  })
+  assert.doesNotMatch(JSON.stringify(result), /must-not-escape/)
+  assert.equal(harness.destroyCount, 1)
+}
+
+const testTerminalDuringFrameStateRejectionIsExpired = async() => {
+  harness = createHarness()
+  harness.proxyGate.resolve()
+  const authSession = await createSession(new AbortController())
+  const stateGate = deferred()
+  let stateReads = 0
+  harness.frame.executeJavaScript = async() => {
+    stateReads++
+    return stateGate.promise
+  }
+  const checking = authSession.check()
+  await settle()
+  assert.equal(stateReads, 1)
+
+  harness.webContents.emit(
+    'did-fail-load',
+    {},
+    -105,
+    'ERR_NAME_NOT_RESOLVED',
+    'https://graph.qq.com/oauth2.0/show',
+    true,
+  )
+  stateGate.reject(new Error('detached status frame'))
+  const result = await checking
+
+  assert.deepEqual(result, {
+    state: 'expired',
+    message: '二维码已失效，请重新获取',
+  })
+  assert.equal(harness.destroyCount, 1)
+}
+
+const testCleanupSyncThrowIsContained = async() => {
+  harness = createHarness()
+  harness.proxyGate.resolve()
+  const diagnostics = []
+  let storageCalls = 0
+  let cacheCalls = 0
+  harness.loginSession.clearAuthCache = () => {
+    throw new Error('synchronous cleanup failure')
+  }
+  harness.loginSession.clearStorageData = async() => {
+    storageCalls++
+  }
+  harness.loginSession.clearCache = async() => {
+    cacheCalls++
+  }
+  const authSession = await createSession(new AbortController(), {
+    onDiagnostic: event => diagnostics.push(event),
+  })
+
+  await withWatchdog(
+    authSession.destroy(),
+    250,
+    'synchronous cleanup throw escaped bounded settlement',
+  )
+  assert.equal(storageCalls, 1)
+  assert.equal(cacheCalls, 1)
+  assert.equal(
+    diagnostics.some(event => event.stage == 'partition-cleanup-completed'),
+    true,
+  )
+  assert.doesNotMatch(
+    JSON.stringify(diagnostics),
+    /synchronous cleanup failure/,
+  )
+  assert.equal(harness.destroyCount, 1)
+}
+
+const testCancellationThenLoadRejectionStaysNonterminal = async() => {
+  harness = createHarness()
+  harness.proxyGate.resolve()
+  const diagnostics = []
+  const controller = new AbortController()
+  const authSession = await createSession(controller, {
+    onDiagnostic: event => diagnostics.push(event),
+  })
+
+  controller.abort()
+  const error = new Error('ERR_ABORTED')
+  error.code = 'ERR_ABORTED'
+  error.errno = -3
+  harness.navigation.reject(error)
+  await settle()
+
+  assert.equal(
+    diagnostics.some(event => event.stage == 'terminal-failure'),
+    false,
+  )
+  assert.equal((await authSession.check()).state, 'expired')
+  assert.equal(harness.destroyCount, 1)
+}
+
 const main = async() => {
   await testProxyPrecedesNavigation()
   await testDirectModePrecedesNavigation()
@@ -284,6 +700,22 @@ const main = async() => {
   await testTransientFrameDetachKeepsDiscovering()
   await testPreCancelledCreationObservesLateProxyRejection()
   await testExpiredCreationObservesLateProxyRejection()
+  await testFatalMainFrameFailureExpiresCapturedQr()
+  await testAbortDuringProxySetupDestroysOnce()
+  await testOneDeadlineIncludesProxySetup()
+  await testStageSettlementAfterDeadlineCannotWin()
+  await testCleanupHasIndependentSettlementBudget()
+  await testAbortDuringFrameDiscoveryDestroysOnce()
+  await testAbortDuringCaptureDestroysOnce()
+  await testFatalLoadInterruptsHungCapture()
+  await testExpectedInitialAbortEventIsOneShot()
+  await testSubframeCannotArmInitialAbortExemption()
+  await testUnexpectedWindowCloseIsTerminal()
+  await testTerminalDuringCookieReadCannotReturnCredentials()
+  await testTerminalDuringCookieRejectionIsExpired()
+  await testTerminalDuringFrameStateRejectionIsExpired()
+  await testCleanupSyncThrowIsContained()
+  await testCancellationThenLoadRejectionStaysNonterminal()
   console.log('QQ Music browser auth lifecycle tests passed')
 }
 

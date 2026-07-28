@@ -139,5 +139,20 @@ assert.strictEqual(
 assert.match(browserAuthSource, /configureSessionProxy/)
 assert.match(browserAuthSource, /deadlineAt/)
 assert.doesNotMatch(browserAuthSource, /await\s+withTimeout\(win\.loadURL/)
+assert.equal(
+  browserAuth.isQQMusicPortalLanding('https://y.qq.com/?from=oauth'),
+  true,
+)
+assert.equal(
+  browserAuth.isQQMusicPortalLanding('https://y.qq.com.evil.example/'),
+  false,
+)
+assert.match(browserAuthSource, /did-fail-load/)
+assert.match(browserAuthSource, /partition-cleanup-timed-out/)
+assert.match(browserAuthSource, /signal\.addEventListener\('abort'/)
+assert.doesNotMatch(
+  browserAuthSource,
+  /onDiagnostic\(\{[\s\S]{0,240}\b(?:validatedURL|errorDescription|authorizeUrl|partition|target|value)\s*(?::|,|\})[\s\S]{0,240}\}\)/,
+)
 
 console.log('QQ Music browser auth helper tests passed')

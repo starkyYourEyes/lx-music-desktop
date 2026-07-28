@@ -205,12 +205,17 @@ export const getQQMusicBrowserCookie = (cookies: CookieLike[]): string => {
   return [...values.values()].join('; ')
 }
 
-const getSafePageTarget = (value: string): string => {
+export const isQQMusicPortalLanding = (value: string): boolean => {
   try {
     const url = new URL(value)
-    return `${url.origin}${url.pathname}`
+    return url.protocol == 'https:' &&
+      url.hostname == 'y.qq.com' &&
+      url.pathname == '/' &&
+      !url.username &&
+      !url.password &&
+      (!url.port || url.port == '443')
   } catch {
-    return ''
+    return false
   }
 }
 
@@ -395,11 +400,21 @@ export const createQQMusicBrowserAuthSession = async({
   }
 
   let terminalReason: QQMusicBrowserAuthTerminalReason | null = null
+  const creationController = new AbortController()
+  let initialAbortEventObserved = false
+
   const markTerminal = (reason: QQMusicBrowserAuthTerminalReason) => {
-    if (!terminalReason) terminalReason = reason
+    if (terminalReason) return
+    terminalReason = reason
+    onDiagnostic({
+      stage: 'terminal-failure',
+      elapsedMs: Math.max(0, Date.now() - startedAt),
+      reason,
+    })
+    creationController.abort()
+    void destroy().catch(() => {})
   }
 
-  void cleanupTimeoutMs
   const partition = `qq-music-login:${crypto.randomUUID()}`
   const loginSession = session.fromPartition(partition, { cache: false })
   loginSession.setPermissionRequestHandler((_webContents, _permission, resolve) => {
@@ -426,6 +441,7 @@ export const createQQMusicBrowserAuthSession = async({
     },
   })
   let destroyed = false
+  let cleanupPromise: Promise<void> | null = null
   let callbackReached = false
   const authorizeUrl = createQQMusicAuthorizeUrl(crypto.randomUUID())
   let initialLoadPending = false
@@ -448,8 +464,7 @@ export const createQQMusicBrowserAuthSession = async({
       return
     }
     event.preventDefault()
-    const target = getSafePageTarget(value)
-    if (target == 'https://y.qq.com/') return
+    if (isQQMusicPortalLanding(value)) return
     markTerminal('blocked-navigation')
   }
 
@@ -466,31 +481,87 @@ export const createQQMusicBrowserAuthSession = async({
   ) => {
     inspectNavigation(event, event.url, event.isMainFrame)
   }
+  const handleLoadFailure = (
+    _event: Electron.Event,
+    errorCode: number,
+    _errorDescription: string,
+    _validatedURL: string,
+    isMainFrame: boolean,
+  ) => {
+    if (!isMainFrame) return
+    if (errorCode == -3 &&
+      initialLoadPending &&
+      sawAllowedSupersedingNavigation &&
+      !initialAbortEventObserved) {
+      initialAbortEventObserved = true
+      return
+    }
+    markTerminal('main-frame-load-failed')
+  }
+  const handleAttachWebview = (event: Electron.Event) => {
+    event.preventDefault()
+  }
+  const handleWindowClosed = () => {
+    if (!destroyed) markTerminal('window-destroyed')
+  }
+
+  const settlePartitionCleanup = async(): Promise<void> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const cleanup = Promise.allSettled([
+      Promise.resolve().then(() => loginSession.clearAuthCache()),
+      Promise.resolve().then(() => loginSession.clearStorageData()),
+      Promise.resolve().then(() => loginSession.clearCache()),
+    ]).then(() => true)
+    const timeout = new Promise<boolean>(resolve => {
+      timer = setTimeout(() => resolve(false), cleanupTimeoutMs)
+    })
+    const completed = await Promise.race([cleanup, timeout])
+    if (timer) clearTimeout(timer)
+    onDiagnostic({
+      stage: completed
+        ? 'partition-cleanup-completed'
+        : 'partition-cleanup-timed-out',
+      elapsedMs: Math.max(0, Date.now() - startedAt),
+    })
+  }
+
+  const destroy = (): Promise<void> => {
+    if (cleanupPromise) return cleanupPromise
+    destroyed = true
+    creationController.abort()
+    signal.removeEventListener('abort', handleAbort)
+    unregisterNavigationGuard()
+    win.webContents.removeListener('did-fail-load', handleLoadFailure)
+    win.webContents.removeListener('will-navigate', handleNavigation)
+    win.webContents.removeListener('will-redirect', handleNavigation)
+    win.webContents.removeListener('will-frame-navigate', handleFrameNavigation)
+    win.webContents.removeListener('will-attach-webview', handleAttachWebview)
+    win.removeListener('closed', handleWindowClosed)
+    if (!win.isDestroyed()) win.destroy()
+    cleanupPromise = settlePartitionCleanup()
+    return cleanupPromise
+  }
+
+  const handleAbort = () => {
+    creationController.abort()
+    void destroy().catch(() => {})
+  }
 
   win.webContents.on('will-navigate', handleNavigation)
   win.webContents.on('will-redirect', handleNavigation)
   win.webContents.on('will-frame-navigate', handleFrameNavigation)
+  win.webContents.on('did-fail-load', handleLoadFailure)
+  win.webContents.on('will-attach-webview', handleAttachWebview)
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  win.webContents.on('will-attach-webview', event => {
-    event.preventDefault()
-  })
+  win.on('closed', handleWindowClosed)
 
-  const destroy = async() => {
-    if (destroyed) return
-    destroyed = true
-    unregisterNavigationGuard()
-    if (!win.isDestroyed()) win.destroy()
-    await Promise.allSettled([
-      loginSession.clearAuthCache(),
-      loginSession.clearStorageData(),
-      loginSession.clearCache(),
-    ])
-  }
+  if (signal.aborted) handleAbort()
+  else signal.addEventListener('abort', handleAbort, { once: true })
 
   try {
     await waitWithinCreation(
       configureSessionProxy(loginSession, proxy),
-      signal,
+      creationController.signal,
       deadlineAt,
     )
     emit('proxy-configured')
@@ -502,6 +573,7 @@ export const createQQMusicBrowserAuthSession = async({
       () => {
         initialLoadPending = false
         sawAllowedSupersedingNavigation = false
+        initialAbortEventObserved = false
       },
       error => {
         const expectedAbort = isExpectedAllowedNavigationAbort(
@@ -510,29 +582,53 @@ export const createQQMusicBrowserAuthSession = async({
         )
         initialLoadPending = false
         sawAllowedSupersedingNavigation = false
+        initialAbortEventObserved = false
+        if (destroyed || creationController.signal.aborted) return
         if (!expectedAbort) markTerminal('main-frame-load-failed')
       },
     )
 
     const qrimg = await captureQrImage({
       win,
-      signal,
+      signal: creationController.signal,
       deadlineAt,
       getTerminalReason: () => terminalReason,
       emit,
     })
 
+    const expiredCheck = (): QQMusicBrowserAuthCheck => ({
+      state: 'expired',
+      message: '二维码已失效，请重新获取',
+    })
+
+    const isTerminal = () => {
+      return destroyed || win.isDestroyed() || terminalReason != null
+    }
+
     const check = async(): Promise<QQMusicBrowserAuthCheck> => {
-      if (destroyed || win.isDestroyed() || terminalReason) {
-        throw new Error('browser-auth-unavailable')
+      if (isTerminal()) return expiredCheck()
+      let cookies: Electron.Cookie[]
+      try {
+        cookies = await loginSession.cookies.get({ url: MUSIC_COOKIE_URL })
+      } catch (error) {
+        if (isTerminal()) return expiredCheck()
+        throw error
       }
-      const cookies = await loginSession.cookies.get({ url: MUSIC_COOKIE_URL })
+      if (isTerminal()) return expiredCheck()
+
       const cookie = getQQMusicBrowserCookie(cookies)
       if (getQQMusicAccountUin(cookie)) {
         return { state: 'success', message: '登录成功', cookie }
       }
       if (callbackReached) return { state: 'scanned', message: '正在完成 QQ 音乐登录' }
-      const state = await getFrameLoginState(win)
+      let state: FrameLoginState
+      try {
+        state = await getFrameLoginState(win)
+      } catch (error) {
+        if (isTerminal()) return expiredCheck()
+        throw error
+      }
+      if (isTerminal()) return expiredCheck()
       if (state == 'expired') return { state, message: '二维码已过期' }
       if (state == 'scanned') return { state, message: '等待手机确认' }
       return { state: 'waiting', message: '等待扫码' }
@@ -543,7 +639,9 @@ export const createQQMusicBrowserAuthSession = async({
     const reason = error instanceof QQMusicBrowserCreateError
       ? error.reason
       : 'failed'
-    if (reason == 'cancelled') {
+    if (terminalReason) {
+      // markTerminal already emitted the fixed terminal reason.
+    } else if (reason == 'cancelled') {
       onDiagnostic({
         stage: 'cancelled',
         elapsedMs: Math.max(0, Date.now() - startedAt),
@@ -553,14 +651,14 @@ export const createQQMusicBrowserAuthSession = async({
         stage: 'timed-out',
         elapsedMs: Math.max(0, Date.now() - startedAt),
       })
-    } else {
+    } else if (!terminalReason) {
       onDiagnostic({
         stage: 'terminal-failure',
         elapsedMs: Math.max(0, Date.now() - startedAt),
-        reason: terminalReason ?? 'qr-capture-failed',
+        reason: 'qr-capture-failed',
       })
     }
-    await destroy()
+    void destroy().catch(() => {})
     throw new Error(CREATE_ERROR)
   }
 }

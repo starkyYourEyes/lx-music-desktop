@@ -297,6 +297,8 @@ const fetchData = async(url, method, {
   }
   return request(url, {
     ...options,
+    use_proxy_from_env_var: false,
+    parse: false,
     method,
     headers: Object.assign({}, defaultHeaders, headers),
     timeout,

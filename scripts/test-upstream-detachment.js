@@ -14,6 +14,8 @@ const legacySupportUrlRxp = /lyswhut\.github|github\.com\/lyswhut|lxmusic\.tosid
 const runtimeSupportMappings = [
   {
     file: 'src/renderer/views/Setting/components/SettingAbout.vue',
+    importFragment: 'import { PROJECT_IDENTITY } from \'@common/projectIdentity\'',
+    bindingFragment: 'projectIdentity: PROJECT_IDENTITY',
     linkFragments: [
       'span.hover.underline(:aria-label="$t(\'setting__click_open\')" @click="openUrl(projectIdentity.repositoryUrl + \'#readme\')") {{ projectIdentity.repositoryUrl }}',
       'span.hover.underline(:aria-label="$t(\'setting__click_open\')" @click="openUrl(projectIdentity.releasesUrl)") GitHub Releases',
@@ -25,40 +27,50 @@ const runtimeSupportMappings = [
   },
   {
     file: 'src/renderer/components/layout/PactModal.vue',
+    importFragment: 'import { PROJECT_IDENTITY } from \'@common/projectIdentity\'',
+    bindingFragment: 'projectIdentity: PROJECT_IDENTITY',
     linkFragments: [
       '<span class="hover underline" @click="openUrl(projectIdentity.repositoryUrl + \'#readme\')">GitHub</span>',
     ],
   },
   {
     file: 'src/renderer/views/Setting/components/UserApiModal.vue',
+    importFragment: 'import { PROJECT_IDENTITY } from \'@common/projectIdentity\'',
+    bindingFragment: 'projectIdentity: PROJECT_IDENTITY',
     linkFragments: [
       'span.hover.underline(:aria-label="projectIdentity.repositoryUrl + \'#readme\'" @click="handleOpenUrl(projectIdentity.repositoryUrl + \'#readme\')") 项目说明',
     ],
   },
   {
     file: 'src/renderer/views/Setting/components/SettingSync/index.vue',
+    importFragment: 'import { PROJECT_IDENTITY } from \'@common/projectIdentity\'',
+    bindingFragment: 'projectIdentity: PROJECT_IDENTITY',
     linkFragments: [
       'button(class="help-btn" :aria-label="$t(\'setting__sync_tip\')" @click="openUrl(projectIdentity.repositoryUrl + \'#readme\')")',
     ],
   },
   {
     file: 'src/renderer/views/Setting/components/SettingOpenAPI.vue',
+    importFragment: 'import { PROJECT_IDENTITY } from \'@common/projectIdentity\'',
+    bindingFragment: 'projectIdentity: PROJECT_IDENTITY',
     linkFragments: [
       'strong.hover.underline(:aria-label="projectIdentity.repositoryUrl + \'#readme\'" @click="openUrl(projectIdentity.repositoryUrl + \'#readme\')") {{ $t(\'setting__open_api_tip_link\') }}',
     ],
   },
   {
     file: 'src/renderer/views/songList/List/components/OpenListModal.vue',
+    importFragment: 'import { PROJECT_IDENTITY } from \'@common/projectIdentity\'',
+    bindingFragment: 'const projectIdentity = PROJECT_IDENTITY',
     linkFragments: [
       '<span class="hover underline" :aria-label="projectIdentity.repositoryUrl + \'#readme\'" @click="openUrl(projectIdentity.repositoryUrl + \'#readme\')" >项目说明</span>',
     ],
   },
 ]
 
-const assertRuntimeSupportMapping = ({ file, linkFragments }, source) => {
+const assertRuntimeSupportMapping = ({ file, importFragment, bindingFragment, linkFragments }, source) => {
   const normalizedSource = normalizeMarkup(source)
-  assert.match(source, /\bPROJECT_IDENTITY\b/, `${file}: shared identity import`)
-  assert.match(source, /\bprojectIdentity\b/, `${file}: template identity binding`)
+  assert.ok(normalizedSource.includes(importFragment), `${file}: ${importFragment}`)
+  assert.ok(normalizedSource.includes(bindingFragment), `${file}: ${bindingFragment}`)
   assert.doesNotMatch(source, legacySupportUrlRxp, `${file}: legacy support URL`)
   for (const fragment of linkFragments) {
     assert.ok(normalizedSource.includes(fragment), `${file}: ${fragment}`)
@@ -179,5 +191,17 @@ test('runtime support audit rejects a legacy UserApi aria target', () => {
   assert.throws(
     () => assertRuntimeSupportMapping(mapping, adversarialSource),
     /UserApiModal\.vue: legacy support URL/,
+  )
+})
+
+test('runtime support audit rejects a missing SettingAbout identity binding', () => {
+  const mapping = runtimeSupportMappings.find(({ file }) => file.endsWith('/SettingAbout.vue'))
+  const source = fs.readFileSync(path.join(root, mapping.file), 'utf8')
+  const binding = 'projectIdentity: PROJECT_IDENTITY,'
+  const adversarialSource = source.replace(binding, '')
+  assert.notEqual(adversarialSource, source, 'SettingAbout binding probe must alter the in-memory source')
+  assert.throws(
+    () => assertRuntimeSupportMapping(mapping, adversarialSource),
+    /SettingAbout\.vue: projectIdentity: PROJECT_IDENTITY/,
   )
 })

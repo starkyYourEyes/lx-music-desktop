@@ -205,3 +205,146 @@ test('runtime support audit rejects a missing SettingAbout identity binding', ()
     /SettingAbout\.vue: projectIdentity: PROJECT_IDENTITY/,
   )
 })
+
+const walkTextFiles = directory => {
+  const ignored = new Set(['.git', '.claude', '.codegraph', '.worktrees', 'build', 'dist', 'node_modules'])
+  const files = []
+  const visit = current => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      if (ignored.has(entry.name)) continue
+      const fullPath = path.join(current, entry.name)
+      if (entry.isDirectory()) visit(fullPath)
+      else {
+        const buffer = fs.readFileSync(fullPath)
+        if (!buffer.includes(0)) {
+          files.push({
+            path: path.relative(root, fullPath).replace(/\\/g, '/'),
+            text: buffer.toString('utf8'),
+          })
+        }
+      }
+    }
+  }
+  visit(directory)
+  return files
+}
+
+const upstreamRecordAllowed = [
+  /^LICENSE$/,
+  /^licenses\//,
+  /^README\.md$/,
+  /^UPSTREAM\.md$/,
+  /^docs\/superpowers\/(?:specs|plans)\//,
+  /^doc\/MOBILE_PORTING_CHANGES\.md$/,
+  /^scripts\/test-(?:upstream-detachment|legacy-user-data-migration|project-identity)\.js$/,
+  /^src\/main\/migration\/legacyUserData\.js$/,
+]
+const upstreamIdentityPattern = /lyswhut|github\.com\/lyswhut|lyswhut\.github\.io/i
+const findUpstreamRecordViolations = files => files.filter(file =>
+  upstreamIdentityPattern.test(file.text) &&
+  !upstreamRecordAllowed.some(pattern => pattern.test(file.path)),
+)
+
+const runtimeIdentifierPatterns = [
+  /cn\.toside\.music\.desktop/,
+  /(?<!starky-)lx-music-protocol/,
+  /\blxmusic:\/\//,
+  /\blx_music_(?:desktop|mobile)\b/,
+  /(?<!starky-)\blx-user-api\b/,
+  /(?<!starky-)\blx-music request\b/,
+  /\blxmusic_temp\b/,
+  /lx-music-desktop-version-info/,
+  /gitee\.com\/lyswhut/,
+  /cdn\.stsky\.cn\/lx-music/,
+]
+const findRuntimeIdentifierViolations = files => {
+  const violations = []
+  for (const file of files) {
+    for (const pattern of runtimeIdentifierPatterns) {
+      if (pattern.test(file.text)) violations.push(`${file.path}: ${pattern}`)
+    }
+  }
+  return violations
+}
+
+const legacyBackupAllowed = [
+  /^src\/common\/backupFormats\.js$/,
+  /^scripts\/test-(?:backup-formats|upstream-detachment)\.js$/,
+  /^README\.md$/,
+  /^docs\/superpowers\/(?:specs|plans)\//,
+]
+const legacyBackupPattern = /\.lxmc\b/
+const findLegacyBackupViolations = files => files.filter(file =>
+  legacyBackupPattern.test(file.text) &&
+  !legacyBackupAllowed.some(pattern => pattern.test(file.path)),
+)
+
+const removedSourceGuardTests = new Set([
+  'scripts/test-updater-removal.js',
+  'scripts/test-upstream-detachment.js',
+])
+const removedSourcePatterns = [
+  /electron-updater/,
+  /github:lyswhut/,
+  /git\+ssh:\/\/git@github\.com\/lyswhut/,
+  /lx-music-desktop-version-info/,
+]
+const createRemovedSourceCorpus = files => files
+  .filter(file =>
+    !/^docs\/superpowers\//.test(file.path) &&
+    !removedSourceGuardTests.has(file.path),
+  )
+  .map(file => file.text)
+  .join('\n')
+
+test('upstream author and URL appear only in attribution and migration records', () => {
+  const violations = findUpstreamRecordViolations(walkTextFiles(root))
+  assert.deepEqual(violations.map(file => file.path), [])
+})
+
+test('old runtime identifiers are isolated from production configuration', () => {
+  const productionRoots = ['src', 'build-config', '.github']
+  const production = productionRoots.flatMap(relativePath => walkTextFiles(path.join(root, relativePath)))
+    .filter(file => file.path != 'src/main/migration/legacyUserData.js')
+  const violations = findRuntimeIdentifierViolations(production)
+  assert.deepEqual(violations, [])
+})
+
+test('legacy backup extension is isolated to compatibility code and records', () => {
+  const violations = findLegacyBackupViolations(walkTextFiles(root))
+  assert.deepEqual(violations.map(file => file.path), [])
+})
+
+test('removed updater and release sources cannot be reintroduced', () => {
+  const allText = createRemovedSourceCorpus(walkTextFiles(root))
+  for (const pattern of removedSourcePatterns) assert.doesNotMatch(allText, pattern)
+})
+
+test('repository audits reject adversarial detached values', () => {
+  const productionPath = 'src/adversarial-probe.js'
+
+  const upstreamViolations = findUpstreamRecordViolations([{
+    path: productionPath,
+    text: 'https://github.com/lyswhut/lx-music-desktop',
+  }])
+  assert.deepEqual(upstreamViolations.map(file => file.path), [productionPath])
+
+  const runtimeViolations = findRuntimeIdentifierViolations([{
+    path: productionPath,
+    text: 'cn.toside.music.desktop',
+  }])
+  assert.equal(runtimeViolations.length, 1)
+  assert.match(runtimeViolations[0], /src\/adversarial-probe\.js/)
+
+  const backupViolations = findLegacyBackupViolations([{
+    path: productionPath,
+    text: 'backup.lxmc',
+  }])
+  assert.deepEqual(backupViolations.map(file => file.path), [productionPath])
+
+  const removedSourceCorpus = createRemovedSourceCorpus([{
+    path: 'package.json',
+    text: 'electron-updater',
+  }])
+  assert.match(removedSourceCorpus, removedSourcePatterns[0])
+})

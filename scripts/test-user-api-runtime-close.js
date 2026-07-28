@@ -1,6 +1,7 @@
 const assert = require('node:assert')
 const path = require('node:path')
 const loadTsModule = require('./test-utils/load-ts-module')
+const { PROJECT_IDENTITY } = require('../src/common/projectIdentity')
 
 const root = path.resolve(__dirname, '..')
 const waitForAsyncTurn = () => new Promise(resolve => setImmediate(resolve))
@@ -108,6 +109,7 @@ const createHarness = ({
           },
         },
       },
+      '@common/projectIdentity': { PROJECT_IDENTITY },
       electron: {
         BrowserWindow: FakeBrowserWindow,
         session: { fromPartition: () => isolatedSession },

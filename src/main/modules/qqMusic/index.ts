@@ -35,8 +35,11 @@ interface AccountStore {
 }
 
 interface LoginService {
-  createLoginQr: () => Promise<QQMusicLoginQr>
-  checkLoginQr: (key: string) => Promise<QQMusicInternalLoginCheck>
+  createLoginQr: (
+    requestId: string,
+    startedAt: number,
+  ) => Promise<QQMusicLoginQr>
+  checkLoginQr: (requestId: string) => Promise<QQMusicInternalLoginCheck>
 }
 
 interface SongService {
@@ -117,7 +120,8 @@ export const createQQMusicAccountService = ({
 
   const createLoginQr = async() => {
     loginGeneration++
-    return loginService.createLoginQr()
+    const startedAt = Date.now()
+    return loginService.createLoginQr(crypto.randomUUID(), startedAt)
   }
 
   const checkLoginQr = async(key: string) => {

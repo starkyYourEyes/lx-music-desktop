@@ -310,6 +310,13 @@ test('backup UI and worker consume the shared helper', () => {
     path.join(root, 'src/renderer/views/List/MyList/useShare.ts'),
     'utf8',
   )
+  const settingBackupIpcImport = settingBackup.match(
+    /^import\s*\{([^}]*)\}\s*from '@renderer\/utils\/ipc'$/m,
+  )
+  assert.ok(settingBackupIpcImport)
+  if (/\bopenSaveDir\s*\(/.test(settingBackup)) {
+    assert.match(settingBackupIpcImport[1], /\bopenSaveDir\b/)
+  }
   assert.equal(settingBackup.match(/await saveBackup\(/g)?.length, 3)
   assert.equal(listBackup.match(/await saveBackup\(/g)?.length, 1)
   assert.doesNotMatch(settingBackup, /void window\.lx\.worker\.main\.saveLxConfigFile/)

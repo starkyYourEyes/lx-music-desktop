@@ -32,6 +32,7 @@ import {
 } from '@renderer/utils'
 import {
   showSelectDialog,
+  openSaveDir,
 } from '@renderer/utils/ipc'
 // import { currentStting } from '../setting'
 import { dialog } from '@renderer/plugins/Dialog'

@@ -1,5 +1,6 @@
 import { computed, onBeforeUnmount, ref, shallowRef } from '@common/utils/vueTools'
 import {
+  cancelQQMusicLoginQr,
   checkQQMusicLoginQr,
   createQQMusicLoginQr,
 } from '@renderer/utils/ipc'
@@ -17,6 +18,7 @@ const statusText = {
 
 const creatingText = '正在生成二维码...'
 const createFailedText = '二维码生成失败，请重试'
+const createTimeoutText = '二维码生成超时，请重试'
 const checkFailedText = '检查登录状态失败，稍后重试'
 
 export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
@@ -30,6 +32,7 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
   let createRevision = 0
   const checkingKeys = new Set<string>()
   let isDisposed = false
+  let currentRequestId: string | null = null
 
   const clearQrTimer = () => {
     if (qrTimer == null) return
@@ -39,8 +42,18 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
 
   const isPending = () => qrState == 'waiting' || qrState == 'scanned'
 
+  const cancelCurrentRequest = async(): Promise<void> => {
+    const requestId = currentRequestId
+    currentRequestId = null
+    if (!requestId) return
+    try {
+      await cancelQQMusicLoginQr(requestId)
+    } catch {}
+  }
+
   const canPoll = (key: string) => {
     return !isDisposed &&
+      currentRequestId == key &&
       showLoginPanel.value &&
       !isLoggedIn.value &&
       qrInfo.value?.key == key &&
@@ -58,7 +71,7 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
 
   const checkLoginStatus = async(key: string) => {
     if (!canPoll(key)) return
-    if (checkingKeys.size) {
+    if (checkingKeys.has(key)) {
       scheduleQrCheck(key)
       return
     }
@@ -80,6 +93,10 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
     if (!canPoll(key)) return
     qrState = status.state
     qrStatusText.value = statusText[status.state]
+
+    if (status.state == 'success' || status.state == 'expired') {
+      if (currentRequestId == key) currentRequestId = null
+    }
 
     if (status.state == 'success') {
       clearQrTimer()
@@ -107,17 +124,32 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
     qrState = null
     qrInfo.value = null
 
+    await cancelCurrentRequest()
+    if (isDisposed || revision != createRevision || !showLoginPanel.value) return
+
+    const requestId = window.crypto.randomUUID()
+    currentRequestId = requestId
     try {
-      const requestId = window.crypto.randomUUID()
       const info = await createQQMusicLoginQr(requestId)
-      if (isDisposed || revision != createRevision || !showLoginPanel.value) return
+      if (isDisposed || revision != createRevision ||
+        currentRequestId != requestId || !showLoginPanel.value) return
+      if (info.key != requestId) throw new Error(createFailedText)
       qrInfo.value = info
       qrState = 'waiting'
       qrStatusText.value = statusText.waiting
-      scheduleQrCheck(info.key)
-    } catch {
-      if (!isDisposed && revision == createRevision && showLoginPanel.value) {
-        qrStatusText.value = createFailedText
+      scheduleQrCheck(requestId)
+    } catch (error) {
+      const isCurrent = currentRequestId == requestId
+      if (isCurrent) {
+        currentRequestId = null
+        void cancelQQMusicLoginQr(requestId).catch(() => {})
+      }
+      if (!isDisposed && revision == createRevision &&
+        isCurrent && showLoginPanel.value) {
+        qrStatusText.value = error instanceof Error &&
+          error.message.includes('QQ Music login QR creation timed out')
+          ? createTimeoutText
+          : createFailedText
       }
     } finally {
       if (revision == createRevision) isCreatingQr.value = false
@@ -137,7 +169,10 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
     showLoginPanel.value = false
     createRevision++
     isCreatingQr.value = false
+    qrState = null
+    qrInfo.value = null
     clearQrTimer()
+    void cancelCurrentRequest()
   }
 
   onBeforeUnmount(() => {
@@ -145,6 +180,7 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
     showLoginPanel.value = false
     createRevision++
     clearQrTimer()
+    void cancelCurrentRequest()
   })
 
   return {

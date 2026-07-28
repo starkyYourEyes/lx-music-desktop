@@ -7,6 +7,8 @@ const root = path.resolve(__dirname, '..')
 const pkg = require('../package.json')
 const lockText = fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8')
 
+const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
 const extractOptionsBlock = (source, startMarker, endMarker) => {
   const normalizedSource = source.replace(/\r\n/g, '\n')
   const start = normalizedSource.indexOf(startMarker)
@@ -60,11 +62,85 @@ test('legacy release and documentation files are removed', () => {
 test('current support and release entry points target this repository', () => {
   const currentUrl = 'https://github.com/starkyYourEyes/lx-music-desktop'
   const read = relativePath => fs.readFileSync(path.join(root, relativePath), 'utf8')
-  assert.match(read('README.md'), new RegExp(currentUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.match(read('README.md'), new RegExp(escapeRegExp(currentUrl)))
   assert.match(read('UPSTREAM.md'), /lyswhut\/lx-music-desktop/)
   for (const file of ['.github/ISSUE_TEMPLATE/bug.yml', '.github/ISSUE_TEMPLATE/feature.yml']) {
     const source = read(file)
     assert.match(source, /starkyYourEyes\/lx-music-desktop/)
     assert.doesNotMatch(source, /lyswhut\.github|github\.com\/lyswhut/)
+  }
+
+  const runtimeSupportMappings = [
+    {
+      file: 'src/renderer/views/Setting/components/SettingAbout.vue',
+      expressions: [
+        "projectIdentity.repositoryUrl + '#readme'",
+        'projectIdentity.releasesUrl',
+        'projectIdentity.issuesUrl',
+        "projectIdentity.repositoryUrl + '#许可证与来源'",
+        'projectIdentity.authorName',
+      ],
+    },
+    {
+      file: 'src/renderer/components/layout/PactModal.vue',
+      expressions: ["projectIdentity.repositoryUrl + '#readme'"],
+    },
+    {
+      file: 'src/renderer/views/Setting/components/UserApiModal.vue',
+      expressions: ["projectIdentity.repositoryUrl + '#readme'"],
+    },
+    {
+      file: 'src/renderer/views/Setting/components/SettingSync/index.vue',
+      expressions: ["projectIdentity.repositoryUrl + '#readme'"],
+    },
+    {
+      file: 'src/renderer/views/Setting/components/SettingOpenAPI.vue',
+      expressions: ["projectIdentity.repositoryUrl + '#readme'"],
+    },
+    {
+      file: 'src/renderer/views/songList/List/components/OpenListModal.vue',
+      expressions: ["projectIdentity.repositoryUrl + '#readme'"],
+    },
+  ]
+
+  for (const { file, expressions } of runtimeSupportMappings) {
+    const source = read(file)
+    assert.match(source, /\bPROJECT_IDENTITY\b/, `${file}: shared identity import`)
+    assert.match(source, /\bprojectIdentity\b/, `${file}: template identity binding`)
+    for (const expression of expressions) {
+      assert.match(source, new RegExp(escapeRegExp(expression)), `${file}: ${expression}`)
+    }
+    assert.doesNotMatch(source, /lyswhut\.github|github\.com\/lyswhut/, `${file}: upstream support URL`)
+  }
+
+  const supportCopy = [
+    {
+      file: 'src/renderer/views/Setting/components/SettingAbout.vue',
+      labels: ['软件的项目说明可转至', '阅读项目说明后'],
+    },
+    {
+      file: 'src/renderer/views/Setting/components/UserApiModal.vue',
+      labels: [') 项目说明'],
+    },
+    {
+      file: 'src/renderer/views/songList/List/components/OpenListModal.vue',
+      labels: ['>项目说明</span>'],
+    },
+    {
+      file: '.github/ISSUE_TEMPLATE/bug.yml',
+      labels: ['description: 报告一个错误（Bug），请先查看项目说明及搜索 Issue 列表中有无你要提的问题。'],
+    },
+    {
+      file: '.github/ISSUE_TEMPLATE/feature.yml',
+      labels: ['description: 为这个项目提出一个想法，请先查看项目说明及搜索 Issue 列表中有无你要提的问题。'],
+    },
+  ]
+
+  for (const { file, labels } of supportCopy) {
+    const source = read(file)
+    for (const label of labels) {
+      assert.match(source, new RegExp(escapeRegExp(label)), `${file}: ${label}`)
+    }
+    assert.doesNotMatch(source, /FAQ|常见问题/, `${file}: stale support label`)
   }
 })

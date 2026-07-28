@@ -8,13 +8,13 @@ dd
     | 最新版下载地址：
     span.hover.underline(:aria-label="$t('setting__click_open')" @click="openUrl(projectIdentity.releasesUrl)") GitHub Releases
   .p.small
-    | 软件的常见问题可转至：
+    | 软件的项目说明可转至：
     span.hover.underline(:aria-label="$t('setting__click_open')" @click="openUrl(projectIdentity.repositoryUrl + '#readme')") 项目说明
   .p.small
     strong 本软件没有客服
     | ，但我们整理了一些常见的使用问题。
     strong 仔细、仔细、仔细
-    | 地阅读常见问题后，
+    | 地阅读项目说明后，
   .p.small
     | 仍有问题可到&nbsp;GitHub&nbsp;
     span.hover.underline(:aria-label="$t('setting__click_open')" @click="openUrl(projectIdentity.issuesUrl)") 提交&nbsp;Issue

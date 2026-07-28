@@ -24,7 +24,7 @@
                 class="hover underline"
                 :aria-label="projectIdentity.repositoryUrl + '#readme'"
                 @click="openUrl(projectIdentity.repositoryUrl + '#readme')"
-              >FAQ</span>
+              >项目说明</span>
             </li>
           </ul>
         </div>

@@ -1,5 +1,5 @@
 name: 🐞 报告错误
-description: 报告一个错误（Bug），请先查看常见问题及搜索 Issue 列表中有无你要提的问题。
+description: 报告一个错误（Bug），请先查看项目说明及搜索 Issue 列表中有无你要提的问题。
 title: "[Bug]: "
 body:
 - type: checkboxes

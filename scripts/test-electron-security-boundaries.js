@@ -2,6 +2,7 @@ const assert = require('node:assert')
 const fs = require('node:fs')
 const path = require('node:path')
 const loadTsModule = require('./test-utils/load-ts-module')
+const { PROJECT_IDENTITY } = require('../src/common/projectIdentity')
 
 const root = path.resolve(__dirname, '..')
 const isolatedSession = {
@@ -19,6 +20,7 @@ const defaultSession = {
   },
 }
 let browserOptions
+let userApiPartition
 
 class FakeBrowserWindow {
   constructor(options) {
@@ -47,9 +49,15 @@ const { createWindow, closeWindow } = loadTsModule(
   {
     '@common/mainIpc': { mainSend() {} },
     '@common/utils': { log: { error() {} } },
+    '@common/projectIdentity': { PROJECT_IDENTITY },
     electron: {
       BrowserWindow: FakeBrowserWindow,
-      session: { fromPartition: () => isolatedSession },
+      session: {
+        fromPartition: partition => {
+          userApiPartition = partition
+          return isolatedSession
+        },
+      },
     },
     fs: { promises: { readFile: async() => '<html></html>' } },
     '@main/utils': { openDevTools() {} },
@@ -60,6 +68,7 @@ const { createWindow, closeWindow } = loadTsModule(
 
 const run = async() => {
   await createWindow({ id: 'test' })
+  assert.strictEqual(userApiPartition, PROJECT_IDENTITY.userApiPartition)
   assert.strictEqual(
     browserOptions.webPreferences.session,
     isolatedSession,

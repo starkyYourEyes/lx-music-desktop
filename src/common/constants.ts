@@ -43,7 +43,6 @@ export const DATA_KEYS = {
   listScrollPosition: 'listScrollPosition',
   listPrevSelectId: 'listPrevSelectId',
   listUpdateInfo: 'listUpdateInfo',
-  ignoreVersion: 'ignoreVersion',
 
   leaderboardSetting: 'leaderboardSetting',
   songListSetting: 'songListSetting',
@@ -51,8 +50,6 @@ export const DATA_KEYS = {
   neteaseAccount: 'neteaseAccount',
   qqMusicAccount: 'qqMusicAccount',
   listeningTimeStats: 'listeningTimeStats',
-
-  lastStartInfo: 'lastStartInfo',
 } as const
 
 export const RECOMMEND_HOME_SECTION_IDS = [

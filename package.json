@@ -139,7 +139,6 @@
     "electron-debug": "^3.2.0",
     "electron-devtools-installer": "^4.0.0",
     "electron-to-chromium": "^1.5.286",
-    "electron-updater": "6.8.3",
     "eslint": "^8.57.1",
     "eslint-config-standard": "^17.1.0",
     "eslint-config-standard-with-typescript": "^43.0.1",

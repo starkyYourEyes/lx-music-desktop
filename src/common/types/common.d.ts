@@ -108,9 +108,4 @@ declare namespace LX {
     prev: boolean
   }
 
-  type UpdateStatus = 'downloaded' | 'downloading' | 'error' | 'checking' | 'idle'
-  interface VersionInfo {
-    version: string
-    desc: string
-  }
 }

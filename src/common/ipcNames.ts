@@ -61,14 +61,6 @@ const modules = {
 
     player_status: 'player_status',
     change_tray: 'change_tray',
-    quit_update: 'quit_update',
-    update_check: 'update_check',
-    update_download_update: 'update_download_update',
-    update_available: 'update_available',
-    update_error: 'update_error',
-    update_progress: 'update_progress',
-    update_downloaded: 'update_downloaded',
-    update_not_available: 'update_not_available',
     set_ignore_mouse_events: 'set_ignore_mouse_events',
     set_window_size: 'set_window_size',
 

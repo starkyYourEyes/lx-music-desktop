@@ -25,22 +25,22 @@ export type QQMusicBrowserAuthProgressStage =
 
 export type QQMusicBrowserAuthDiagnostic =
   | {
-      stage: QQMusicBrowserAuthProgressStage
-      elapsedMs: number
-    }
+    stage: QQMusicBrowserAuthProgressStage
+    elapsedMs: number
+  }
   | {
-      stage: 'cancelled' | 'timed-out'
-      elapsedMs: number
-    }
+    stage: 'cancelled' | 'timed-out'
+    elapsedMs: number
+  }
   | {
-      stage: 'terminal-failure'
-      elapsedMs: number
-      reason: QQMusicBrowserAuthTerminalReason | 'qr-capture-failed'
-    }
+    stage: 'terminal-failure'
+    elapsedMs: number
+    reason: QQMusicBrowserAuthTerminalReason | 'qr-capture-failed'
+  }
   | {
-      stage: 'partition-cleanup-timed-out'
-      elapsedMs: number
-    }
+    stage: 'partition-cleanup-timed-out'
+    elapsedMs: number
+  }
 
 export interface QQMusicBrowserAuthCreateOptions {
   signal: AbortSignal
@@ -258,7 +258,9 @@ const waitWithinCreation = async<Result>(
       callback()
     }
     const handleAbort = () => {
-      finish(() => reject(new QQMusicBrowserCreateError('cancelled')))
+      finish(() => {
+        reject(new QQMusicBrowserCreateError('cancelled'))
+      })
     }
     promise.then(
       value => {
@@ -283,13 +285,17 @@ const waitWithinCreation = async<Result>(
       return
     }
     if (remainingMs <= 0) {
-      finish(() => reject(new QQMusicBrowserCreateError('timed-out')))
+      finish(() => {
+        reject(new QQMusicBrowserCreateError('timed-out'))
+      })
       return
     }
 
     signal.addEventListener('abort', handleAbort, { once: true })
     timer = setTimeout(() => {
-      finish(() => reject(new QQMusicBrowserCreateError('timed-out')))
+      finish(() => {
+        reject(new QQMusicBrowserCreateError('timed-out'))
+      })
     }, remainingMs)
   })
 }

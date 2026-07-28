@@ -18,6 +18,7 @@ for (const name of [
   'qq_music_get_account_status',
   'qq_music_login_qr_create',
   'qq_music_login_qr_check',
+  'qq_music_login_qr_cancel',
   'qq_music_logout',
   'qq_music_get_guess_like_songs',
   'qq_music_get_daily_recommend_songs',
@@ -65,5 +66,37 @@ const publicTypeBodies = [...types.matchAll(/interface (?:Profile|AccountStatus|
   .map(match => match[1]).join('\n')
 assert.doesNotMatch(publicTypeBodies, /\b(cookie|qrsig|ptqrtoken|code)\s*:/i)
 assert.doesNotMatch(rendererIpc, /\b(cookie|qrsig|ptqrtoken)\b/i)
+assert.match(
+  handlers,
+  /mainHandle<string,\s*LX\.QQMusic\.LoginQr>\([\s\S]*?qq_music_login_qr_create[\s\S]*?Date\.now\(\)/,
+)
+assert.match(
+  handlers,
+  /mainHandle<string,\s*void>\([\s\S]*?qq_music_login_qr_cancel[\s\S]*?cancelLoginQr\(requestId\)/,
+)
+assert.strictEqual(
+  (handlers.match(/isQQMusicLoginRequestId\(requestId\)/g) || []).length,
+  2,
+)
+assert.match(
+  handlers,
+  /event_app\.on\('main_window_close'[\s\S]*?disposeLoginQr/,
+)
+assert.match(
+  rendererIpc,
+  /createQQMusicLoginQr\s*=\s*async\(requestId:\s*string\)/,
+)
+assert.match(
+  rendererIpc,
+  /cancelQQMusicLoginQr\s*=\s*async\(requestId:\s*string\)/,
+)
+assert.match(
+  rendererIpc,
+  /rendererInvoke<string,\s*void>\([\s\S]*?qq_music_login_qr_cancel/,
+)
+assert.doesNotMatch(
+  rendererIpc,
+  /qq_music_login_qr_(?:create|cancel)[\s\S]{0,180}\b(cookie|qrsig|ptqrtoken|code)\b/i,
+)
 
 console.log('QQ Music IPC security tests passed')

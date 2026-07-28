@@ -2,6 +2,7 @@ import { DATA_KEYS, STORE_NAMES } from '@common/constants'
 import getStore from '@main/utils/store'
 import {
   createQQMusicLoginService,
+  isQQMusicLoginRequestId,
   type QQMusicInternalLoginCheck,
   type QQMusicLoginQr,
 } from './login'
@@ -40,6 +41,8 @@ interface LoginService {
     startedAt: number,
   ) => Promise<QQMusicLoginQr>
   checkLoginQr: (requestId: string) => Promise<QQMusicInternalLoginCheck>
+  cancelLoginQr: (requestId: string) => Promise<void>
+  disposeAll: () => Promise<void>
 }
 
 interface SongService {
@@ -118,10 +121,12 @@ export const createQQMusicAccountService = ({
     }
   }
 
-  const createLoginQr = async() => {
+  const createLoginQr = async(requestId: string, startedAt: number) => {
+    if (!isQQMusicLoginRequestId(requestId)) {
+      throw new Error('QQ Music login QR creation failed')
+    }
     loginGeneration++
-    const startedAt = Date.now()
-    return loginService.createLoginQr(crypto.randomUUID(), startedAt)
+    return loginService.createLoginQr(requestId, startedAt)
   }
 
   const checkLoginQr = async(key: string) => {
@@ -157,7 +162,17 @@ export const createQQMusicAccountService = ({
 
   const logout = async() => {
     loginGeneration++
+    await loginService.disposeAll()
     clearAccount()
+  }
+
+  const cancelLoginQr = async(requestId: string) => {
+    await loginService.cancelLoginQr(requestId)
+  }
+
+  const disposeLoginQr = async() => {
+    loginGeneration++
+    await loginService.disposeAll()
   }
 
   const runAuthenticatedRequest = async<T>(request: () => Promise<T>) => {
@@ -195,6 +210,8 @@ export const createQQMusicAccountService = ({
     getAccountStatus,
     createLoginQr,
     checkLoginQr,
+    cancelLoginQr,
+    disposeLoginQr,
     logout,
     getGuessLikeSongs,
     getDailyRecommendSongs,
@@ -226,8 +243,20 @@ const getAccountService = () => {
 }
 
 export const getAccountStatus = () => getAccountService().getAccountStatus()
-export const createLoginQr = async() => getAccountService().createLoginQr()
-export const checkLoginQr = async(key: string) => getAccountService().checkLoginQr(key)
+export const createLoginQr = async(requestId: string, startedAt: number) => {
+  return getAccountService().createLoginQr(requestId, startedAt)
+}
+export const checkLoginQr = async(requestId: string) => {
+  return getAccountService().checkLoginQr(requestId)
+}
+export const cancelLoginQr = async(requestId: string) => {
+  await getAccountService().cancelLoginQr(requestId)
+}
+export const disposeLoginQr = async() => {
+  if (!accountService) return
+  await accountService.disposeLoginQr()
+}
+export { isQQMusicLoginRequestId }
 export const logout = async() => getAccountService().logout()
 export const getGuessLikeSongs = async(options?: LX.QQMusic.GuessLikeRequest) => {
   return getAccountService().getGuessLikeSongs(options)

@@ -272,6 +272,10 @@ const testQrPolling = async() => {
   let createResults = []
   let checkHandler
   let checkKeys = []
+  const makeRequestId = sequence =>
+    `20000000-0000-4000-8000-${String(sequence).padStart(12, '0')}`
+  const createIds = []
+  let requestIndex = 0
   let accountStatus = null
   let loginSuccessCount = 0
   const isLoggedIn = ref(false)
@@ -287,6 +291,9 @@ const testQrPolling = async() => {
     clearTimeout(id) {
       timers.delete(id)
     },
+    crypto: {
+      randomUUID: () => makeRequestId(++requestIndex),
+    },
   }
 
   const takeTimer = () => {
@@ -301,6 +308,8 @@ const testQrPolling = async() => {
     unmountCallbacks.length = 0
     createResults = []
     checkKeys = []
+    createIds.length = 0
+    requestIndex = 0
     accountStatus = null
     loginSuccessCount = 0
     isLoggedIn.value = false
@@ -316,7 +325,10 @@ const testQrPolling = async() => {
         onBeforeUnmount: callback => unmountCallbacks.push(callback),
       },
       '@renderer/utils/ipc': {
-        createQQMusicLoginQr: async() => createResults.shift(),
+        createQQMusicLoginQr: async requestId => {
+          createIds.push(requestId)
+          return createResults.shift()
+        },
         checkQQMusicLoginQr: async key => {
           checkKeys.push(key)
           return checkHandler(key)
@@ -347,6 +359,7 @@ const testQrPolling = async() => {
     const polling = useQQMusicLoginQr(async() => { loginSuccessCount++ })
 
     await polling.handleCreateLoginQr()
+    assert.strictEqual(createIds[0], makeRequestId(1))
     assert.strictEqual(polling.showLoginPanel.value, true)
     assert.strictEqual(polling.qrImg.value, 'data:first')
     assert.strictEqual(polling.qrStatusText.value, '请使用手机 QQ 扫码登录')

@@ -25,9 +25,30 @@ let singletonGetHomeRecommendCookie
 let singletonGetPlaylistDetailCookie
 let storeFactoryCallCount = 0
 class QQMusicAuthError extends Error {}
+let nextLoginSequence = 0
+const nextLoginRequestId = () =>
+  `10000000-0000-4000-8000-${String(++nextLoginSequence).padStart(12, '0')}`
+const isQQMusicLoginRequestId = requestId =>
+  typeof requestId == 'string' &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId)
+
+const loginCalls = {
+  create: [],
+  cancel: [],
+  dispose: 0,
+}
 const loginService = {
-  createLoginQr: async() => ({ key: 'opaque', qrimg: 'data:image/png;base64,AA==' }),
+  createLoginQr: async(requestId, startedAt) => {
+    loginCalls.create.push({ requestId, startedAt })
+    return { key: requestId, qrimg: 'data:image/png;base64,AA==' }
+  },
   checkLoginQr: async() => pendingLoginPromise ?? loginResult,
+  cancelLoginQr: async requestId => {
+    loginCalls.cancel.push(requestId)
+  },
+  disposeAll: async() => {
+    loginCalls.dispose++
+  },
 }
 const songService = {
   getGuessLikeSongs: async() => {
@@ -89,6 +110,7 @@ const {
     },
     './login': {
       createQQMusicLoginService: () => loginService,
+      isQQMusicLoginRequestId,
     },
     './auth': { getQQMusicAccountUin },
     './song': {
@@ -130,13 +152,18 @@ const createFacade = () => createQQMusicAccountService({
   now: () => 123456,
 })
 
+const createQr = async service => {
+  const requestId = nextLoginRequestId()
+  return service.createLoginQr(requestId, Date.now())
+}
+
 const main = async() => {
   getSingletonAccountStatus()
   assert.strictEqual(storeFactoryCallCount, 1)
   assert.strictEqual(singletonGetDailyRecommendCookie, singletonGetCookie)
   assert.strictEqual(singletonGetHomeRecommendCookie, singletonGetCookie)
   assert.strictEqual(singletonGetPlaylistDetailCookie, singletonGetCookie)
-  await createSingletonLoginQr()
+  await createSingletonLoginQr(nextLoginRequestId(), Date.now())
   assert.strictEqual(storeFactoryCallCount, 1)
 
   const service = createFacade()
@@ -144,12 +171,10 @@ const main = async() => {
     isLoggedIn: false,
     profile: null,
   })
-  assert.deepStrictEqual(await service.createLoginQr(), {
-    key: 'opaque',
-    qrimg: 'data:image/png;base64,AA==',
-  })
+  const created = await createQr(service)
+  assert.strictEqual(created.qrimg, 'data:image/png;base64,AA==')
 
-  const result = await service.checkLoginQr('opaque')
+  const result = await service.checkLoginQr(created.key)
   assert.deepStrictEqual(result, {
     state: 'success',
     message: '登录成功',
@@ -211,21 +236,24 @@ const main = async() => {
     message: '登录成功',
     cookie: 'qqmusic_uin=456; qqmusic_key=new-secret',
   }
-  await restarted.checkLoginQr('new-opaque')
+  const restartedQr = await createQr(restarted)
+  await restarted.checkLoginQr(restartedQr.key)
   assert.strictEqual(restarted.getAccountStatus().isLoggedIn, true)
+  const disposalsBeforeLogout = loginCalls.dispose
   await restarted.logout()
+  assert.strictEqual(loginCalls.dispose, disposalsBeforeLogout + 1)
   assert.deepStrictEqual(restarted.getAccountStatus(), {
     isLoggedIn: false,
     profile: null,
   })
   assert.deepStrictEqual(data.get('neteaseAccount'), { cookie: 'keep-netease' })
 
-  await restarted.createLoginQr()
+  const staleQr = await createQr(restarted)
   let resolveStaleLogin
   pendingLoginPromise = new Promise(resolve => {
     resolveStaleLogin = resolve
   })
-  const staleLoginCheck = restarted.checkLoginQr('opaque')
+  const staleLoginCheck = restarted.checkLoginQr(staleQr.key)
   await restarted.logout()
   resolveStaleLogin({
     state: 'success',
@@ -244,20 +272,20 @@ const main = async() => {
     profile: null,
   })
 
-  await restarted.createLoginQr()
+  const accountAQr = await createQr(restarted)
   let resolveAccountALogin
   pendingLoginPromise = new Promise(resolve => {
     resolveAccountALogin = resolve
   })
-  const accountALoginCheck = restarted.checkLoginQr('opaque')
-  await restarted.createLoginQr()
+  const accountALoginCheck = restarted.checkLoginQr(accountAQr.key)
+  const accountBQr = await createQr(restarted)
   pendingLoginPromise = null
   loginResult = {
     state: 'success',
     message: '登录成功',
     cookie: 'uin=oB; qqmusic_key=account-b',
   }
-  await restarted.checkLoginQr('opaque')
+  await restarted.checkLoginQr(accountBQr.key)
   resolveAccountALogin({
     state: 'success',
     message: '登录成功',
@@ -280,7 +308,8 @@ const main = async() => {
     message: '登录成功',
     cookie: 'qqmusic_key=key-without-uin',
   }
-  await assert.rejects(restarted.checkLoginQr('missing-uin'), error => {
+  const missingUinQr = await createQr(restarted)
+  await assert.rejects(restarted.checkLoginQr(missingUinQr.key), error => {
     assert.strictEqual(error.message, 'QQ Music login check failed')
     assert.strictEqual(Object.hasOwn(error, 'cookie'), false)
     assert.strictEqual(String(error).includes('key-without-uin'), false)
@@ -364,6 +393,23 @@ const main = async() => {
   await assert.rejects(raceFacade.getPlaylistDetail('211111', 1), QQMusicAuthError)
   assert.strictEqual(raceFacade.getAccountStatus().isLoggedIn, false)
   playlistDetailError = null
+
+  const createId = '10000000-0000-4000-8000-999999999999'
+  assert.deepStrictEqual(await service.createLoginQr(createId, 1234), {
+    key: createId,
+    qrimg: 'data:image/png;base64,AA==',
+  })
+  assert.deepStrictEqual(loginCalls.create.at(-1), {
+    requestId: createId,
+    startedAt: 1234,
+  })
+
+  await service.cancelLoginQr(createId)
+  assert.strictEqual(loginCalls.cancel.at(-1), createId)
+
+  const disposalsBeforeExplicitDispose = loginCalls.dispose
+  await service.disposeLoginQr()
+  assert.strictEqual(loginCalls.dispose, disposalsBeforeExplicitDispose + 1)
 }
 
 main().then(() => {

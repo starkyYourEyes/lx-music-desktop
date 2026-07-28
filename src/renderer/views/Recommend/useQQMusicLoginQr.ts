@@ -108,7 +108,8 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
     qrInfo.value = null
 
     try {
-      const info = await createQQMusicLoginQr()
+      const requestId = window.crypto.randomUUID()
+      const info = await createQQMusicLoginQr(requestId)
       if (isDisposed || revision != createRevision || !showLoginPanel.value) return
       qrInfo.value = info
       qrState = 'waiting'

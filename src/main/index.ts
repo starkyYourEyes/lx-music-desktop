@@ -45,7 +45,7 @@ const getStorageCoordinator = () => {
 
 const init = () => {
   void getStorageCoordinator().start().then(outcome => {
-    if (outcome.status == 'fatal') {
+    if (outcome.status == 'fatal' && !isFinishingStorageShutdown) {
       console.error('Storage startup failed', outcome.reason)
       app.exit(1)
     }

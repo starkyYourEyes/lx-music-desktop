@@ -68,6 +68,11 @@ const errorWithCode = (code: string): Error => {
   return error
 }
 
+const startupCancelled = (): StorageStartupOutcome => ({
+  status: 'fatal',
+  reason: 'storage_startup_cancelled',
+})
+
 const databaseRecovery = (
   result: Extract<DatabaseStartupResult, { status: 'recovery' }>,
 ): RecoveryOutcome => ({
@@ -89,14 +94,18 @@ export const createStorageCoordinator = (
   let startPromise: Promise<StorageStartupOutcome> | null = null
   let shutdownPromise: Promise<void> | null = null
   let runHasStarted = false
+  let shutdownRequested = false
 
   const start = (): Promise<StorageStartupOutcome> => {
     if (startPromise != null) return startPromise
     startPromise = (async() => {
       try {
+        if (shutdownRequested) return startupCancelled()
         const previousShutdownWasClean = await dependencies.runState.begin()
         runHasStarted = true
+        if (shutdownRequested) return startupCancelled()
         const database = await dependencies.initDatabase(previousShutdownWasClean)
+        if (shutdownRequested) return startupCancelled()
         if (database.status == 'recovery') {
           const outcome = databaseRecovery(database)
           await dependencies.showRecovery(outcome)
@@ -104,12 +113,14 @@ export const createStorageCoordinator = (
         }
 
         const migrationOutcome = await dependencies.runMigrationHooks(database)
+        if (shutdownRequested) return startupCancelled()
         if (migrationOutcome?.status == 'recovery') {
           await dependencies.showRecovery(migrationOutcome)
           return migrationOutcome
         }
 
         await dependencies.initSettings()
+        if (shutdownRequested) return startupCancelled()
         dependencies.registerModules()
         dependencies.appInited()
         return { status: 'ready', schemaVersion: database.schemaVersion }
@@ -155,11 +166,26 @@ export const createStorageCoordinator = (
     return { timedOut: timedOut ? [...pending] : [], failed }
   }
 
+  const waitForStartup = async(): Promise<boolean> => {
+    if (startPromise == null) return true
+    let timeout: ReturnType<typeof setTimeout> | null = null
+    const completed = await Promise.race([
+      startPromise.then(() => true, () => true),
+      new Promise<boolean>(resolve => {
+        timeout = setTimeout(() => resolve(false), shutdownTimeoutMs)
+      }),
+    ])
+    if (timeout != null) clearTimeout(timeout)
+    return completed
+  }
+
   const shutdown = (): Promise<void> => {
     if (shutdownPromise != null) return shutdownPromise
     shutdownPromise = (async() => {
+      shutdownRequested = true
+      const startupCompleted = await waitForStartup()
       const flusherResult = await runFlushers()
-      let failure: Error | null = null
+      let failure: Error | null = startupCompleted ? null : errorWithCode('shutdown_startup_timeout')
       if (flusherResult.timedOut.length) {
         dependencies.reportShutdownFailure?.({
           code: 'shutdown_flush_timeout',

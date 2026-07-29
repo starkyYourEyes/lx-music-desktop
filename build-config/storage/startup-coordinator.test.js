@@ -140,6 +140,54 @@ describe('storage startup coordinator', () => {
     assert.equal(calls.filter(call => call == 'db:init').length, 1)
   })
 
+  it('cancels blocked startup before shutdown can write a clean marker', async() => {
+    const { calls, deps } = createDeps()
+    let releaseDatabase
+    let signalDatabaseStarted
+    const databaseStarted = new Promise(resolve => { signalDatabaseStarted = resolve })
+    const databaseGate = new Promise(resolve => { releaseDatabase = resolve })
+    deps.initDatabase = async() => {
+      calls.push('db:init')
+      signalDatabaseStarted()
+      await databaseGate
+      return readyResult
+    }
+    const coordinator = createCoordinator(deps)
+
+    const startup = coordinator.start()
+    await databaseStarted
+    const shutdown = coordinator.shutdown()
+    const shutdownIsStillWaiting = await Promise.race([
+      shutdown.then(() => false),
+      new Promise(resolve => setImmediate(() => resolve(true))),
+    ])
+    assert.equal(shutdownIsStillWaiting, true)
+
+    releaseDatabase()
+    assert.deepEqual(await startup, { status: 'fatal', reason: 'storage_startup_cancelled' })
+    await shutdown
+    assert.deepEqual(calls, ['run-state:unclean', 'db:init', 'stores:flush', 'db:close', 'run-state:clean'])
+  })
+
+  it('leaves the run unclean when blocked startup exceeds the shutdown bound', async() => {
+    const { calls, deps } = createDeps({ shutdownTimeoutMs: 20 })
+    let signalDatabaseStarted
+    const databaseStarted = new Promise(resolve => { signalDatabaseStarted = resolve })
+    deps.initDatabase = async() => {
+      calls.push('db:init')
+      signalDatabaseStarted()
+      await new Promise(() => {})
+      return readyResult
+    }
+    const coordinator = createCoordinator(deps)
+
+    void coordinator.start()
+    await databaseStarted
+    await assert.rejects(coordinator.shutdown(), /shutdown_startup_timeout/)
+
+    assert.deepEqual(calls, ['run-state:unclean', 'db:init', 'stores:flush', 'db:close'])
+  })
+
   it('isolates a database recovery result before migration hooks or business registration', async() => {
     const { calls, deps } = createDeps({ initDatabase: async() => {
       calls.push('db:init')
@@ -265,11 +313,12 @@ describe('storage recovery dialog', () => {
   it('offers data-folder recovery without reading or disclosing affected file contents', async() => {
     const openedPaths = []
     const messages = []
+    let quitCalls = 0
     const originalLoad = Module._load
     Module._load = function(request, parent, isMain) {
       if (request == 'electron') {
         return {
-          app: { quit: () => { throw new Error('quit should not be called') } },
+          app: { quit: () => { quitCalls++ } },
           dialog: {
             showMessageBox: async options => {
               messages.push(options)
@@ -301,5 +350,6 @@ describe('storage recovery dialog', () => {
     assert.equal(messages[0].detail.includes('schema.table_missing:my_list'), true)
     assert.equal(messages[0].detail.includes('file payload'), false)
     assert.deepEqual(openedPaths, ['C:\\profiles\\alice\\LxDatas'])
+    assert.equal(quitCalls, 1)
   })
 })

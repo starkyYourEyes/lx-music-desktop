@@ -55,7 +55,11 @@ export const showStorageRecovery = async(outcome: RecoveryOutcome): Promise<void
     noLink: true,
   })
   if (response.response == 0 && affectedPath != null) {
-    await shell.openPath(path.dirname(affectedPath))
+    try {
+      await shell.openPath(path.dirname(affectedPath))
+    } finally {
+      app.quit()
+    }
     return
   }
   app.quit()

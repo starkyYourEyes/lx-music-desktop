@@ -24,6 +24,8 @@ for (const name of [
   'qq_music_get_daily_recommend_songs',
   'qq_music_get_home_recommendation',
   'qq_music_get_playlist_detail',
+  'qq_music_like_music',
+  'qq_music_dislike_music',
 ]) {
   assert.match(names, new RegExp(`${name}: '${name}'`))
   assert.match(handlers, new RegExp(name))
@@ -61,6 +63,14 @@ assert.match(qqMusicMain, /createQQMusicHomeRecommendService/)
 assert.match(qqMusicMain, /getHomeRecommendation/)
 assert.match(qqMusicMain, /createQQMusicPlaylistDetailService/)
 assert.match(qqMusicMain, /getPlaylistDetail/)
+assert.match(qqMusicMain, /createQQMusicFeedbackService/)
+assert.match(qqMusicMain, /export const likeMusic/)
+assert.match(qqMusicMain, /export const dislikeMusic/)
+assert.match(handlers, /params\.source\s*!=\s*'tx'/)
+assert.match(handlers, /qq_music_like_music[\s\S]*?likeMusic\(params\)/)
+assert.match(handlers, /qq_music_dislike_music[\s\S]*?dislikeMusic\(params\)/)
+assert.match(rendererIpc, /likeQQMusic[\s\S]*?toCloneable\(musicInfo\)/)
+assert.match(rendererIpc, /dislikeQQMusic[\s\S]*?toCloneable\(musicInfo\)/)
 
 const publicTypeBodies = [...types.matchAll(/interface (?:Profile|AccountStatus|LoginQr|LoginQrCheck)\s*\{([\s\S]*?)\n\s*\}/g)]
   .map(match => match[1]).join('\n')

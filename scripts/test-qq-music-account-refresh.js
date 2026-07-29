@@ -73,6 +73,11 @@ const {
         throw new Error('unexpected singleton playlist service')
       },
     },
+    './feedback': {
+      createQQMusicFeedbackService: () => {
+        throw new Error('unexpected singleton feedback service')
+      },
+    },
   },
 )
 
@@ -108,6 +113,8 @@ const createServices = (request) => {
       state: 'waiting',
       message: 'waiting',
     }),
+    cancelLoginQr: async() => {},
+    disposeAll: async() => {},
   }
   return {
     loginService,
@@ -115,6 +122,10 @@ const createServices = (request) => {
     dailyRecommendService: { getDailyRecommendSongs: request },
     homeRecommendService: { getHomeRecommendation: request },
     playlistDetailService: { getPlaylistDetail: request },
+    feedbackService: {
+      likeMusic: request,
+      dislikeMusic: request,
+    },
   }
 }
 
@@ -188,6 +199,60 @@ const createFacade = ({
 }
 
 const main = async() => {
+  const txMusic = {
+    id: 'tx_synthetic',
+    source: 'tx',
+    name: 'Synthetic song',
+    singer: 'Synthetic singer',
+    interval: null,
+    meta: { songId: 'synthetic', id: 123, songType: 0 },
+  }
+
+  {
+    let feedbackCalls = 0
+    const { service } = createFacade({
+      initial: { cookie: '', profile: null, updatedAt: 0 },
+      request: async() => { feedbackCalls++ },
+      refresh: async() => '',
+    })
+    await assert.doesNotReject(service.likeMusic(txMusic))
+    assert.strictEqual(feedbackCalls, 0)
+    await assert.rejects(service.dislikeMusic(txMusic), error => error.name == 'QQMusicAuthError')
+  }
+
+  {
+    let feedbackCalls = 0
+    let refreshCalls = 0
+    const facade = createFacade({
+      request: async() => {
+        feedbackCalls++
+        if (feedbackCalls == 1) throw new QQMusicAuthError()
+      },
+      refresh: async() => {
+        refreshCalls++
+        return 'uin=oA; qqmusic_key=feedback-new-key'
+      },
+    })
+    await facade.service.likeMusic(txMusic)
+    assert.strictEqual(feedbackCalls, 2)
+    assert.strictEqual(refreshCalls, 1)
+  }
+
+  {
+    const liked = []
+    const disliked = []
+    const facade = createFacade({
+      request: async() => {},
+      refresh: async() => accountA.cookie,
+    })
+    facade.services.feedbackService.likeMusic = async musicInfo => { liked.push(musicInfo) }
+    facade.services.feedbackService.dislikeMusic = async musicInfo => { disliked.push(musicInfo) }
+    await facade.service.likeMusic(txMusic)
+    await facade.service.dislikeMusic(txMusic)
+    assert.deepStrictEqual(liked, [txMusic])
+    assert.deepStrictEqual(disliked, [txMusic])
+  }
+
   {
     let requestCalls = 0
     let refreshCalls = 0

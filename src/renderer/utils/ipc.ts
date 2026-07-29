@@ -740,6 +740,22 @@ export const getQQMusicPlaylistDetail = async(id: string, page = 1) => {
   )
 }
 
+export const likeQQMusic = async(musicInfo: LX.Music.MusicInfo_tx): Promise<void> => {
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type
+  await rendererInvoke<LX.Music.MusicInfo_tx, void>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_like_music,
+    toCloneable(musicInfo),
+  )
+}
+
+export const dislikeQQMusic = async(musicInfo: LX.Music.MusicInfo_tx): Promise<void> => {
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type
+  await rendererInvoke<LX.Music.MusicInfo_tx, void>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_dislike_music,
+    toCloneable(musicInfo),
+  )
+}
+
 export const getNeteaseAccountStatus = async() => {
   return rendererInvoke<LX.Netease.AccountStatus>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_account_status)
 }

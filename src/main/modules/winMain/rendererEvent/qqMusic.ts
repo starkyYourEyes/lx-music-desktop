@@ -11,8 +11,17 @@ import {
   getHomeRecommendation,
   getPlaylistDetail,
   isQQMusicLoginRequestId,
+  dislikeMusic,
+  likeMusic,
   logout,
 } from '@main/modules/qqMusic'
+
+const assertQQMusicInfo = (params: LX.Music.MusicInfo): LX.Music.MusicInfo_tx => {
+  if (!params || params.source != 'tx') {
+    throw new Error('QQ Music feedback request failed')
+  }
+  return params
+}
 
 export default () => {
   mainHandle<LX.QQMusic.AccountStatus>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_account_status, async() => {
@@ -67,6 +76,24 @@ export default () => {
   mainHandle<LX.QQMusic.PlaylistDetailParams, LX.QQMusic.PlaylistDetailInfo>(
     WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_playlist_detail,
     async({ params }) => getPlaylistDetail(params.id, params.page),
+  )
+
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type
+  mainHandle<LX.Music.MusicInfo_tx, void>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_like_music,
+    async({ params }) => {
+      params = assertQQMusicInfo(params)
+      await likeMusic(params)
+    },
+  )
+
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type
+  mainHandle<LX.Music.MusicInfo_tx, void>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_dislike_music,
+    async({ params }) => {
+      params = assertQQMusicInfo(params)
+      await dislikeMusic(params)
+    },
   )
 
   global.lx.event_app.on('main_window_close', () => {

@@ -26,8 +26,206 @@ const actualVerify = require('../../src/main/worker/dbService/verifyDB.ts')
 const tables = require('../../src/main/worker/dbService/tables.ts').default
 const { createAtomicJsonFile } = require('../../src/main/storage/atomicJsonFile.ts')
 
+const MIGRATION_3_CHECKSUM = '9243aa510e8355d2c3d0f687c6736654adf584ec6007b1bcf46f374a9d694e41'
+const FOUNDATION_V3_SCHEMA = [
+  {
+    name: 'db_info',
+    type: 'table',
+    columns: [
+      { name: 'id', type: 'INTEGER', notNull: true, primaryKeyPosition: 1 },
+      { name: 'field_name', type: 'TEXT', notNull: false, primaryKeyPosition: 0 },
+      { name: 'field_value', type: 'TEXT', notNull: false, primaryKeyPosition: 0 },
+    ],
+    indexes: [{ columns: ['id'], unique: true, partial: false }],
+    foreignKeys: [],
+  },
+  {
+    name: 'my_list',
+    type: 'table',
+    columns: [
+      { name: 'id', type: 'TEXT', notNull: true, primaryKeyPosition: 1 },
+      { name: 'name', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'source', type: 'TEXT', notNull: false, primaryKeyPosition: 0 },
+      { name: 'sourceListId', type: 'TEXT', notNull: false, primaryKeyPosition: 0 },
+      { name: 'position', type: 'INTEGER', notNull: true, primaryKeyPosition: 0 },
+      { name: 'locationUpdateTime', type: 'INTEGER', notNull: false, primaryKeyPosition: 0 },
+    ],
+    indexes: [{ columns: ['id'], unique: true, partial: false }],
+    foreignKeys: [],
+  },
+  {
+    name: 'my_list_music_info',
+    type: 'table',
+    columns: [
+      { name: 'id', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'listId', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'name', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'singer', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'source', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'interval', type: 'TEXT', notNull: false, primaryKeyPosition: 0 },
+      { name: 'meta', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+    ],
+    indexes: [
+      { columns: ['id', 'listId'], unique: false, partial: false },
+      { columns: ['id', 'listId'], unique: true, partial: false },
+    ],
+    foreignKeys: [],
+  },
+  {
+    name: 'my_list_music_info_order',
+    type: 'table',
+    columns: [
+      { name: 'listId', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'musicInfoId', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'order', type: 'INTEGER', notNull: true, primaryKeyPosition: 0 },
+    ],
+    indexes: [{ columns: ['listId', 'musicInfoId'], unique: false, partial: false }],
+    foreignKeys: [],
+  },
+  {
+    name: 'music_info_other_source',
+    type: 'table',
+    columns: [
+      { name: 'source_id', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'id', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'source', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'name', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'singer', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'meta', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'order', type: 'INTEGER', notNull: true, primaryKeyPosition: 0 },
+    ],
+    indexes: [
+      { columns: ['source_id', 'id'], unique: false, partial: false },
+      { columns: ['source_id', 'id'], unique: true, partial: false },
+    ],
+    foreignKeys: [],
+  },
+  {
+    name: 'lyric',
+    type: 'table',
+    columns: [
+      { name: 'id', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'source', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'type', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'text', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+    ],
+    indexes: [],
+    foreignKeys: [],
+  },
+  {
+    name: 'music_url',
+    type: 'table',
+    columns: [
+      { name: 'id', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'url', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+    ],
+    indexes: [],
+    foreignKeys: [],
+  },
+  {
+    name: 'download_list',
+    type: 'table',
+    columns: [
+      { name: 'id', type: 'TEXT', notNull: true, primaryKeyPosition: 1 },
+      { name: 'isComplate', type: 'INTEGER', notNull: true, primaryKeyPosition: 0 },
+      { name: 'status', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'statusText', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'progress_downloaded', type: 'INTEGER', notNull: true, primaryKeyPosition: 0 },
+      { name: 'progress_total', type: 'INTEGER', notNull: true, primaryKeyPosition: 0 },
+      { name: 'url', type: 'TEXT', notNull: false, primaryKeyPosition: 0 },
+      { name: 'quality', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'ext', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'fileName', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'filePath', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'musicInfo', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'position', type: 'INTEGER', notNull: true, primaryKeyPosition: 0 },
+    ],
+    indexes: [{ columns: ['id'], unique: true, partial: false }],
+    foreignKeys: [],
+  },
+  {
+    name: 'dislike_list',
+    type: 'table',
+    columns: [
+      { name: 'type', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'content', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'meta', type: 'TEXT', notNull: false, primaryKeyPosition: 0 },
+    ],
+    indexes: [],
+    foreignKeys: [],
+  },
+  {
+    name: 'schema_migrations',
+    type: 'table',
+    columns: [
+      { name: 'version', type: 'INTEGER', notNull: false, primaryKeyPosition: 1 },
+      { name: 'name', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'checksum', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'applied_at_ms', type: 'INTEGER', notNull: true, primaryKeyPosition: 0 },
+    ],
+    indexes: [],
+    foreignKeys: [],
+  },
+  {
+    name: 'migration_markers',
+    type: 'table',
+    columns: [
+      { name: 'name', type: 'TEXT', notNull: false, primaryKeyPosition: 1 },
+      { name: 'source_sha256', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+      { name: 'completed_at_ms', type: 'INTEGER', notNull: true, primaryKeyPosition: 0 },
+      { name: 'details_json', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
+    ],
+    indexes: [{ columns: ['name'], unique: true, partial: false }],
+    foreignKeys: [],
+  },
+]
+
 const sha256Bytes = bytes => crypto.createHash('sha256').update(bytes).digest('hex')
 const sha256File = async filePath => sha256Bytes(await fsp.readFile(filePath))
+
+const quotePragmaValue = value => `'${value.replaceAll("'", "''")}'`
+const compareJson = (left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))
+
+const readFoundationSchema = db => FOUNDATION_V3_SCHEMA.map(({ name }) => {
+  const object = db.prepare('SELECT type FROM sqlite_master WHERE name = ?').get(name)
+  const columns = db.pragma(`table_info(${quotePragmaValue(name)})`).map(column => ({
+    name: column.name,
+    type: column.type,
+    notNull: column.notnull == 1,
+    primaryKeyPosition: column.pk,
+  }))
+  const indexes = db.pragma(`index_list(${quotePragmaValue(name)})`).map(index => ({
+    columns: db.pragma(`index_info(${quotePragmaValue(index.name)})`)
+      .sort((left, right) => left.seqno - right.seqno)
+      .map(column => column.name),
+    unique: index.unique == 1,
+    partial: index.partial == 1,
+  })).sort(compareJson)
+  const foreignKeysById = new Map()
+  for (const row of db.pragma(`foreign_key_list(${quotePragmaValue(name)})`)) {
+    let relationship = foreignKeysById.get(row.id)
+    if (relationship == null) {
+      relationship = {
+        table: row.table,
+        from: [],
+        to: [],
+        onUpdate: row.on_update,
+        onDelete: row.on_delete,
+        match: row.match,
+      }
+      foreignKeysById.set(row.id, relationship)
+    }
+    relationship.from[row.seq] = row.from
+    relationship.to[row.seq] = row.to
+  }
+  return {
+    name,
+    type: object?.type ?? null,
+    columns,
+    indexes,
+    foreignKeys: Array.from(foreignKeysById.values()),
+  }
+})
 
 const createFaultTracker = () => {
   let hits = 0
@@ -111,7 +309,7 @@ const databaseMetadata = databasePath => {
     return {
       quickCheck: db.pragma('quick_check', { simple: true }),
       foreignKeyFailures: db.pragma('foreign_key_check'),
-      structure: actualVerify.verifyDatabase(db, { runQuickCheck: false, runForeignKeyCheck: false }),
+      foundationSchema: readFoundationSchema(db),
       version: db.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value,
       migration: hasLedger
         ? db.prepare('SELECT version, name, checksum FROM schema_migrations ORDER BY version').get()
@@ -415,8 +613,8 @@ test('database Foundation failure matrix', async t => {
             assert.equal(authoritative.version, '3')
             assert.equal(authoritative.migration.version, 3)
             assert.equal(authoritative.migration.name, 'storage_foundation')
-            assert.equal(authoritative.migration.checksum, actualMigrations.migration3.checksum)
-            assert.deepEqual(authoritative.structure, { ok: true, diagnostics: [] })
+            assert.equal(authoritative.migration.checksum, MIGRATION_3_CHECKSUM)
+            assert.deepEqual(authoritative.foundationSchema, FOUNDATION_V3_SCHEMA)
             if (fixtureCase.authoritative == 'committed-with-fk-failure') {
               assert.equal(authoritative.foreignKeyFailures.length, 1)
             } else {

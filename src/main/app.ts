@@ -301,8 +301,9 @@ const initTheme = () => {
 }
 
 let isInitialized = false
-export const runStorageMigrationHooks = async(result: { existed: boolean }): Promise<void> => {
+export const runStorageMigrationHooks = async(result: { existed: boolean }): Promise<undefined> => {
   if (!result.existed) await migrateDBData()
+  return undefined
 }
 
 export const initAppSetting = async(): Promise<void> => {

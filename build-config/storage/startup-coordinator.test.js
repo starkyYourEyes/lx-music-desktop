@@ -27,6 +27,35 @@ const recoveryPath = '../../src/main/startup/recovery.ts'
 const workerAdapterPath = '../../src/main/worker/dbService/index.ts'
 const tempDirectories = []
 
+const compileCoordinatorTypeFixture = source => {
+  const fixturePath = path.resolve(__dirname, 'storage-coordinator-type-fixture.ts')
+  const compilerOptions = {
+    target: typescript.ScriptTarget.ESNext,
+    module: typescript.ModuleKind.CommonJS,
+    moduleResolution: typescript.ModuleResolutionKind.Node10,
+    esModuleInterop: true,
+    strict: true,
+    skipLibCheck: true,
+    noEmit: true,
+    types: ['node'],
+  }
+  const host = typescript.createCompilerHost(compilerOptions)
+  const originalFileExists = host.fileExists.bind(host)
+  const originalReadFile = host.readFile.bind(host)
+  const originalGetSourceFile = host.getSourceFile.bind(host)
+  const isFixture = filename => path.resolve(filename) == fixturePath
+  host.fileExists = filename => isFixture(filename) || originalFileExists(filename)
+  host.readFile = filename => isFixture(filename) ? source : originalReadFile(filename)
+  host.getSourceFile = (filename, languageVersion, onError, shouldCreateNewSourceFile) => isFixture(filename)
+    ? typescript.createSourceFile(filename, source, languageVersion, true)
+    : originalGetSourceFile(filename, languageVersion, onError, shouldCreateNewSourceFile)
+
+  const program = typescript.createProgram({ rootNames: [fixturePath], options: compilerOptions, host })
+  return typescript.getPreEmitDiagnostics(program)
+    .filter(diagnostic => diagnostic.file != null && isFixture(diagnostic.file.fileName))
+    .map(diagnostic => typescript.flattenDiagnosticMessageText(diagnostic.messageText, '\n'))
+}
+
 const tempDirectory = prefix => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
   tempDirectories.push(directory)
@@ -111,6 +140,35 @@ const loadWorkerAdapter = databaseInit => {
 }
 
 describe('storage startup coordinator', () => {
+  it('accepts a branch-dependent migration hook returning recovery or undefined', () => {
+    const diagnostics = compileCoordinatorTypeFixture(`
+      import type {
+        StorageCoordinatorDependencies,
+        StorageStartupOutcome,
+      } from '../../src/main/startup/storageCoordinator'
+
+      type RecoveryOutcome = Extract<StorageStartupOutcome, { status: 'recovery' }>
+
+      const hook: StorageCoordinatorDependencies['runMigrationHooks'] = async(): Promise<RecoveryOutcome | undefined> => {
+        if (Date.now() > 0) return undefined
+        return {
+          status: 'recovery',
+          reason: 'fixture_recovery',
+          target: {
+            kind: 'external-migration',
+            component: 'credentials',
+            affectedPath: 'fixture-path',
+            diagnostics: [],
+          },
+        }
+      }
+
+      void hook
+    `)
+
+    assert.deepEqual(diagnostics, [])
+  })
+
   it('prevents module registration before database readiness and reuses concurrent start work', async() => {
     const { calls, deps } = createDeps()
     let releaseDatabase

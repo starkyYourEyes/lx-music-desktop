@@ -43,7 +43,7 @@ export interface StorageCoordinatorDependencies {
   runState: RunStateStore
   initDatabase: (previousShutdownWasClean: boolean) => Promise<DatabaseStartupResult>
   closeDatabase: () => Promise<void> | void
-  runMigrationHooks: (result: DatabaseReadyResult) => Promise<void> | Promise<RecoveryOutcome>
+  runMigrationHooks: (result: DatabaseReadyResult) => Promise<RecoveryOutcome | undefined>
   initSettings: () => Promise<void>
   registerModules: () => void
   appInited: () => void

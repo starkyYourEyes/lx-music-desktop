@@ -1,9 +1,11 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const Module = require('node:module')
+const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
 
+// eslint-disable-next-line n/no-deprecated-api
 require.extensions['.ts'] = (module, filename) => {
   const source = fs.readFileSync(filename, 'utf8')
   const output = typescript.transpileModule(source, {
@@ -19,9 +21,11 @@ require.extensions['.ts'] = (module, filename) => {
 const contractsPath = '../../src/common/storage/contracts.ts'
 const validatorPath = '../../src/main/storage/validateStorageRequest.ts'
 const handlerPath = '../../src/main/modules/winMain/rendererEvent/storage.ts'
+const rendererIpcPath = '../../src/renderer/utils/ipc.ts'
+const commonRoot = path.resolve(__dirname, '../../src/common')
 
 const clearStorageContractModules = () => {
-  for (const modulePath of [contractsPath, validatorPath, handlerPath]) {
+  for (const modulePath of [contractsPath, validatorPath, handlerPath, rendererIpcPath]) {
     try { delete require.cache[require.resolve(modulePath)] } catch {}
   }
 }
@@ -51,6 +55,50 @@ describe('storage request contract', () => {
         return true
       })
     }
+  })
+})
+
+describe('renderer storage IPC contract', () => {
+  it('passes through the exact capabilities request and renderer IPC Promise', () => {
+    const calls = []
+    const expectedPromise = Promise.resolve({
+      version: 1,
+      schemaVersion: 3,
+      securePersistence: 'available',
+      recoveryMode: false,
+    })
+    const originalLoad = Module._load
+    Module._load = function(request, parent, isMain) {
+      if (request == '@common/rendererIpc') {
+        return {
+          rendererInvoke: (channel, params) => {
+            calls.push({ channel, params })
+            return expectedPromise
+          },
+          rendererSend: () => {},
+          rendererOn: () => {},
+          rendererOff: () => {},
+        }
+      }
+      if (request.startsWith('@common/')) {
+        const realModule = path.join(commonRoot, `${request.slice('@common/'.length)}.ts`)
+        return originalLoad.call(this, realModule, parent, isMain)
+      }
+      return originalLoad.call(this, request, parent, isMain)
+    }
+
+    let actualPromise
+    try {
+      actualPromise = require(rendererIpcPath).getStorageCapabilities()
+    } finally {
+      Module._load = originalLoad
+    }
+
+    assert.strictEqual(actualPromise, expectedPromise)
+    assert.deepEqual(calls, [{
+      channel: 'winMain_storage_capabilities_get',
+      params: { version: 1, type: 'capabilities.get' },
+    }])
   })
 })
 

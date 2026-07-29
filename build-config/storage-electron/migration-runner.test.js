@@ -1,0 +1,338 @@
+const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const { afterEach, describe, it } = require('node:test')
+const typescript = require('typescript')
+
+require.extensions['.ts'] = (module, filename) => {
+  const source = fs.readFileSync(filename, 'utf8')
+  const output = typescript.transpileModule(source, {
+    compilerOptions: { module: typescript.ModuleKind.CommonJS, esModuleInterop: true },
+  }).outputText
+  module._compile(output, filename)
+}
+
+const Database = require('better-sqlite3')
+const {
+  getMigrationMarker,
+  getPendingMigrations,
+  getSchemaVersion,
+  putMigrationMarker,
+  runMigrations,
+} = require('../../src/main/worker/dbService/migrate.ts')
+const { migration3, STORAGE_FOUNDATION_SOURCE } = require('../../src/main/worker/dbService/migrations/0003_storage_foundation.ts')
+const tables = require('../../src/main/worker/dbService/tables.ts').default
+
+const databases = []
+const tempDirs = []
+
+afterEach(() => {
+  for (const db of databases.splice(0)) {
+    if (db.open) db.close()
+  }
+  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+})
+
+const hasObject = (db, name) => Boolean(db.prepare('SELECT 1 FROM sqlite_master WHERE name = ?').get(name))
+
+const createLegacyDatabase = (version, options = {}) => {
+  const db = new Database(':memory:')
+  databases.push(db)
+  const omitted = new Set(options.omit ?? [])
+  if (options.omitDislike) omitted.add('dislike_list')
+  for (const [name, sql] of tables) {
+    if (!omitted.has(name)) db.exec(sql)
+  }
+  if (!omitted.has('db_info')) {
+    db.prepare('INSERT INTO db_info (field_name, field_value) VALUES (?, ?)').run('version', version)
+  }
+  return db
+}
+
+const checksum = source => crypto.createHash('sha256').update(source).digest('hex')
+
+const createMigration = (version, name, up = () => {}) => ({
+  version,
+  name,
+  checksum: checksum(`test migration ${version}: ${name}`),
+  up,
+})
+
+const migration4 = createMigration(4, 'test_four', db => db.exec('CREATE TABLE migration_four (id INTEGER PRIMARY KEY)'))
+const migration5 = createMigration(5, 'test_five', db => db.exec('CREATE TABLE migration_five (id INTEGER PRIMARY KEY)'))
+
+const readLegacyVersion = db => db.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value
+const readLedger = db => db.prepare('SELECT version, name, checksum, applied_at_ms FROM schema_migrations ORDER BY version').all()
+
+describe('database migrations', () => {
+  it('bridges legacy version 2 and applies all pending migrations atomically', () => {
+    const db = createLegacyDatabase('2')
+
+    const result = runMigrations(db, [migration3], { now: () => 1000 })
+
+    assert.deepEqual(result, { fromVersion: 2, toVersion: 3, applied: [3] })
+    assert.deepEqual(readLedger(db), [{
+      version: 3,
+      name: 'storage_foundation',
+      checksum: migration3.checksum,
+      applied_at_ms: 1000,
+    }])
+    assert.equal(migration3.checksum, checksum(STORAGE_FOUNDATION_SOURCE))
+    assert.equal(readLegacyVersion(db), '3')
+    assert.equal(getSchemaVersion(db), 3)
+  })
+
+  it('rolls back bootstrap and every pending migration when a later migration fails', () => {
+    const db = createLegacyDatabase('2')
+    const throwingMigration4 = createMigration(4, 'throwing_four', migratedDb => {
+      migratedDb.exec('CREATE TABLE migration_four (id INTEGER PRIMARY KEY)')
+      throw new Error('injected migration failure')
+    })
+
+    assert.throws(() => runMigrations(db, [migration3, throwingMigration4]), /injected migration failure/)
+
+    assert.equal(hasObject(db, 'migration_markers'), false)
+    assert.equal(hasObject(db, 'schema_migrations'), false)
+    assert.equal(hasObject(db, 'migration_four'), false)
+    assert.equal(readLegacyVersion(db), '2')
+  })
+
+  it('repairs a legacy version 1 database inside the migration transaction', () => {
+    const db = createLegacyDatabase('1', { omitDislike: true })
+
+    const result = runMigrations(db, [migration3], { now: () => 1000 })
+
+    assert.deepEqual(result, { fromVersion: 1, toVersion: 3, applied: [3] })
+    assert.equal(hasObject(db, 'dislike_list'), true)
+    assert.equal(readLegacyVersion(db), '3')
+  })
+
+  it('rolls back the legacy version 1 repair when a pending migration fails', () => {
+    const db = createLegacyDatabase('1', { omitDislike: true })
+    const throwingMigration4 = createMigration(4, 'throwing_four', () => { throw new Error('injected migration failure') })
+
+    assert.throws(() => runMigrations(db, [migration3, throwingMigration4]), /injected migration failure/)
+
+    assert.equal(hasObject(db, 'dislike_list'), false)
+    assert.equal(hasObject(db, 'schema_migrations'), false)
+    assert.equal(readLegacyVersion(db), '1')
+  })
+
+  it('rejects unsupported or malformed legacy versions before creating the ledger', () => {
+    for (const version of ['0', '2x', '4']) {
+      const db = createLegacyDatabase(version)
+      assert.throws(() => runMigrations(db, [migration3]), /legacy.*version/i)
+      assert.equal(hasObject(db, 'schema_migrations'), false)
+    }
+
+    const duplicate = createLegacyDatabase('2')
+    duplicate.prepare('INSERT INTO db_info (field_name, field_value) VALUES (?, ?)').run('version', '2')
+    assert.throws(() => runMigrations(duplicate, [migration3]), /legacy.*version/i)
+    assert.equal(hasObject(duplicate, 'schema_migrations'), false)
+  })
+
+  it('rejects malformed legacy table sets before repair or bootstrap', () => {
+    const v1 = createLegacyDatabase('1', { omit: ['my_list'], omitDislike: true })
+    assert.throws(() => runMigrations(v1, [migration3]), /legacy.*schema/i)
+    assert.equal(hasObject(v1, 'dislike_list'), false)
+    assert.equal(hasObject(v1, 'schema_migrations'), false)
+
+    const v2 = createLegacyDatabase('2', { omitDislike: true })
+    assert.throws(() => runMigrations(v2, [migration3]), /legacy.*schema/i)
+    assert.equal(hasObject(v2, 'schema_migrations'), false)
+
+    const extra = createLegacyDatabase('2')
+    extra.exec('CREATE TABLE unexpected_legacy_table (id INTEGER)')
+    assert.throws(() => runMigrations(extra, [migration3]), /legacy.*schema/i)
+    assert.equal(hasObject(extra, 'schema_migrations'), false)
+  })
+
+  it('rejects duplicate, unordered, non-contiguous, or malformed migration registries', () => {
+    const cases = [
+      [migration3, { ...migration3, name: 'duplicate_three' }],
+      [migration4, migration3],
+      [migration3, createMigration(5, 'gap_five')],
+      [{ ...migration3, checksum: 'A'.repeat(64) }],
+      [{ ...migration3, checksum: '0'.repeat(63) }],
+    ]
+    for (const registry of cases) {
+      const db = createLegacyDatabase('2')
+      assert.throws(() => getPendingMigrations(db, registry), /migration registry/i)
+      assert.equal(hasObject(db, 'schema_migrations'), false)
+    }
+  })
+
+  it('reruns idempotently without changing applied migration records', () => {
+    const db = createLegacyDatabase('2')
+    let clockCalls = 0
+    runMigrations(db, [migration3], { now: () => ++clockCalls * 1000 })
+    const before = readLedger(db)
+
+    const result = runMigrations(db, [migration3], { now: () => ++clockCalls * 1000 })
+
+    assert.deepEqual(result, { fromVersion: 3, toVersion: 3, applied: [] })
+    assert.deepEqual(readLedger(db), before)
+    assert.equal(clockCalls, 1)
+  })
+
+  it('stops at an inclusive migration target and resumes from that exact boundary', () => {
+    const db = createLegacyDatabase('2')
+    const registry = [migration3, migration4, migration5]
+
+    const first = runMigrations(db, registry, { targetSchemaVersion: 4, now: () => 1000 })
+    assert.deepEqual(first, { fromVersion: 2, toVersion: 4, applied: [3, 4] })
+    assert.deepEqual(readLedger(db).map(row => row.version), [3, 4])
+    assert.equal(hasObject(db, 'migration_five'), false)
+    assert.equal(readLegacyVersion(db), '4')
+
+    const second = runMigrations(db, registry, { targetSchemaVersion: 5, now: () => 2000 })
+    assert.deepEqual(second, { fromVersion: 4, toVersion: 5, applied: [5] })
+    assert.deepEqual(readLedger(db).map(row => row.version), [3, 4, 5])
+    assert.equal(hasObject(db, 'migration_five'), true)
+    assert.equal(readLegacyVersion(db), '5')
+  })
+
+  it('rejects migration targets outside an inclusive contiguous boundary', () => {
+    const registry = [migration3, migration4]
+    for (const targetSchemaVersion of [1, 2.5, 5, Number.POSITIVE_INFINITY]) {
+      const db = createLegacyDatabase('2')
+      assert.throws(
+        () => getPendingMigrations(db, registry, { targetSchemaVersion }),
+        /target schema version/i,
+      )
+      assert.equal(hasObject(db, 'schema_migrations'), false)
+    }
+  })
+
+  it('rejects changed names, checksums, and missing registry entries for applied migrations', () => {
+    const changedName = createLegacyDatabase('2')
+    runMigrations(changedName, [migration3])
+    assert.throws(
+      () => runMigrations(changedName, [{ ...migration3, name: 'changed_name' }]),
+      /name/i,
+    )
+
+    const changedChecksum = createLegacyDatabase('2')
+    runMigrations(changedChecksum, [migration3])
+    assert.throws(
+      () => runMigrations(changedChecksum, [{ ...migration3, checksum: '0'.repeat(64) }]),
+      /checksum/i,
+    )
+
+    const missing = createLegacyDatabase('2')
+    runMigrations(missing, [migration3, migration4])
+    assert.throws(() => getPendingMigrations(missing, [migration3]), /missing.*4/i)
+  })
+
+  it('uses the ledger as authoritative after migration bootstrap', () => {
+    const db = createLegacyDatabase('2')
+    runMigrations(db, [migration3])
+    db.prepare("UPDATE db_info SET field_value = '1' WHERE field_name = 'version'").run()
+
+    assert.equal(getSchemaVersion(db), 3)
+  })
+
+  it('round-trips migration markers with canonical versioned object details', () => {
+    const db = createLegacyDatabase('2')
+    runMigrations(db, [migration3])
+    const marker = {
+      name: 'legacy_config_v1.settings',
+      sourceSha256: 'a'.repeat(64),
+      completedAtMs: 1234,
+      detailsJson: '{"z":2,"version":1,"a":{"y":2,"x":1}}',
+    }
+
+    putMigrationMarker(db, marker)
+
+    assert.deepEqual(getMigrationMarker(db, marker.name), {
+      ...marker,
+      detailsJson: '{"a":{"x":1,"y":2},"version":1,"z":2}',
+    })
+  })
+
+  it('rejects invalid migration marker names, hashes, timestamps, and envelopes', () => {
+    const db = createLegacyDatabase('2')
+    runMigrations(db, [migration3])
+    const valid = {
+      name: 'legacy_config_v1.settings',
+      sourceSha256: 'a'.repeat(64),
+      completedAtMs: 0,
+      detailsJson: '{"version":1}',
+    }
+    const invalid = [
+      { ...valid, name: '' },
+      { ...valid, sourceSha256: 'A'.repeat(64) },
+      { ...valid, sourceSha256: 'a'.repeat(63) },
+      { ...valid, completedAtMs: -1 },
+      { ...valid, completedAtMs: 1.5 },
+      { ...valid, completedAtMs: Number.POSITIVE_INFINITY },
+      { ...valid, detailsJson: 'not json' },
+      { ...valid, detailsJson: '[]' },
+      { ...valid, detailsJson: '{"wrong":1}' },
+      { ...valid, detailsJson: '{"version":2}' },
+    ]
+
+    for (const marker of invalid) assert.throws(() => putMigrationMarker(db, marker), /migration marker/i)
+    assert.equal(db.prepare('SELECT count(*) AS count FROM migration_markers').get().count, 0)
+  })
+
+  it('reuses same-source migration markers without overwriting original details', () => {
+    const db = createLegacyDatabase('2')
+    runMigrations(db, [migration3])
+    const original = {
+      name: 'legacy_config_v1.settings',
+      sourceSha256: 'a'.repeat(64),
+      completedAtMs: 1000,
+      detailsJson: '{"version":1,"attempt":1}',
+    }
+    putMigrationMarker(db, original)
+
+    putMigrationMarker(db, { ...original, completedAtMs: 2000, detailsJson: '{"version":1,"attempt":2}' })
+
+    assert.deepEqual(getMigrationMarker(db, original.name), {
+      ...original,
+      detailsJson: '{"attempt":1,"version":1}',
+    })
+  })
+
+  it('rejects conflicting-source migration markers without exposing or replacing payloads', () => {
+    const db = createLegacyDatabase('2')
+    runMigrations(db, [migration3])
+    const original = {
+      name: 'legacy_config_v1.settings',
+      sourceSha256: 'a'.repeat(64),
+      completedAtMs: 1000,
+      detailsJson: '{"version":1,"secret":"not-in-error"}',
+    }
+    putMigrationMarker(db, original)
+
+    assert.throws(
+      () => putMigrationMarker(db, { ...original, sourceSha256: 'b'.repeat(64) }),
+      error => error.message.includes(original.name) && error.message.includes('conflict') && !error.message.includes('not-in-error'),
+    )
+    assert.deepEqual(getMigrationMarker(db, original.name), {
+      ...original,
+      detailsJson: '{"secret":"not-in-error","version":1}',
+    })
+  })
+
+  it('initializes a new app database through migration 3 with authoritative pragmas', () => {
+    const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-migration-init-'))
+    tempDirs.push(profileRoot)
+    const dbService = require('../../src/main/worker/dbService/db.ts')
+
+    assert.equal(dbService.init(profileRoot), false)
+    const db = dbService.getAppDB()
+    databases.push(db)
+
+    assert.equal(dbService.getDB(), db)
+    assert.equal(getSchemaVersion(db), 3)
+    assert.deepEqual(readLedger(db).map(row => [row.version, row.name]), [[3, 'storage_foundation']])
+    assert.equal(db.pragma('foreign_keys', { simple: true }), 1)
+    assert.equal(db.pragma('journal_mode', { simple: true }), 'wal')
+    assert.equal(fs.existsSync(path.join(profileRoot, 'lx.data.db')), true)
+    assert.equal(fs.existsSync(path.join(profileRoot, 'activity.db')), false)
+  })
+})

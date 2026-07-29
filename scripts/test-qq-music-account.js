@@ -23,6 +23,7 @@ let singletonGetCookie
 let singletonGetDailyRecommendCookie
 let singletonGetHomeRecommendCookie
 let singletonGetPlaylistDetailCookie
+let singletonGetFeedbackCookie
 let storeFactoryCallCount = 0
 class QQMusicAuthError extends Error {}
 class QQMusicCredentialRefreshError extends Error {
@@ -105,6 +106,10 @@ const playlistDetailService = {
     return { ...playlistDetail, id, page }
   },
 }
+const feedbackService = {
+  likeMusic: async() => {},
+  dislikeMusic: async() => {},
+}
 
 const {
   createQQMusicAccountService,
@@ -157,6 +162,12 @@ const {
         return playlistDetailService
       },
     },
+    './feedback': {
+      createQQMusicFeedbackService: options => {
+        singletonGetFeedbackCookie = options.getCookie
+        return feedbackService
+      },
+    },
   },
 )
 assert.strictEqual(storeFactoryCallCount, 0)
@@ -168,6 +179,7 @@ const createFacade = () => createQQMusicAccountService({
   dailyRecommendService,
   homeRecommendService,
   playlistDetailService,
+  feedbackService,
   credentialService: unavailableCredentialService,
   onRefreshDiagnostic: () => {},
   now: () => 123456,
@@ -184,6 +196,7 @@ const main = async() => {
   assert.strictEqual(singletonGetDailyRecommendCookie, singletonGetCookie)
   assert.strictEqual(singletonGetHomeRecommendCookie, singletonGetCookie)
   assert.strictEqual(singletonGetPlaylistDetailCookie, singletonGetCookie)
+  assert.strictEqual(singletonGetFeedbackCookie, singletonGetCookie)
   await createSingletonLoginQr(nextLoginRequestId(), Date.now())
   assert.strictEqual(storeFactoryCallCount, 1)
 

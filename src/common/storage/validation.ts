@@ -15,5 +15,11 @@ export const assertFiniteInteger = (value: unknown, field: string, minimum: numb
 }
 
 export const assertJsonByteSize = (value: unknown, field: string, maximum: number): void => {
-  if (Buffer.byteLength(JSON.stringify(value), 'utf8') > maximum) invalidField(field)
+  let serialized: string | undefined
+  try {
+    serialized = JSON.stringify(value)
+  } catch {
+    invalidField(field)
+  }
+  if (typeof serialized != 'string' || Buffer.byteLength(serialized, 'utf8') > maximum) invalidField(field)
 }

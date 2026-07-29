@@ -224,7 +224,7 @@ describe('storage startup coordinator', () => {
     releaseDatabase()
     assert.deepEqual(await startup, { status: 'fatal', reason: 'storage_startup_cancelled' })
     await shutdown
-    assert.deepEqual(calls, ['run-state:unclean', 'db:init', 'stores:flush', 'db:close', 'run-state:clean'])
+    assert.deepEqual(calls, ['run-state:unclean', 'db:init', 'stores:flush', 'db:close'])
   })
 
   it('leaves the run unclean when blocked startup exceeds the shutdown bound', async() => {
@@ -270,6 +270,83 @@ describe('storage startup coordinator', () => {
       },
     })
     assert.deepEqual(calls, ['run-state:unclean', 'db:init', 'recovery:show'])
+  })
+
+  for (const recoveryReason of ['quick_check_failed', 'foreign_key_check_failed']) {
+    it(`keeps ${recoveryReason} unclean across orderly shutdown and restart`, async() => {
+      const runtimeRoot = tempDirectory(`lx-run-state-${recoveryReason}-`)
+      const { createRunState } = require(runStatePath)
+      const firstDeps = createDeps({
+        runState: createRunState({ runtimeRoot, now: () => 100 }),
+        initDatabase: async() => ({
+          ...recoveryResult,
+          reason: recoveryReason,
+          diagnostics: [`${recoveryReason}.stable`],
+        }),
+      }).deps
+      const firstCoordinator = createCoordinator(firstDeps)
+
+      assert.equal((await firstCoordinator.start()).status, 'recovery')
+      await firstCoordinator.shutdown()
+
+      const previousCleanValues = []
+      const secondDeps = createDeps({
+        runState: createRunState({ runtimeRoot, now: () => 200 }),
+        initDatabase: async previousShutdownWasClean => {
+          previousCleanValues.push(previousShutdownWasClean)
+          return readyResult
+        },
+      }).deps
+      const secondCoordinator = createCoordinator(secondDeps)
+
+      assert.deepEqual(await secondCoordinator.start(), { status: 'ready', schemaVersion: 3 })
+      assert.deepEqual(previousCleanValues, [false])
+    })
+  }
+
+  it('keeps an external-migration recovery unclean after orderly shutdown', async() => {
+    const { calls, deps } = createDeps({
+      runMigrationHooks: async() => {
+        calls.push('migration-hooks')
+        return {
+          status: 'recovery',
+          reason: 'credentials_migration_failed',
+          target: {
+            kind: 'external-migration',
+            component: 'credentials',
+            affectedPath: null,
+            diagnostics: ['credentials.write_failed'],
+          },
+        }
+      },
+    })
+    const coordinator = createCoordinator(deps)
+
+    assert.equal((await coordinator.start()).status, 'recovery')
+    await coordinator.shutdown()
+
+    assert.equal(calls.includes('run-state:clean'), false)
+    assert.equal(calls.includes('modules:register'), false)
+    assert.equal(calls.includes('app:inited'), false)
+  })
+
+  it('keeps a fatal startup unclean after orderly shutdown', async() => {
+    const { calls, deps } = createDeps({
+      initSettings: async() => {
+        calls.push('settings:init')
+        const error = new Error('setting-secret')
+        error.code = 'settings_init_failed'
+        throw error
+      },
+    })
+    const coordinator = createCoordinator(deps)
+
+    assert.deepEqual(await coordinator.start(), { status: 'fatal', reason: 'settings_init_failed' })
+    await coordinator.shutdown()
+
+    assert.equal(calls.includes('run-state:clean'), false)
+    assert.equal(calls.includes('modules:register'), false)
+    assert.equal(calls.includes('app:inited'), false)
   })
 
   it('marks a run clean only after every flusher, stores, and database close succeeds', async() => {
@@ -341,6 +418,27 @@ describe('database worker startup surface', () => {
 })
 
 describe('storage run state', () => {
+  it('cleans only exact stale run-state owned temps before its first read', async() => {
+    const runtimeRoot = tempDirectory('lx-run-state-cleanup-')
+    const target = path.join(runtimeRoot, 'run-state.v1.json')
+    const staleTemp = `${target}.owned-tmp-712-4`
+    const nextFile = `${target}.next`
+    const previousFile = `${target}.previous`
+    const otherWriterTemp = path.join(runtimeRoot, 'other.json.owned-tmp-712-4')
+    fs.writeFileSync(staleTemp, 'stale')
+    fs.writeFileSync(nextFile, '{"version":1}')
+    fs.writeFileSync(previousFile, '{"version":1}')
+    fs.writeFileSync(otherWriterTemp, 'keep')
+    const { createRunState } = require(runStatePath)
+
+    assert.equal(await createRunState({ runtimeRoot, now: () => 100 }).begin(), false)
+
+    assert.equal(fs.existsSync(staleTemp), false)
+    assert.equal(fs.existsSync(nextFile), true)
+    assert.equal(fs.existsSync(previousFile), true)
+    assert.equal(fs.existsSync(otherWriterTemp), true)
+  })
+
   it('records unclean startup before database initialization and clean completion after shutdown', async() => {
     const runtimeRoot = tempDirectory('lx-run-state-')
     let now = 100

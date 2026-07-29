@@ -162,6 +162,36 @@ const makePaths = prefix => {
   return { root, dataPath, backupDir, databasePath: path.join(dataPath, 'lx.data.db') }
 }
 
+const createDatabaseSymlinkOrSkip = (testContext, {
+  target,
+  link,
+  dangling,
+  contents,
+}) => {
+  if (!dangling) fs.writeFileSync(target, contents)
+  try {
+    fs.symlinkSync(target, link, 'file')
+    return { targetArtifact: target }
+  } catch (error) {
+    if (!['EPERM', 'EACCES', 'ENOSYS'].includes(error?.code) || process.platform != 'win32') throw error
+    try {
+      fs.rmSync(target, { recursive: true, force: true })
+      fs.mkdirSync(target, { recursive: true })
+      const targetArtifact = path.join(target, 'sentinel')
+      if (!dangling) fs.writeFileSync(targetArtifact, contents)
+      fs.symlinkSync(target, link, 'junction')
+      if (dangling) fs.rmSync(target, { recursive: true, force: true })
+      return { targetArtifact }
+    } catch (junctionError) {
+      if (['EPERM', 'EACCES', 'ENOSYS'].includes(junctionError?.code)) {
+        testContext.skip(`Filesystem links are unavailable on ${process.platform}: ${junctionError.code}`)
+        return null
+      }
+      throw junctionError
+    }
+  }
+}
+
 const createV3Database = databasePath => {
   const db = openTracked(databasePath)
   db.exec(V3_SCHEMA)
@@ -594,7 +624,7 @@ describe('database startup orchestration', () => {
     assert.deepEqual(calls, [{ runQuickCheck: false, runForeignKeyCheck: false }])
   })
 
-  it('kills skipped unclean checks by running quick_check but not FK check without migration', async() => {
+  it('runs both integrity checks after an unclean startup without pending migrations', async() => {
     const paths = makePaths('lx-recovery-unclean-')
     const existing = createV3Database(paths.databasePath)
     existing.close()
@@ -613,8 +643,77 @@ describe('database startup orchestration', () => {
     const result = await dbService.init({ ...initOptions(paths), previousShutdownWasClean: false })
 
     assert.equal(result.status, 'ready')
-    assert.deepEqual(calls, [{ runQuickCheck: true, runForeignKeyCheck: false }])
+    assert.deepEqual(calls, [{ runQuickCheck: true, runForeignKeyCheck: true }])
   })
+
+  for (const recoveryReason of ['quick_check_failed', 'foreign_key_check_failed']) {
+    it(`restarts ${recoveryReason} recovery with both integrity checks before ready`, async() => {
+      const paths = makePaths(`lx-recovery-restart-${recoveryReason}-`)
+      const runtimeRoot = path.join(paths.root, 'runtime')
+      const existing = createV3Database(paths.databasePath)
+      existing.close()
+      const { createRunState } = require('../../src/main/startup/runState.ts')
+      const { createStorageCoordinator } = require('../../src/main/startup/storageCoordinator.ts')
+      const createCoordinatorFor = (dbService, previousCleanValues) => createStorageCoordinator({
+        runState: createRunState({ runtimeRoot }),
+        initDatabase: previousShutdownWasClean => {
+          previousCleanValues.push(previousShutdownWasClean)
+          return dbService.init({ ...initOptions(paths), previousShutdownWasClean })
+        },
+        closeDatabase: () => dbService.close(),
+        runMigrationHooks: async() => undefined,
+        initSettings: async() => {},
+        registerModules: () => {},
+        appInited: () => {},
+        showRecovery: async() => {},
+        flushStores: async() => {},
+      })
+      const firstPreviousCleanValues = []
+      const firstDbService = loadDbServiceWithBoundaries({
+        verifyModule: {
+          verifyDatabase: () => ({
+            ok: false,
+            reason: recoveryReason,
+            diagnostics: [`${recoveryReason}.stable`],
+          }),
+        },
+      })
+      const firstCoordinator = createCoordinatorFor(firstDbService, firstPreviousCleanValues)
+
+      assert.equal((await firstCoordinator.start()).status, 'recovery')
+      await firstCoordinator.shutdown()
+      const cleanMarkerBeforeRestart = JSON.parse(
+        fs.readFileSync(path.join(runtimeRoot, 'run-state.v1.json'), 'utf8'),
+      ).clean
+
+      const actualVerify = require('../../src/main/worker/dbService/verifyDB.ts')
+      const verificationOptions = []
+      const secondDbService = loadDbServiceWithBoundaries({
+        verifyModule: {
+          ...actualVerify,
+          verifyDatabase: (db, options) => {
+            verificationOptions.push(options)
+            return actualVerify.verifyDatabase(db, options)
+          },
+        },
+      })
+      const secondPreviousCleanValues = []
+      const secondCoordinator = createCoordinatorFor(secondDbService, secondPreviousCleanValues)
+
+      assert.equal((await secondCoordinator.start()).status, 'ready')
+      assert.deepEqual({
+        cleanMarkerBeforeRestart,
+        firstPreviousCleanValues,
+        secondPreviousCleanValues,
+        verificationOptions,
+      }, {
+        cleanMarkerBeforeRestart: false,
+        firstPreviousCleanValues: [false],
+        secondPreviousCleanValues: [false],
+        verificationOptions: [{ runQuickCheck: true, runForeignKeyCheck: true }],
+      })
+    })
+  }
 
   it('kills migration-after-backup-failure by returning recovery and leaving v2 authoritative', async() => {
     const paths = makePaths('lx-recovery-backup-fail-')
@@ -696,6 +795,94 @@ describe('database startup orchestration', () => {
     assert.deepEqual(dbService.getDatabaseHealth(), {
       status: 'recovery', readOnly: false, reason: 'open_failed', diagnostics: ['open.failed', 'readonly_reopen.failed'],
     })
+  })
+
+  it('enables and verifies foreign keys before exposing a read-only recovery connection', async() => {
+    const paths = makePaths('lx-recovery-readonly-fk-')
+    const existing = createV3Database(paths.databasePath)
+    existing.close()
+    const readonlyPragmas = []
+    class TrackingDatabase {
+      constructor(filename, options) {
+        const real = new Database(filename, options)
+        if (!options?.readonly) return real
+        return new Proxy(real, {
+          get(target, property) {
+            const value = Reflect.get(target, property)
+            if (property == 'pragma') {
+              return (statement, pragmaOptions) => {
+                readonlyPragmas.push(statement)
+                return target.pragma(statement, pragmaOptions)
+              }
+            }
+            return typeof value == 'function' ? value.bind(target) : value
+          },
+        })
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({
+      DatabaseImplementation: TrackingDatabase,
+      verifyModule: {
+        verifyDatabase: () => ({
+          ok: false,
+          reason: 'quick_check_failed',
+          diagnostics: ['quick_check.failed'],
+        }),
+      },
+    })
+
+    const result = await dbService.init({ ...initOptions(paths), previousShutdownWasClean: false })
+
+    assert.equal(result.status, 'recovery')
+    assert.equal(dbService.getDatabaseHealth().readOnly, true)
+    assert.deepEqual(readonlyPragmas, ['foreign_keys = ON', 'foreign_keys', 'schema_version'])
+  })
+
+  it('rejects a recovery connection when foreign-key enforcement cannot be verified', async() => {
+    const paths = makePaths('lx-recovery-readonly-fk-disabled-')
+    const existing = createV3Database(paths.databasePath)
+    existing.close()
+    const readonlyPragmas = []
+    class DisabledForeignKeysDatabase {
+      constructor(filename, options) {
+        const real = new Database(filename, options)
+        if (!options?.readonly) return real
+        return new Proxy(real, {
+          get(target, property) {
+            const value = Reflect.get(target, property)
+            if (property == 'pragma') {
+              return (statement, pragmaOptions) => {
+                readonlyPragmas.push(statement)
+                if (statement == 'foreign_keys' && pragmaOptions?.simple) return 0
+                return target.pragma(statement, pragmaOptions)
+              }
+            }
+            return typeof value == 'function' ? value.bind(target) : value
+          },
+        })
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({
+      DatabaseImplementation: DisabledForeignKeysDatabase,
+      verifyModule: {
+        verifyDatabase: () => ({
+          ok: false,
+          reason: 'quick_check_failed',
+          diagnostics: ['quick_check.failed'],
+        }),
+      },
+    })
+
+    const result = await dbService.init({ ...initOptions(paths), previousShutdownWasClean: false })
+
+    assert.deepEqual(result.diagnostics, ['quick_check.failed', 'readonly_reopen.failed'])
+    assert.deepEqual(dbService.getDatabaseHealth(), {
+      status: 'recovery',
+      readOnly: false,
+      reason: 'quick_check_failed',
+      diagnostics: ['quick_check.failed', 'readonly_reopen.failed'],
+    })
+    assert.deepEqual(readonlyPragmas, ['foreign_keys = ON', 'foreign_keys'])
   })
 
   it('kills wrong error mapping by returning exact recovery reasons for each startup boundary', async() => {
@@ -800,8 +987,238 @@ describe('database startup orchestration', () => {
     const result = await dbService.init(initOptions(paths))
 
     assert.equal(result.reason, 'open_failed')
-    assert.deepEqual(result.diagnostics, ['open.path_invalid', 'readonly_reopen.failed'])
+    assert.deepEqual(result.diagnostics, ['open.path_invalid'])
     assert.equal(fs.existsSync(escaped), false)
+  })
+
+  it('rejects a dangling authoritative database symlink without opening or following it', async(t) => {
+    const paths = makePaths('lx-recovery-dangling-symlink-')
+    const danglingTarget = path.join(paths.root, 'missing-external.db')
+    if (createDatabaseSymlinkOrSkip(t, {
+      target: danglingTarget,
+      link: paths.databasePath,
+      dangling: true,
+    }) == null) return
+    let openCalls = 0
+    class TrackingDatabase {
+      constructor(...args) {
+        openCalls++
+        return new Database(...args)
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({ DatabaseImplementation: TrackingDatabase })
+
+    const result = await dbService.init(initOptions(paths))
+
+    assert.equal(result.status, 'recovery')
+    assert.equal(result.reason, 'open_failed')
+    assert.deepEqual(result.diagnostics, ['open.target_symlink'])
+    assert.equal(openCalls, 0)
+    assert.equal(fs.existsSync(danglingTarget), false)
+    assert.equal(fs.lstatSync(paths.databasePath).isSymbolicLink(), true)
+  })
+
+  it('rejects an external-target database symlink without opening or modifying its target', async(t) => {
+    const paths = makePaths('lx-recovery-external-symlink-')
+    const externalTarget = path.join(paths.root, 'external.db')
+    const link = createDatabaseSymlinkOrSkip(t, {
+      target: externalTarget,
+      link: paths.databasePath,
+      dangling: false,
+      contents: 'EXTERNAL_DATABASE_SECRET_4D18',
+    })
+    if (link == null) return
+    const before = fs.readFileSync(link.targetArtifact)
+    let openCalls = 0
+    class TrackingDatabase {
+      constructor(...args) {
+        openCalls++
+        return new Database(...args)
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({ DatabaseImplementation: TrackingDatabase })
+
+    const result = await dbService.init(initOptions(paths))
+
+    assert.equal(result.status, 'recovery')
+    assert.deepEqual(result.diagnostics, ['open.target_symlink'])
+    assert.equal(openCalls, 0)
+    assert.deepEqual(fs.readFileSync(link.targetArtifact), before)
+  })
+
+  it('rejects a non-regular authoritative database target without opening it', async() => {
+    const paths = makePaths('lx-recovery-directory-target-')
+    fs.mkdirSync(paths.databasePath)
+    let openCalls = 0
+    class TrackingDatabase {
+      constructor(...args) {
+        openCalls++
+        return new Database(...args)
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({ DatabaseImplementation: TrackingDatabase })
+
+    const result = await dbService.init(initOptions(paths))
+
+    assert.equal(result.status, 'recovery')
+    assert.deepEqual(result.diagnostics, ['open.target_not_regular'])
+    assert.equal(openCalls, 0)
+    assert.equal(fs.lstatSync(paths.databasePath).isDirectory(), true)
+  })
+
+  it('returns sanitized recovery when another creator wins the missing-target reservation race', async() => {
+    const paths = makePaths('lx-recovery-create-race-')
+    const competingBytes = 'RACING_DATABASE_SECRET_681B'
+    let raceInjected = false
+    const racingFileSystem = {
+      ...fs,
+      openSync(filePath, flags, mode) {
+        if (path.resolve(filePath) == path.resolve(paths.databasePath) && flags == 'wx' && !raceInjected) {
+          raceInjected = true
+          fs.writeFileSync(paths.databasePath, competingBytes)
+        }
+        return fs.openSync(filePath, flags, mode)
+      },
+    }
+    let openCalls = 0
+    class TrackingDatabase {
+      constructor(...args) {
+        openCalls++
+        return new Database(...args)
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({
+      DatabaseImplementation: TrackingDatabase,
+      fileSystem: racingFileSystem,
+    })
+
+    const result = await dbService.init(initOptions(paths))
+
+    assert.equal(raceInjected, true)
+    assert.equal(result.status, 'recovery')
+    assert.equal(result.reason, 'open_failed')
+    assert.deepEqual(result.diagnostics, ['open.reserve_conflict'])
+    assert.equal(openCalls, 0)
+    assert.equal(fs.readFileSync(paths.databasePath, 'utf8'), competingBytes)
+    assert.equal(JSON.stringify(result).includes(competingBytes), false)
+  })
+
+  it('rejects an external target identity swapped at the SQLite open boundary without configuring it', async() => {
+    const paths = makePaths('lx-recovery-open-swap-')
+    const originalPath = path.join(paths.root, 'original.db')
+    const externalPath = path.join(paths.root, 'external.db')
+    const existing = createV3Database(paths.databasePath)
+    existing.close()
+    const external = createV3Database(externalPath)
+    external.close()
+    const externalBefore = fs.readFileSync(externalPath)
+    let swapped = false
+    const pragmaCalls = []
+    class OpenBoundarySwapDatabase {
+      constructor(filename, options) {
+        if (!options?.readonly && path.resolve(filename) == path.resolve(paths.databasePath) && !swapped) {
+          fs.renameSync(paths.databasePath, originalPath)
+          fs.linkSync(externalPath, paths.databasePath)
+          swapped = true
+        }
+        const real = new Database(filename, options)
+        return new Proxy(real, {
+          get(target, property) {
+            const value = Reflect.get(target, property)
+            if (property == 'pragma') {
+              return (...args) => {
+                pragmaCalls.push(args[0])
+                return target.pragma(...args)
+              }
+            }
+            return typeof value == 'function' ? value.bind(target) : value
+          },
+        })
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({ DatabaseImplementation: OpenBoundarySwapDatabase })
+
+    const result = await dbService.init(initOptions(paths))
+
+    assert.equal(swapped, true)
+    assert.equal(result.status, 'recovery')
+    assert.equal(result.reason, 'open_failed')
+    assert.deepEqual(result.diagnostics, ['open.target_changed'])
+    assert.deepEqual(pragmaCalls, [])
+    assert.deepEqual(fs.readFileSync(externalPath), externalBefore)
+    assert.equal(fs.lstatSync(paths.databasePath).isFile(), true)
+    assert.equal(fs.statSync(paths.databasePath).ino, fs.statSync(externalPath).ino)
+    assert.equal(fs.existsSync(originalPath), true)
+  })
+
+  it('rejects a recovery target swapped during writable close before read-only reopen', async() => {
+    const paths = makePaths('lx-recovery-close-swap-')
+    const originalPath = path.join(paths.root, 'original.db')
+    const externalPath = path.join(paths.root, 'external.db')
+    const existing = createV3Database(paths.databasePath)
+    existing.close()
+    const external = createV3Database(externalPath)
+    external.close()
+    const externalBefore = fs.readFileSync(externalPath)
+    let swapped = false
+    let readonlyOpenCalls = 0
+    class CloseBoundarySwapDatabase {
+      constructor(filename, options) {
+        if (options?.readonly) readonlyOpenCalls++
+        const real = new Database(filename, options)
+        if (options?.readonly) return real
+        return new Proxy(real, {
+          get(target, property) {
+            const value = Reflect.get(target, property)
+            if (property == 'close') {
+              return () => {
+                target.close()
+                if (swapped) return
+                fs.renameSync(paths.databasePath, originalPath)
+                fs.linkSync(externalPath, paths.databasePath)
+                swapped = true
+              }
+            }
+            return typeof value == 'function' ? value.bind(target) : value
+          },
+        })
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({
+      DatabaseImplementation: CloseBoundarySwapDatabase,
+      verifyModule: {
+        verifyDatabase: () => ({
+          ok: false,
+          reason: 'quick_check_failed',
+          diagnostics: ['quick_check.failed'],
+        }),
+      },
+    })
+
+    try {
+      const result = await dbService.init({ ...initOptions(paths), previousShutdownWasClean: false })
+
+      assert.equal(swapped, true)
+      assert.deepEqual(result, {
+        status: 'recovery',
+        reason: 'quick_check_failed',
+        databasePath: path.resolve(paths.databasePath),
+        backupPath: null,
+        diagnostics: ['quick_check.failed', 'readonly_reopen.failed'],
+      })
+      assert.deepEqual(dbService.getDatabaseHealth(), {
+        status: 'recovery',
+        readOnly: false,
+        reason: 'quick_check_failed',
+        diagnostics: ['quick_check.failed', 'readonly_reopen.failed'],
+      })
+      assert.equal(readonlyOpenCalls, 0)
+      assert.deepEqual(fs.readFileSync(externalPath), externalBefore)
+      assert.equal(fs.statSync(paths.databasePath).ino, fs.statSync(externalPath).ino)
+      assert.equal(fs.existsSync(originalPath), true)
+    } finally {
+      dbService.close()
+    }
   })
 
   it('kills backup-path traversal by rejecting a resolved candidate outside backupDir', async() => {
@@ -833,6 +1250,119 @@ describe('database startup orchestration', () => {
 
     assert.deepEqual(dbService.getDatabaseHealth(), { status: 'closed' })
     assert.throws(() => dbService.getAppDB(), error => error.message == 'database_not_ready' && error.code == 'database_not_ready')
+  })
+
+  it('propagates a writable close failure through shutdown and leaves the run unclean', async() => {
+    const paths = makePaths('lx-recovery-close-failure-')
+    const existing = createV3Database(paths.databasePath)
+    existing.close()
+    const closeError = new Error('native-close-secret-91C7')
+    let closeCalls = 0
+    class CloseOnceDatabase {
+      constructor(filename, options) {
+        const real = new Database(filename, options)
+        if (options?.readonly) return real
+        return new Proxy(real, {
+          get(target, property) {
+            const value = Reflect.get(target, property)
+            if (property == 'close') {
+              return () => {
+                closeCalls++
+                if (closeCalls == 1) throw closeError
+                return target.close()
+              }
+            }
+            return typeof value == 'function' ? value.bind(target) : value
+          },
+        })
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({ DatabaseImplementation: CloseOnceDatabase })
+    let markedClean = false
+    const { createStorageCoordinator } = require('../../src/main/startup/storageCoordinator.ts')
+    const coordinator = createStorageCoordinator({
+      runState: {
+        begin: async() => true,
+        markClean: async() => { markedClean = true },
+      },
+      initDatabase: () => dbService.init(initOptions(paths)),
+      closeDatabase: () => dbService.close(),
+      runMigrationHooks: async() => undefined,
+      initSettings: async() => {},
+      registerModules: () => {},
+      appInited: () => {},
+      showRecovery: async() => {},
+      flushStores: async() => {},
+    })
+
+    assert.equal((await coordinator.start()).status, 'ready')
+    await assert.rejects(coordinator.shutdown(), error => error === closeError)
+    assert.equal(markedClean, false)
+    assert.equal(dbService.getDatabaseHealth().status, 'ready')
+    dbService.close()
+    assert.equal(closeCalls, 2)
+    assert.deepEqual(dbService.getDatabaseHealth(), { status: 'closed' })
+  })
+
+  it('does not reopen read-only when the recovery write connection cannot close', async() => {
+    const paths = makePaths('lx-recovery-write-close-failure-')
+    const existing = createV3Database(paths.databasePath)
+    existing.close()
+    const closeSecret = 'recovery-native-close-secret-D320'
+    let writeCloseCalls = 0
+    let readonlyOpenCalls = 0
+    class RecoveryCloseFaultDatabase {
+      constructor(filename, options) {
+        const real = new Database(filename, options)
+        if (options?.readonly) {
+          readonlyOpenCalls++
+          return real
+        }
+        return new Proxy(real, {
+          get(target, property) {
+            const value = Reflect.get(target, property)
+            if (property == 'close') {
+              return () => {
+                writeCloseCalls++
+                if (writeCloseCalls == 1) throw new Error(closeSecret)
+                return target.close()
+              }
+            }
+            return typeof value == 'function' ? value.bind(target) : value
+          },
+        })
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({
+      DatabaseImplementation: RecoveryCloseFaultDatabase,
+      verifyModule: {
+        verifyDatabase: () => ({
+          ok: false,
+          reason: 'quick_check_failed',
+          diagnostics: ['quick_check.failed'],
+        }),
+      },
+    })
+
+    const result = await dbService.init({ ...initOptions(paths), previousShutdownWasClean: false })
+
+    assert.deepEqual(result, {
+      status: 'recovery',
+      reason: 'quick_check_failed',
+      databasePath: path.resolve(paths.databasePath),
+      backupPath: null,
+      diagnostics: ['quick_check.failed', 'write_close.failed'],
+    })
+    assert.deepEqual(dbService.getDatabaseHealth(), {
+      status: 'recovery',
+      readOnly: false,
+      reason: 'quick_check_failed',
+      diagnostics: ['quick_check.failed', 'write_close.failed'],
+    })
+    assert.equal(readonlyOpenCalls, 0)
+    assert.equal(JSON.stringify(result).includes(closeSecret), false)
+    dbService.close()
+    assert.equal(writeCloseCalls, 2)
   })
 
   it('kills duplicate same-key initialization by sharing backup work and cloning cached results', async() => {

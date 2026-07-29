@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
+import syncFs from 'node:fs'
 import fs from 'node:fs/promises'
 import { canonicalJson, type JsonValue } from '../../common/storage/canonicalJson'
 
@@ -56,34 +57,85 @@ const sameIdentity = (left: FileIdentity, right: FileIdentity): boolean => {
 }
 
 let tempCounter = 0
+const cleanupInFlightByFile = new Map<string, Promise<void>>()
+const activeOwnedTempsByFile = new Map<string, Set<string>>()
+
+const ownedTempPattern = (basename: string): RegExp =>
+  new RegExp(`^${basename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.owned-tmp-\\d+-\\d+$`)
+
+const isActiveOwnedTemp = (filePath: string, ownedPath: string): boolean =>
+  activeOwnedTempsByFile.get(filePath)?.has(ownedPath) == true
+
+const markOwnedTempActive = (filePath: string, ownedPath: string): void => {
+  let active = activeOwnedTempsByFile.get(filePath)
+  if (active == null) activeOwnedTempsByFile.set(filePath, active = new Set())
+  active.add(ownedPath)
+}
+
+const markOwnedTempInactive = (filePath: string, ownedPath: string): void => {
+  const active = activeOwnedTempsByFile.get(filePath)
+  if (active == null) return
+  active.delete(ownedPath)
+  if (!active.size) activeOwnedTempsByFile.delete(filePath)
+}
+
+export const cleanupAtomicJsonOwnedTempsSync = (targetPath: string): void => {
+  const filePath = path.resolve(targetPath)
+  const directoryPath = path.dirname(filePath)
+  const pattern = ownedTempPattern(path.basename(filePath))
+  let entries: string[]
+  try {
+    entries = syncFs.readdirSync(directoryPath)
+  } catch (error) {
+    if (!isMissing(error)) throw error
+    return
+  }
+  for (const entry of entries) {
+    if (!pattern.test(entry)) continue
+    const ownedPath = path.join(directoryPath, entry)
+    if (isActiveOwnedTemp(filePath, ownedPath)) continue
+    try {
+      syncFs.unlinkSync(ownedPath)
+    } catch {}
+  }
+}
 
 export function createAtomicJsonFile<T>(options: {
   filePath: string
   validate: (value: unknown) => value is T
   mode?: number
   fs?: AtomicFileSystem
+  initialCleanupComplete?: boolean
 }): AtomicJsonFile<T> {
   const filePath = path.resolve(options.filePath)
   const directoryPath = path.dirname(filePath)
   const basename = path.basename(filePath)
   const ownedPrefix = `${basename}.owned-tmp-`
-  const ownedPattern = new RegExp(`^${basename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.owned-tmp-\\d+-\\d+$`)
+  const ownedPattern = ownedTempPattern(basename)
   const fileSystem = options.fs ?? fs
   const mode = options.mode ?? 0o600
   const stageRecords = new WeakMap<AtomicJsonStage, StageRecord>()
-  const activeOwnedTemps = new Set<string>()
   let queuePromise: Promise<{ fileSha256: string }> | null = null
   let pendingValue: T | undefined
   let hasPendingValue = false
+  let initialCleanupPromise = options.initialCleanupComplete ? Promise.resolve() : null
+
+  const isValid = (value: unknown): value is T => {
+    try {
+      return options.validate(value)
+    } catch {
+      return false
+    }
+  }
 
   const parseAndValidate = (bytes: string, description: string): T => {
     let value: unknown
     try {
       value = JSON.parse(bytes)
-    } catch (error) {
-      throw new Error(`Atomic JSON ${description} is not valid JSON`, { cause: error })
+    } catch {
+      throw new Error(`Atomic JSON ${description} is not valid JSON`)
     }
-    if (!options.validate(value)) throw new Error(`Atomic JSON ${description} is not valid`)
+    if (!isValid(value)) throw new Error(`Atomic JSON ${description} is not valid`)
     return value
   }
 
@@ -137,7 +189,39 @@ export function createAtomicJsonFile<T>(options: {
     }
   }
 
+  const cleanupOwnedTempsOnce = async(): Promise<void> => {
+    if (initialCleanupPromise == null) {
+      let sharedCleanup = cleanupInFlightByFile.get(filePath)
+      if (sharedCleanup == null) {
+        sharedCleanup = (async() => {
+          let entries: string[]
+          try {
+            entries = await fileSystem.readdir(directoryPath)
+          } catch (error) {
+            if (isMissing(error)) return
+            throw error
+          }
+          await Promise.all(entries.map(async entry => {
+            if (!ownedPattern.test(entry)) return
+            const ownedPath = path.join(directoryPath, entry)
+            if (isActiveOwnedTemp(filePath, ownedPath)) return
+            await removeBestEffort(ownedPath)
+          }))
+        })()
+        cleanupInFlightByFile.set(filePath, sharedCleanup)
+        void sharedCleanup.then(() => {
+          if (cleanupInFlightByFile.get(filePath) == sharedCleanup) cleanupInFlightByFile.delete(filePath)
+        }, () => {
+          if (cleanupInFlightByFile.get(filePath) == sharedCleanup) cleanupInFlightByFile.delete(filePath)
+        })
+      }
+      initialCleanupPromise = sharedCleanup
+    }
+    await initialCleanupPromise
+  }
+
   const read = async(): Promise<T | null> => {
+    await cleanupOwnedTempsOnce()
     let bytes: string
     try {
       bytes = await fileSystem.readFile(filePath, 'utf8')
@@ -149,10 +233,18 @@ export function createAtomicJsonFile<T>(options: {
   }
 
   const stage = async(value: T, label?: 'next'): Promise<AtomicJsonStage> => {
-    if (!options.validate(value)) throw new Error('Atomic JSON value is not valid')
-    const bytes = canonicalJson(value as JsonValue)
+    await cleanupOwnedTempsOnce()
+    if (!isValid(value)) throw new Error('Atomic JSON value is not valid')
+    let bytes: string
+    try {
+      const serialized: unknown = canonicalJson(value as JsonValue)
+      if (typeof serialized != 'string') throw new Error('invalid_serialized_value')
+      bytes = serialized
+    } catch {
+      throw new Error('Atomic JSON value is not valid')
+    }
     const stagedPath = label == 'next' ? `${filePath}.next` : nextOwnedTempPath()
-    if (label == null) activeOwnedTemps.add(stagedPath)
+    if (label == null) markOwnedTempActive(filePath, stagedPath)
     try {
       const identity = await writeDurableBytes(stagedPath, bytes, label == null)
       parseAndValidate(bytes, 'stage')
@@ -162,7 +254,7 @@ export function createAtomicJsonFile<T>(options: {
       return result
     } catch (error) {
       await removeBestEffort(stagedPath)
-      activeOwnedTemps.delete(stagedPath)
+      markOwnedTempInactive(filePath, stagedPath)
       throw error
     }
   }
@@ -182,18 +274,18 @@ export function createAtomicJsonFile<T>(options: {
 
   const preservePrevious = async(bytes: string): Promise<void> => {
     const tempPath = nextOwnedTempPath()
-    activeOwnedTemps.add(tempPath)
+    markOwnedTempActive(filePath, tempPath)
     try {
       await writeDurableBytes(tempPath, bytes, true)
       parseAndValidate(await fileSystem.readFile(tempPath, 'utf8'), 'previous stage')
       await fileSystem.rename(tempPath, `${filePath}.previous`)
-      activeOwnedTemps.delete(tempPath)
+      markOwnedTempInactive(filePath, tempPath)
       const readBack = await fileSystem.readFile(`${filePath}.previous`, 'utf8')
       parseAndValidate(readBack, 'previous read-back')
       if (sha256(readBack) != sha256(bytes)) throw new Error('Atomic JSON previous read-back hash changed')
     } catch (error) {
       await removeBestEffort(tempPath)
-      activeOwnedTemps.delete(tempPath)
+      markOwnedTempInactive(filePath, tempPath)
       throw error
     }
   }
@@ -215,7 +307,7 @@ export function createAtomicJsonFile<T>(options: {
     try {
       await fileSystem.rename(record.filePath, filePath)
       replaced = true
-      activeOwnedTemps.delete(record.filePath)
+      markOwnedTempInactive(filePath, record.filePath)
       const readBack = await fileSystem.readFile(filePath, 'utf8')
       parseAndValidate(readBack, 'destination read-back')
       if (sha256(readBack) != record.fileSha256) throw new Error('Atomic JSON destination read-back hash changed')
@@ -232,7 +324,7 @@ export function createAtomicJsonFile<T>(options: {
       return await commit(staged)
     } catch (error) {
       stageRecords.delete(staged)
-      activeOwnedTemps.delete(staged.filePath)
+      markOwnedTempInactive(filePath, staged.filePath)
       await removeBestEffort(staged.filePath)
       throw error
     }
@@ -270,21 +362,7 @@ export function createAtomicJsonFile<T>(options: {
     if (queuePromise != null) await queuePromise
   }
 
-  const cleanupOwnedTemps = async(): Promise<void> => {
-    let entries: string[]
-    try {
-      entries = await fileSystem.readdir(directoryPath)
-    } catch (error) {
-      if (isMissing(error)) return
-      throw error
-    }
-    await Promise.all(entries.map(async entry => {
-      if (!ownedPattern.test(entry)) return
-      const ownedPath = path.join(directoryPath, entry)
-      if (activeOwnedTemps.has(ownedPath)) return
-      await removeBestEffort(ownedPath)
-    }))
-  }
+  const cleanupOwnedTemps = async(): Promise<void> => cleanupOwnedTempsOnce()
 
   return { read, stage, commit, replace, flush, cleanupOwnedTemps }
 }

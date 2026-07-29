@@ -35,4 +35,30 @@ describe('storage canonical JSON', () => {
     assert.throws(() => assertJsonByteSize({ value: 'x'.repeat(20) }, 'payload', 8), /payload/)
     assert.throws(() => assertJsonByteSize({ value: '你' }, 'payload', 14), /payload/)
   })
+
+  it('sanitizes values that JSON cannot serialize as a document', () => {
+    const secret = 'webdav-password=BYTE_SIZE_SECRET_7E4A'
+    const cyclic = { secret }
+    cyclic.self = cyclic
+    const cases = [
+      undefined,
+      1n,
+      cyclic,
+      Object.defineProperty({}, 'value', {
+        enumerable: true,
+        get() { throw new Error(secret) },
+      }),
+      { toJSON() { throw new Error(secret) } },
+    ]
+
+    for (const value of cases) {
+      assert.throws(() => assertJsonByteSize(value, 'payload', 1024), error => {
+        assert.equal(error instanceof Error, true)
+        assert.equal(error.message, 'Invalid payload')
+        assert.equal('cause' in error, false)
+        assert.equal(String(error).includes(secret), false)
+        return true
+      })
+    }
+  })
 })

@@ -3,7 +3,12 @@ import { dialog, shell } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
 import { log } from '@common/utils'
-import { createAtomicJsonFile, type AtomicFileSystem, type AtomicJsonFile } from '../storage/atomicJsonFile'
+import {
+  cleanupAtomicJsonOwnedTempsSync,
+  createAtomicJsonFile,
+  type AtomicFileSystem,
+  type AtomicJsonFile,
+} from '../storage/atomicJsonFile'
 
 type Stores = Record<string, Store>
 
@@ -13,9 +18,7 @@ const isStoreRecord = (value: unknown): value is Record<string, any> => {
   return value != null && typeof value == 'object' && !Array.isArray(value)
 }
 
-const toStorePersistenceError = (error: unknown): Error => error instanceof Error
-  ? error
-  : new Error('Store persistence failed')
+const toStorePersistenceError = (): Error => new Error('Store persistence failed')
 
 
 class Store {
@@ -28,33 +31,42 @@ class Store {
     let snapshot: Record<string, any>
     try {
       snapshot = structuredClone(this.store)
-    } catch (error) {
-      this.writeError ??= toStorePersistenceError(error)
+    } catch {
+      this.writeError ??= toStorePersistenceError()
       return
     }
-    void this.atomicFile.replace(snapshot).catch(error => {
-      this.writeError ??= toStorePersistenceError(error)
+    void this.atomicFile.replace(snapshot).catch(() => {
+      this.writeError ??= toStorePersistenceError()
     })
   }
 
   constructor(filePath: string, clearInvalidConfig: boolean = false, atomicFileSystem?: AtomicFileSystem) {
     this.filePath = filePath
-    this.atomicFile = createAtomicJsonFile({ filePath, validate: isStoreRecord, fs: atomicFileSystem })
+    try {
+      cleanupAtomicJsonOwnedTempsSync(filePath)
+    } catch {
+      throw new Error('Store data load failed')
+    }
+    this.atomicFile = createAtomicJsonFile({
+      filePath,
+      validate: isStoreRecord,
+      fs: atomicFileSystem,
+      initialCleanupComplete: true,
+    })
 
     let store: Record<string, any>
     if (fs.existsSync(this.filePath)) {
-      if (clearInvalidConfig) {
-        try {
-          store = JSON.parse(fs.readFileSync(this.filePath, 'utf8'))
-        } catch {
-          store = {}
-        }
-      } else store = JSON.parse(fs.readFileSync(this.filePath, 'utf8'))
+      try {
+        store = JSON.parse(fs.readFileSync(this.filePath, 'utf8'))
+      } catch {
+        if (clearInvalidConfig) store = {}
+        else throw new Error('Store data load failed')
+      }
     } else store = {}
 
     if (!isStoreRecord(store)) {
       if (clearInvalidConfig) store = {}
-      else throw new Error('parse data error: ' + String(store))
+      else throw new Error('Store data load failed')
     }
     this.store = store
   }
@@ -86,8 +98,8 @@ class Store {
   async flush(): Promise<void> {
     try {
       await this.atomicFile.flush()
-    } catch (error) {
-      this.writeError ??= toStorePersistenceError(error)
+    } catch {
+      this.writeError ??= toStorePersistenceError()
     }
     if (this.writeError != null) throw this.writeError
   }

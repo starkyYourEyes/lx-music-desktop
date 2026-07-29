@@ -67,6 +67,12 @@ const pathExists = (filePath: string): boolean => {
   }
 }
 
+const isMissing = (error: unknown): error is NodeJS.ErrnoException =>
+  error instanceof Error && 'code' in error && error.code == 'ENOENT'
+
+const isAlreadyExists = (error: unknown): error is NodeJS.ErrnoException =>
+  error instanceof Error && 'code' in error && error.code == 'EEXIST'
+
 const resolveContainedPath = (rootPath: string, childName: string): string => {
   const root = path.resolve(rootPath)
   const candidate = path.resolve(root, childName)
@@ -75,6 +81,165 @@ const resolveContainedPath = (rootPath: string, childName: string): string => {
     throw new Error('path_outside_root')
   }
   return candidate
+}
+
+const isPathContained = (rootPath: string, candidatePath: string): boolean => {
+  const relative = path.relative(rootPath, candidatePath)
+  return relative == '' || (!relative.startsWith(`..${path.sep}`) && relative != '..' && !path.isAbsolute(relative))
+}
+
+type DatabaseTargetPreparation =
+  | {
+    ok: true
+    existed: boolean
+    realRoot: string
+    identity: DatabaseFileIdentity
+    guardDescriptor: number
+  }
+  | { ok: false, diagnostic: string }
+
+type DatabaseTargetExpectation = Pick<
+Extract<DatabaseTargetPreparation, { ok: true }>,
+'realRoot' | 'identity'
+>
+
+interface DatabaseFileIdentity {
+  dev: number
+  ino: number
+}
+
+const databaseFileIdentity = (stats: fs.Stats): DatabaseFileIdentity => ({
+  dev: stats.dev,
+  ino: stats.ino,
+})
+
+const sameDatabaseFileIdentity = (left: DatabaseFileIdentity, right: DatabaseFileIdentity): boolean =>
+  left.dev == right.dev && left.ino == right.ino
+
+const closeDescriptorBestEffort = (descriptor: number | null): void => {
+  if (descriptor == null) return
+  try {
+    fs.closeSync(descriptor)
+  } catch {}
+}
+
+const validatePreparedDatabaseTarget = (
+  databasePath: string,
+  target: Extract<DatabaseTargetPreparation, { ok: true }>,
+): boolean => {
+  try {
+    const targetStats = fs.lstatSync(databasePath)
+    if (targetStats.isSymbolicLink() || !targetStats.isFile()) return false
+    if (!sameDatabaseFileIdentity(databaseFileIdentity(targetStats), target.identity)) return false
+    const guardStats = fs.fstatSync(target.guardDescriptor)
+    if (!guardStats.isFile()) return false
+    if (!sameDatabaseFileIdentity(databaseFileIdentity(guardStats), target.identity)) return false
+    return isPathContained(target.realRoot, fs.realpathSync(databasePath))
+  } catch {
+    return false
+  }
+}
+
+const acquireExpectedDatabaseTarget = (
+  databasePath: string,
+  expected: DatabaseTargetExpectation,
+): Extract<DatabaseTargetPreparation, { ok: true }> | null => {
+  let guardDescriptor: number | null = null
+  try {
+    const targetStats = fs.lstatSync(databasePath)
+    if (targetStats.isSymbolicLink() || !targetStats.isFile()) return null
+    if (!sameDatabaseFileIdentity(databaseFileIdentity(targetStats), expected.identity)) return null
+    if (!isPathContained(expected.realRoot, fs.realpathSync(databasePath))) return null
+
+    const noFollow = fs.constants.O_NOFOLLOW ?? 0
+    guardDescriptor = fs.openSync(databasePath, fs.constants.O_RDONLY | noFollow)
+    const guardedTarget = {
+      ok: true as const,
+      existed: true,
+      realRoot: expected.realRoot,
+      identity: expected.identity,
+      guardDescriptor,
+    }
+    if (!validatePreparedDatabaseTarget(databasePath, guardedTarget)) {
+      closeDescriptorBestEffort(guardDescriptor)
+      return null
+    }
+    return guardedTarget
+  } catch {
+    closeDescriptorBestEffort(guardDescriptor)
+    return null
+  }
+}
+
+const prepareDatabaseTarget = (dataPath: string, databasePath: string): DatabaseTargetPreparation => {
+  const directoryPath = path.dirname(databasePath)
+  let guardDescriptor: number | null = null
+  try {
+    fs.mkdirSync(directoryPath, { recursive: true })
+    const realRoot = fs.realpathSync(dataPath)
+    const realDirectory = fs.realpathSync(directoryPath)
+    if (!isPathContained(realRoot, realDirectory)) return { ok: false, diagnostic: 'open.path_invalid' }
+
+    let targetStats: fs.Stats | null = null
+    try {
+      targetStats = fs.lstatSync(databasePath)
+    } catch (error) {
+      if (!isMissing(error)) return { ok: false, diagnostic: 'open.target_inspect_failed' }
+    }
+
+    if (targetStats != null) {
+      if (targetStats.isSymbolicLink()) return { ok: false, diagnostic: 'open.target_symlink' }
+      if (!targetStats.isFile()) return { ok: false, diagnostic: 'open.target_not_regular' }
+      const realTarget = fs.realpathSync(databasePath)
+      if (!isPathContained(realRoot, realTarget)) return { ok: false, diagnostic: 'open.path_invalid' }
+      const noFollow = fs.constants.O_NOFOLLOW ?? 0
+      guardDescriptor = fs.openSync(databasePath, fs.constants.O_RDONLY | noFollow)
+      const guardStats = fs.fstatSync(guardDescriptor)
+      if (!guardStats.isFile() ||
+        !sameDatabaseFileIdentity(databaseFileIdentity(guardStats), databaseFileIdentity(targetStats))) {
+        closeDescriptorBestEffort(guardDescriptor)
+        return { ok: false, diagnostic: 'open.target_changed' }
+      }
+      return {
+        ok: true,
+        existed: true,
+        realRoot,
+        identity: databaseFileIdentity(guardStats),
+        guardDescriptor,
+      }
+    }
+
+    try {
+      guardDescriptor = fs.openSync(databasePath, 'wx', 0o600)
+    } catch (error) {
+      return {
+        ok: false,
+        diagnostic: isAlreadyExists(error) ? 'open.reserve_conflict' : 'open.reserve_failed',
+      }
+    }
+    const guardStats = fs.fstatSync(guardDescriptor)
+    const reservedStats = fs.lstatSync(databasePath)
+    if (reservedStats.isSymbolicLink() || !reservedStats.isFile() || !guardStats.isFile() ||
+      !sameDatabaseFileIdentity(databaseFileIdentity(reservedStats), databaseFileIdentity(guardStats))) {
+      closeDescriptorBestEffort(guardDescriptor)
+      return { ok: false, diagnostic: 'open.reserved_target_invalid' }
+    }
+    const realTarget = fs.realpathSync(databasePath)
+    if (!isPathContained(realRoot, realTarget)) {
+      closeDescriptorBestEffort(guardDescriptor)
+      return { ok: false, diagnostic: 'open.path_invalid' }
+    }
+    return {
+      ok: true,
+      existed: false,
+      realRoot,
+      identity: databaseFileIdentity(guardStats),
+      guardDescriptor,
+    }
+  } catch {
+    closeDescriptorBestEffort(guardDescriptor)
+    return { ok: false, diagnostic: 'open.target_inspect_failed' }
+  }
 }
 
 const getNativeOptions = (): { nativeBinding?: string } => {
@@ -89,25 +254,49 @@ const initTables = (db: Database.Database): void => {
   `)
 }
 
-const safeClose = (db: Database.Database | null): void => {
-  if (!db?.open) return
+interface CloseAttempt {
+  closed: boolean
+  error: unknown | null
+}
+
+const closeConnection = (db: Database.Database | null): CloseAttempt => {
+  if (!db?.open) return { closed: true, error: null }
   try {
     db.close()
-  } catch {}
+    return db.open
+      ? { closed: false, error: new Error('database_close_failed') }
+      : { closed: true, error: null }
+  } catch (error) {
+    return { closed: !db.open, error }
+  }
 }
 
 export const close = (): void => {
   lifecycleGeneration++
-  safeClose(initializingDb)
-  safeClose(writeDb)
-  safeClose(recoveryDb)
-  initializingDb = null
-  writeDb = null
-  recoveryDb = null
-  initializationKey = null
-  initializationPromise = null
-  cachedStartupResult = null
-  health = { status: 'closed' }
+  let failure: unknown | null = null
+  const connections = [initializingDb, writeDb, recoveryDb].filter(
+    (db): db is Database.Database => db != null,
+  )
+  for (let index = 0; index < connections.length; index++) {
+    const db = connections[index]
+    if (connections.indexOf(db) != index) continue
+    const attempt = closeConnection(db)
+    if (attempt.closed) {
+      if (initializingDb == db) initializingDb = null
+      if (writeDb == db) writeDb = null
+      if (recoveryDb == db) recoveryDb = null
+    }
+    if (attempt.error != null) failure ??= attempt.error
+  }
+
+  if (initializingDb == null && writeDb == null && recoveryDb == null) {
+    initializationKey = null
+    initializationPromise = null
+    cachedStartupResult = null
+    health = { status: 'closed' }
+  }
+  if (failure instanceof Error) throw failure
+  if (failure != null) throw new Error('database_close_failed')
 }
 
 const allocateBackupPath = (
@@ -129,15 +318,25 @@ const allocateBackupPath = (
 const reopenReadOnly = (
   databasePath: string,
   nativeOptions: { nativeBinding?: string },
+  expectedTarget: DatabaseTargetExpectation,
 ): { db: Database.Database | null, diagnostic: string | null } => {
+  const guardedTarget = acquireExpectedDatabaseTarget(databasePath, expectedTarget)
+  if (guardedTarget == null) return { db: null, diagnostic: 'readonly_reopen.failed' }
   let db: Database.Database | null = null
   try {
     db = new Database(databasePath, { ...nativeOptions, readonly: true, fileMustExist: true })
+    if (!validatePreparedDatabaseTarget(databasePath, guardedTarget)) {
+      throw new Error('readonly_target_changed')
+    }
+    db.pragma('foreign_keys = ON')
+    if (db.pragma('foreign_keys', { simple: true }) != 1) throw new Error('foreign_keys_not_enabled')
     db.pragma('schema_version', { simple: true })
     return { db, diagnostic: null }
   } catch {
-    safeClose(db)
+    closeConnection(db)
     return { db: null, diagnostic: 'readonly_reopen.failed' }
+  } finally {
+    closeDescriptorBestEffort(guardedTarget.guardDescriptor)
   }
 }
 
@@ -148,11 +347,32 @@ const enterRecovery = (
   diagnostics: string[],
   localWriteDb: Database.Database | null,
   nativeOptions: { nativeBinding?: string },
+  recoveryTarget: DatabaseTargetExpectation | null,
 ): DatabaseStartupResult => {
-  safeClose(localWriteDb)
-  if (initializingDb == localWriteDb) initializingDb = null
+  const writeClose = closeConnection(localWriteDb)
+  if (writeClose.closed && initializingDb == localWriteDb) initializingDb = null
   writeDb = null
-  const reopened = reopenReadOnly(databasePath, nativeOptions)
+  if (!writeClose.closed) {
+    recoveryDb = null
+    const sanitizedDiagnostics = [...diagnostics, 'write_close.failed']
+    health = {
+      status: 'recovery',
+      readOnly: false,
+      reason,
+      diagnostics: [...sanitizedDiagnostics],
+    }
+    return {
+      status: 'recovery',
+      reason,
+      databasePath,
+      backupPath,
+      diagnostics: sanitizedDiagnostics,
+    }
+  }
+
+  const reopened = recoveryTarget != null
+    ? reopenReadOnly(databasePath, nativeOptions, recoveryTarget)
+    : { db: null, diagnostic: null }
   recoveryDb = reopened.db
   const sanitizedDiagnostics = reopened.diagnostic == null
     ? [...diagnostics]
@@ -231,29 +451,57 @@ const initializeDatabase = async(
     const fallbackPath = typeof options.dataPath == 'string'
       ? path.resolve(options.dataPath, 'lx.data.db')
       : path.resolve('lx.data.db')
-    return enterRecovery('open_failed', fallbackPath, null, ['open.path_invalid'], null, nativeOptions)
+    return enterRecovery('open_failed', fallbackPath, null, ['open.path_invalid'], null, nativeOptions, null)
   }
 
-  let existed: boolean
-  try {
-    existed = pathExists(databasePath)
-    if (!existed) fs.mkdirSync(path.dirname(databasePath), { recursive: true })
-  } catch {
-    return enterRecovery('open_failed', databasePath, null, ['open.stat_failed'], null, nativeOptions)
+  const target = prepareDatabaseTarget(path.resolve(options.dataPath), databasePath)
+  if (!target.ok) {
+    return enterRecovery('open_failed', databasePath, null, [target.diagnostic], null, nativeOptions, null)
+  }
+  const existed = target.existed
+
+  if (!validatePreparedDatabaseTarget(databasePath, target)) {
+    closeDescriptorBestEffort(target.guardDescriptor)
+    return enterRecovery('open_failed', databasePath, null, ['open.target_changed'], null, nativeOptions, null)
   }
 
   let localWriteDb: Database.Database | null = null
+  let targetValidatedAfterOpen = false
   try {
     localWriteDb = new Database(databasePath, {
       ...nativeOptions,
-      ...(existed ? { fileMustExist: true } : {}),
+      fileMustExist: true,
     })
     initializingDb = localWriteDb
+    if (!validatePreparedDatabaseTarget(databasePath, target)) {
+      closeDescriptorBestEffort(target.guardDescriptor)
+      return enterRecovery(
+        'open_failed',
+        databasePath,
+        null,
+        ['open.target_changed'],
+        localWriteDb,
+        nativeOptions,
+        null,
+      )
+    }
+    targetValidatedAfterOpen = true
+    closeDescriptorBestEffort(target.guardDescriptor)
     localWriteDb.pragma('foreign_keys = ON')
     localWriteDb.pragma('journal_mode = WAL')
     if (!existed) initTables(localWriteDb)
   } catch {
-    return enterRecovery('open_failed', databasePath, null, ['open.failed'], localWriteDb, nativeOptions)
+    const targetIsValid = targetValidatedAfterOpen || validatePreparedDatabaseTarget(databasePath, target)
+    closeDescriptorBestEffort(target.guardDescriptor)
+    return enterRecovery(
+      'open_failed',
+      databasePath,
+      null,
+      [targetIsValid ? 'open.failed' : 'open.target_changed'],
+      localWriteDb,
+      nativeOptions,
+      targetIsValid ? target : null,
+    )
   }
 
   let pending
@@ -262,7 +510,15 @@ const initializeDatabase = async(
     pending = getPendingMigrations(localWriteDb, migrations, { targetSchemaVersion: options.targetSchemaVersion })
     fromVersion = getSchemaVersion(localWriteDb)
   } catch {
-    return enterRecovery('migration_failed', databasePath, null, ['migration.plan_failed'], localWriteDb, nativeOptions)
+    return enterRecovery(
+      'migration_failed',
+      databasePath,
+      null,
+      ['migration.plan_failed'],
+      localWriteDb,
+      nativeOptions,
+      target,
+    )
   }
 
   let backupPath: string | null = null
@@ -272,13 +528,21 @@ const initializeDatabase = async(
       await createOnlineBackup(localWriteDb, backupPath)
     } catch {
       if (!isCurrentAttempt(generation, key)) {
-        safeClose(localWriteDb)
+        closeConnection(localWriteDb)
         throw createDatabaseError('database_initialization_cancelled')
       }
-      return enterRecovery('backup_failed', databasePath, backupPath, ['backup.failed'], localWriteDb, nativeOptions)
+      return enterRecovery(
+        'backup_failed',
+        databasePath,
+        backupPath,
+        ['backup.failed'],
+        localWriteDb,
+        nativeOptions,
+        target,
+      )
     }
     if (!isCurrentAttempt(generation, key)) {
-      safeClose(localWriteDb)
+      closeConnection(localWriteDb)
       throw createDatabaseError('database_initialization_cancelled')
     }
   }
@@ -293,14 +557,22 @@ const initializeDatabase = async(
     }
     schemaVersion = getSchemaVersion(localWriteDb)
   } catch {
-    return enterRecovery('migration_failed', databasePath, backupPath, ['migration.failed'], localWriteDb, nativeOptions)
+    return enterRecovery(
+      'migration_failed',
+      databasePath,
+      backupPath,
+      ['migration.failed'],
+      localWriteDb,
+      nativeOptions,
+      target,
+    )
   }
 
   let verification: ReturnType<typeof verifyDatabase>
   try {
     verification = verifyDatabase(localWriteDb, {
       runQuickCheck: migratedVersions.length > 0 || !options.previousShutdownWasClean,
-      runForeignKeyCheck: migratedVersions.length > 0,
+      runForeignKeyCheck: migratedVersions.length > 0 || !options.previousShutdownWasClean,
     })
   } catch {
     return enterRecovery(
@@ -310,6 +582,7 @@ const initializeDatabase = async(
       ['schema.verify_failed'],
       localWriteDb,
       nativeOptions,
+      target,
     )
   }
   if (!verification.ok) {
@@ -320,6 +593,7 @@ const initializeDatabase = async(
       verification.diagnostics,
       localWriteDb,
       nativeOptions,
+      target,
     )
   }
 
@@ -350,10 +624,10 @@ export const init = async(options: DatabaseInitOptions): Promise<DatabaseStartup
     throw createDatabaseError('database_initialization_cancelled')
   }, error => {
     if (isCurrentAttempt(generation, resolved.key)) {
-      safeClose(initializingDb)
-      initializingDb = null
+      const closeAttempt = closeConnection(initializingDb)
+      if (closeAttempt.closed) initializingDb = null
       initializationPromise = null
-      initializationKey = null
+      if (initializingDb == null) initializationKey = null
     }
     throw error
   })

@@ -18,9 +18,17 @@ require.extensions['.ts'] = (module, filename) => {
 }
 
 const originalLoad = Module._load
+const storeLogEntries = []
+const storeDialogEntries = []
+const storeShownPaths = []
 Module._load = function(request, parent, isMain) {
-  if (request == 'electron') return { dialog: {}, shell: {} }
-  if (request == '@common/utils') return { log: { error() {} } }
+  if (request == 'electron') {
+    return {
+      dialog: { showMessageBoxSync: options => { storeDialogEntries.push(options) } },
+      shell: { showItemInFolder: target => { storeShownPaths.push(target) } },
+    }
+  }
+  if (request == '@common/utils') return { log: { error: error => { storeLogEntries.push(error) } } }
   return originalLoad.call(this, request, parent, isMain)
 }
 
@@ -83,6 +91,9 @@ const withTempHandleFailures = ({ syncError, closeError }) => ({
 })
 
 afterEach(async() => {
+  storeLogEntries.length = 0
+  storeDialogEntries.length = 0
+  storeShownPaths.length = 0
   await Promise.all(tempDirs.splice(0).map(async dir => fsp.rm(dir, { recursive: true, force: true })))
 })
 
@@ -173,6 +184,98 @@ describe('atomic JSON file', () => {
     assert.equal(await exists(path.join(dir, 'settings.json.other.owned-tmp-1-1')), true)
   })
 
+  it('runs one owned-temp cleanup before concurrent first read and write operations', async() => {
+    const { dir, target } = await createFixture('first-operation-cleanup')
+    await fsp.writeFile(target, '{"n":0}')
+    const staleTemp = `${target}.owned-tmp-404-17`
+    const nextFile = `${target}.next`
+    const previousFile = `${target}.previous`
+    const otherWriterTemp = path.join(dir, 'other.json.owned-tmp-404-17')
+    await Promise.all([
+      fsp.writeFile(staleTemp, 'stale'),
+      fsp.writeFile(nextFile, '{"n":8}'),
+      fsp.writeFile(previousFile, '{"n":7}'),
+      fsp.writeFile(otherWriterTemp, 'keep'),
+    ])
+    const events = []
+    const trackingFs = {
+      ...fsp,
+      async readdir(...args) {
+        events.push('cleanup')
+        await new Promise(resolve => setImmediate(resolve))
+        return fsp.readdir(...args)
+      },
+      async open(filePath, flags, mode) {
+        if (flags == 'wx') events.push('stage')
+        return fsp.open(filePath, flags, mode)
+      },
+    }
+    const file = createAtomicJsonFile({ filePath: target, validate: isCounter, fs: trackingFs })
+
+    await Promise.all([file.read(), file.replace({ n: 1 })])
+
+    assert.equal(events.filter(event => event == 'cleanup').length, 1)
+    assert.equal(events.indexOf('cleanup') < events.indexOf('stage'), true)
+    assert.equal(await exists(staleTemp), false)
+    assert.equal(await exists(nextFile), true)
+    assert.equal(await exists(previousFile), true)
+    assert.equal(await exists(otherWriterTemp), true)
+  })
+
+  it('rescans for later writer instances while preserving another instance active stage', async() => {
+    const { target } = await createFixture('cross-instance-cleanup')
+    await fsp.writeFile(target, '{"n":0}')
+    const newlyStaleTemp = `${target}.owned-tmp-407-21`
+    let stagedPath
+    let releaseStageStat
+    let signalStageStat
+    const stageStatStarted = new Promise(resolve => { signalStageStat = resolve })
+    const stageStatBarrier = new Promise(resolve => { releaseStageStat = resolve })
+    const firstFileSystem = {
+      ...fsp,
+      async stat(filePath) {
+        if (String(filePath).includes('.owned-tmp-') && stagedPath == null) {
+          stagedPath = String(filePath)
+          signalStageStat()
+          await stageStatBarrier
+        }
+        return fsp.stat(filePath)
+      },
+    }
+    const first = createAtomicJsonFile({ filePath: target, validate: isCounter, fs: firstFileSystem })
+    let secondCleanupCalls = 0
+    const secondFileSystem = {
+      ...fsp,
+      async readdir(...args) {
+        secondCleanupCalls++
+        return fsp.readdir(...args)
+      },
+    }
+    const second = createAtomicJsonFile({ filePath: target, validate: isCounter, fs: secondFileSystem })
+
+    const pendingStage = first.stage({ n: 1 })
+    await stageStatStarted
+    await fsp.writeFile(newlyStaleTemp, 'stale')
+    assert.deepEqual(await second.read(), { n: 0 })
+    const stageWasPreserved = await exists(stagedPath)
+    const staleWasRemoved = !await exists(newlyStaleTemp)
+    releaseStageStat()
+    let stage = null
+    let stageError = null
+    try {
+      stage = await pendingStage
+    } catch (error) {
+      stageError = error
+    }
+
+    assert.equal(secondCleanupCalls, 1)
+    assert.equal(stageWasPreserved, true)
+    assert.equal(staleWasRemoved, true)
+    assert.equal(stageError, null)
+    await first.commit(stage)
+    assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { n: 1 })
+  })
+
   it('records the canonical stage hash and rejects a replaced stage identity', async() => {
     const { target } = await createFixture('identity')
     const file = createAtomicJsonFile({ filePath: target, validate: isCounter })
@@ -215,6 +318,54 @@ describe('atomic JSON file', () => {
     await file.cleanupOwnedTemps()
     assert.deepEqual((await fsp.readdir(dir)).filter(name => name.includes('.owned-tmp-')), [])
   })
+
+  it('does not retain raw JSON parser diagnostics as an error cause', async() => {
+    const { target } = await createFixture('invalid-json-diagnostic')
+    const secret = 'cookie=MUSIC_U_ATOMIC_SECRET_91AF'
+    await fsp.writeFile(target, `{"credential":"${secret}","broken":}`)
+    const file = createAtomicJsonFile({ filePath: target, validate: isCounter })
+
+    await assert.rejects(file.read(), error => {
+      assert.equal(error.message, 'Atomic JSON destination is not valid JSON')
+      assert.equal('cause' in error, false)
+      assert.equal(String(error).includes(secret), false)
+      return true
+    })
+  })
+
+  it('sanitizes validator and serializer exceptions from caller-controlled values', async() => {
+    const secret = 'cookie=ATOMIC_VALIDATION_SECRET_17D2'
+    const throwingValue = Object.defineProperty({}, 'credential', {
+      enumerable: true,
+      get() {
+        throw new Error(secret)
+      },
+    })
+    const cases = [
+      {
+        label: 'validator',
+        value: { n: 1 },
+        validate: () => { throw new Error(secret) },
+      },
+      {
+        label: 'serializer',
+        value: throwingValue,
+        validate: () => true,
+      },
+    ]
+
+    for (const fixture of cases) {
+      const { target } = await createFixture(`atomic-${fixture.label}-exception`)
+      const file = createAtomicJsonFile({ filePath: target, validate: fixture.validate })
+
+      await assert.rejects(file.replace(fixture.value), error => {
+        assert.equal(error.message, 'Atomic JSON value is not valid')
+        assert.equal('cause' in error, false)
+        assert.equal(String(error).includes(secret), false)
+        return true
+      })
+    }
+  })
 })
 
 describe('Store atomic persistence', () => {
@@ -245,15 +396,22 @@ describe('Store atomic persistence', () => {
     assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { next: 2 })
   })
 
-  it('keeps the synchronous update and reports asynchronous persistence errors from flush', async() => {
+  it('keeps the synchronous update and sanitizes asynchronous persistence errors from flush', async() => {
     const { target } = await createFixture('store-failure')
     await fsp.writeFile(target, '{"value":1}')
-    const persistenceError = new Error('injected fsync failure')
+    const secret = 'webdav-password=STORE_FSYNC_SECRET_C981'
+    const persistenceError = new Error(secret)
     const store = new Store(target, false, withFailingTempSync(persistenceError))
 
     assert.doesNotThrow(() => store.set('value', 2))
     assert.equal(store.get('value'), 2)
-    await assert.rejects(store.flush(), error => error === persistenceError)
+    await assert.rejects(store.flush(), error => {
+      assert.notStrictEqual(error, persistenceError)
+      assert.equal(error.message, 'Store persistence failed')
+      assert.equal('cause' in error, false)
+      assert.equal(String(error).includes(secret), false)
+      return true
+    })
     assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { value: 1 })
   })
 
@@ -282,7 +440,125 @@ describe('Store atomic persistence', () => {
     const store = getStore(name, true, false)
     store.set('value', 2)
 
-    await assert.rejects(flushStores(), /valid/)
+    await assert.rejects(flushStores(), error => error.message == 'Store persistence failed')
     assert.equal(await fsp.readFile(target, 'utf8'), '[]')
   })
+
+  it('cleans a lazy Store owned temp before its first persisted use', async() => {
+    const { dir } = await createFixture('store-lazy-cleanup')
+    const name = `lazy-${Date.now()}-${Math.random()}`
+    const target = path.join(dir, `${name}.json`)
+    const staleTemp = `${target}.owned-tmp-812-3`
+    const nextFile = `${target}.next`
+    await fsp.writeFile(target, '{"value":1}')
+    await fsp.writeFile(staleTemp, 'stale')
+    await fsp.writeFile(nextFile, '{"value":9}')
+    global.lxDataPath = dir
+
+    const store = getStore(name, true, false)
+    store.set('value', 2)
+    await store.flush()
+
+    assert.equal(await exists(staleTemp), false)
+    assert.equal(await exists(nextFile), true)
+    assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { value: 2 })
+  })
+
+  it('cleans a lazy Store owned temp before synchronous read-only use', async() => {
+    const { dir } = await createFixture('store-read-only-cleanup')
+    const name = `read-only-${Date.now()}-${Math.random()}`
+    const target = path.join(dir, `${name}.json`)
+    const staleTemp = `${target}.owned-tmp-913-7`
+    const nextFile = `${target}.next`
+    await fsp.writeFile(target, '{"value":1}')
+    await fsp.writeFile(staleTemp, 'stale')
+    await fsp.writeFile(nextFile, '{"value":9}')
+    global.lxDataPath = dir
+
+    const store = getStore(name, true, false)
+
+    assert.equal(store.get('value'), 1)
+    assert.equal(await exists(staleTemp), false)
+    assert.equal(await exists(nextFile), true)
+    assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { value: 1 })
+  })
+
+  it('completes synchronous lazy Store cleanup while another writer cleanup is pending', async() => {
+    const { dir } = await createFixture('store-pending-cleanup')
+    const name = `pending-${Date.now()}-${Math.random()}`
+    const target = path.join(dir, `${name}.json`)
+    const staleTemp = `${target}.owned-tmp-915-8`
+    await fsp.writeFile(target, '{"n":1}')
+    await fsp.writeFile(staleTemp, 'stale')
+    let releaseCleanup
+    let signalCleanup
+    const cleanupStarted = new Promise(resolve => { signalCleanup = resolve })
+    const cleanupBarrier = new Promise(resolve => { releaseCleanup = resolve })
+    const delayedFileSystem = {
+      ...fsp,
+      async readdir(...args) {
+        signalCleanup()
+        await cleanupBarrier
+        return fsp.readdir(...args)
+      },
+    }
+    const first = createAtomicJsonFile({ filePath: target, validate: isCounter, fs: delayedFileSystem })
+    const pendingRead = first.read()
+    await cleanupStarted
+    global.lxDataPath = dir
+
+    const store = getStore(name, true, false)
+    const staleWasRemovedBeforeRead = !await exists(staleTemp)
+    releaseCleanup()
+    await pendingRead
+
+    assert.equal(store.get('n'), 1)
+    assert.equal(staleWasRemovedBeforeRead, true)
+  })
+
+  for (const fixture of [
+    {
+      label: 'malformed JSON',
+      contents: '{"cookie":"MUSIC_U_STORE_SECRET_2F6C","broken":}',
+      secret: 'MUSIC_U_STORE_SECRET_2F6C',
+    },
+    {
+      label: 'a scalar document',
+      contents: '"webdav-password=STORE_SCALAR_SECRET_A431"',
+      secret: 'STORE_SCALAR_SECRET_A431',
+    },
+    {
+      label: 'an array document',
+      contents: '["cookie=STORE_ARRAY_SECRET_B729"]',
+      secret: 'STORE_ARRAY_SECRET_B729',
+    },
+  ]) {
+    it(`sanitizes ${fixture.label} in thrown, logged, and dialog diagnostics`, async() => {
+      const { dir } = await createFixture(`store-diagnostic-${fixture.label.replaceAll(' ', '-')}`)
+      const name = `diagnostic-${Date.now()}-${Math.random()}`
+      const target = path.join(dir, `${name}.json`)
+      await fsp.writeFile(target, fixture.contents)
+
+      assert.throws(() => new Store(target), error => {
+        assert.equal(error.message, 'Store data load failed')
+        assert.equal('cause' in error, false)
+        assert.equal(String(error).includes(fixture.secret), false)
+        return true
+      })
+
+      global.lxDataPath = dir
+      const recovered = getStore(name, true, true)
+      assert.equal(recovered.has('cookie'), false)
+      assert.equal(storeLogEntries.length, 1)
+      assert.equal(storeDialogEntries.length, 1)
+      assert.deepEqual(storeShownPaths, [target])
+      const diagnosticText = [
+        storeLogEntries[0]?.stack ?? String(storeLogEntries[0]),
+        JSON.stringify(storeDialogEntries[0]),
+      ].join('\n')
+      assert.equal(diagnosticText.includes(fixture.secret), false)
+      assert.equal(diagnosticText.includes('Unexpected token'), false)
+      assert.equal(storeDialogEntries[0].detail.includes('Error detail: Store data load failed'), true)
+    })
+  }
 })

@@ -94,6 +94,7 @@ export const createStorageCoordinator = (
   let startPromise: Promise<StorageStartupOutcome> | null = null
   let shutdownPromise: Promise<void> | null = null
   let runHasStarted = false
+  let startupReachedReady = false
   let shutdownRequested = false
 
   // Repeated callers must receive the exact cached startup Promise.
@@ -125,6 +126,7 @@ export const createStorageCoordinator = (
         if (shutdownRequested) return startupCancelled()
         dependencies.registerModules()
         dependencies.appInited()
+        startupReachedReady = true
         return { status: 'ready', schemaVersion: database.schemaVersion }
       } catch (error) {
         return { status: 'fatal', reason: failureCode(error, 'storage_startup_failed') }
@@ -214,7 +216,7 @@ export const createStorageCoordinator = (
       }
 
       if (failure != null) throw failure
-      if (runHasStarted) await dependencies.runState.markClean()
+      if (runHasStarted && startupReachedReady) await dependencies.runState.markClean()
     })()
     return shutdownPromise
   }

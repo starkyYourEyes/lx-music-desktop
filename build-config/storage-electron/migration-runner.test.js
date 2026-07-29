@@ -421,9 +421,9 @@ describe('database migrations', () => {
     }
     const fileSystem = {
       ...fs,
-      statSync(target) {
+      lstatSync(target) {
         if (target == databasePath) throw statError
-        return fs.statSync(target)
+        return fs.lstatSync(target)
       },
     }
     const dbService = loadDbServiceWithBoundaries({ DatabaseImplementation: UnexpectedDatabase, fileSystem })
@@ -436,8 +436,8 @@ describe('database migrations', () => {
 
     assert.equal(result.status, 'recovery')
     assert.equal(result.reason, 'open_failed')
-    assert.deepEqual(result.diagnostics, ['open.stat_failed', 'readonly_reopen.failed'])
-    assert.equal(openCalls, 1)
+    assert.deepEqual(result.diagnostics, ['open.target_inspect_failed'])
+    assert.equal(openCalls, 0)
   })
 
   it('initializes a new app database through backup and migration 3 with authoritative pragmas', async() => {

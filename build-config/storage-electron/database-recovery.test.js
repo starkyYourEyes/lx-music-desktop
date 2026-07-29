@@ -988,10 +988,10 @@ describe('database startup orchestration', () => {
   })
 })
 
-describe('transitional worker startup adapter', () => {
-  it('kills destructive null recovery mapping by throwing a fixed error for legacy callers', async() => {
+describe('worker startup API', () => {
+  it('keeps recovery results available to direct object callers', async() => {
     const calls = []
-    const { initForWorker } = loadWorkerAdapterWithInit(async options => {
+    const { init } = loadWorkerAdapterWithInit(async options => {
       calls.push(options)
       return {
         status: 'recovery',
@@ -1001,35 +1001,50 @@ describe('transitional worker startup adapter', () => {
         diagnostics: ['schema.table_missing:secret'],
       }
     })
-
-    await assert.rejects(initForWorker('C:\\profiles\\alice'), error => error.message == 'database_recovery_required')
-
-    assert.deepEqual(calls, [{
+    const options = {
       dataPath: 'C:\\profiles\\alice',
       backupDir: path.join('C:\\profiles\\alice', 'backups'),
       previousShutdownWasClean: false,
-    }])
+    }
+
+    assert.deepEqual(await init(options), {
+      status: 'recovery',
+      reason: 'schema_invalid',
+      databasePath: 'secret-path',
+      backupPath: null,
+      diagnostics: ['schema.table_missing:secret'],
+    })
+    assert.deepEqual(calls, [options])
   })
 
-  it('kills startup-result leakage by mapping legacy ready to the old existed boolean only', async() => {
-    const { initForWorker } = loadWorkerAdapterWithInit(async() => ({
+  it('returns ready startup metadata to direct object callers', async() => {
+    const { init } = loadWorkerAdapterWithInit(async() => ({
       status: 'ready', existed: true, schemaVersion: 3, migratedVersions: [], backupPath: null,
     }))
 
-    assert.equal(await initForWorker('C:\\profiles\\alice'), true)
+    assert.deepEqual(await init({
+      dataPath: 'C:\\profiles\\alice',
+      backupDir: path.join('C:\\profiles\\alice', 'backups'),
+      previousShutdownWasClean: true,
+    }), { status: 'ready', existed: true, schemaVersion: 3, migratedVersions: [], backupPath: null })
   })
 
-  it('kills adapter reinitialization by reusing the same real string startup result', async() => {
+  it('reuses the same real object startup result without reinitialization', async() => {
     const paths = makePaths('lx-recovery-adapter-reuse-')
-    const { initForWorker } = loadRealWorkerAdapter()
+    const { init } = loadRealWorkerAdapter()
 
-    const first = await initForWorker(paths.dataPath)
+    const first = await init(initOptions(paths))
     const handle = require('../../src/main/worker/dbService/db.ts').getAppDB()
-    const second = await initForWorker(path.join(paths.dataPath, '.'))
+    const second = await init({
+      dataPath: path.join(paths.dataPath, '.'),
+      backupDir: path.join(paths.backupDir, 'nested', '..'),
+      previousShutdownWasClean: true,
+    })
 
-    assert.equal(first, false)
-    assert.equal(second, false)
+    assert.equal(first.status, 'ready')
+    assert.equal(first.existed, false)
+    assert.deepEqual(second, first)
     assert.equal(require('../../src/main/worker/dbService/db.ts').getAppDB(), handle)
-    assert.equal(fs.readdirSync(path.join(paths.dataPath, 'backups')).filter(name => name.endsWith('.backup')).length, 1)
+    assert.equal(fs.readdirSync(paths.backupDir).filter(name => name.endsWith('.backup')).length, 1)
   })
 })

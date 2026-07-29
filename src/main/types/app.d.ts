@@ -3,6 +3,7 @@
 // import { Event as WinLyricEvent } from '@main/modules/winLyric/event'
 import { type DislikeType, type AppType, type ListType } from '@main/event'
 import { type DBSeriveTypes } from '@main/worker/utils'
+import { type StorageCoordinator } from '@main/startup/storageCoordinator'
 
 interface Lx {
   inited: boolean
@@ -26,6 +27,7 @@ interface Lx {
   worker: {
     dbService: DBSeriveTypes
   }
+  storage: StorageCoordinator | null
   theme: LX.ThemeSetting
   player_status: LX.Player.Status
 }

@@ -9,6 +9,7 @@ export interface SchemaIndexContract {
   name: string
   columns: string[]
   unique: boolean
+  partial: boolean
 }
 
 export interface SchemaForeignKeyContract {
@@ -43,7 +44,7 @@ export const databaseSchemaContract: SchemaContract = {
     {
       name: 'db_info',
       columns: [column('id', 'INTEGER', true, 1), column('field_name', 'TEXT'), column('field_value', 'TEXT')],
-      indexes: [{ name: 'db_info.id.unique', columns: ['id'], unique: true }],
+      indexes: [{ name: 'db_info.id.unique', columns: ['id'], unique: true, partial: false }],
       foreignKeys: [],
     },
     {
@@ -56,7 +57,7 @@ export const databaseSchemaContract: SchemaContract = {
         column('position', 'INTEGER', true),
         column('locationUpdateTime', 'INTEGER'),
       ],
-      indexes: [{ name: 'my_list.id.primary', columns: ['id'], unique: true }],
+      indexes: [{ name: 'my_list.id.primary', columns: ['id'], unique: true, partial: false }],
       foreignKeys: [],
     },
     {
@@ -71,15 +72,15 @@ export const databaseSchemaContract: SchemaContract = {
         column('meta', 'TEXT', true),
       ],
       indexes: [
-        { name: 'my_list_music_info.id_listId.unique', columns: ['id', 'listId'], unique: true },
-        { name: 'index_my_list_music_info', columns: ['id', 'listId'], unique: false },
+        { name: 'my_list_music_info.id_listId.unique', columns: ['id', 'listId'], unique: true, partial: false },
+        { name: 'index_my_list_music_info', columns: ['id', 'listId'], unique: false, partial: false },
       ],
       foreignKeys: [],
     },
     {
       name: 'my_list_music_info_order',
       columns: [column('listId', 'TEXT', true), column('musicInfoId', 'TEXT', true), column('order', 'INTEGER', true)],
-      indexes: [{ name: 'index_my_list_music_info_order', columns: ['listId', 'musicInfoId'], unique: false }],
+      indexes: [{ name: 'index_my_list_music_info_order', columns: ['listId', 'musicInfoId'], unique: false, partial: false }],
       foreignKeys: [],
     },
     {
@@ -94,8 +95,8 @@ export const databaseSchemaContract: SchemaContract = {
         column('order', 'INTEGER', true),
       ],
       indexes: [
-        { name: 'music_info_other_source.source_id_id.unique', columns: ['source_id', 'id'], unique: true },
-        { name: 'index_music_info_other_source', columns: ['source_id', 'id'], unique: false },
+        { name: 'music_info_other_source.source_id_id.unique', columns: ['source_id', 'id'], unique: true, partial: false },
+        { name: 'index_music_info_other_source', columns: ['source_id', 'id'], unique: false, partial: false },
       ],
       foreignKeys: [],
     },
@@ -128,7 +129,7 @@ export const databaseSchemaContract: SchemaContract = {
         column('musicInfo', 'TEXT', true),
         column('position', 'INTEGER', true),
       ],
-      indexes: [{ name: 'download_list.id.primary', columns: ['id'], unique: true }],
+      indexes: [{ name: 'download_list.id.primary', columns: ['id'], unique: true, partial: false }],
       foreignKeys: [],
     },
     {
@@ -156,7 +157,7 @@ export const databaseSchemaContract: SchemaContract = {
         column('completed_at_ms', 'INTEGER', true),
         column('details_json', 'TEXT', true),
       ],
-      indexes: [{ name: 'migration_markers.name.primary', columns: ['name'], unique: true }],
+      indexes: [{ name: 'migration_markers.name.primary', columns: ['name'], unique: true, partial: false }],
       foreignKeys: [],
     },
   ],

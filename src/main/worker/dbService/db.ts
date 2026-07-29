@@ -50,7 +50,12 @@ export interface DatabaseInitOptions {
 
 let writeDb: Database.Database | null = null
 let recoveryDb: Database.Database | null = null
+let initializingDb: Database.Database | null = null
 let health: DatabaseHealth = { status: 'closed' }
+let initializationKey: string | null = null
+let initializationPromise: Promise<DatabaseStartupResult> | null = null
+let cachedStartupResult: DatabaseStartupResult | null = null
+let lifecycleGeneration = 0
 
 const pathExists = (filePath: string): boolean => {
   try {
@@ -92,10 +97,16 @@ const safeClose = (db: Database.Database | null): void => {
 }
 
 export const close = (): void => {
+  lifecycleGeneration++
+  safeClose(initializingDb)
   safeClose(writeDb)
   safeClose(recoveryDb)
+  initializingDb = null
   writeDb = null
   recoveryDb = null
+  initializationKey = null
+  initializationPromise = null
+  cachedStartupResult = null
   health = { status: 'closed' }
 }
 
@@ -139,6 +150,7 @@ const enterRecovery = (
   nativeOptions: { nativeBinding?: string },
 ): DatabaseStartupResult => {
   safeClose(localWriteDb)
+  if (initializingDb == localWriteDb) initializingDb = null
   writeDb = null
   const reopened = reopenReadOnly(databasePath, nativeOptions)
   recoveryDb = reopened.db
@@ -160,8 +172,55 @@ const enterRecovery = (
   }
 }
 
-export async function init(options: DatabaseInitOptions): Promise<DatabaseStartupResult> {
-  close()
+const createDatabaseError = (code: string): Error & { code: string } => {
+  const error = new Error(code) as Error & { code: string }
+  error.code = code
+  return error
+}
+
+const cloneStartupResult = (result: DatabaseStartupResult): DatabaseStartupResult => result.status == 'ready'
+  ? { ...result, migratedVersions: [...result.migratedVersions] }
+  : { ...result, diagnostics: [...result.diagnostics] }
+
+const freezeStartupResult = (result: DatabaseStartupResult): DatabaseStartupResult => {
+  const cloned = cloneStartupResult(result)
+  if (cloned.status == 'ready') Object.freeze(cloned.migratedVersions)
+  else Object.freeze(cloned.diagnostics)
+  return Object.freeze(cloned)
+}
+
+const resolveInitialization = (options: DatabaseInitOptions): {
+  key: string
+  options: DatabaseInitOptions
+} => {
+  try {
+    const normalized = {
+      ...options,
+      dataPath: path.resolve(options.dataPath),
+      backupDir: path.resolve(options.backupDir),
+    }
+    return {
+      key: JSON.stringify([
+        normalized.dataPath,
+        normalized.backupDir,
+        normalized.previousShutdownWasClean,
+        normalized.targetSchemaVersion == null ? null : String(normalized.targetSchemaVersion),
+      ]),
+      options: normalized,
+    }
+  } catch {
+    return { key: 'invalid_initialization_options', options }
+  }
+}
+
+const isCurrentAttempt = (generation: number, key: string): boolean =>
+  lifecycleGeneration == generation && initializationKey == key
+
+const initializeDatabase = async(
+  options: DatabaseInitOptions,
+  generation: number,
+  key: string,
+): Promise<DatabaseStartupResult> => {
   let databasePath: string
   let nativeOptions: { nativeBinding?: string } = {}
   try {
@@ -189,9 +248,10 @@ export async function init(options: DatabaseInitOptions): Promise<DatabaseStartu
       ...nativeOptions,
       ...(existed ? { fileMustExist: true } : {}),
     })
-    if (!existed) initTables(localWriteDb)
+    initializingDb = localWriteDb
     localWriteDb.pragma('foreign_keys = ON')
     localWriteDb.pragma('journal_mode = WAL')
+    if (!existed) initTables(localWriteDb)
   } catch {
     return enterRecovery('open_failed', databasePath, null, ['open.failed'], localWriteDb, nativeOptions)
   }
@@ -211,7 +271,15 @@ export async function init(options: DatabaseInitOptions): Promise<DatabaseStartu
       backupPath = allocateBackupPath(options.backupDir, fromVersion, pending[pending.length - 1].version)
       await createOnlineBackup(localWriteDb, backupPath)
     } catch {
+      if (!isCurrentAttempt(generation, key)) {
+        safeClose(localWriteDb)
+        throw createDatabaseError('database_initialization_cancelled')
+      }
       return enterRecovery('backup_failed', databasePath, backupPath, ['backup.failed'], localWriteDb, nativeOptions)
+    }
+    if (!isCurrentAttempt(generation, key)) {
+      safeClose(localWriteDb)
+      throw createDatabaseError('database_initialization_cancelled')
     }
   }
 
@@ -256,16 +324,45 @@ export async function init(options: DatabaseInitOptions): Promise<DatabaseStartu
   }
 
   writeDb = localWriteDb
+  initializingDb = null
   recoveryDb = null
   health = { status: 'ready', readOnly: false, schemaVersion }
   return { status: 'ready', existed, schemaVersion, migratedVersions, backupPath }
 }
 
+export const init = async(options: DatabaseInitOptions): Promise<DatabaseStartupResult> => {
+  const resolved = resolveInitialization(options)
+  if (initializationKey != null && initializationKey != resolved.key) {
+    return Promise.reject(createDatabaseError('database_initialization_conflict'))
+  }
+  if (cachedStartupResult != null) return Promise.resolve(cloneStartupResult(cachedStartupResult))
+  if (initializationPromise != null) return initializationPromise.then(cloneStartupResult)
+
+  initializationKey = resolved.key
+  const generation = ++lifecycleGeneration
+  const attempt = initializeDatabase(resolved.options, generation, resolved.key)
+  initializationPromise = attempt.then(result => {
+    if (isCurrentAttempt(generation, resolved.key)) {
+      cachedStartupResult = freezeStartupResult(result)
+      initializationPromise = null
+      return cachedStartupResult
+    }
+    throw createDatabaseError('database_initialization_cancelled')
+  }, error => {
+    if (isCurrentAttempt(generation, resolved.key)) {
+      safeClose(initializingDb)
+      initializingDb = null
+      initializationPromise = null
+      initializationKey = null
+    }
+    throw error
+  })
+  return initializationPromise.then(cloneStartupResult)
+}
+
 export const getAppDB = (): Database.Database => {
   if (health.status != 'ready' || writeDb == null) {
-    const error = new Error('database_not_ready') as Error & { code: string }
-    error.code = 'database_not_ready'
-    throw error
+    throw createDatabaseError('database_not_ready')
   }
   return writeDb
 }

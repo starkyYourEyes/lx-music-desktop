@@ -107,7 +107,7 @@ const SYNTHETIC_CONTRACT = {
         { name: 'id', type: 'INTEGER', notNull: false, primaryKeyPosition: 1 },
         { name: 'code', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
       ],
-      indexes: [{ name: 'parent_code_unique', columns: ['code'], unique: true }],
+      indexes: [{ name: 'parent_code_unique', columns: ['code'], unique: true, partial: false }],
       foreignKeys: [],
     },
     {
@@ -116,7 +116,7 @@ const SYNTHETIC_CONTRACT = {
         { name: 'id', type: 'INTEGER', notNull: false, primaryKeyPosition: 1 },
         { name: 'parent_code', type: 'TEXT', notNull: true, primaryKeyPosition: 0 },
       ],
-      indexes: [{ name: 'child_parent_code', columns: ['parent_code'], unique: false }],
+      indexes: [{ name: 'child_parent_code', columns: ['parent_code'], unique: false, partial: false }],
       foreignKeys: [{
         name: 'child_parent_code_fk',
         table: 'parent',
@@ -230,6 +230,24 @@ const loadWorkerAdapterWithInit = initImplementation => {
   }
 }
 
+const loadRealWorkerAdapter = () => {
+  const indexPath = require.resolve('../../src/main/worker/dbService/index.ts')
+  clearDbServiceCache()
+  delete require.cache[indexPath]
+  const originalLoad = Module._load
+  Module._load = function(request, parent, isMain) {
+    if (request == '../utils/worker') return { exposeWorker: () => {} }
+    if (request == './modules/index') return {}
+    return originalLoad.call(this, request, parent, isMain)
+  }
+  try {
+    return require(indexPath)
+  } finally {
+    Module._load = originalLoad
+    delete require.cache[indexPath]
+  }
+}
+
 const initOptions = paths => ({
   dataPath: paths.dataPath,
   backupDir: paths.backupDir,
@@ -266,6 +284,44 @@ describe('online backup', () => {
     await assert.rejects(createOnlineBackup(db, destination))
 
     assert.equal(fs.readFileSync(destination, 'utf8'), 'verified artifact')
+  })
+
+  it('kills check-then-write races by atomically reserving one concurrent destination owner', async() => {
+    const root = tempDir('lx-recovery-atomic-backup-')
+    const destination = path.join(root, 'backup.db')
+    const db = openTracked(':memory:')
+    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
+    const actualBackup = db.backup.bind(db)
+    let backupCalls = 0
+    let releaseBarrier
+    const bothReachedBackup = new Promise(resolve => { releaseBarrier = resolve })
+    const coordinatedDb = new Proxy(db, {
+      get(target, property) {
+        if (property != 'backup') {
+          const value = Reflect.get(target, property)
+          return typeof value == 'function' ? value.bind(target) : value
+        }
+        return async(targetPath) => {
+          backupCalls++
+          if (backupCalls == 2) releaseBarrier()
+          await Promise.race([bothReachedBackup, new Promise(resolve => setTimeout(resolve, 50))])
+          return actualBackup(targetPath)
+        }
+      },
+    })
+    const { createOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
+
+    const results = await Promise.allSettled([
+      createOnlineBackup(coordinatedDb, destination),
+      createOnlineBackup(coordinatedDb, destination),
+    ])
+
+    assert.equal(backupCalls, 1)
+    assert.equal(results.filter(result => result.status == 'fulfilled').length, 1)
+    assert.equal(results.filter(result => result.status == 'rejected').length, 1)
+    const restored = openTracked(destination, { readonly: true, fileMustExist: true })
+    assert.equal(restored.prepare('SELECT count(*) count FROM items').get().count, 1)
+    assert.equal(restored.pragma('quick_check', { simple: true }), 'ok')
   })
 
   it('kills unverified-backup implementations by rejecting an invalid backup candidate', async() => {
@@ -347,6 +403,31 @@ describe('PRAGMA structural verification', () => {
     }
   })
 
+  it('kills partial/expression index substitution by requiring complete column indexes', () => {
+    const { verifyDatabaseAgainstContract } = require('../../src/main/worker/dbService/verifyDB.ts')
+    const cases = [
+      validSyntheticSql.replace(
+        'CREATE UNIQUE INDEX parent_code_unique ON parent(code);',
+        "CREATE UNIQUE INDEX parent_code_unique ON parent(code) WHERE code <> '';",
+      ),
+      validSyntheticSql.replace(
+        'CREATE UNIQUE INDEX parent_code_unique ON parent(code);',
+        'CREATE UNIQUE INDEX parent_code_unique ON parent(lower(code));',
+      ),
+    ]
+
+    for (const sql of cases) {
+      assert.deepEqual(verifyDatabaseAgainstContract(createSynthetic(sql), SYNTHETIC_CONTRACT, {
+        runQuickCheck: false,
+        runForeignKeyCheck: false,
+      }), {
+        ok: false,
+        reason: 'schema_invalid',
+        diagnostics: ['schema.index_invalid:parent.parent_code_unique'],
+      })
+    }
+  })
+
   it('kills incomplete FK verification by rejecting missing and mismatched FK actions/columns', () => {
     const { verifyDatabaseAgainstContract } = require('../../src/main/worker/dbService/verifyDB.ts')
     const cases = [
@@ -393,6 +474,42 @@ describe('PRAGMA structural verification', () => {
 })
 
 describe('database startup orchestration', () => {
+  it('kills fresh writes before authoritative pragmas by configuring FK and WAL before baseline DDL', async() => {
+    const paths = makePaths('lx-recovery-fresh-order-')
+    const events = []
+    class OrderedDatabase {
+      constructor(...args) {
+        const real = new Database(...args)
+        events.push('open')
+        return new Proxy(real, {
+          get(target, property) {
+            const value = Reflect.get(target, property)
+            if (property == 'pragma') {
+              return (statement, options) => {
+                if (statement == 'foreign_keys = ON') events.push('foreign_keys')
+                if (statement == 'journal_mode = WAL') events.push('wal')
+                return target.pragma(statement, options)
+              }
+            }
+            if (property == 'exec') {
+              return (sql) => {
+                if (sql.includes('CREATE TABLE "db_info"')) events.push('baseline_write')
+                return target.exec(sql)
+              }
+            }
+            return typeof value == 'function' ? value.bind(target) : value
+          },
+        })
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({ DatabaseImplementation: OrderedDatabase })
+
+    const result = await dbService.init(initOptions(paths))
+
+    assert.equal(result.status, 'ready')
+    assert.deepEqual(events.slice(0, 4), ['open', 'foreign_keys', 'wal', 'baseline_write'])
+  })
+
   it('kills missing-backup fresh initialization by migrating v2 through a verified online backup', async() => {
     const paths = makePaths('lx-recovery-fresh-')
     const dbService = loadDbServiceWithBoundaries()
@@ -717,6 +834,158 @@ describe('database startup orchestration', () => {
     assert.deepEqual(dbService.getDatabaseHealth(), { status: 'closed' })
     assert.throws(() => dbService.getAppDB(), error => error.message == 'database_not_ready' && error.code == 'database_not_ready')
   })
+
+  it('kills duplicate same-key initialization by sharing backup work and cloning cached results', async() => {
+    const paths = makePaths('lx-recovery-init-reuse-')
+    const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
+    let openCalls = 0
+    let backupCalls = 0
+    let releaseBackup
+    let signalBackupStarted
+    const backupStarted = new Promise(resolve => { signalBackupStarted = resolve })
+    const backupBarrier = new Promise(resolve => { releaseBackup = resolve })
+    class TrackingDatabase {
+      constructor(...args) {
+        openCalls++
+        return new Database(...args)
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({
+      DatabaseImplementation: TrackingDatabase,
+      backupModule: {
+        createOnlineBackup: async(...args) => {
+          backupCalls++
+          signalBackupStarted()
+          await backupBarrier
+          return actualBackup.createOnlineBackup(...args)
+        },
+      },
+    })
+    const firstPromise = dbService.init(initOptions(paths))
+    await backupStarted
+    const secondPromise = dbService.init({
+      dataPath: path.join(paths.dataPath, '.'),
+      backupDir: path.join(paths.backupDir, 'nested', '..'),
+      previousShutdownWasClean: true,
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    releaseBackup()
+
+    const [first, second] = await Promise.all([firstPromise, secondPromise])
+
+    assert.equal(first.status, 'ready')
+    assert.deepEqual(second, first)
+    assert.notEqual(second, first)
+    assert.equal(openCalls, 1)
+    assert.equal(backupCalls, 1)
+    const stableHandle = dbService.getAppDB()
+    first.migratedVersions.push(99)
+    const third = await dbService.init(initOptions(paths))
+    assert.deepEqual(third.migratedVersions, [3])
+    assert.equal(dbService.getAppDB(), stableHandle)
+    assert.equal(openCalls, 1)
+    assert.equal(backupCalls, 1)
+  })
+
+  it('kills profile replacement by rejecting different keys while active and initialized', async() => {
+    const firstPaths = makePaths('lx-recovery-init-conflict-a-')
+    const secondPaths = makePaths('lx-recovery-init-conflict-b-')
+    const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
+    let releaseBackup
+    let signalBackupStarted
+    const backupStarted = new Promise(resolve => { signalBackupStarted = resolve })
+    const backupBarrier = new Promise(resolve => { releaseBackup = resolve })
+    const dbService = loadDbServiceWithBoundaries({
+      backupModule: {
+        createOnlineBackup: async(...args) => {
+          signalBackupStarted()
+          await backupBarrier
+          return actualBackup.createOnlineBackup(...args)
+        },
+      },
+    })
+    const firstPromise = dbService.init(initOptions(firstPaths))
+    await backupStarted
+    const activeConflict = dbService.init(initOptions(secondPaths))
+    setTimeout(releaseBackup, 50)
+
+    await assert.rejects(activeConflict, error =>
+      error.message == 'database_initialization_conflict' && error.code == 'database_initialization_conflict')
+    const first = await firstPromise
+    assert.equal(first.status, 'ready')
+    const stableHandle = dbService.getAppDB()
+    await assert.rejects(dbService.init(initOptions(secondPaths)), error =>
+      error.message == 'database_initialization_conflict' && error.code == 'database_initialization_conflict')
+    assert.equal(dbService.getAppDB(), stableHandle)
+    assert.equal(fs.existsSync(secondPaths.databasePath), false)
+  })
+
+  it('kills repeated recovery reopen by caching cloned same-key recovery results', async() => {
+    const paths = makePaths('lx-recovery-init-recovery-cache-')
+    fs.writeFileSync(paths.databasePath, 'not sqlite')
+    let openCalls = 0
+    class TrackingDatabase {
+      constructor(...args) {
+        openCalls++
+        return new Database(...args)
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({ DatabaseImplementation: TrackingDatabase })
+
+    const first = await dbService.init(initOptions(paths))
+    first.diagnostics.push('caller mutation')
+    const second = await dbService.init(initOptions(paths))
+
+    assert.equal(first.status, 'recovery')
+    assert.equal(second.status, 'recovery')
+    assert.notEqual(second, first)
+    assert.deepEqual(second.diagnostics, ['open.failed', 'readonly_reopen.failed'])
+    assert.equal(openCalls, 2)
+  })
+
+  it('kills permanent initialization locks by allowing a new profile only after close', async() => {
+    const firstPaths = makePaths('lx-recovery-init-close-a-')
+    const secondPaths = makePaths('lx-recovery-init-close-b-')
+    const dbService = loadDbServiceWithBoundaries()
+    assert.equal((await dbService.init(initOptions(firstPaths))).status, 'ready')
+
+    dbService.close()
+
+    assert.equal((await dbService.init(initOptions(secondPaths))).status, 'ready')
+    assert.equal(fs.existsSync(secondPaths.databasePath), true)
+  })
+
+  it('kills orphaned initializing writers by invalidating an active attempt on close', async() => {
+    const firstPaths = makePaths('lx-recovery-init-cancel-a-')
+    const secondPaths = makePaths('lx-recovery-init-cancel-b-')
+    const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
+    let releaseBackup
+    let signalBackupStarted
+    const backupStarted = new Promise(resolve => { signalBackupStarted = resolve })
+    const backupBarrier = new Promise(resolve => { releaseBackup = resolve })
+    const dbService = loadDbServiceWithBoundaries({
+      backupModule: {
+        createOnlineBackup: async(...args) => {
+          signalBackupStarted()
+          await backupBarrier
+          return actualBackup.createOnlineBackup(...args)
+        },
+      },
+    })
+    const cancelled = dbService.init(initOptions(firstPaths))
+    await backupStarted
+
+    dbService.close()
+    const replacement = dbService.init(initOptions(secondPaths))
+    await new Promise(resolve => setImmediate(resolve))
+    releaseBackup()
+
+    await assert.rejects(cancelled, error =>
+      error.message == 'database_initialization_cancelled' && error.code == 'database_initialization_cancelled')
+    assert.equal((await replacement).status, 'ready')
+    assert.equal(dbService.getDatabaseHealth().status, 'ready')
+    assert.equal(dbService.getAppDB().open, true)
+  })
 })
 
 describe('transitional worker startup adapter', () => {
@@ -748,5 +1017,19 @@ describe('transitional worker startup adapter', () => {
     }))
 
     assert.equal(await initForWorker('C:\\profiles\\alice'), true)
+  })
+
+  it('kills adapter reinitialization by reusing the same real string startup result', async() => {
+    const paths = makePaths('lx-recovery-adapter-reuse-')
+    const { initForWorker } = loadRealWorkerAdapter()
+
+    const first = await initForWorker(paths.dataPath)
+    const handle = require('../../src/main/worker/dbService/db.ts').getAppDB()
+    const second = await initForWorker(path.join(paths.dataPath, '.'))
+
+    assert.equal(first, false)
+    assert.equal(second, false)
+    assert.equal(require('../../src/main/worker/dbService/db.ts').getAppDB(), handle)
+    assert.equal(fs.readdirSync(path.join(paths.dataPath, 'backups')).filter(name => name.endsWith('.backup')).length, 1)
   })
 })

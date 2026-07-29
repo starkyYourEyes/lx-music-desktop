@@ -28,10 +28,11 @@ interface TableInfoRow {
 interface IndexListRow {
   name: string
   unique: number
+  partial: number
 }
 
 interface IndexInfoRow {
-  name: string
+  name: string | null
   seqno: number
 }
 
@@ -47,13 +48,19 @@ interface ForeignKeyRow {
 
 const quoteIdentifier = (value: string): string => `"${value.replace(/"/g, '""')}"`
 
-const sameColumns = (actual: readonly string[], expected: readonly string[]): boolean =>
+const sameColumns = (actual: readonly unknown[], expected: readonly string[]): boolean =>
   actual.length == expected.length && actual.every((value, index) => value == expected[index])
 
-const readIndexes = (db: Database.Database, table: string): Array<{ name: string, unique: boolean, columns: string[] }> =>
+const readIndexes = (db: Database.Database, table: string): Array<{
+  name: string
+  unique: boolean
+  partial: boolean
+  columns: Array<string | null>
+}> =>
   (db.pragma(`index_list(${quoteIdentifier(table)})`) as IndexListRow[]).map(index => ({
     name: index.name,
     unique: index.unique == 1,
+    partial: index.partial == 1,
     columns: (db.pragma(`index_info(${quoteIdentifier(index.name)})`) as IndexInfoRow[])
       .sort((a, b) => a.seqno - b.seqno)
       .map(columnInfo => columnInfo.name),
@@ -62,7 +69,10 @@ const readIndexes = (db: Database.Database, table: string): Array<{ name: string
 const hasIndex = (
   actual: ReturnType<typeof readIndexes>,
   expected: SchemaIndexContract,
-): boolean => actual.some(index => index.unique == expected.unique && sameColumns(index.columns, expected.columns))
+): boolean => actual.some(index =>
+  index.unique == expected.unique &&
+  index.partial == expected.partial &&
+  sameColumns(index.columns, expected.columns))
 
 const readForeignKeys = (db: Database.Database, table: string): ForeignKeyRow[][] => {
   const rows = db.pragma(`foreign_key_list(${quoteIdentifier(table)})`) as ForeignKeyRow[]

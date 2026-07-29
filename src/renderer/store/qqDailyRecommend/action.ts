@@ -214,6 +214,8 @@ export const dislikeQQDailyRecommendMusic = (
         throw error
       }
 
+      if (previousTempList.revision != tempListInstallRevision ||
+        tempListMeta.id != QQ_DAILY_RECOMMEND_TEMP_LIST_ID) return false
       if (!isCurrentFeedbackSnapshot(snapshot)) {
         await restorePreviousTempList(previousTempList)
         return false

@@ -715,6 +715,41 @@ const testNewDailyInstallSupersedesPendingDislikeRollback = async() => {
   assert.strictEqual(store.calls.playNext, 0)
 }
 
+const testSameSessionTempInstallSupersedesPendingDislikeCommit = async() => {
+  const reducedInstall = deferred()
+  let installCount = 0
+  const store = createDailyStore(async() => [song('one'), song('two')], {
+    setTempList: (id, list, { tempList, tempListMeta }) => {
+      tempListMeta.id = id
+      tempList.splice(0, tempList.length, ...list)
+      installCount++
+      return installCount == 2 ? reducedInstall.promise : Promise.resolve()
+    },
+  })
+  await store.action.prepareQQDailyRecommend('A')
+  await store.action.playQQDailyRecommend('A')
+  store.playInfo.playerListId = 'temp'
+  store.playMusicInfo.musicInfo = song('one')
+  const snapshot = store.action.getQQDailyRecommendFeedbackSnapshot(song('one'), 'A')
+  const request = store.action.dislikeQQDailyRecommendMusic(song('one'), snapshot)
+  await settle()
+  assert.deepStrictEqual(store.tempList, [song('two')])
+
+  await store.action.syncQQDailyRecommendTempList()
+  const clearPlayedListCalls = store.calls.clearPlayedList
+  const playListCalls = store.calls.playList.length
+  const playNextCalls = store.calls.playNext
+  assert.deepStrictEqual(store.tempList, [song('one'), song('two')])
+  reducedInstall.resolve()
+
+  assert.strictEqual(await request, false)
+  assert.deepStrictEqual(store.state.qqDailyRecommendSongs, [song('one'), song('two')])
+  assert.deepStrictEqual(store.tempList, [song('one'), song('two')])
+  assert.strictEqual(store.calls.clearPlayedList, clearPlayedListCalls)
+  assert.strictEqual(store.calls.playList.length, playListCalls)
+  assert.strictEqual(store.calls.playNext, playNextCalls)
+}
+
 const testNewTrackRejectedInstallRestoresQueueAfterPendingFeedback = async() => {
   const firstReducedInstall = deferred()
   const secondInstallError = new Error('synthetic second reduced install failure')
@@ -1211,6 +1246,7 @@ const main = async() => {
   await testStaleDailyDislikeSuccessKeepsCurrentSession()
   await testRejectedDailyDislikeInstallRestoresPreviousTempList()
   await testNewDailyInstallSupersedesPendingDislikeRollback()
+  await testSameSessionTempInstallSupersedesPendingDislikeCommit()
   await testPendingDailyDislikeLogoutRestoresPreviousPlayback()
   await testPendingDailyDislikeAccountSwitchRestoresPreviousPlayback()
   await testPendingDailyDislikeTrackChangeDoesNotCommitOrAdvance()

@@ -1,14 +1,5 @@
 const BLOCKED_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor'])
 const toError = value => value instanceof Error ? value : new Error(String(value))
-const serializeError = error => ({
-  name: typeof error?.name == 'string' ? error.name : 'Error',
-  message: typeof error?.message == 'string' ? error.message : String(error),
-})
-const deserializeError = value => {
-  const error = new Error(typeof value?.message == 'string' ? value.message : 'Remote RPC error')
-  error.name = typeof value?.name == 'string' ? value.name : 'Error'
-  return error
-}
 
 const createSyncRpc = ({ funcsObj, timeout = 30_000, sendMessage, onCallBeforeParams = args => args, onError = () => {} }) => {
   let destroyed = false
@@ -39,12 +30,12 @@ const createSyncRpc = ({ funcsObj, timeout = 30_000, sendMessage, onCallBeforePa
   const callRemote = (path, args, group) => {
     if (destroyed) return Promise.reject(new Error('Sync RPC destroyed'))
     return new Promise((resolve, reject) => {
-      const id = `${Date.now().toString(36)}-${++nextId}`
+      const id = `${path.join('.')}__${Date.now().toString(36)}-${++nextId}`
       const timer = setTimeout(() => {
         settlePending(id, entry => entry.reject(new Error(`Sync RPC timeout: ${path.join('.')}`)))
       }, Math.max(1, timeout))
       pending.set(id, { resolve, reject, timer })
-      send({ type: 'call', id, path, args, group }, error => settlePending(id, entry => entry.reject(error)))
+      send({ name: id, path, data: args }, error => settlePending(id, entry => entry.reject(error)))
     })
   }
   const drainQueue = group => {
@@ -99,32 +90,36 @@ const createSyncRpc = ({ funcsObj, timeout = 30_000, sendMessage, onCallBeforePa
   }
   const handleCall = async data => {
     const path = Array.isArray(data.path) ? data.path : []
-    const group = typeof data.group == 'string' ? data.group : null
     try {
-      if (typeof data.id != 'string' || !Array.isArray(data.args)) throw new Error('Invalid RPC call')
+      if (typeof data.name != 'string' || !Array.isArray(data.data)) throw new Error('Invalid RPC call')
       const { parent, target } = resolveFunction(path)
-      const args = await onCallBeforeParams(data.args)
+      const args = await onCallBeforeParams(data.data)
       if (!Array.isArray(args)) throw new Error('RPC parameter hook must return an array')
       const result = await target.apply(parent, args)
-      send({ type: 'result', id: data.id, data: result }, error => reportError(error, path, group))
+      send(
+        { name: data.name, error: null, data: result },
+        error => reportError(error, path, null),
+      )
     } catch (error) {
-      reportError(error, path, group)
-      if (typeof data.id == 'string') send({ type: 'error', id: data.id, error: serializeError(error) }, sendError => reportError(sendError, path, group))
+      reportError(error, path, null)
+      if (typeof data.name == 'string') {
+        send(
+          { name: data.name, error: toError(error).message },
+          sendError => reportError(sendError, path, null),
+        )
+      }
     }
   }
   const message = data => {
-    if (destroyed || !data || typeof data != 'object') return
-    switch (data.type) {
-      case 'call':
-        handleCall(data)
-        break
-      case 'result':
-        if (typeof data.id == 'string') settlePending(data.id, entry => entry.resolve(data.data))
-        break
-      case 'error':
-        if (typeof data.id == 'string') settlePending(data.id, entry => entry.reject(deserializeError(data.error)))
-        break
+    if (destroyed || !data || typeof data != 'object' || typeof data.name != 'string') return
+    if (Array.isArray(data.path) && data.path.length) {
+      void handleCall(data)
+      return
     }
+    settlePending(data.name, entry => {
+      if (data.error == null) entry.resolve(data.data)
+      else entry.reject(new Error(String(data.error)))
+    })
   }
   const destroy = () => {
     if (destroyed) return

@@ -55,7 +55,7 @@ test('serializes remote errors and rejects unknown or non-function paths', async
     },
   })
   t.after(() => { pair.left.destroy(); pair.right.destroy() })
-  await assert.rejects(pair.left.remote.fail(), error => error.name == 'TypeError' && error.message == 'remote failure')
+  await assert.rejects(pair.left.remote.fail(), /remote failure/)
   await assert.rejects(pair.left.remote.missing(), /Unknown RPC path/)
   await assert.rejects(pair.left.remote.value(), /not a function/)
 })

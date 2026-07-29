@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict')
+const { spawnSync } = require('node:child_process')
 const test = require('node:test')
 const { createSyncRpc } = require('../src/common/utils/syncRpc')
 
@@ -226,11 +227,32 @@ test('wire protocol resolver is evaluated for each outbound call', async t => {
 
   selected = 'current'
   const currentCall = rpc.remote.second()
-  void currentCall.catch(() => {})
   const currentFrame = sent[1]
   assert.equal(currentFrame.type, 'call')
   rpc.message({ type: 'result', id: currentFrame.id, data: 'current-result' })
   assert.equal(await currentCall, 'current-result')
+})
+
+test('a throwing wire protocol resolver rejects without keeping the process alive', () => {
+  const script = `
+    const { createSyncRpc } = require(${JSON.stringify(require.resolve('../src/common/utils/syncRpc'))})
+    const rpc = createSyncRpc({
+      funcsObj: {},
+      timeout: 1000,
+      wireProtocol() {
+        throw new Error('resolver failure')
+      },
+      sendMessage() {},
+    })
+    rpc.remote.call().catch(error => process.stdout.write(error.message))
+  `
+  const result = spawnSync(process.execPath, ['-e', script], {
+    encoding: 'utf8',
+    timeout: 500,
+  })
+
+  assert.equal(result.status, 0)
+  assert.equal(result.stdout, 'resolver failure')
 })
 
 test('current wire errors preserve the remote error name', async t => {
@@ -249,7 +271,7 @@ test('current wire errors preserve the remote error name', async t => {
   )
 })
 
-test('blocked paths return errors in both wire formats', async t => {
+test('blocked paths return mirrored errors in both wire formats', async t => {
   const sent = []
   const rpc = createSyncRpc({
     funcsObj: {},
@@ -259,17 +281,36 @@ test('blocked paths return errors in both wire formats', async t => {
   })
   t.after(() => rpc.destroy())
 
-  rpc.message({ name: 'legacy-blocked', path: ['__proto__', 'polluted'], data: [] })
-  rpc.message({
-    type: 'call',
-    id: 'current-blocked',
-    path: ['constructor', 'polluted'],
-    args: [],
-    group: null,
-  })
+  for (const segment of ['__proto__', 'prototype', 'constructor']) {
+    rpc.message({
+      name: `legacy-${segment}`,
+      path: [segment, 'polluted'],
+      data: [],
+    })
+    rpc.message({
+      type: 'call',
+      id: `current-${segment}`,
+      path: [segment, 'polluted'],
+      args: [],
+      group: null,
+    })
+  }
   await new Promise(resolve => setImmediate(resolve))
 
-  assert.match(sent[0].error, /Unknown RPC path/)
-  assert.equal(sent[1].type, 'error')
-  assert.match(sent[1].error.message, /Unknown RPC path/)
+  for (const segment of ['__proto__', 'prototype', 'constructor']) {
+    const legacy = sent.find(frame => frame.name == `legacy-${segment}`)
+    const current = sent.find(frame => frame.id == `current-${segment}`)
+    assert.deepEqual(legacy, {
+      name: `legacy-${segment}`,
+      error: 'Unknown RPC path',
+    })
+    assert.deepEqual(current, {
+      type: 'error',
+      id: `current-${segment}`,
+      error: {
+        name: 'Error',
+        message: 'Unknown RPC path',
+      },
+    })
+  }
 })

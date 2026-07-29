@@ -52,13 +52,14 @@ const createSyncRpc = ({ funcsObj, timeout = 30_000, wireProtocol = 'legacy', se
   const callRemote = (path, args, group) => {
     if (destroyed) return Promise.reject(new Error('Sync RPC destroyed'))
     return new Promise((resolve, reject) => {
+      const protocol = resolveWireProtocol()
       const id = `${path.join('.')}__${Date.now().toString(36)}-${++nextId}`
       const timer = setTimeout(() => {
         settlePending(id, entry => entry.reject(new Error(`Sync RPC timeout: ${path.join('.')}`)))
       }, Math.max(1, timeout))
       pending.set(id, { resolve, reject, timer })
       send(
-        encodeCall(resolveWireProtocol(), id, path, args, group),
+        encodeCall(protocol, id, path, args, group),
         error => settlePending(id, entry => entry.reject(error)),
       )
     })

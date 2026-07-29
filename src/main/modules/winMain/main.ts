@@ -3,6 +3,7 @@ import path from 'node:path'
 import { createTaskBarButtons, getWindowSizeInfo } from './utils'
 import { getPlatform, isLinux, isWin } from '@common/utils'
 import { getProxy, openDevTools as handleOpenDevTools } from '@main/utils'
+import { configureSessionProxy } from '@main/utils/sessionProxy'
 import { mainSend } from '@common/mainIpc'
 import { sendFocus, sendTaskbarButtonClick } from './rendererEvent'
 import { encodePath } from '@common/utils/electron'
@@ -60,6 +61,17 @@ const winEvent = () => {
   })
 }
 
+const configureMainSessionProxy = (targetSession: Electron.Session) => {
+  void configureSessionProxy(
+    targetSession,
+    getProxy(),
+  ).catch(error => {
+    console.warn('[main window proxy]', {
+      stage: 'proxy-config-failed',
+      reason: error instanceof Error ? error.name : 'unknown',
+    })
+  })
+}
 
 export const createWindow = () => {
   closeWindow()
@@ -67,8 +79,7 @@ export const createWindow = () => {
 
   const { shouldUseDarkColors, theme } = global.lx.theme
   const ses = session.fromPartition('persist:win-main')
-  const proxy = getProxy()
-  setSesProxy(ses, proxy?.host, proxy?.port)
+  configureMainSessionProxy(ses)
 
   /**
    * Initial window options
@@ -129,22 +140,9 @@ export const closeWindow = () => {
   browserWindow.close()
 }
 
-const setSesProxy = (ses: Electron.Session, host?: string, port?: string | number) => {
-  if (host) {
-    void ses.setProxy({
-      mode: 'fixed_servers',
-      proxyRules: `http://${host}:${port}`,
-    })
-  } else {
-    void ses.setProxy({
-      mode: 'direct',
-    })
-  }
-}
 export const setProxy = () => {
   if (!browserWindow) return
-  const proxy = getProxy()
-  setSesProxy(browserWindow.webContents.session, proxy?.host, proxy?.port)
+  configureMainSessionProxy(browserWindow.webContents.session)
 }
 
 

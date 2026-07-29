@@ -175,6 +175,7 @@ const modules = {
     qq_music_get_account_status: 'qq_music_get_account_status',
     qq_music_login_qr_create: 'qq_music_login_qr_create',
     qq_music_login_qr_check: 'qq_music_login_qr_check',
+    qq_music_login_qr_cancel: 'qq_music_login_qr_cancel',
     qq_music_logout: 'qq_music_logout',
     qq_music_get_guess_like_songs: 'qq_music_get_guess_like_songs',
     qq_music_get_daily_recommend_songs: 'qq_music_get_daily_recommend_songs',

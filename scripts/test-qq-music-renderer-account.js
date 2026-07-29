@@ -272,10 +272,44 @@ const testQrPolling = async() => {
   let createResults = []
   let checkHandler
   let checkKeys = []
+  const makeRequestId = sequence =>
+    `20000000-0000-4000-8000-${String(sequence).padStart(12, '0')}`
+  const createIds = []
+  const cancelledIds = []
+  const cancelGates = []
+  let requestIndex = 0
   let accountStatus = null
   let loginSuccessCount = 0
   const isLoggedIn = ref(false)
   const originalWindow = global.window
+  const originalHTMLImageElement = global.HTMLImageElement
+  const animationFrames = []
+  const measures = []
+  let performanceNow = 100
+
+  class FakeHTMLImageElement {
+    constructor({
+      connected = true,
+      naturalWidth = 218,
+      naturalHeight = 218,
+      width = 218,
+      height = 218,
+      display = 'block',
+      visibility = 'visible',
+      opacity = '1',
+    } = {}) {
+      this.isConnected = connected
+      this.naturalWidth = naturalWidth
+      this.naturalHeight = naturalHeight
+      this.bounds = { width, height }
+      this.style = { display, visibility, opacity }
+    }
+
+    getBoundingClientRect() {
+      return this.bounds
+    }
+  }
+  global.HTMLImageElement = FakeHTMLImageElement
 
   global.window = {
     setTimeout(callback, delay) {
@@ -286,6 +320,18 @@ const testQrPolling = async() => {
     },
     clearTimeout(id) {
       timers.delete(id)
+    },
+    crypto: {
+      randomUUID: () => makeRequestId(++requestIndex),
+    },
+    requestAnimationFrame(callback) {
+      animationFrames.push(callback)
+      return animationFrames.length
+    },
+    getComputedStyle: image => image.style,
+    performance: {
+      now: () => performanceNow,
+      measure: (name, options) => measures.push({ name, options }),
     },
   }
 
@@ -301,12 +347,19 @@ const testQrPolling = async() => {
     unmountCallbacks.length = 0
     createResults = []
     checkKeys = []
+    createIds.length = 0
+    cancelledIds.length = 0
+    cancelGates.length = 0
+    requestIndex = 0
     accountStatus = null
     loginSuccessCount = 0
     isLoggedIn.value = false
+    animationFrames.length = 0
+    measures.length = 0
+    performanceNow = 100
   }
 
-  const { useQQMusicLoginQr } = loadTsModule(
+  const { isRenderedQQMusicQrImage, useQQMusicLoginQr } = loadTsModule(
     path.join(__dirname, '../src/renderer/views/Recommend/useQQMusicLoginQr.ts'),
     {
       '@common/utils/vueTools': {
@@ -316,7 +369,16 @@ const testQrPolling = async() => {
         onBeforeUnmount: callback => unmountCallbacks.push(callback),
       },
       '@renderer/utils/ipc': {
-        createQQMusicLoginQr: async() => createResults.shift(),
+        createQQMusicLoginQr: async requestId => {
+          createIds.push(requestId)
+          const result = await createResults.shift()
+          return { ...result, key: requestId }
+        },
+        cancelQQMusicLoginQr: async requestId => {
+          cancelledIds.push(requestId)
+          const gate = cancelGates.shift()
+          if (gate) await gate.promise
+        },
         checkQQMusicLoginQr: async key => {
           checkKeys.push(key)
           return checkHandler(key)
@@ -337,6 +399,7 @@ const testQrPolling = async() => {
 
   try {
     reset()
+    performanceNow = 100
     createResults.push({ key: 'first', qrimg: 'data:first' })
     const pendingResults = [
       { state: 'waiting', message: '', isLoggedIn: false, profile: null },
@@ -347,10 +410,72 @@ const testQrPolling = async() => {
     const polling = useQQMusicLoginQr(async() => { loginSuccessCount++ })
 
     await polling.handleCreateLoginQr()
+    const firstRequestId = createIds[0]
+    assert.strictEqual(firstRequestId, makeRequestId(1))
+    assert.strictEqual(polling.qrInfo.value.key, firstRequestId)
+    assert.deepStrictEqual(checkKeys, [])
     assert.strictEqual(polling.showLoginPanel.value, true)
     assert.strictEqual(polling.qrImg.value, 'data:first')
     assert.strictEqual(polling.qrStatusText.value, '请使用手机 QQ 扫码登录')
     assert.strictEqual(timers.size, 1)
+
+    const image = new FakeHTMLImageElement()
+    performanceNow = 2_450
+    polling.handleQrImageLoad({ currentTarget: image })
+    assert.strictEqual(measures.length, 0)
+    assert.strictEqual(animationFrames.length, 1)
+    polling.handleQrImageLoad({ currentTarget: image })
+    assert.strictEqual(animationFrames.length, 2)
+    animationFrames.shift()()
+    animationFrames.shift()()
+    assert.deepStrictEqual(measures, [{
+      name: 'qq-music-login-qr-visible',
+      options: {
+        start: 100,
+        end: 2450,
+      },
+    }])
+
+    polling.handleQrImageLoad({ currentTarget: image })
+    assert.strictEqual(animationFrames.length, 0)
+    assert.strictEqual(measures.length, 1)
+
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ naturalWidth: 0 })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ naturalHeight: 0 })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ connected: false })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ width: 0 })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ height: 0 })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ display: 'none' })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ visibility: 'hidden' })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ visibility: 'collapse' })),
+      false,
+    )
+    assert.strictEqual(
+      isRenderedQQMusicQrImage(new FakeHTMLImageElement({ opacity: '0' })),
+      false,
+    )
 
     takeTimer()
     await settle()
@@ -364,7 +489,11 @@ const testQrPolling = async() => {
 
     takeTimer()
     await settle()
-    assert.deepStrictEqual(checkKeys, ['first', 'first', 'first'])
+    assert.deepStrictEqual(checkKeys, [
+      firstRequestId,
+      firstRequestId,
+      firstRequestId,
+    ])
     assert.deepStrictEqual(accountStatus, {
       isLoggedIn: true,
       profile: { uin: '123', nickname: 'QQ 账号' },
@@ -379,12 +508,28 @@ const testQrPolling = async() => {
     checkHandler = () => closeCheck.promise
     const closing = useQQMusicLoginQr(async() => {})
     await closing.handleCreateLoginQr()
+    const closingRequestId = createIds[0]
     takeTimer()
     closing.handleCloseLogin()
+    assert.deepStrictEqual(cancelledIds, [closingRequestId])
     closeCheck.resolve({ state: 'waiting', message: '', isLoggedIn: false, profile: null })
     await settle()
     assert.strictEqual(closing.showLoginPanel.value, false)
     assert.strictEqual(timers.size, 0)
+
+    reset()
+    const createGate = deferred()
+    createResults.push(createGate.promise)
+    const earlyClose = useQQMusicLoginQr(async() => {})
+    const pendingCreate = earlyClose.handleCreateLoginQr()
+    await settle()
+    const earlyRequestId = createIds[0]
+    earlyClose.handleCloseLogin()
+    assert.deepStrictEqual(cancelledIds, [earlyRequestId])
+    createGate.reject(new Error('cancelled creation'))
+    await pendingCreate
+    assert.notStrictEqual(earlyClose.qrStatusText.value, '二维码生成失败，请重试')
+    assert.strictEqual(earlyClose.showLoginPanel.value, false)
 
     reset()
     createResults.push(
@@ -398,11 +543,74 @@ const testQrPolling = async() => {
     await settle()
     assert.strictEqual(expiring.qrStatusText.value, '二维码已过期，请重新获取')
     assert.strictEqual(timers.size, 0)
+    expiring.handleQrImageLoad({
+      currentTarget: new FakeHTMLImageElement(),
+    })
+    assert.strictEqual(animationFrames.length, 0)
     expiring.handleShowLogin()
     await settle()
-    assert.strictEqual(expiring.qrInfo.value.key, 'replacement')
+    const expiryReplacementId = createIds[1]
+    assert.strictEqual(expiryReplacementId, makeRequestId(2))
+    assert.strictEqual(expiring.qrInfo.value.key, expiryReplacementId)
     assert.strictEqual(expiring.qrImg.value, 'data:replacement')
     assert.strictEqual(timers.size, 1)
+
+    reset()
+    createResults.push(Promise.reject(
+      new Error('QQ Music login QR creation timed out'),
+    ))
+    const timedOut = useQQMusicLoginQr(async() => {})
+    await timedOut.handleCreateLoginQr()
+    assert.strictEqual(timedOut.qrStatusText.value, '二维码生成超时，请重试')
+    assert.strictEqual(timedOut.showLoginPanel.value, true)
+
+    reset()
+    createResults.push(
+      { qrimg: 'data:old' },
+      { qrimg: 'data:current' },
+    )
+    checkHandler = async() => ({
+      state: 'waiting',
+      message: '',
+      isLoggedIn: false,
+      profile: null,
+    })
+    const replacing = useQQMusicLoginQr(async() => {})
+    await replacing.handleCreateLoginQr()
+    const refreshOldRequestId = createIds[0]
+    replacing.handleQrImageLoad({
+      currentTarget: new FakeHTMLImageElement(),
+    })
+    assert.strictEqual(animationFrames.length, 1)
+
+    const cancelGate = deferred()
+    cancelGates.push(cancelGate)
+    const refresh = replacing.handleCreateLoginQr()
+    await settle()
+    assert.deepStrictEqual(cancelledIds, [refreshOldRequestId])
+    assert.strictEqual(createIds.length, 1)
+    cancelGate.resolve()
+    await refresh
+    const refreshCurrentRequestId = createIds[1]
+    assert.notStrictEqual(refreshCurrentRequestId, refreshOldRequestId)
+    assert.strictEqual(replacing.qrInfo.value.key, refreshCurrentRequestId)
+    const measureCountBeforeStaleFrame = measures.length
+    animationFrames.shift()()
+    assert.strictEqual(measures.length, measureCountBeforeStaleFrame)
+
+    reset()
+    performanceNow = 3_000
+    createResults.push({ qrimg: 'data:stale-visible' })
+    const staleVisibility = useQQMusicLoginQr(async() => {})
+    await staleVisibility.handleCreateLoginQr()
+    staleVisibility.handleQrImageLoad({
+      currentTarget: new FakeHTMLImageElement(),
+    })
+    assert.strictEqual(animationFrames.length, 1)
+    const measureCount = measures.length
+    staleVisibility.handleCloseLogin()
+    animationFrames.shift()()
+    assert.strictEqual(measures.length, measureCount)
 
     reset()
     createResults.push(
@@ -410,14 +618,17 @@ const testQrPolling = async() => {
       { key: 'current', qrimg: 'data:current' },
     )
     const oldCheck = deferred()
-    checkHandler = key => key == 'old'
+    let oldRequestId
+    checkHandler = key => key == oldRequestId
       ? oldCheck.promise
       : Promise.resolve({ state: 'waiting', message: '', isLoggedIn: false, profile: null })
-    const replacing = useQQMusicLoginQr(async() => {})
-    await replacing.handleCreateLoginQr()
+    const staleCheck = useQQMusicLoginQr(async() => {})
+    await staleCheck.handleCreateLoginQr()
+    oldRequestId = createIds[0]
     takeTimer()
-    await replacing.handleCreateLoginQr()
-    assert.strictEqual(replacing.qrInfo.value.key, 'current')
+    await staleCheck.handleCreateLoginQr()
+    const currentRequestId = createIds[1]
+    assert.strictEqual(staleCheck.qrInfo.value.key, currentRequestId)
     assert.strictEqual(timers.size, 1)
     oldCheck.resolve({
       state: 'success',
@@ -426,16 +637,17 @@ const testQrPolling = async() => {
       profile: { uin: 'stale', nickname: '旧账号' },
     })
     await settle()
-    assert.strictEqual(replacing.qrInfo.value.key, 'current')
-    assert.strictEqual(replacing.qrStatusText.value, '请使用手机 QQ 扫码登录')
+    assert.strictEqual(staleCheck.qrInfo.value.key, currentRequestId)
     assert.strictEqual(accountStatus, null)
     assert.strictEqual(timers.size, 1)
 
     assert.strictEqual(unmountCallbacks.length, 1)
     unmountCallbacks[0]()
+    assert.strictEqual(cancelledIds.at(-1), currentRequestId)
     assert.strictEqual(timers.size, 0)
   } finally {
     global.window = originalWindow
+    global.HTMLImageElement = originalHTMLImageElement
   }
 }
 

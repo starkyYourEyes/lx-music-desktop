@@ -1,5 +1,6 @@
 import { computed, onBeforeUnmount, ref, shallowRef } from '@common/utils/vueTools'
 import {
+  cancelQQMusicLoginQr,
   checkQQMusicLoginQr,
   createQQMusicLoginQr,
 } from '@renderer/utils/ipc'
@@ -17,7 +18,30 @@ const statusText = {
 
 const creatingText = '正在生成二维码...'
 const createFailedText = '二维码生成失败，请重试'
+const createTimeoutText = '二维码生成超时，请重试'
 const checkFailedText = '检查登录状态失败，稍后重试'
+
+interface QrVisibilityAttempt {
+  requestId: string
+  startedAt: number
+  reported: boolean
+}
+
+export const isRenderedQQMusicQrImage = (
+  image: HTMLImageElement,
+): boolean => {
+  const style = window.getComputedStyle(image)
+  const bounds = image.getBoundingClientRect()
+  return image.isConnected &&
+    image.naturalWidth > 0 &&
+    image.naturalHeight > 0 &&
+    bounds.width > 0 &&
+    bounds.height > 0 &&
+    style.display != 'none' &&
+    style.visibility != 'hidden' &&
+    style.visibility != 'collapse' &&
+    Number.parseFloat(style.opacity) > 0
+}
 
 export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
   const qrInfo = shallowRef<LX.QQMusic.LoginQr | null>(null)
@@ -30,6 +54,13 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
   let createRevision = 0
   const checkingKeys = new Set<string>()
   let isDisposed = false
+  let currentRequestId: string | null = null
+  let visibilityAttempt: QrVisibilityAttempt | null = null
+
+  const clearVisibilityAttempt = (requestId?: string) => {
+    if (requestId && visibilityAttempt?.requestId != requestId) return
+    visibilityAttempt = null
+  }
 
   const clearQrTimer = () => {
     if (qrTimer == null) return
@@ -39,8 +70,19 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
 
   const isPending = () => qrState == 'waiting' || qrState == 'scanned'
 
+  const cancelCurrentRequest = async(): Promise<void> => {
+    const requestId = currentRequestId
+    currentRequestId = null
+    clearVisibilityAttempt(requestId ?? undefined)
+    if (!requestId) return
+    try {
+      await cancelQQMusicLoginQr(requestId)
+    } catch {}
+  }
+
   const canPoll = (key: string) => {
     return !isDisposed &&
+      currentRequestId == key &&
       showLoginPanel.value &&
       !isLoggedIn.value &&
       qrInfo.value?.key == key &&
@@ -58,7 +100,7 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
 
   const checkLoginStatus = async(key: string) => {
     if (!canPoll(key)) return
-    if (checkingKeys.size) {
+    if (checkingKeys.has(key)) {
       scheduleQrCheck(key)
       return
     }
@@ -80,6 +122,11 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
     if (!canPoll(key)) return
     qrState = status.state
     qrStatusText.value = statusText[status.state]
+
+    if (status.state == 'success' || status.state == 'expired') {
+      if (currentRequestId == key) currentRequestId = null
+      clearVisibilityAttempt(key)
+    }
 
     if (status.state == 'success') {
       clearQrTimer()
@@ -107,16 +154,38 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
     qrState = null
     qrInfo.value = null
 
+    await cancelCurrentRequest()
+    if (isDisposed || revision != createRevision || !showLoginPanel.value) return
+
+    const requestId = window.crypto.randomUUID()
+    currentRequestId = requestId
     try {
-      const info = await createQQMusicLoginQr()
-      if (isDisposed || revision != createRevision || !showLoginPanel.value) return
+      visibilityAttempt = {
+        requestId,
+        startedAt: window.performance.now(),
+        reported: false,
+      }
+      const info = await createQQMusicLoginQr(requestId)
+      if (isDisposed || revision != createRevision ||
+        currentRequestId != requestId || !showLoginPanel.value) return
+      if (info.key != requestId) throw new Error(createFailedText)
       qrInfo.value = info
       qrState = 'waiting'
       qrStatusText.value = statusText.waiting
-      scheduleQrCheck(info.key)
-    } catch {
-      if (!isDisposed && revision == createRevision && showLoginPanel.value) {
-        qrStatusText.value = createFailedText
+      scheduleQrCheck(requestId)
+    } catch (error) {
+      clearVisibilityAttempt(requestId)
+      const isCurrent = currentRequestId == requestId
+      if (isCurrent) {
+        currentRequestId = null
+        void cancelQQMusicLoginQr(requestId).catch(() => {})
+      }
+      if (!isDisposed && revision == createRevision &&
+        isCurrent && showLoginPanel.value) {
+        qrStatusText.value = error instanceof Error &&
+          error.message.includes('QQ Music login QR creation timed out')
+          ? createTimeoutText
+          : createFailedText
       }
     } finally {
       if (revision == createRevision) isCreatingQr.value = false
@@ -132,11 +201,43 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
     void handleCreateLoginQr()
   }
 
+  const handleQrImageLoad = (event: Event) => {
+    const image = event.currentTarget
+    if (!(image instanceof HTMLImageElement)) return
+    const attempt = visibilityAttempt
+    const revision = createRevision
+    if (!attempt || attempt.reported) return
+
+    window.requestAnimationFrame(() => {
+      if (isDisposed || revision != createRevision ||
+        visibilityAttempt !== attempt || attempt.reported ||
+        currentRequestId != attempt.requestId ||
+        qrInfo.value?.key != attempt.requestId) return
+
+      if (!isRenderedQQMusicQrImage(image)) return
+
+      attempt.reported = true
+      const end = window.performance.now()
+      window.performance.measure('qq-music-login-qr-visible', {
+        start: attempt.startedAt,
+        end,
+      })
+      console.info('[QQ Music login performance]', {
+        stage: 'qr-visible',
+        elapsedMs: Math.max(0, Math.round(end - attempt.startedAt)),
+      })
+    })
+  }
+
   const handleCloseLogin = () => {
     showLoginPanel.value = false
     createRevision++
     isCreatingQr.value = false
+    qrState = null
+    qrInfo.value = null
     clearQrTimer()
+    clearVisibilityAttempt()
+    void cancelCurrentRequest()
   }
 
   onBeforeUnmount(() => {
@@ -144,6 +245,8 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
     showLoginPanel.value = false
     createRevision++
     clearQrTimer()
+    clearVisibilityAttempt()
+    void cancelCurrentRequest()
   })
 
   return {
@@ -155,5 +258,6 @@ export const useQQMusicLoginQr = (onLoginSuccess: () => Promise<void>) => {
     handleCreateLoginQr,
     handleShowLogin,
     handleCloseLogin,
+    handleQrImageLoad,
   }
 }

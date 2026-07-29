@@ -3,7 +3,12 @@
     <div :class="$style.loginPanel">
       <button :class="$style.closeBtn" type="button" @click="$emit('close')">x</button>
       <div :class="$style.qrWrap">
-        <img v-if="qrImg" :src="qrImg" draggable="false">
+        <img
+          v-if="qrImg"
+          :src="qrImg"
+          draggable="false"
+          @load="$emit('qrLoad', $event)"
+        >
         <span v-else>{{ isCreatingQr ? '生成中...' : '暂无二维码' }}</span>
       </div>
       <h3>{{ title }}</h3>
@@ -26,6 +31,7 @@ defineProps<{
 defineEmits<{
   close: []
   refresh: []
+  qrLoad: [event: Event]
 }>()
 </script>
 

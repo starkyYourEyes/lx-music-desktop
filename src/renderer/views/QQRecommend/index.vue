@@ -9,6 +9,7 @@
       :is-creating-qr="isCreatingQr"
       @close="handleCloseLogin"
       @refresh="handleCreateLoginQr"
+      @qr-load="handleQrImageLoad"
     />
 
     <div :class="$style.content" class="scroll">
@@ -186,6 +187,7 @@ const {
   handleCreateLoginQr,
   handleShowLogin,
   handleCloseLogin,
+  handleQrImageLoad,
 } = useQQMusicLoginQr(async() => {
   handleCloseLogin()
 })

@@ -685,12 +685,23 @@ export const getQQMusicAccountStatus = async() => {
   return rendererInvoke<LX.QQMusic.AccountStatus>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_account_status)
 }
 
-export const createQQMusicLoginQr = async() => {
-  return rendererInvoke<LX.QQMusic.LoginQr>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_login_qr_create)
+export const createQQMusicLoginQr = async(requestId: string) => {
+  return rendererInvoke<string, LX.QQMusic.LoginQr>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_login_qr_create,
+    requestId,
+  )
 }
 
 export const checkQQMusicLoginQr = async(key: string) => {
   return rendererInvoke<string, LX.QQMusic.LoginQrCheck>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_login_qr_check, key)
+}
+
+export const cancelQQMusicLoginQr = async(requestId: string): Promise<void> => {
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type
+  await rendererInvoke<string, void>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_login_qr_cancel,
+    requestId,
+  )
 }
 
 export const logoutQQMusic = async() => {

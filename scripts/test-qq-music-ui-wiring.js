@@ -1104,6 +1104,8 @@ const testDedicatedQQRecommendationWiring = () => {
   const qqData = read('src/renderer/views/Recommend/useQQGuessLikeData.ts')
   const qqPlayback = read('src/renderer/views/QQRecommend/useQQGuessLikePlayback.ts')
   const qqAccount = read('src/renderer/store/qqMusic.ts')
+  const loginPanel = read('src/renderer/views/Recommend/components/LoginPanel.vue')
+  const loginQr = read('src/renderer/views/Recommend/useQQMusicLoginQr.ts')
 
   const qqAction = aside.match(/const\s+handleQQMusicAction[\s\S]*?(?=const\s+handleNeteaseAction)/)?.[0] || ''
   assert.match(qqAction, /route\.path\s*==\s*'\/qq-recommend'/)
@@ -1115,6 +1117,16 @@ const testDedicatedQQRecommendationWiring = () => {
   assert.match(qqPage, /window\.addEventListener\('show-qq-music-login'/)
   assert.match(qqPage, /window\.removeEventListener\('show-qq-music-login'/)
   assert.doesNotMatch(qqPage, /resetPlayback/)
+  assert.match(loginPanel, /@load="\$emit\('qrLoad', \$event\)"/)
+  assert.match(loginPanel, /qrLoad:\s*\[event:\s*Event\]/)
+  assert.match(qqPage, /@qr-load="handleQrImageLoad"/)
+  assert.match(qqPage, /handleQrImageLoad/)
+  assert.match(loginQr, /requestAnimationFrame/)
+  assert.match(loginQr, /qq-music-login-qr-visible/)
+  assert.doesNotMatch(
+    read('src/renderer/views/Recommend/index.vue'),
+    /@qr-load="handleQrImageLoad"/,
+  )
 
   assert.match(qqData, /prepareQQGuessLikeQueue/)
   assert.match(qqData, /qqGuessLikeQueue/)

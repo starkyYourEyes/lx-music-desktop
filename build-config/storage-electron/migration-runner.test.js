@@ -86,8 +86,13 @@ const readLedger = db => db.prepare('SELECT version, name, checksum, applied_at_
 
 const loadDbServiceWithBoundaries = ({ DatabaseImplementation, fileSystem = fs }) => {
   const dbServicePath = require.resolve('../../src/main/worker/dbService/db.ts')
+  const boundaryDependencyPaths = [
+    require.resolve('../../src/main/worker/dbService/databaseBackup.ts'),
+    require.resolve('../../src/main/worker/dbService/verifyDB.ts'),
+  ]
   const originalLoad = Module._load
   delete require.cache[dbServicePath]
+  for (const dependencyPath of boundaryDependencyPaths) delete require.cache[dependencyPath]
   Module._load = function(request, parent, isMain) {
     if (request == 'better-sqlite3') return DatabaseImplementation
     if (request == 'node:fs') return fileSystem
@@ -98,6 +103,7 @@ const loadDbServiceWithBoundaries = ({ DatabaseImplementation, fileSystem = fs }
   } finally {
     Module._load = originalLoad
     delete require.cache[dbServicePath]
+    for (const dependencyPath of boundaryDependencyPaths) delete require.cache[dependencyPath]
   }
 }
 
@@ -374,7 +380,7 @@ describe('database migrations', () => {
     })
   })
 
-  it('propagates an existing app database open error without a create fallback', () => {
+  it('maps an existing app database open error to recovery without a create fallback', async() => {
     const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-migration-open-error-'))
     tempDirs.push(profileRoot)
     fs.writeFileSync(path.join(profileRoot, 'lx.data.db'), '')
@@ -389,18 +395,19 @@ describe('database migrations', () => {
     }
     const dbService = loadDbServiceWithBoundaries({ DatabaseImplementation: FailingDatabase })
 
-    let error
-    try {
-      dbService.init(profileRoot)
-    } catch (caught) {
-      error = caught
-    }
+    const result = await dbService.init({
+      dataPath: profileRoot,
+      backupDir: path.join(profileRoot, 'backups'),
+      previousShutdownWasClean: true,
+    })
 
-    assert.equal(error, openError)
-    assert.equal(openCalls, 1)
+    assert.equal(result.status, 'recovery')
+    assert.equal(result.reason, 'open_failed')
+    assert.deepEqual(result.diagnostics, ['open.failed', 'readonly_reopen.failed'])
+    assert.equal(openCalls, 2)
   })
 
-  it('propagates app database stat errors without attempting to open or create', () => {
+  it('maps app database stat errors to recovery without attempting write open or create', async() => {
     const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-migration-stat-error-'))
     tempDirs.push(profileRoot)
     const databasePath = path.join(profileRoot, 'lx.data.db')
@@ -421,26 +428,40 @@ describe('database migrations', () => {
     }
     const dbService = loadDbServiceWithBoundaries({ DatabaseImplementation: UnexpectedDatabase, fileSystem })
 
-    let error
-    try {
-      dbService.init(profileRoot)
-    } catch (caught) {
-      error = caught
-    }
+    const result = await dbService.init({
+      dataPath: profileRoot,
+      backupDir: path.join(profileRoot, 'backups'),
+      previousShutdownWasClean: true,
+    })
 
-    assert.equal(error, statError)
-    assert.equal(openCalls, 0)
+    assert.equal(result.status, 'recovery')
+    assert.equal(result.reason, 'open_failed')
+    assert.deepEqual(result.diagnostics, ['open.stat_failed', 'readonly_reopen.failed'])
+    assert.equal(openCalls, 1)
   })
 
-  it('initializes a new app database through migration 3 with authoritative pragmas', () => {
+  it('initializes a new app database through backup and migration 3 with authoritative pragmas', async() => {
     const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-migration-init-'))
     tempDirs.push(profileRoot)
     const dbService = require('../../src/main/worker/dbService/db.ts')
 
-    assert.equal(dbService.init(profileRoot), false)
+    const backupDir = path.join(profileRoot, 'backups')
+    const result = await dbService.init({ dataPath: profileRoot, backupDir, previousShutdownWasClean: true })
     const db = dbService.getAppDB()
     databases.push(db)
 
+    assert.equal(result.status, 'ready')
+    assert.deepEqual({
+      existed: result.existed,
+      schemaVersion: result.schemaVersion,
+      migratedVersions: result.migratedVersions,
+      backupDir: path.dirname(result.backupPath),
+    }, {
+      existed: false,
+      schemaVersion: 3,
+      migratedVersions: [3],
+      backupDir: path.resolve(backupDir),
+    })
     assert.equal(dbService.getDB(), db)
     assert.equal(getSchemaVersion(db), 3)
     assert.deepEqual(readLedger(db).map(row => [row.version, row.name]), [[3, 'storage_foundation']])

@@ -1,11 +1,14 @@
 const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
+const Module = require('node:module')
 const os = require('node:os')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
 
+// Electron ABI tests transpile the source modules in-process.
+// eslint-disable-next-line n/no-deprecated-api
 require.extensions['.ts'] = (module, filename) => {
   const source = fs.readFileSync(filename, 'utf8')
   const output = typescript.transpileModule(source, {
@@ -22,8 +25,23 @@ const {
   putMigrationMarker,
   runMigrations,
 } = require('../../src/main/worker/dbService/migrate.ts')
-const { migration3, STORAGE_FOUNDATION_SOURCE } = require('../../src/main/worker/dbService/migrations/0003_storage_foundation.ts')
-const tables = require('../../src/main/worker/dbService/tables.ts').default
+const { migration3 } = require('../../src/main/worker/dbService/migrations/0003_storage_foundation.ts')
+
+const MIGRATION_3_CHECKSUM = '9243aa510e8355d2c3d0f687c6736654adf584ec6007b1bcf46f374a9d694e41'
+const LEGACY_SCHEMA = new Map([
+  ['db_info', 'CREATE TABLE db_info (field_name TEXT, field_value TEXT)'],
+  ['my_list', 'CREATE TABLE my_list (id TEXT PRIMARY KEY)'],
+  ['my_list_music_info', 'CREATE TABLE my_list_music_info (id TEXT, listId TEXT)'],
+  ['index_my_list_music_info', 'CREATE INDEX index_my_list_music_info ON my_list_music_info (id, listId)'],
+  ['my_list_music_info_order', 'CREATE TABLE my_list_music_info_order (listId TEXT, musicInfoId TEXT)'],
+  ['index_my_list_music_info_order', 'CREATE INDEX index_my_list_music_info_order ON my_list_music_info_order (listId, musicInfoId)'],
+  ['music_info_other_source', 'CREATE TABLE music_info_other_source (source_id TEXT, id TEXT)'],
+  ['index_music_info_other_source', 'CREATE INDEX index_music_info_other_source ON music_info_other_source (source_id, id)'],
+  ['lyric', 'CREATE TABLE lyric (id TEXT)'],
+  ['music_url', 'CREATE TABLE music_url (id TEXT)'],
+  ['download_list', 'CREATE TABLE download_list (id TEXT PRIMARY KEY)'],
+  ['dislike_list', 'CREATE TABLE dislike_list (type TEXT, content TEXT)'],
+])
 
 const databases = []
 const tempDirs = []
@@ -42,7 +60,7 @@ const createLegacyDatabase = (version, options = {}) => {
   databases.push(db)
   const omitted = new Set(options.omit ?? [])
   if (options.omitDislike) omitted.add('dislike_list')
-  for (const [name, sql] of tables) {
+  for (const [name, sql] of LEGACY_SCHEMA) {
     if (!omitted.has(name)) db.exec(sql)
   }
   if (!omitted.has('db_info')) {
@@ -66,6 +84,23 @@ const migration5 = createMigration(5, 'test_five', db => db.exec('CREATE TABLE m
 const readLegacyVersion = db => db.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value
 const readLedger = db => db.prepare('SELECT version, name, checksum, applied_at_ms FROM schema_migrations ORDER BY version').all()
 
+const loadDbServiceWithBoundaries = ({ DatabaseImplementation, fileSystem = fs }) => {
+  const dbServicePath = require.resolve('../../src/main/worker/dbService/db.ts')
+  const originalLoad = Module._load
+  delete require.cache[dbServicePath]
+  Module._load = function(request, parent, isMain) {
+    if (request == 'better-sqlite3') return DatabaseImplementation
+    if (request == 'node:fs') return fileSystem
+    return originalLoad.call(this, request, parent, isMain)
+  }
+  try {
+    return require(dbServicePath)
+  } finally {
+    Module._load = originalLoad
+    delete require.cache[dbServicePath]
+  }
+}
+
 describe('database migrations', () => {
   it('bridges legacy version 2 and applies all pending migrations atomically', () => {
     const db = createLegacyDatabase('2')
@@ -76,10 +111,13 @@ describe('database migrations', () => {
     assert.deepEqual(readLedger(db), [{
       version: 3,
       name: 'storage_foundation',
-      checksum: migration3.checksum,
+      checksum: MIGRATION_3_CHECKSUM,
       applied_at_ms: 1000,
     }])
-    assert.equal(migration3.checksum, checksum(STORAGE_FOUNDATION_SOURCE))
+    assert.deepEqual(
+      { version: migration3.version, name: migration3.name, checksum: migration3.checksum },
+      { version: 3, name: 'storage_foundation', checksum: MIGRATION_3_CHECKSUM },
+    )
     assert.equal(readLegacyVersion(db), '3')
     assert.equal(getSchemaVersion(db), 3)
   })
@@ -278,6 +316,24 @@ describe('database migrations', () => {
     assert.equal(db.prepare('SELECT count(*) AS count FROM migration_markers').get().count, 0)
   })
 
+  it('enforces migration marker constraints for direct SQL writes', () => {
+    const db = createLegacyDatabase('2')
+    runMigrations(db, [migration3])
+    const insert = db.prepare(`
+      INSERT INTO migration_markers (name, source_sha256, completed_at_ms, details_json)
+      VALUES (?, ?, ?, ?)
+    `)
+    const invalidRows = [
+      ['short-sha', 'a'.repeat(63), 0, '{"version":1}'],
+      ['negative-time', 'a'.repeat(64), -1, '{"version":1}'],
+      ['fractional-time', 'a'.repeat(64), 1.5, '{"version":1}'],
+      ['invalid-json', 'a'.repeat(64), 0, 'not json'],
+    ]
+
+    for (const row of invalidRows) assert.throws(() => insert.run(...row), /constraint/i)
+    assert.equal(db.prepare('SELECT count(*) AS count FROM migration_markers').get().count, 0)
+  })
+
   it('reuses same-source migration markers without overwriting original details', () => {
     const db = createLegacyDatabase('2')
     runMigrations(db, [migration3])
@@ -316,6 +372,64 @@ describe('database migrations', () => {
       ...original,
       detailsJson: '{"secret":"not-in-error","version":1}',
     })
+  })
+
+  it('propagates an existing app database open error without a create fallback', () => {
+    const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-migration-open-error-'))
+    tempDirs.push(profileRoot)
+    fs.writeFileSync(path.join(profileRoot, 'lx.data.db'), '')
+    const openError = new Error('injected existing database open failure')
+    const fallbackError = new Error('create fallback must not run')
+    let openCalls = 0
+    class FailingDatabase {
+      constructor() {
+        openCalls++
+        throw openCalls == 1 ? openError : fallbackError
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({ DatabaseImplementation: FailingDatabase })
+
+    let error
+    try {
+      dbService.init(profileRoot)
+    } catch (caught) {
+      error = caught
+    }
+
+    assert.equal(error, openError)
+    assert.equal(openCalls, 1)
+  })
+
+  it('propagates app database stat errors without attempting to open or create', () => {
+    const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-migration-stat-error-'))
+    tempDirs.push(profileRoot)
+    const databasePath = path.join(profileRoot, 'lx.data.db')
+    const statError = Object.assign(new Error('injected database stat failure'), { code: 'EACCES' })
+    let openCalls = 0
+    class UnexpectedDatabase {
+      constructor() {
+        openCalls++
+        throw new Error('database open must not run')
+      }
+    }
+    const fileSystem = {
+      ...fs,
+      statSync(target) {
+        if (target == databasePath) throw statError
+        return fs.statSync(target)
+      },
+    }
+    const dbService = loadDbServiceWithBoundaries({ DatabaseImplementation: UnexpectedDatabase, fileSystem })
+
+    let error
+    try {
+      dbService.init(profileRoot)
+    } catch (caught) {
+      error = caught
+    }
+
+    assert.equal(error, statError)
+    assert.equal(openCalls, 0)
   })
 
   it('initializes a new app database through migration 3 with authoritative pragmas', () => {

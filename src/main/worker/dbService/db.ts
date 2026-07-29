@@ -7,6 +7,15 @@ import migrateData from './migrate'
 
 let db: Database.Database
 
+const pathExists = (filePath: string): boolean => {
+  try {
+    fs.statSync(filePath)
+    return true
+  } catch (error) {
+    if (error != null && typeof error == 'object' && 'code' in error && error.code == 'ENOENT') return false
+    throw error
+  }
+}
 
 const initTables = (db: Database.Database) => {
   db.exec(`
@@ -20,22 +29,16 @@ const initTables = (db: Database.Database) => {
 export const init = (lxDataPath: string): boolean | null => {
   const databasePath = path.join(lxDataPath, 'lx.data.db')
   const nativeBinding = path.join(__dirname, '../node_modules/better-sqlite3/build/Release/better_sqlite3.node')
-  const databaseOptions = fs.existsSync(nativeBinding) ? { nativeBinding } : {}
-  let dbFileExists = true
+  const databaseOptions = pathExists(nativeBinding) ? { nativeBinding } : {}
+  const dbFileExists = pathExists(databasePath)
 
-  try {
-    db = new Database(databasePath, {
-      fileMustExist: true,
-      ...databaseOptions,
-      // verbose: process.env.NODE_ENV !== 'production' ? console.log : undefined,
-    })
-  } catch {
-    db = new Database(databasePath, {
-      ...databaseOptions,
-      // verbose: process.env.NODE_ENV !== 'production' ? console.log : undefined,
-    })
+  db = new Database(databasePath, {
+    ...(dbFileExists ? { fileMustExist: true } : {}),
+    ...databaseOptions,
+    // verbose: process.env.NODE_ENV !== 'production' ? console.log : undefined,
+  })
+  if (!dbFileExists) {
     initTables(db)
-    dbFileExists = false
   }
   db.pragma('foreign_keys = ON')
   db.pragma('journal_mode = WAL')

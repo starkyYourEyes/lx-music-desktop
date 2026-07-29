@@ -4,7 +4,7 @@ import type { SchemaMigration } from './types'
 export const STORAGE_FOUNDATION_SOURCE = `CREATE TABLE migration_markers (
   name TEXT PRIMARY KEY,
   source_sha256 TEXT NOT NULL CHECK(length(source_sha256) = 64),
-  completed_at_ms INTEGER NOT NULL CHECK(completed_at_ms >= 0),
+  completed_at_ms INTEGER NOT NULL CHECK(typeof(completed_at_ms) = 'integer' AND completed_at_ms >= 0),
   details_json TEXT NOT NULL CHECK(json_valid(details_json))
 );`
 

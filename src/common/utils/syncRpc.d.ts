@@ -1,9 +1,14 @@
 type RemoteValue<T> = T extends (...args: infer A) => infer R
   ? (...args: A) => Promise<Awaited<R>>
   : T extends object ? { [K in keyof T]: RemoteValue<T[K]> } : never
+export type SyncRpcWireProtocol = 'legacy' | 'current'
+export type SyncRpcWireProtocolOption =
+  | SyncRpcWireProtocol
+  | (() => SyncRpcWireProtocol)
 export interface SyncRpcOptions {
   funcsObj: Record<string, unknown>
   timeout?: number
+  wireProtocol?: SyncRpcWireProtocolOption
   sendMessage: (data: Record<string, unknown>) => void | Promise<void>
   onCallBeforeParams?: (rawArgs: unknown[]) => unknown[] | Promise<unknown[]>
   onError?: (error: Error, path: string[], groupName: string | null) => void

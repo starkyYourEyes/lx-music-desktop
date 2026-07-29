@@ -1,7 +1,16 @@
 const BLOCKED_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor'])
 const toError = value => value instanceof Error ? value : new Error(String(value))
+const serializeError = error => ({
+  name: typeof error?.name == 'string' ? error.name : 'Error',
+  message: typeof error?.message == 'string' ? error.message : String(error),
+})
+const deserializeError = value => {
+  const error = new Error(typeof value?.message == 'string' ? value.message : 'Remote RPC error')
+  error.name = typeof value?.name == 'string' ? value.name : 'Error'
+  return error
+}
 
-const createSyncRpc = ({ funcsObj, timeout = 30_000, sendMessage, onCallBeforeParams = args => args, onError = () => {} }) => {
+const createSyncRpc = ({ funcsObj, timeout = 30_000, wireProtocol = 'legacy', sendMessage, onCallBeforeParams = args => args, onError = () => {} }) => {
   let destroyed = false
   let nextId = 0
   const pending = new Map()
@@ -11,6 +20,19 @@ const createSyncRpc = ({ funcsObj, timeout = 30_000, sendMessage, onCallBeforePa
       onError(toError(error), path, group)
     } catch {}
   }
+  const resolveWireProtocol = () => {
+    const selected = typeof wireProtocol == 'function' ? wireProtocol() : wireProtocol
+    return selected == 'current' ? 'current' : 'legacy'
+  }
+  const encodeCall = (protocol, id, path, args, group) => protocol == 'current'
+    ? { type: 'call', id, path, args, group }
+    : { name: id, path, data: args }
+  const encodeResult = (protocol, id, data) => protocol == 'current'
+    ? { type: 'result', id, data }
+    : { name: id, error: null, data }
+  const encodeError = (protocol, id, error) => protocol == 'current'
+    ? { type: 'error', id, error: serializeError(error) }
+    : { name: id, error: toError(error).message }
   const settlePending = (id, handler) => {
     const entry = pending.get(id)
     if (!entry) return false
@@ -35,7 +57,10 @@ const createSyncRpc = ({ funcsObj, timeout = 30_000, sendMessage, onCallBeforePa
         settlePending(id, entry => entry.reject(new Error(`Sync RPC timeout: ${path.join('.')}`)))
       }, Math.max(1, timeout))
       pending.set(id, { resolve, reject, timer })
-      send({ name: id, path, data: args }, error => settlePending(id, entry => entry.reject(error)))
+      send(
+        encodeCall(resolveWireProtocol(), id, path, args, group),
+        error => settlePending(id, entry => entry.reject(error)),
+      )
     })
   }
   const drainQueue = group => {
@@ -88,32 +113,62 @@ const createSyncRpc = ({ funcsObj, timeout = 30_000, sendMessage, onCallBeforePa
     if (typeof target != 'function') throw new Error(`RPC path is not a function: ${path.join('.')}`)
     return { parent, target }
   }
-  const handleCall = async data => {
-    const path = Array.isArray(data.path) ? data.path : []
+  const handleCall = async({ id, path: rawPath, args: rawArgs, group, protocol }) => {
+    const path = Array.isArray(rawPath) ? rawPath : []
     try {
-      if (typeof data.name != 'string' || !Array.isArray(data.data)) throw new Error('Invalid RPC call')
+      if (typeof id != 'string' || !Array.isArray(rawArgs)) throw new Error('Invalid RPC call')
       const { parent, target } = resolveFunction(path)
-      const args = await onCallBeforeParams(data.data)
+      const args = await onCallBeforeParams(rawArgs)
       if (!Array.isArray(args)) throw new Error('RPC parameter hook must return an array')
       const result = await target.apply(parent, args)
       send(
-        { name: data.name, error: null, data: result },
-        error => reportError(error, path, null),
+        encodeResult(protocol, id, result),
+        error => reportError(error, path, group),
       )
     } catch (error) {
-      reportError(error, path, null)
-      if (typeof data.name == 'string') {
+      reportError(error, path, group)
+      if (typeof id == 'string') {
         send(
-          { name: data.name, error: toError(error).message },
-          sendError => reportError(sendError, path, null),
+          encodeError(protocol, id, error),
+          sendError => reportError(sendError, path, group),
         )
       }
     }
   }
   const message = data => {
-    if (destroyed || !data || typeof data != 'object' || typeof data.name != 'string') return
+    if (destroyed || !data || typeof data != 'object') return
+
+    switch (data.type) {
+      case 'call':
+        void handleCall({
+          id: data.id,
+          path: data.path,
+          args: data.args,
+          group: typeof data.group == 'string' ? data.group : null,
+          protocol: 'current',
+        })
+        return
+      case 'result':
+        if (typeof data.id == 'string') {
+          settlePending(data.id, entry => entry.resolve(data.data))
+        }
+        return
+      case 'error':
+        if (typeof data.id == 'string') {
+          settlePending(data.id, entry => entry.reject(deserializeError(data.error)))
+        }
+        return
+    }
+
+    if (typeof data.name != 'string') return
     if (Array.isArray(data.path) && data.path.length) {
-      void handleCall(data)
+      void handleCall({
+        id: data.name,
+        path: data.path,
+        args: data.data,
+        group: null,
+        protocol: 'legacy',
+      })
       return
     }
     settlePending(data.name, entry => {

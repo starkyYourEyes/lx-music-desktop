@@ -88,6 +88,32 @@ const createLegacyPair = ({ rpcFuncs = {}, peerFuncs = {}, timeout = 75 } = {}) 
   return { peer, peerFrames, rpc, rpcFrames }
 }
 
+const createCurrentPair = ({ leftFuncs = {}, rightFuncs = {}, timeout = 75 } = {}) => {
+  let left
+  let right
+  const leftFrames = []
+  const rightFrames = []
+  left = createSyncRpc({
+    funcsObj: leftFuncs,
+    timeout,
+    wireProtocol: 'current',
+    sendMessage(data) {
+      leftFrames.push(clone(data))
+      setImmediate(() => right.message(clone(data)))
+    },
+  })
+  right = createSyncRpc({
+    funcsObj: rightFuncs,
+    timeout,
+    wireProtocol: 'current',
+    sendMessage(data) {
+      rightFrames.push(clone(data))
+      setImmediate(() => left.message(clone(data)))
+    },
+  })
+  return { left, leftFrames, right, rightFrames }
+}
+
 test('legacy peer calls the local getEnabledFeatures handler', async t => {
   let handlerCalled = false
   const pair = createLegacyPair({
@@ -137,4 +163,113 @@ test('legacy peer errors reject the local pending call', async t => {
   t.after(() => { pair.peer.destroy(); pair.rpc.destroy() })
 
   await assert.rejects(pair.rpc.remote.fail(), /legacy failure/)
+})
+
+test('current wire protocol preserves the type and id envelope', async t => {
+  const pair = createCurrentPair({
+    rightFuncs: {
+      echo(value) {
+        return `current:${value}`
+      },
+    },
+  })
+  t.after(() => { pair.left.destroy(); pair.right.destroy() })
+
+  assert.equal(await pair.left.remote.echo('value'), 'current:value')
+  assert.deepEqual(
+    Object.keys(pair.leftFrames[0]).sort(),
+    ['args', 'group', 'id', 'path', 'type'],
+  )
+  assert.equal(pair.leftFrames[0].type, 'call')
+  assert.equal(pair.rightFrames[0].type, 'result')
+})
+
+test('incoming calls receive responses in their own wire format', async t => {
+  const sent = []
+  const rpc = createSyncRpc({
+    funcsObj: {
+      echo(value) {
+        return value
+      },
+    },
+    sendMessage(data) {
+      sent.push(clone(data))
+    },
+  })
+  t.after(() => rpc.destroy())
+
+  rpc.message({ name: 'legacy-1', path: ['echo'], data: ['legacy'] })
+  rpc.message({ type: 'call', id: 'current-1', path: ['echo'], args: ['current'], group: null })
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.deepEqual(sent[0], { name: 'legacy-1', error: null, data: 'legacy' })
+  assert.deepEqual(sent[1], { type: 'result', id: 'current-1', data: 'current' })
+})
+
+test('wire protocol resolver is evaluated for each outbound call', async t => {
+  let selected = 'legacy'
+  const sent = []
+  const rpc = createSyncRpc({
+    funcsObj: {},
+    wireProtocol: () => selected,
+    sendMessage(data) {
+      sent.push(clone(data))
+    },
+  })
+  t.after(() => rpc.destroy())
+
+  const legacyCall = rpc.remote.first()
+  const legacyFrame = sent[0]
+  assert.equal(typeof legacyFrame.name, 'string')
+  rpc.message({ name: legacyFrame.name, error: null, data: 'legacy-result' })
+  assert.equal(await legacyCall, 'legacy-result')
+
+  selected = 'current'
+  const currentCall = rpc.remote.second()
+  void currentCall.catch(() => {})
+  const currentFrame = sent[1]
+  assert.equal(currentFrame.type, 'call')
+  rpc.message({ type: 'result', id: currentFrame.id, data: 'current-result' })
+  assert.equal(await currentCall, 'current-result')
+})
+
+test('current wire errors preserve the remote error name', async t => {
+  const pair = createCurrentPair({
+    rightFuncs: {
+      fail() {
+        throw new TypeError('current failure')
+      },
+    },
+  })
+  t.after(() => { pair.left.destroy(); pair.right.destroy() })
+
+  await assert.rejects(
+    pair.left.remote.fail(),
+    error => error.name == 'TypeError' && error.message == 'current failure',
+  )
+})
+
+test('blocked paths return errors in both wire formats', async t => {
+  const sent = []
+  const rpc = createSyncRpc({
+    funcsObj: {},
+    sendMessage(data) {
+      sent.push(clone(data))
+    },
+  })
+  t.after(() => rpc.destroy())
+
+  rpc.message({ name: 'legacy-blocked', path: ['__proto__', 'polluted'], data: [] })
+  rpc.message({
+    type: 'call',
+    id: 'current-blocked',
+    path: ['constructor', 'polluted'],
+    args: [],
+    group: null,
+  })
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.match(sent[0].error, /Unknown RPC path/)
+  assert.equal(sent[1].type, 'error')
+  assert.match(sent[1].error.message, /Unknown RPC path/)
 })

@@ -12,7 +12,7 @@ import {
 import { setMusicList } from '@renderer/store/list/listManage/action'
 import { toRaw } from '@common/utils/vueTools'
 import { LIST_IDS } from '@common/constants'
-import { likeNeteaseMusic, listWebDAVMusics, uploadLocalMusicToWebDAV } from '@renderer/utils/ipc'
+import { likeNeteaseMusic, likeQQMusic, listWebDAVMusics, uploadLocalMusicToWebDAV } from '@renderer/utils/ipc'
 
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
 
@@ -23,6 +23,21 @@ export const syncNeteaseLikedMusics = async(musicInfos: LX.Music.MusicInfo[]) =>
   await Promise.all(neteaseMusics.map(async musicInfo => {
     await likeNeteaseMusic(musicInfo)
   }))
+}
+
+export const syncQQMusicLikedMusics = async(musicInfos: LX.Music.MusicInfo[]) => {
+  const qqMusics = toCloneable(musicInfos)
+    .filter((musicInfo): musicInfo is LX.Music.MusicInfo_tx => musicInfo.source == 'tx')
+  if (!qqMusics.length) return
+
+  const results = await Promise.allSettled(qqMusics.map(async musicInfo => {
+    await likeQQMusic(musicInfo)
+  }))
+  for (const result of results) {
+    if (result.status == 'rejected') {
+      console.warn('Sync QQ Music liked music failed')
+    }
+  }
 }
 
 export const registerAction = (onListChanged: (listIds: string[]) => void) => {
@@ -101,6 +116,8 @@ const convertLocalMusicsToWebDAV = async(musicInfos: LX.Music.MusicInfo[]) => {
 export const addListMusics = async(id: string, musicInfos: LX.Music.MusicInfo[], addMusicLocationType?: LX.AddMusicLocationType, options?: {
   waitNeteaseSync?: boolean
   skipNeteaseSync?: boolean
+  waitQQMusicSync?: boolean
+  skipQQMusicSync?: boolean
   skipLocalWebDAVSync?: boolean
 }) => {
   let rawMusicInfos = toCloneable(musicInfos)
@@ -119,6 +136,16 @@ export const addListMusics = async(id: string, musicInfos: LX.Music.MusicInfo[],
     } else {
       void syncPromise.catch(err => {
         console.warn('Sync Netease liked music failed:', err)
+      })
+    }
+  }
+  if (id == LIST_IDS.LOVE && !options?.skipQQMusicSync) {
+    const syncPromise = syncQQMusicLikedMusics(rawMusicInfos)
+    if (options?.waitQQMusicSync) {
+      await syncPromise
+    } else {
+      void syncPromise.catch(() => {
+        console.warn('Sync QQ Music liked music failed')
       })
     }
   }

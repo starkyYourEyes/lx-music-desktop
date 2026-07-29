@@ -30,13 +30,23 @@ const settle = async() => {
   await Promise.resolve()
 }
 
-const song = id => ({ id: `tx_${id}`, name: id, meta: { picUrl: `${id}.jpg` } })
+const song = id => ({
+  id: `tx_${id}`,
+  source: 'tx',
+  name: id,
+  singer: 'Synthetic singer',
+  interval: null,
+  meta: { picUrl: `${id}.jpg`, id: id.length * 100, songType: 0 },
+})
 
 const createDailyStore = (getSongs = async() => [], options = {}) => {
   const playInfo = { playerListId: null }
+  const playMusicInfo = { musicInfo: null }
   const tempListMeta = { id: options.initialTempListId ?? null }
   const tempList = [...(options.initialTempList ?? [])]
-  const calls = { setTempList: [], clearPlayedList: 0, playList: [] }
+  let accountKey = options.accountKey ?? 'A'
+  let dislikeCalls = 0
+  const calls = { setTempList: [], clearPlayedList: 0, playList: [], playNext: 0 }
   const state = loadTsModule(path.join(__dirname, '../src/renderer/store/qqDailyRecommend/state.ts'), {
     '@common/utils/vueTools': { ref, shallowReactive, computed },
     '@common/constants': { LIST_IDS: { TEMP: 'temp' } },
@@ -46,7 +56,10 @@ const createDailyStore = (getSongs = async() => [], options = {}) => {
   const action = loadTsModule(path.join(__dirname, '../src/renderer/store/qqDailyRecommend/action.ts'), {
     '@common/constants': { LIST_IDS: { TEMP: 'temp' } },
     '@common/utils/vueTools': { markRawList, toRaw },
-    '@renderer/core/player': { playList: (...args) => calls.playList.push(args) },
+    '@renderer/core/player': {
+      playList: (...args) => calls.playList.push(args),
+      playNext: async() => { calls.playNext++ },
+    },
     '@renderer/store/list/action': {
       getListMusicsFromCache: listId => listId == 'temp' ? tempList : [],
       setTempList: async(id, list) => {
@@ -60,12 +73,28 @@ const createDailyStore = (getSongs = async() => [], options = {}) => {
     '@renderer/store/player/action': {
       clearPlayedList: () => { calls.clearPlayedList++ },
     },
-    '@renderer/store/player/state': { playInfo },
-    '@renderer/utils/ipc': { getQQMusicDailyRecommendSongs: getSongs },
-    '@renderer/store/qqMusic': { getQQMusicAccountKey: () => 'A' },
+    '@renderer/store/player/state': { playInfo, playMusicInfo },
+    '@renderer/utils/ipc': {
+      getQQMusicDailyRecommendSongs: getSongs,
+      dislikeQQMusic: async musicInfo => {
+        dislikeCalls++
+        if (options.dislikeQQMusic) return options.dislikeQQMusic(musicInfo)
+      },
+    },
+    '@renderer/store/qqMusic': { getQQMusicAccountKey: () => accountKey },
     './state': state,
   })
-  return { state, action, playInfo, tempListMeta, tempList, calls }
+  return {
+    state,
+    action,
+    playInfo,
+    playMusicInfo,
+    tempListMeta,
+    tempList,
+    calls,
+    getDislikeCalls: () => dislikeCalls,
+    setAccountKey: value => { accountKey = value },
+  }
 }
 
 const testStateIdentityAndPlayingListDetection = () => {
@@ -231,15 +260,24 @@ const testPlaybackInstallsClonedListAndGuardsStaleAccount = async() => {
   const staleAction = loadTsModule(path.join(__dirname, '../src/renderer/store/qqDailyRecommend/action.ts'), {
     '@common/constants': { LIST_IDS: { TEMP: 'temp' } },
     '@common/utils/vueTools': { markRawList, toRaw },
-    '@renderer/core/player': { playList: (...args) => staleStore.calls.playList.push(args) },
+    '@renderer/core/player': {
+      playList: (...args) => staleStore.calls.playList.push(args),
+      playNext: async() => { staleStore.calls.playNext++ },
+    },
     '@renderer/store/list/action': {
       getListMusicsFromCache: () => staleStore.tempList,
       setTempList: () => installing.promise,
     },
     '@renderer/store/list/state': { tempListMeta: staleStore.tempListMeta },
     '@renderer/store/player/action': { clearPlayedList: () => { staleStore.calls.clearPlayedList++ } },
-    '@renderer/store/player/state': { playInfo: staleStore.playInfo },
-    '@renderer/utils/ipc': { getQQMusicDailyRecommendSongs: async() => [song('account-a')] },
+    '@renderer/store/player/state': {
+      playInfo: staleStore.playInfo,
+      playMusicInfo: staleStore.playMusicInfo,
+    },
+    '@renderer/utils/ipc': {
+      getQQMusicDailyRecommendSongs: async() => [song('account-a')],
+      dislikeQQMusic: async() => {},
+    },
     '@renderer/store/qqMusic': { getQQMusicAccountKey: () => 'B' },
     './state': staleStore.state,
   })
@@ -446,6 +484,75 @@ const testEmptyPlaybackErrorIsSanitized = async() => {
     assert.strictEqual(error.message, 'QQ Daily 30 has no songs')
     return true
   })
+}
+
+const testAcceptedDailyDislikeRemovesAndAdvances = async() => {
+  const store = createDailyStore(async() => [song('one'), song('two'), song('three')])
+  await store.action.prepareQQDailyRecommend('A')
+  await store.action.playQQDailyRecommend('A', 1)
+  store.playInfo.playerListId = 'temp'
+  store.playMusicInfo.musicInfo = song('two')
+  const snapshot = store.action.getQQDailyRecommendFeedbackSnapshot(song('two'), 'A')
+  assert.ok(snapshot)
+  assert.strictEqual(await store.action.dislikeQQDailyRecommendMusic(song('two'), snapshot), true)
+  assert.strictEqual(store.getDislikeCalls(), 1)
+  assert.deepStrictEqual(store.state.qqDailyRecommendSongs.map(item => item.id), ['tx_one', 'tx_three'])
+  assert.deepStrictEqual(store.tempList.map(item => item.id), ['tx_one', 'tx_three'])
+  assert.deepStrictEqual(store.calls.playList.at(-1), ['temp', 1])
+}
+
+const testDuplicateDailyDislikeSharesOneRequest = async() => {
+  const pending = deferred()
+  const store = createDailyStore(async() => [song('one'), song('two')], {
+    dislikeQQMusic: () => pending.promise,
+  })
+  await store.action.prepareQQDailyRecommend('A')
+  await store.action.playQQDailyRecommend('A')
+  store.playInfo.playerListId = 'temp'
+  store.playMusicInfo.musicInfo = song('one')
+  const snapshot = store.action.getQQDailyRecommendFeedbackSnapshot(song('one'), 'A')
+  const first = store.action.dislikeQQDailyRecommendMusic(song('one'), snapshot)
+  const duplicate = store.action.dislikeQQDailyRecommendMusic(song('one'), snapshot)
+  assert.strictEqual(first, duplicate)
+  assert.strictEqual(store.getDislikeCalls(), 1)
+  pending.resolve()
+  await first
+}
+
+const testRejectedDailyDislikeKeepsQueue = async() => {
+  const store = createDailyStore(async() => [song('one'), song('two')], {
+    dislikeQQMusic: async() => { throw new Error('synthetic feedback failure') },
+  })
+  await store.action.prepareQQDailyRecommend('A')
+  await store.action.playQQDailyRecommend('A')
+  store.playInfo.playerListId = 'temp'
+  store.playMusicInfo.musicInfo = song('one')
+  const snapshot = store.action.getQQDailyRecommendFeedbackSnapshot(song('one'), 'A')
+  const playCalls = store.calls.playList.length
+  await assert.rejects(store.action.dislikeQQDailyRecommendMusic(song('one'), snapshot))
+  assert.deepStrictEqual(store.state.qqDailyRecommendSongs.map(item => item.id), ['tx_one', 'tx_two'])
+  assert.strictEqual(store.calls.playList.length, playCalls)
+}
+
+const testStaleDailyDislikeSuccessKeepsCurrentSession = async() => {
+  const pending = deferred()
+  let loads = 0
+  const store = createDailyStore(async() => {
+    return loads++ == 0 ? [song('one'), song('two')] : [song('account-b')]
+  }, {
+    dislikeQQMusic: () => pending.promise,
+  })
+  await store.action.prepareQQDailyRecommend('A')
+  await store.action.playQQDailyRecommend('A')
+  store.playInfo.playerListId = 'temp'
+  store.playMusicInfo.musicInfo = song('one')
+  const snapshot = store.action.getQQDailyRecommendFeedbackSnapshot(song('one'), 'A')
+  const request = store.action.dislikeQQDailyRecommendMusic(song('one'), snapshot)
+  store.setAccountKey('B')
+  await store.action.prepareQQDailyRecommend('B')
+  pending.resolve()
+  assert.strictEqual(await request, false)
+  assert.deepStrictEqual(store.state.qqDailyRecommendSongs.map(item => item.id), ['tx_account-b'])
 }
 
 const testDailyPlaylistDetailUsesCachedSongs = async() => {
@@ -899,6 +1006,10 @@ const main = async() => {
   await testPlaybackWaitsForCurrentForceRefresh()
   await testPlaybackLoadsEmptyQueueBeforeStarting()
   await testEmptyPlaybackErrorIsSanitized()
+  await testAcceptedDailyDislikeRemovesAndAdvances()
+  await testDuplicateDailyDislikeSharesOneRequest()
+  await testRejectedDailyDislikeKeepsQueue()
+  await testStaleDailyDislikeSuccessKeepsCurrentSession()
   await testDailyPlaylistDetailUsesCachedSongs()
   await testSongListLoadsDailyDetailWithoutCallingQQProvider()
   await testStaleDailyForceRefreshCannotOverwriteNewerCache()

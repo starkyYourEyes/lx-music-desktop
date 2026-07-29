@@ -1,11 +1,12 @@
 import { LIST_IDS } from '@common/constants'
 import { markRawList, toRaw } from '@common/utils/vueTools'
-import { playList } from '@renderer/core/player'
+import { playList, playNext } from '@renderer/core/player'
 import { getListMusicsFromCache, setTempList } from '@renderer/store/list/action'
 import { tempListMeta } from '@renderer/store/list/state'
 import { clearPlayedList } from '@renderer/store/player/action'
-import { playInfo } from '@renderer/store/player/state'
-import { getQQMusicDailyRecommendSongs } from '@renderer/utils/ipc'
+import { playInfo, playMusicInfo } from '@renderer/store/player/state'
+import { getQQMusicAccountKey } from '@renderer/store/qqMusic'
+import { dislikeQQMusic, getQQMusicDailyRecommendSongs } from '@renderer/utils/ipc'
 import {
   QQ_DAILY_RECOMMEND_LIST_ID,
   QQ_DAILY_RECOMMEND_TEMP_LIST_ID,
@@ -27,9 +28,16 @@ interface TempListInstall {
   revision: number
 }
 
+export interface QQDailyRecommendFeedbackSnapshot {
+  accountKey: string
+  generation: number
+  musicId: string
+}
+
 let request: DailyRecommendRequest | null = null
 let playbackGeneration: number | null = null
 let tempListInstallRevision = 0
+const dislikeRequests = new Map<string, Promise<boolean>>()
 
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
 
@@ -40,6 +48,24 @@ const isOnlineMusicInfo = (musicInfo: LX.Music.MusicInfo): musicInfo is LX.Music
 const isCurrentSnapshot = (accountKey: string, generation: number) => {
   return qqDailyRecommendOwnerAccountKey.value == accountKey &&
     qqDailyRecommendGeneration.value == generation
+}
+
+const getCurrentMusicInfo = () => {
+  const current = playMusicInfo.musicInfo
+  if (!current) return null
+  return 'progress' in current ? current.metadata.musicInfo : current
+}
+
+const getFeedbackKey = (snapshot: QQDailyRecommendFeedbackSnapshot) => {
+  return `${snapshot.accountKey}:${snapshot.generation}:${snapshot.musicId}`
+}
+
+const isCurrentFeedbackSnapshot = (snapshot: QQDailyRecommendFeedbackSnapshot) => {
+  return snapshot.accountKey == getQQMusicAccountKey() &&
+    snapshot.accountKey == qqDailyRecommendOwnerAccountKey.value &&
+    snapshot.generation == qqDailyRecommendGeneration.value &&
+    isQQDailyRecommendListActive(snapshot.accountKey) &&
+    getCurrentMusicInfo()?.id == snapshot.musicId
 }
 
 const beginAccountSession = (accountKey: string) => {
@@ -123,6 +149,86 @@ export const isQQDailyRecommendListActive = (accountKey: string | null) => {
     playbackGeneration == qqDailyRecommendGeneration.value &&
     playInfo.playerListId == LIST_IDS.TEMP &&
     tempListMeta.id == QQ_DAILY_RECOMMEND_TEMP_LIST_ID
+}
+
+export const getQQDailyRecommendFeedbackSnapshot = (
+  musicInfo: LX.Music.MusicInfo,
+  accountKey = getQQMusicAccountKey(),
+): QQDailyRecommendFeedbackSnapshot | null => {
+  if (!accountKey || musicInfo.source != 'tx' ||
+    !isQQDailyRecommendListActive(accountKey) ||
+    getCurrentMusicInfo()?.id != musicInfo.id) return null
+  return {
+    accountKey,
+    generation: qqDailyRecommendGeneration.value,
+    musicId: musicInfo.id,
+  }
+}
+
+const restoreCurrentDailyTempList = async(musicInfos: LX.Music.MusicInfo_tx[]) => {
+  if (tempListMeta.id != QQ_DAILY_RECOMMEND_TEMP_LIST_ID) return
+  await setTempList(
+    QQ_DAILY_RECOMMEND_TEMP_LIST_ID,
+    toCloneable(musicInfos),
+  ).catch(() => {})
+}
+
+export const dislikeQQDailyRecommendMusic = (
+  musicInfo: LX.Music.MusicInfo_tx,
+  snapshot: QQDailyRecommendFeedbackSnapshot,
+  // eslint-disable-next-line @typescript-eslint/promise-function-async -- Duplicate callers must receive the same promise instance.
+): Promise<boolean> => {
+  const key = getFeedbackKey(snapshot)
+  const existing = dislikeRequests.get(key)
+  if (existing) return existing
+
+  const run = async() => {
+    if (!isCurrentFeedbackSnapshot(snapshot)) return false
+    await dislikeQQMusic(toCloneable(musicInfo))
+    if (!isCurrentFeedbackSnapshot(snapshot)) return false
+
+    const removedIndex = qqDailyRecommendSongs.findIndex(item => item.id == snapshot.musicId)
+    if (removedIndex < 0) return false
+    const originalSongs = [...qqDailyRecommendSongs]
+    const remainingSongs = originalSongs.filter(item => item.id != snapshot.musicId)
+    try {
+      await setTempList(
+        QQ_DAILY_RECOMMEND_TEMP_LIST_ID,
+        toCloneable(remainingSongs),
+      )
+    } catch (error) {
+      await restoreCurrentDailyTempList(
+        isCurrentFeedbackSnapshot(snapshot)
+          ? originalSongs
+          : [...qqDailyRecommendSongs],
+      )
+      throw error
+    }
+
+    if (!isCurrentFeedbackSnapshot(snapshot)) {
+      await restoreCurrentDailyTempList([...qqDailyRecommendSongs])
+      return false
+    }
+    qqDailyRecommendSongs.splice(
+      0,
+      qqDailyRecommendSongs.length,
+      ...markRawList(remainingSongs),
+    )
+    clearPlayedList()
+    if (remainingSongs.length) {
+      playList(LIST_IDS.TEMP, removedIndex % remainingSongs.length)
+    } else {
+      await playNext(true)
+    }
+    return true
+  }
+
+  let task: Promise<boolean>
+  task = run().finally(() => {
+    if (dislikeRequests.get(key) == task) dislikeRequests.delete(key)
+  })
+  dislikeRequests.set(key, task)
+  return task
 }
 
 export const playQQDailyRecommend = async(accountKey: string, startIndex = 0) => {

@@ -12,6 +12,17 @@
         <use :xlink:href="isCollected ? '#icon-love-fill' : '#icon-love'" />
       </svg>
     </button>
+    <button
+      v-if="showQQDailyRecommendDislike"
+      :class="[$style.titleBtn, $style.favoriteBtn, { [$style.active]: isQQDailyRecommendDislikePending }]"
+      :aria-label="$t('player__private_fm_trash')"
+      :disabled="isQQDailyRecommendDislikePending"
+      @click="handleQQDailyRecommendDislike"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" width="90%" viewBox="0 0 24 24">
+        <use xlink:href="#icon-heart-off" />
+      </svg>
+    </button>
     <button v-if="showAddTo" :class="$style.titleBtn" :aria-label="$t('player__add_music_to')" @click="addMusicTo">
       <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" width="90%" viewBox="0 0 512 512" space="preserve">
         <use xlink:href="#icon-add-2" />
@@ -33,7 +44,7 @@
 </template>
 
 <script>
-import { onBeforeUnmount, onMounted, ref, watch } from '@common/utils/vueTools'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from '@common/utils/vueTools'
 import useToggleDesktopLyric from '@renderer/utils/compositions/useToggleDesktopLyric'
 import { musicInfo, playMusicInfo } from '@renderer/store/player/state'
 import { appSetting } from '@renderer/store/setting'
@@ -41,6 +52,11 @@ import { loveList } from '@renderer/store/list/state'
 import { addListMusics, checkListExistMusic, removeListMusics } from '@renderer/store/list/action'
 import { LIST_IDS } from '@common/constants'
 import { isPrivateFmMode } from '@renderer/store/privateFm/state'
+import { getQQMusicAccountKey } from '@renderer/store/qqMusic'
+import {
+  dislikeQQDailyRecommendMusic,
+  getQQDailyRecommendFeedbackSnapshot,
+} from '@renderer/store/qqDailyRecommend/action'
 
 export default {
   props: {
@@ -82,6 +98,52 @@ export default {
       const currentMusicInfo = playMusicInfo.musicInfo
       if (!currentMusicInfo) return null
       return 'progress' in currentMusicInfo ? currentMusicInfo.metadata.musicInfo : currentMusicInfo
+    }
+
+    const pendingDislikeKeys = new Set()
+    const pendingDislikeRevision = ref(0)
+
+    const getQQDailyRecommendSnapshot = () => {
+      const currentMusicInfo = getCurrentMusicInfo()
+      if (!currentMusicInfo) return null
+      return getQQDailyRecommendFeedbackSnapshot(
+        currentMusicInfo,
+        getQQMusicAccountKey(),
+      )
+    }
+
+    const getSnapshotKey = snapshot => {
+      return `${snapshot.accountKey}:${snapshot.generation}:${snapshot.musicId}`
+    }
+
+    const showQQDailyRecommendDislike = computed(() => {
+      return props.showFavorite && getQQDailyRecommendSnapshot() != null
+    })
+
+    const isQQDailyRecommendDislikePending = computed(() => {
+      const pendingRevision = pendingDislikeRevision.value
+      const snapshot = getQQDailyRecommendSnapshot()
+      return snapshot
+        ? pendingRevision >= 0 && pendingDislikeKeys.has(getSnapshotKey(snapshot))
+        : false
+    })
+
+    const handleQQDailyRecommendDislike = async() => {
+      const currentMusicInfo = getCurrentMusicInfo()
+      const snapshot = getQQDailyRecommendSnapshot()
+      if (!currentMusicInfo || currentMusicInfo.source != 'tx' || !snapshot) return
+      const key = getSnapshotKey(snapshot)
+      if (pendingDislikeKeys.has(key)) return
+      pendingDislikeKeys.add(key)
+      pendingDislikeRevision.value++
+      try {
+        await dislikeQQDailyRecommendMusic(currentMusicInfo, snapshot)
+      } catch {
+        console.warn('QQ Music Daily 30 feedback failed')
+      } finally {
+        pendingDislikeKeys.delete(key)
+        pendingDislikeRevision.value++
+      }
     }
 
     let updateCollectToken = 0
@@ -153,6 +215,9 @@ export default {
       toggleLockDesktopLyric,
       addMusicTo,
       toggleCollect,
+      showQQDailyRecommendDislike,
+      isQQDailyRecommendDislikePending,
+      handleQQDailyRecommendDislike,
       playMusicInfo,
       isPrivateFmMode,
     }

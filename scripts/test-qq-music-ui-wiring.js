@@ -1106,6 +1106,9 @@ const testDedicatedQQRecommendationWiring = () => {
   const qqAccount = read('src/renderer/store/qqMusic.ts')
   const loginPanel = read('src/renderer/views/Recommend/components/LoginPanel.vue')
   const loginQr = read('src/renderer/views/Recommend/useQQMusicLoginQr.ts')
+  const controlBtns = read('src/renderer/components/layout/PlayBar/ControlBtns.vue')
+  const icons = read('src/renderer/components/layout/Icons.vue')
+  const dailyAction = read('src/renderer/store/qqDailyRecommend/action.ts')
 
   const qqAction = aside.match(/const\s+handleQQMusicAction[\s\S]*?(?=const\s+handleNeteaseAction)/)?.[0] || ''
   assert.match(qqAction, /route\.path\s*==\s*'\/qq-recommend'/)
@@ -1133,6 +1136,13 @@ const testDedicatedQQRecommendationWiring = () => {
   assert.match(qqPlayback, /enterQQGuessLikeMode/)
   assert.match(qqPlayback, /isQQGuessLikeListActive/)
   assert.match(qqAccount, /resetQQGuessLikeQueue/)
+  assert.match(controlBtns, /getQQDailyRecommendFeedbackSnapshot/)
+  assert.match(controlBtns, /dislikeQQDailyRecommendMusic/)
+  assert.match(controlBtns, /player__private_fm_trash/)
+  assert.match(controlBtns, /#icon-heart-off/)
+  assert.match(controlBtns, /pendingDislikeKeys/)
+  assert.match(icons, /id="icon-heart-off"/)
+  assert.doesNotMatch(dailyAction, /addDislikeInfo|dislikeList/)
 }
 
 const main = async() => {

@@ -285,15 +285,35 @@ const runtimeIdentifierPatterns = [
   /gitee\.com\/lyswhut/,
   /cdn\.stsky\.cn\/lx-music/,
 ]
+const runtimeIdentifierAllowed = [
+  /^src\/common\/syncProtocol\.js$/,
+]
 const findRuntimeIdentifierViolations = files => {
   const violations = []
   for (const file of [...files].sort(compareTextFilePaths)) {
+    if (runtimeIdentifierAllowed.some(pattern => pattern.test(file.path))) continue
     for (const pattern of runtimeIdentifierPatterns) {
       if (pattern.test(file.text)) violations.push(`${file.path}: ${pattern}`)
     }
   }
   return violations.sort(compareStrings)
 }
+
+test('legacy sync identifiers are allowlisted only in the compatibility module', () => {
+  const violations = findRuntimeIdentifierViolations([
+    {
+      path: 'src/common/syncProtocol.js',
+      text: 'lx_music_desktop\nlx_music_mobile\nlx-music auth::\nlx-music connect',
+    },
+    {
+      path: 'src/main/stray.ts',
+      text: 'lx_music_desktop',
+    },
+  ])
+  assert.deepEqual(violations, [
+    'src/main/stray.ts: /\\blx_music_(?:desktop|mobile)\\b/',
+  ])
+})
 
 const legacyBackupAllowed = [
   /^src\/common\/backupFormats\.js$/,

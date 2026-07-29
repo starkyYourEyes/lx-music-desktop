@@ -62,10 +62,13 @@ declare namespace LX {
       address: string[]
     }
 
+    type SyncProtocolId = 'current' | 'legacy'
+
     interface ClientKeyInfo {
       clientId: string
       key: string
       serverName: string
+      syncProtocol?: SyncProtocolId
     }
 
     interface ServerKeyInfo {
@@ -74,6 +77,7 @@ declare namespace LX {
       deviceName: string
       lastConnectDate?: number
       isMobile: boolean
+      syncProtocol?: SyncProtocolId
     }
 
     interface ListConfig {

@@ -141,6 +141,7 @@ const run = async() => {
       songId: 'song-mid', albumName: 'Album', albumId: 'album-mid',
       picUrl: 'https://y.gtimg.cn/music/photo_new/T002R500x500M000album-mid.jpg',
       strMediaMid: 'media-mid', id: 17, albumMid: 'album-mid',
+      songType: undefined,
       qualitys: [{ type: 'flac', size: 'size:4096' }, { type: '320k', size: 'size:2048' }, { type: '128k', size: 'size:1024' }],
       _qualitys: { flac: { size: 'size:4096' }, '320k': { size: 'size:2048' }, '128k': { size: 'size:1024' } },
     },

@@ -555,6 +555,205 @@ const testStaleDailyDislikeSuccessKeepsCurrentSession = async() => {
   assert.deepStrictEqual(store.state.qqDailyRecommendSongs.map(item => item.id), ['tx_account-b'])
 }
 
+const testRejectedDailyDislikeInstallRestoresPreviousTempList = async() => {
+  const installError = new Error('synthetic reduced temp install failure')
+  let installCount = 0
+  const store = createDailyStore(async() => [song('one'), song('two')], {
+    setTempList: (id, list, { tempList, tempListMeta }) => {
+      tempListMeta.id = id
+      tempList.splice(0, tempList.length, ...list)
+      installCount++
+      return installCount == 2 ? Promise.reject(installError) : Promise.resolve()
+    },
+  })
+  await store.action.prepareQQDailyRecommend('A')
+  await store.action.playQQDailyRecommend('A')
+  store.playInfo.playerListId = 'temp'
+  store.playMusicInfo.musicInfo = song('one')
+  const snapshot = store.action.getQQDailyRecommendFeedbackSnapshot(song('one'), 'A')
+  const playCalls = store.calls.playList.length
+
+  await assert.rejects(
+    store.action.dislikeQQDailyRecommendMusic(song('one'), snapshot),
+    error => error === installError,
+  )
+
+  assert.deepStrictEqual(store.state.qqDailyRecommendSongs, [song('one'), song('two')])
+  assert.deepStrictEqual(store.tempList, [song('one'), song('two')])
+  assert.strictEqual(store.calls.playList.length, playCalls)
+  assert.strictEqual(store.calls.playNext, 0)
+}
+
+const testPendingDailyDislikeAccountSwitchRestoresPreviousPlayback = async() => {
+  const reducedInstall = deferred()
+  let installCount = 0
+  let loads = 0
+  const store = createDailyStore(async() => {
+    return loads++ == 0 ? [song('one'), song('two')] : [song('account-b')]
+  }, {
+    setTempList: (id, list, { tempList, tempListMeta }) => {
+      tempListMeta.id = id
+      tempList.splice(0, tempList.length, ...list)
+      installCount++
+      return installCount == 2 ? reducedInstall.promise : Promise.resolve()
+    },
+  })
+  await store.action.prepareQQDailyRecommend('A')
+  await store.action.playQQDailyRecommend('A')
+  store.playInfo.playerListId = 'temp'
+  store.playMusicInfo.musicInfo = song('one')
+  const snapshot = store.action.getQQDailyRecommendFeedbackSnapshot(song('one'), 'A')
+  const request = store.action.dislikeQQDailyRecommendMusic(song('one'), snapshot)
+  await settle()
+  assert.deepStrictEqual(store.tempList, [song('two')])
+
+  store.setAccountKey('B')
+  await store.action.prepareQQDailyRecommend('B')
+  reducedInstall.resolve()
+
+  assert.strictEqual(await request, false)
+  assert.deepStrictEqual(store.state.qqDailyRecommendSongs, [song('account-b')])
+  assert.deepStrictEqual(store.tempList, [song('one'), song('two')])
+  assert.strictEqual(store.calls.playList.length, 1)
+  assert.strictEqual(store.calls.playNext, 0)
+}
+
+const testPendingDailyDislikeLogoutRestoresPreviousPlayback = async() => {
+  const reducedInstall = deferred()
+  let installCount = 0
+  const store = createDailyStore(async() => [song('one'), song('two')], {
+    setTempList: (id, list, { tempList, tempListMeta }) => {
+      tempListMeta.id = id
+      tempList.splice(0, tempList.length, ...list)
+      installCount++
+      return installCount == 2 ? reducedInstall.promise : Promise.resolve()
+    },
+  })
+  await store.action.prepareQQDailyRecommend('A')
+  await store.action.playQQDailyRecommend('A')
+  store.playInfo.playerListId = 'temp'
+  store.playMusicInfo.musicInfo = song('one')
+  const snapshot = store.action.getQQDailyRecommendFeedbackSnapshot(song('one'), 'A')
+  const request = store.action.dislikeQQDailyRecommendMusic(song('one'), snapshot)
+  await settle()
+  assert.deepStrictEqual(store.tempList, [song('two')])
+
+  store.setAccountKey(null)
+  store.action.resetQQDailyRecommend()
+  reducedInstall.resolve()
+
+  assert.strictEqual(await request, false)
+  assert.deepStrictEqual(store.state.qqDailyRecommendSongs, [])
+  assert.deepStrictEqual(store.tempList, [song('one'), song('two')])
+  assert.strictEqual(store.calls.playList.length, 1)
+  assert.strictEqual(store.calls.playNext, 0)
+}
+
+const testPendingDailyDislikeTrackChangeDoesNotCommitOrAdvance = async() => {
+  const reducedInstall = deferred()
+  let installCount = 0
+  const store = createDailyStore(async() => [song('one'), song('two')], {
+    setTempList: (id, list, { tempList, tempListMeta }) => {
+      tempListMeta.id = id
+      tempList.splice(0, tempList.length, ...list)
+      installCount++
+      return installCount == 2 ? reducedInstall.promise : Promise.resolve()
+    },
+  })
+  await store.action.prepareQQDailyRecommend('A')
+  await store.action.playQQDailyRecommend('A')
+  store.playInfo.playerListId = 'temp'
+  store.playMusicInfo.musicInfo = song('one')
+  const snapshot = store.action.getQQDailyRecommendFeedbackSnapshot(song('one'), 'A')
+  const request = store.action.dislikeQQDailyRecommendMusic(song('one'), snapshot)
+  await settle()
+
+  store.playMusicInfo.musicInfo = song('two')
+  reducedInstall.resolve()
+
+  assert.strictEqual(await request, false)
+  assert.deepStrictEqual(store.state.qqDailyRecommendSongs, [song('one'), song('two')])
+  assert.deepStrictEqual(store.tempList, [song('one'), song('two')])
+  assert.strictEqual(store.calls.playList.length, 1)
+  assert.strictEqual(store.calls.playNext, 0)
+}
+
+const testNewDailyInstallSupersedesPendingDislikeRollback = async() => {
+  const reducedInstall = deferred()
+  let installCount = 0
+  let loads = 0
+  const store = createDailyStore(async() => {
+    return loads++ == 0 ? [song('one'), song('two')] : [song('account-b')]
+  }, {
+    setTempList: (id, list, { tempList, tempListMeta }) => {
+      tempListMeta.id = id
+      tempList.splice(0, tempList.length, ...list)
+      installCount++
+      return installCount == 2 ? reducedInstall.promise : Promise.resolve()
+    },
+  })
+  await store.action.prepareQQDailyRecommend('A')
+  await store.action.playQQDailyRecommend('A')
+  store.playInfo.playerListId = 'temp'
+  store.playMusicInfo.musicInfo = song('one')
+  const snapshot = store.action.getQQDailyRecommendFeedbackSnapshot(song('one'), 'A')
+  const request = store.action.dislikeQQDailyRecommendMusic(song('one'), snapshot)
+  await settle()
+
+  store.setAccountKey('B')
+  await store.action.prepareQQDailyRecommend('B')
+  await store.action.playQQDailyRecommend('B')
+  store.playMusicInfo.musicInfo = song('account-b')
+  const installCalls = store.calls.setTempList.length
+  reducedInstall.resolve()
+
+  assert.strictEqual(await request, false)
+  assert.deepStrictEqual(store.state.qqDailyRecommendSongs, [song('account-b')])
+  assert.deepStrictEqual(store.tempList, [song('account-b')])
+  assert.strictEqual(store.calls.setTempList.length, installCalls)
+  assert.strictEqual(store.calls.playList.length, 2)
+  assert.strictEqual(store.calls.playNext, 0)
+}
+
+const testNewTrackRejectedInstallRestoresQueueAfterPendingFeedback = async() => {
+  const firstReducedInstall = deferred()
+  const secondInstallError = new Error('synthetic second reduced install failure')
+  let installCount = 0
+  const store = createDailyStore(async() => [song('one'), song('two'), song('three')], {
+    setTempList: (id, list, { tempList, tempListMeta }) => {
+      tempListMeta.id = id
+      tempList.splice(0, tempList.length, ...list)
+      installCount++
+      const ids = list.map(item => item.id)
+      if (installCount == 2) return firstReducedInstall.promise
+      if (ids.join() == 'tx_one,tx_three') return Promise.reject(secondInstallError)
+      return Promise.resolve()
+    },
+  })
+  await store.action.prepareQQDailyRecommend('A')
+  await store.action.playQQDailyRecommend('A')
+  store.playInfo.playerListId = 'temp'
+  store.playMusicInfo.musicInfo = song('one')
+  const firstSnapshot = store.action.getQQDailyRecommendFeedbackSnapshot(song('one'), 'A')
+  const first = store.action.dislikeQQDailyRecommendMusic(song('one'), firstSnapshot)
+  await settle()
+  assert.deepStrictEqual(store.tempList.map(item => item.id), ['tx_two', 'tx_three'])
+
+  store.playMusicInfo.musicInfo = song('two')
+  const secondSnapshot = store.action.getQQDailyRecommendFeedbackSnapshot(song('two'), 'A')
+  const second = store.action.dislikeQQDailyRecommendMusic(song('two'), secondSnapshot)
+  await settle()
+  firstReducedInstall.resolve()
+
+  assert.strictEqual(await first, false)
+  await assert.rejects(second, error => error === secondInstallError)
+  assert.strictEqual(store.getDislikeCalls(), 2)
+  assert.deepStrictEqual(store.state.qqDailyRecommendSongs, [song('one'), song('two'), song('three')])
+  assert.deepStrictEqual(store.tempList, [song('one'), song('two'), song('three')])
+  assert.strictEqual(store.calls.playList.length, 1)
+  assert.strictEqual(store.calls.playNext, 0)
+}
+
 const testDailyPlaylistDetailUsesCachedSongs = async() => {
   const first = { ...song('first'), singer: 'Singer 1' }
   const second = { ...song('second'), singer: 'Singer 2' }
@@ -1010,6 +1209,12 @@ const main = async() => {
   await testDuplicateDailyDislikeSharesOneRequest()
   await testRejectedDailyDislikeKeepsQueue()
   await testStaleDailyDislikeSuccessKeepsCurrentSession()
+  await testRejectedDailyDislikeInstallRestoresPreviousTempList()
+  await testNewDailyInstallSupersedesPendingDislikeRollback()
+  await testPendingDailyDislikeLogoutRestoresPreviousPlayback()
+  await testPendingDailyDislikeAccountSwitchRestoresPreviousPlayback()
+  await testPendingDailyDislikeTrackChangeDoesNotCommitOrAdvance()
+  await testNewTrackRejectedInstallRestoresQueueAfterPendingFeedback()
   await testDailyPlaylistDetailUsesCachedSongs()
   await testSongListLoadsDailyDetailWithoutCallingQQProvider()
   await testStaleDailyForceRefreshCannotOverwriteNewerCache()

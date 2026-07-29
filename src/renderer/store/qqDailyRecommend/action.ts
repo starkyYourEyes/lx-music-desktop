@@ -37,6 +37,7 @@ export interface QQDailyRecommendFeedbackSnapshot {
 let request: DailyRecommendRequest | null = null
 let playbackGeneration: number | null = null
 let tempListInstallRevision = 0
+let feedbackInstallQueue = Promise.resolve()
 const dislikeRequests = new Map<string, Promise<boolean>>()
 
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
@@ -123,17 +124,35 @@ const restorePreviousTempList = async(previousTempList: TempListInstall | undefi
   }
 }
 
-export const syncQQDailyRecommendTempList = async() => {
-  if (!qqDailyRecommendSongs.length) return
+const beginTempListInstall = () => {
   const currentTempList = getListMusicsFromCache(LIST_IDS.TEMP)
   if (!currentTempList.every(isOnlineMusicInfo)) {
     throw new Error('Temporary playlist contains unsupported music entries')
   }
-  const previousTempList: TempListInstall = {
+  return {
     id: tempListMeta.id,
     list: toCloneable(currentTempList),
     revision: ++tempListInstallRevision,
   }
+}
+
+const runFeedbackInstall = async<T>(handler: () => Promise<T>) => {
+  const previousInstall = feedbackInstallQueue
+  let releaseInstall: () => void = () => {}
+  feedbackInstallQueue = new Promise<void>(resolve => {
+    releaseInstall = resolve
+  })
+  await previousInstall
+  try {
+    return await handler()
+  } finally {
+    releaseInstall()
+  }
+}
+
+export const syncQQDailyRecommendTempList = async() => {
+  if (!qqDailyRecommendSongs.length) return
+  const previousTempList = beginTempListInstall()
   try {
     await setTempList(QQ_DAILY_RECOMMEND_TEMP_LIST_ID, toCloneable(qqDailyRecommendSongs))
   } catch (error) {
@@ -165,14 +184,6 @@ export const getQQDailyRecommendFeedbackSnapshot = (
   }
 }
 
-const restoreCurrentDailyTempList = async(musicInfos: LX.Music.MusicInfo_tx[]) => {
-  if (tempListMeta.id != QQ_DAILY_RECOMMEND_TEMP_LIST_ID) return
-  await setTempList(
-    QQ_DAILY_RECOMMEND_TEMP_LIST_ID,
-    toCloneable(musicInfos),
-  ).catch(() => {})
-}
-
 export const dislikeQQDailyRecommendMusic = (
   musicInfo: LX.Music.MusicInfo_tx,
   snapshot: QQDailyRecommendFeedbackSnapshot,
@@ -186,41 +197,40 @@ export const dislikeQQDailyRecommendMusic = (
     if (!isCurrentFeedbackSnapshot(snapshot)) return false
     await dislikeQQMusic(toCloneable(musicInfo))
     if (!isCurrentFeedbackSnapshot(snapshot)) return false
+    return runFeedbackInstall(async() => {
+      if (!isCurrentFeedbackSnapshot(snapshot)) return false
+      const removedIndex = qqDailyRecommendSongs.findIndex(item => item.id == snapshot.musicId)
+      if (removedIndex < 0) return false
+      const originalSongs = [...qqDailyRecommendSongs]
+      const remainingSongs = originalSongs.filter(item => item.id != snapshot.musicId)
+      const previousTempList = beginTempListInstall()
+      try {
+        await setTempList(
+          QQ_DAILY_RECOMMEND_TEMP_LIST_ID,
+          toCloneable(remainingSongs),
+        )
+      } catch (error) {
+        await restorePreviousTempList(previousTempList)
+        throw error
+      }
 
-    const removedIndex = qqDailyRecommendSongs.findIndex(item => item.id == snapshot.musicId)
-    if (removedIndex < 0) return false
-    const originalSongs = [...qqDailyRecommendSongs]
-    const remainingSongs = originalSongs.filter(item => item.id != snapshot.musicId)
-    try {
-      await setTempList(
-        QQ_DAILY_RECOMMEND_TEMP_LIST_ID,
-        toCloneable(remainingSongs),
+      if (!isCurrentFeedbackSnapshot(snapshot)) {
+        await restorePreviousTempList(previousTempList)
+        return false
+      }
+      qqDailyRecommendSongs.splice(
+        0,
+        qqDailyRecommendSongs.length,
+        ...markRawList(remainingSongs),
       )
-    } catch (error) {
-      await restoreCurrentDailyTempList(
-        isCurrentFeedbackSnapshot(snapshot)
-          ? originalSongs
-          : [...qqDailyRecommendSongs],
-      )
-      throw error
-    }
-
-    if (!isCurrentFeedbackSnapshot(snapshot)) {
-      await restoreCurrentDailyTempList([...qqDailyRecommendSongs])
-      return false
-    }
-    qqDailyRecommendSongs.splice(
-      0,
-      qqDailyRecommendSongs.length,
-      ...markRawList(remainingSongs),
-    )
-    clearPlayedList()
-    if (remainingSongs.length) {
-      playList(LIST_IDS.TEMP, removedIndex % remainingSongs.length)
-    } else {
-      await playNext(true)
-    }
-    return true
+      clearPlayedList()
+      if (remainingSongs.length) {
+        playList(LIST_IDS.TEMP, removedIndex % remainingSongs.length)
+      } else {
+        await playNext(true)
+      }
+      return true
+    })
   }
 
   let task: Promise<boolean>

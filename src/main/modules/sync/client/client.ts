@@ -180,6 +180,7 @@ export const connect = (urlInfo: LX.Sync.Client.UrlInfo, keyInfo: LX.Sync.Client
       },
     },
     timeout: 120 * 1000,
+    wireProtocol: getSyncProtocol(keyInfo.syncProtocol).id,
     sendMessage(data) {
       if (disconnected) throw new Error('disconnected')
       void encryptMsg(keyInfo, JSON.stringify(data)).then((data) => {

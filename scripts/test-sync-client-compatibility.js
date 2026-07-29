@@ -163,6 +163,10 @@ test('socket connection uses the protocol stored on the key', () => {
     'utf8',
   )
   assert.match(source, /getSyncProtocol\(keyInfo\.syncProtocol\)\.syncConnectMessage/)
+  assert.match(
+    source,
+    /wireProtocol:\s*getSyncProtocol\(keyInfo\.syncProtocol\)\.id/,
+  )
   assert.equal(
     require('../src/common/syncProtocol').getSyncProtocol('legacy').syncConnectMessage,
     'lx-music connect',

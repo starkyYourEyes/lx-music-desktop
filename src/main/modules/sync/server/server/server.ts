@@ -12,6 +12,7 @@ import migrateData from '../../migrate'
 import type { Socket } from 'node:net'
 import { getAddress } from '@common/utils/nodejs'
 import { arrRemove } from '@common/utils/common'
+import { getSyncProtocol } from '@common/syncProtocol'
 
 
 let status: LX.Sync.ServerStatus = {
@@ -181,6 +182,7 @@ const handleStartServer = async(port = 9527, ip = '0.0.0.0') => await new Promis
     const syncRpc = createSyncRpc<LX.Sync.ClientSyncActions>({
       funcsObj: callObj,
       timeout: 120 * 1000,
+      wireProtocol: () => getSyncProtocol(socket.keyInfo.syncProtocol).id,
       sendMessage(data) {
         if (disconnected) throw new Error('disconnected')
         void encryptMsg(socket.keyInfo, JSON.stringify(data)).then((data) => {

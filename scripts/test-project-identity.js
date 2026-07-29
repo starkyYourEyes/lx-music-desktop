@@ -20,6 +20,21 @@ const read = relativePath => fs.readFileSync(path.join(root, relativePath), 'utf
 const runtimeIdentityPath = path.join(root, 'src/common/runtimeIdentity.js')
 const runtimeIdentity = fs.existsSync(runtimeIdentityPath) ? require(runtimeIdentityPath) : {}
 
+test('built-in sync server resolves RPC wire protocol after key assignment', () => {
+  const source = fs.readFileSync(
+    path.join(root, 'src/main/modules/sync/server/server/server.ts'),
+    'utf8',
+  )
+  assert.match(
+    source,
+    /wireProtocol:\s*\(\)\s*=>\s*getSyncProtocol\(socket\.keyInfo\.syncProtocol\)\.id/,
+  )
+  assert.match(
+    source,
+    /import\s+\{\s*getSyncProtocol\s*\}\s+from\s+'@common\/syncProtocol'/,
+  )
+})
+
 let runtimeEntries
 const getRuntimeEntries = () => {
   if (runtimeEntries) return runtimeEntries

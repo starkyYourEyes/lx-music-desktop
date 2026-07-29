@@ -123,7 +123,7 @@ export default (name: string, isIgnoredError = true, isShowErrorAlert = true): S
     }
 
 
-    store = new Store(storePath, true)
+    store = stores[name] = new Store(storePath, true)
   }
   return store
 }

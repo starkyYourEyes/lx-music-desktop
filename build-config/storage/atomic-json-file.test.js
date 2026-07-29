@@ -24,7 +24,7 @@ Module._load = function(request, parent, isMain) {
 }
 
 const { createAtomicJsonFile } = require('../../src/main/storage/atomicJsonFile.ts')
-const { Store } = require('../../src/main/utils/store.ts')
+const { default: getStore, flushStores, Store } = require('../../src/main/utils/store.ts')
 
 const tempDirs = []
 
@@ -205,5 +205,19 @@ describe('Store atomic persistence', () => {
     assert.equal(store.get('value'), 2)
     await assert.rejects(store.flush(), /injected fsync failure/)
     assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { value: 1 })
+  })
+
+  it('registers a recovered Store so global flush surfaces its persistence error', async() => {
+    const { dir } = await createFixture('store-recovery-registry')
+    const name = `recovery-${Date.now()}-${Math.random()}`
+    const target = path.join(dir, `${name}.json`)
+    await fsp.writeFile(target, '[]')
+    global.lxDataPath = dir
+
+    const store = getStore(name, true, false)
+    store.set('value', 2)
+
+    await assert.rejects(flushStores(), /valid/)
+    assert.equal(await fsp.readFile(target, 'utf8'), '[]')
   })
 })

@@ -28,7 +28,7 @@ const getNumericSongId = (musicInfo: LX.Music.MusicInfo_tx) => {
 }
 
 const getSongType = (musicInfo: LX.Music.MusicInfo_tx) => {
-  return Number.isInteger(musicInfo.meta.songType) ? musicInfo.meta.songType as number : 0
+  return Number.isInteger(musicInfo.meta.songType) ? musicInfo.meta.songType! : 0
 }
 
 export const createQQMusicFeedbackService = ({
@@ -78,7 +78,9 @@ export const createQQMusicFeedbackService = ({
     const url = new URL(FEEDBACK_URL)
     url.searchParams.set('sign', createQQMusicRequestSign(body))
     const controller = new AbortController()
-    const timer = setTimeoutImpl(() => controller.abort(), 10_000)
+    const timer = setTimeoutImpl(() => {
+      controller.abort()
+    }, 10_000)
     try {
       const response = await fetchImpl(url, {
         method: 'POST',

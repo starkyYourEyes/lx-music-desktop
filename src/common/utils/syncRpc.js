@@ -140,7 +140,7 @@ const createSyncRpc = ({ funcsObj, timeout = 30_000, wireProtocol = 'legacy', se
 
     switch (data.type) {
       case 'call':
-        void handleCall({
+        handleCall({
           id: data.id,
           path: data.path,
           args: data.args,
@@ -162,7 +162,7 @@ const createSyncRpc = ({ funcsObj, timeout = 30_000, wireProtocol = 'legacy', se
 
     if (typeof data.name != 'string') return
     if (Array.isArray(data.path) && data.path.length) {
-      void handleCall({
+      handleCall({
         id: data.name,
         path: data.path,
         args: data.data,

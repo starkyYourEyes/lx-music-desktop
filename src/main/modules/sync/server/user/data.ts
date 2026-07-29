@@ -89,17 +89,12 @@ export const getUserConfig = (userName: string) => {
 //   deviceUserMap.delete(clientId)
 // }
 
-export const createClientKeyInfo = (
-  deviceName: string,
-  isMobile: boolean,
-  syncProtocol: LX.Sync.SyncProtocolId = 'current',
-): LX.Sync.ServerKeyInfo => {
+export const createClientKeyInfo = (deviceName: string, isMobile: boolean): LX.Sync.ServerKeyInfo => {
   const keyInfo: LX.Sync.ServerKeyInfo = {
     clientId: randomBytes(4 * 4).toString('base64'),
     key: randomBytes(16).toString('base64'),
     deviceName,
     isMobile,
-    syncProtocol,
     lastConnectDate: 0,
   }
   return keyInfo

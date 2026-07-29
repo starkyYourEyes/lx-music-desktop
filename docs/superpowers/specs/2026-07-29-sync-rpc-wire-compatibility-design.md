@@ -127,6 +127,9 @@ The second implementation stage adds a `wireProtocol` option:
 
 ```ts
 type SyncRpcWireProtocol = 'legacy' | 'current'
+type SyncRpcWireProtocolOption =
+  | SyncRpcWireProtocol
+  | (() => SyncRpcWireProtocol)
 ```
 
 Outbound calls use the configured format:
@@ -141,6 +144,14 @@ without ambiguous response handling.
 
 The default is `legacy`, so any call site that does not select a format remains
 compatible with `message2call`.
+
+A resolver function is evaluated when an outbound call is encoded, rather than
+when the RPC instance is created. The desktop client passes a fixed value
+because its key is already available in `connect()`. The built-in server passes
+a resolver because the WebSocket RPC instance is created before
+`handleConnection()` assigns `socket.keyInfo`; its first outbound sync call is
+made only after that assignment. This avoids duplicating key lookup or
+reordering the connection lifecycle.
 
 ### 4. Per-Connection Format Selection
 

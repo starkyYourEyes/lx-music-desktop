@@ -83,6 +83,7 @@ export const normalizeQQMusicTracks = (tracks: unknown): LX.Music.MusicInfo_tx[]
         _qualitys,
         strMediaMid: song?.file?.media_mid ?? mid,
         id: song?.id,
+        songType: Number.isInteger(song?.type) ? song.type : undefined,
         albumMid,
       },
     })

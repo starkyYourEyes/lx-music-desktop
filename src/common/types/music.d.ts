@@ -93,6 +93,7 @@ declare namespace LX {
       strMediaMid: string // 歌曲strMediaMid
       id?: number // 歌曲songId
       albumMid?: string // 歌曲albumMid
+      songType?: number
     }
     interface MusicInfo_tx extends MusicInfoBase<'tx'> {
       meta: MusicInfoMeta_tx

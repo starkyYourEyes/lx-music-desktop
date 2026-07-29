@@ -13,6 +13,7 @@ const { getCookieValue } = loadTsModule(
 const tracks = [
   {
     id: 17,
+    type: 7,
     mid: 'song-mid',
     name: 'Song',
     interval: 185,
@@ -96,6 +97,7 @@ const assertNormalizedSongs = songs => {
       picUrl: 'https://y.gtimg.cn/music/photo_new/T002R500x500M000album-mid.jpg',
       strMediaMid: 'media-mid',
       id: 17,
+      songType: 7,
       albumMid: 'album-mid',
       qualitys: [
         { type: 'flac', size: 'size:4096' },
@@ -109,6 +111,7 @@ const assertNormalizedSongs = songs => {
       },
     },
   })
+  assert.strictEqual(songs[0].meta.songType, 7)
 }
 
 const createFetchWithPayload = payload => async() => ({

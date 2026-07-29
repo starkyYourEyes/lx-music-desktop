@@ -5,8 +5,8 @@ import { mainHandle } from '../../../../common/mainIpc'
 import { parseStorageRequest } from '../../../storage/validateStorageRequest'
 
 interface SafeStorageCapabilitySource {
-  isEncryptionAvailable(): boolean
-  getSelectedStorageBackend?(): string
+  isEncryptionAvailable: () => boolean
+  getSelectedStorageBackend?: () => string
 }
 
 interface StorageCapabilityState {
@@ -15,11 +15,11 @@ interface StorageCapabilityState {
 }
 
 export interface StorageCapabilitiesHandlerDependencies {
-  getCapabilities(): Promise<StorageCapabilitiesV1> | StorageCapabilitiesV1
+  getCapabilities: () => Promise<StorageCapabilitiesV1> | StorageCapabilitiesV1
 }
 
 export interface StorageCapabilitiesProviderDependencies {
-  getStorageState(): Promise<StorageCapabilityState> | StorageCapabilityState
+  getStorageState: () => Promise<StorageCapabilityState> | StorageCapabilityState
   safeStorage?: SafeStorageCapabilitySource
   platform?: NodeJS.Platform
 }
@@ -68,5 +68,5 @@ export default () => {
   const handle = createStorageCapabilitiesHandler({
     getCapabilities: createStorageCapabilitiesProvider({ getStorageState }),
   })
-  mainHandle<unknown, StorageCapabilitiesV1>(WIN_MAIN_RENDERER_EVENT_NAME.storage_capabilities_get, ({ params }) => handle(params))
+  mainHandle<unknown, StorageCapabilitiesV1>(WIN_MAIN_RENDERER_EVENT_NAME.storage_capabilities_get, async({ params }) => handle(params))
 }

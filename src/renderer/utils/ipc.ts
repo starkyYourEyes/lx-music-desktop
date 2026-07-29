@@ -10,6 +10,8 @@ type RemoveListener = () => void
 
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
 
+// Preserve the direct IPC Promise rather than adding an async adoption wrapper.
+// eslint-disable-next-line @typescript-eslint/promise-function-async
 export const getStorageCapabilities = (): Promise<StorageCapabilitiesV1> => rendererInvoke<StorageRequestV1, StorageCapabilitiesV1>(
   WIN_MAIN_RENDERER_EVENT_NAME.storage_capabilities_get,
   { version: 1, type: 'capabilities.get' },

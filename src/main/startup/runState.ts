@@ -9,8 +9,8 @@ export interface RunState {
 }
 
 export interface RunStateStore {
-  begin(): Promise<boolean>
-  markClean(): Promise<void>
+  begin: () => Promise<boolean>
+  markClean: () => Promise<void>
 }
 
 const isTimestamp = (value: unknown): value is number => {
@@ -35,8 +35,25 @@ export const createRunState = (options: {
     validate: isRunState,
   })
   let current: RunState | null = null
+  let lifecycle = Promise.resolve()
 
-  const begin = async(): Promise<boolean> => {
+  const serialize = async<T>(operation: () => Promise<T>): Promise<T> => {
+    const result = lifecycle.then(operation)
+    lifecycle = result.then(() => undefined, () => undefined)
+    return result
+  }
+
+  const persistClean = async(state: RunState): Promise<void> => {
+    const nextState = {
+      ...state,
+      clean: true as const,
+      completedAtMs: now(),
+    }
+    current = nextState
+    await file.replace(nextState)
+  }
+
+  const begin = async(): Promise<boolean> => serialize(async() => {
     const previous = await file.read()
     const startedAtMs = now()
     current = {
@@ -47,18 +64,13 @@ export const createRunState = (options: {
     }
     await file.replace(current)
     return previous?.clean == true
-  }
+  })
 
-  const markClean = async(): Promise<void> => {
+  const markClean = async(): Promise<void> => serialize(async() => {
     const state = current ?? await file.read()
     if (state == null) return
-    current = {
-      ...state,
-      clean: true,
-      completedAtMs: now(),
-    }
-    await file.replace(current)
-  }
+    await persistClean(state)
+  })
 
   return { begin, markClean }
 }

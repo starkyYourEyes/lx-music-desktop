@@ -8,6 +8,7 @@ const Module = require('node:module')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
 
+// eslint-disable-next-line n/no-deprecated-api
 require.extensions['.ts'] = (module, filename) => {
   const source = fs.readFileSync(filename, 'utf8')
   const output = typescript.transpileModule(source, {
@@ -47,7 +48,7 @@ const exists = async(filePath) => {
 const isValue = value => value != null && typeof value == 'object' && !Array.isArray(value) && Number.isInteger(value.value)
 const isCounter = value => value != null && typeof value == 'object' && !Array.isArray(value) && Number.isInteger(value.n)
 
-const withFailingTempSync = () => ({
+const withFailingTempSync = (syncError = new Error('injected fsync failure')) => ({
   ...fsp,
   async open(filePath, flags, mode) {
     const handle = await fsp.open(filePath, flags, mode)
@@ -55,9 +56,28 @@ const withFailingTempSync = () => ({
     return {
       writeFile: handle.writeFile.bind(handle),
       async sync() {
-        throw new Error('injected fsync failure')
+        throw syncError
       },
       close: handle.close.bind(handle),
+    }
+  },
+})
+
+const withTempHandleFailures = ({ syncError, closeError }) => ({
+  ...fsp,
+  async open(filePath, flags, mode) {
+    const handle = await fsp.open(filePath, flags, mode)
+    if (!String(filePath).includes('.owned-tmp-')) return handle
+    return {
+      writeFile: handle.writeFile.bind(handle),
+      async sync() {
+        if (syncError != null) throw syncError
+        await handle.sync()
+      },
+      async close() {
+        await handle.close()
+        if (closeError != null) throw closeError
+      },
     }
   },
 })
@@ -77,6 +97,31 @@ describe('atomic JSON file', () => {
     assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { value: 1 })
   })
 
+  it('preserves the primary write failure when closing the failed handle also fails', async() => {
+    const { target } = await createFixture('write-close-errors')
+    const syncError = new Error('primary sync failure')
+    const closeError = new Error('secondary close failure')
+    const file = createAtomicJsonFile({
+      filePath: target,
+      validate: isValue,
+      fs: withTempHandleFailures({ syncError, closeError }),
+    })
+
+    await assert.rejects(file.replace({ value: 1 }), error => error === syncError)
+  })
+
+  it('propagates a close-only failure from a durable temporary write', async() => {
+    const { target } = await createFixture('close-error')
+    const closeError = new Error('close-only failure')
+    const file = createAtomicJsonFile({
+      filePath: target,
+      validate: isValue,
+      fs: withTempHandleFailures({ closeError }),
+    })
+
+    await assert.rejects(file.replace({ value: 1 }), error => error === closeError)
+  })
+
   it('coalesces queued snapshots and resolves every waiter after the newest write', async() => {
     const { target } = await createFixture('queue')
     const delayedFs = {
@@ -93,11 +138,15 @@ describe('atomic JSON file', () => {
     const file = createAtomicJsonFile({ filePath: target, validate: isCounter, fs: delayedFs })
     const observed = []
 
-    await Promise.all([
-      file.replace({ n: 1 }).then(async() => observed.push(JSON.parse(await fsp.readFile(target, 'utf8')).n)),
-      file.replace({ n: 2 }).then(async() => observed.push(JSON.parse(await fsp.readFile(target, 'utf8')).n)),
-      file.replace({ n: 3 }).then(async() => observed.push(JSON.parse(await fsp.readFile(target, 'utf8')).n)),
-    ])
+    const first = file.replace({ n: 1 })
+    const second = file.replace({ n: 2 })
+    const third = file.replace({ n: 3 })
+    assert.strictEqual(second, first)
+    assert.strictEqual(third, first)
+    await Promise.all([first, second, third].map(async write => {
+      await write
+      observed.push(JSON.parse(await fsp.readFile(target, 'utf8')).n)
+    }))
 
     assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { n: 3 })
     assert.equal(delayedFs.replacements, 2)
@@ -199,12 +248,28 @@ describe('Store atomic persistence', () => {
   it('keeps the synchronous update and reports asynchronous persistence errors from flush', async() => {
     const { target } = await createFixture('store-failure')
     await fsp.writeFile(target, '{"value":1}')
-    const store = new Store(target, false, withFailingTempSync())
+    const persistenceError = new Error('injected fsync failure')
+    const store = new Store(target, false, withFailingTempSync(persistenceError))
 
     assert.doesNotThrow(() => store.set('value', 2))
     assert.equal(store.get('value'), 2)
-    await assert.rejects(store.flush(), /injected fsync failure/)
+    await assert.rejects(store.flush(), error => error === persistenceError)
     assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { value: 1 })
+  })
+
+  it('sanitizes non-Error persistence rejections without echoing their payload', async() => {
+    const { target } = await createFixture('store-non-error')
+    const rejectedPayload = { secret: 'credential payload' }
+    const store = new Store(target, false, withFailingTempSync(rejectedPayload))
+
+    store.set('value', 2)
+
+    await assert.rejects(store.flush(), error => {
+      assert.equal(error instanceof Error, true)
+      assert.equal(error.message, 'Store persistence failed')
+      assert.equal(JSON.stringify(error).includes('credential payload'), false)
+      return true
+    })
   })
 
   it('registers a recovered Store so global flush surfaces its persistence error', async() => {

@@ -13,23 +13,27 @@ const isStoreRecord = (value: unknown): value is Record<string, any> => {
   return value != null && typeof value == 'object' && !Array.isArray(value)
 }
 
+const toStorePersistenceError = (error: unknown): Error => error instanceof Error
+  ? error
+  : new Error('Store persistence failed')
+
 
 class Store {
   private readonly filePath: string
   private readonly atomicFile: AtomicJsonFile<Record<string, any>>
   private store: Record<string, any>
-  private writeError: unknown = null
+  private writeError: Error | null = null
 
   private enqueueWrite() {
     let snapshot: Record<string, any>
     try {
       snapshot = structuredClone(this.store)
     } catch (error) {
-      this.writeError ??= error
+      this.writeError ??= toStorePersistenceError(error)
       return
     }
     void this.atomicFile.replace(snapshot).catch(error => {
-      this.writeError ??= error
+      this.writeError ??= toStorePersistenceError(error)
     })
   }
 
@@ -83,7 +87,7 @@ class Store {
     try {
       await this.atomicFile.flush()
     } catch (error) {
-      this.writeError ??= error
+      this.writeError ??= toStorePersistenceError(error)
     }
     if (this.writeError != null) throw this.writeError
   }

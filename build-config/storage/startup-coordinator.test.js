@@ -181,6 +181,8 @@ describe('storage startup coordinator', () => {
     }
     const coordinator = createCoordinator(deps)
 
+    // This startup is intentionally left pending to exercise the shutdown bound.
+    // eslint-disable-next-line no-void
     void coordinator.start()
     await databaseStarted
     await assert.rejects(coordinator.shutdown(), /shutdown_startup_timeout/)
@@ -189,10 +191,12 @@ describe('storage startup coordinator', () => {
   })
 
   it('isolates a database recovery result before migration hooks or business registration', async() => {
-    const { calls, deps } = createDeps({ initDatabase: async() => {
-      calls.push('db:init')
-      return recoveryResult
-    } })
+    const { calls, deps } = createDeps({
+      initDatabase: async() => {
+        calls.push('db:init')
+        return recoveryResult
+      },
+    })
     const coordinator = createCoordinator(deps)
 
     const result = await coordinator.start()
@@ -217,7 +221,10 @@ describe('storage startup coordinator', () => {
     calls.length = 0
     coordinator.registerShutdownFlusher('activity', async() => { calls.push('activity:flush') })
 
-    await coordinator.shutdown()
+    const firstShutdown = coordinator.shutdown()
+    const secondShutdown = coordinator.shutdown()
+    assert.strictEqual(secondShutdown, firstShutdown)
+    await firstShutdown
 
     assert.deepEqual(calls, ['activity:flush', 'stores:flush', 'db:close', 'run-state:clean'])
   })
@@ -239,10 +246,12 @@ describe('storage startup coordinator', () => {
   })
 
   it('keeps the run unclean when stores cannot flush', async() => {
-    const { calls, deps } = createDeps({ flushStores: async() => {
-      calls.push('stores:flush')
-      throw new Error('store_flush_failed')
-    } })
+    const { calls, deps } = createDeps({
+      flushStores: async() => {
+        calls.push('stores:flush')
+        throw new Error('store_flush_failed')
+      },
+    })
     const coordinator = createCoordinator(deps)
     await coordinator.start()
     calls.length = 0
@@ -304,6 +313,32 @@ describe('storage run state', () => {
       version: 1,
       clean: false,
       startedAtMs: 300,
+      completedAtMs: 200,
+    })
+  })
+
+  it('serializes concurrent begin and markClean calls in invocation order', async() => {
+    const runtimeRoot = tempDirectory('lx-run-state-concurrent-')
+    let now = 100
+    const { createRunState } = require(runStatePath)
+    const runState = createRunState({
+      runtimeRoot,
+      now: () => {
+        const timestamp = now
+        now += 100
+        return timestamp
+      },
+    })
+
+    const begin = runState.begin()
+    const markClean = runState.markClean()
+
+    assert.equal(await begin, false)
+    await markClean
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'run-state.v1.json'), 'utf8')), {
+      version: 1,
+      clean: true,
+      startedAtMs: 100,
       completedAtMs: 200,
     })
   })

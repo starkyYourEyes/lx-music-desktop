@@ -11,12 +11,12 @@ export interface AtomicJsonStage {
 }
 
 export interface AtomicJsonFile<T> {
-  read(): Promise<T | null>
-  stage(value: T, label?: 'next'): Promise<AtomicJsonStage>
-  commit(stage: AtomicJsonStage): Promise<{ fileSha256: string }>
-  replace(value: T): Promise<{ fileSha256: string }>
-  flush(): Promise<void>
-  cleanupOwnedTemps(): Promise<void>
+  read: () => Promise<T | null>
+  stage: (value: T, label?: 'next') => Promise<AtomicJsonStage>
+  commit: (stage: AtomicJsonStage) => Promise<{ fileSha256: string }>
+  replace: (value: T) => Promise<{ fileSha256: string }>
+  flush: () => Promise<void>
+  cleanupOwnedTemps: () => Promise<void>
 }
 
 interface FileIdentity {
@@ -95,29 +95,32 @@ export function createAtomicJsonFile<T>(options: {
   const writeDurableBytes = async(destination: string, bytes: string, exclusive: boolean): Promise<FileIdentity> => {
     await fileSystem.mkdir(directoryPath, { recursive: true })
     const handle = await fileSystem.open(destination, exclusive ? 'wx' : 'w', mode)
+    let operationFailed = false
     let operationError: unknown
     try {
       await handle.writeFile(bytes, 'utf8')
       await handle.sync()
     } catch (error) {
+      operationFailed = true
       operationError = error
-      throw error
-    } finally {
-      try {
-        await handle.close()
-      } catch (error) {
-        if (operationError == null) throw error
-      }
     }
+    let closeFailed = false
+    let closeError: unknown
+    try {
+      await handle.close()
+    } catch (error) {
+      closeFailed = true
+      closeError = error
+    }
+    if (operationFailed) await Promise.reject(operationError)
+    if (closeFailed) await Promise.reject(closeError)
     return identityOf(await fileSystem.stat(destination))
   }
 
   const removeBestEffort = async(targetPath: string): Promise<void> => {
     try {
       await fileSystem.unlink(targetPath)
-    } catch (error) {
-      if (!isMissing(error)) return
-    }
+    } catch {}
   }
 
   const syncDirectoryBestEffort = async(): Promise<void> => {
@@ -164,7 +167,7 @@ export function createAtomicJsonFile<T>(options: {
     }
   }
 
-  const verifyStage = async(candidate: AtomicJsonStage): Promise<{ record: StageRecord; bytes: string }> => {
+  const verifyStage = async(candidate: AtomicJsonStage): Promise<{ record: StageRecord, bytes: string }> => {
     const record = stageRecords.get(candidate)
     if (record == null || candidate.filePath != record.filePath || candidate.fileSha256 != record.fileSha256) {
       throw new Error('Atomic JSON stage is not recognized')
@@ -247,6 +250,8 @@ export function createAtomicJsonFile<T>(options: {
     }
   }
 
+  // Coalesced writers must receive the exact shared queue Promise.
+  // eslint-disable-next-line @typescript-eslint/promise-function-async
   const replace = (value: T): Promise<{ fileSha256: string }> => {
     if (queuePromise != null) {
       pendingValue = value

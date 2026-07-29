@@ -26,9 +26,9 @@ export type StorageStartupOutcome =
   | { status: 'fatal', reason: string }
 
 export interface StorageCoordinator {
-  start(): Promise<StorageStartupOutcome>
-  registerShutdownFlusher(name: string, flush: () => Promise<void>): () => void
-  shutdown(): Promise<void>
+  start: () => Promise<StorageStartupOutcome>
+  registerShutdownFlusher: (name: string, flush: () => Promise<void>) => () => void
+  shutdown: () => Promise<void>
 }
 
 type DatabaseReadyResult = Extract<DatabaseStartupResult, { status: 'ready' }>
@@ -41,15 +41,15 @@ interface ShutdownDiagnostic {
 
 export interface StorageCoordinatorDependencies {
   runState: RunStateStore
-  initDatabase(previousShutdownWasClean: boolean): Promise<DatabaseStartupResult>
-  closeDatabase(): Promise<void> | void
-  runMigrationHooks(result: DatabaseReadyResult): Promise<void | RecoveryOutcome>
-  initSettings(): Promise<void>
-  registerModules(): void
-  appInited(): void
-  showRecovery(outcome: RecoveryOutcome): Promise<void>
-  flushStores(): Promise<void>
-  reportShutdownFailure?(diagnostic: ShutdownDiagnostic): void
+  initDatabase: (previousShutdownWasClean: boolean) => Promise<DatabaseStartupResult>
+  closeDatabase: () => Promise<void> | void
+  runMigrationHooks: (result: DatabaseReadyResult) => Promise<void> | Promise<RecoveryOutcome>
+  initSettings: () => Promise<void>
+  registerModules: () => void
+  appInited: () => void
+  showRecovery: (outcome: RecoveryOutcome) => Promise<void>
+  flushStores: () => Promise<void>
+  reportShutdownFailure?: (diagnostic: ShutdownDiagnostic) => void
   shutdownTimeoutMs?: number
 }
 
@@ -96,6 +96,8 @@ export const createStorageCoordinator = (
   let runHasStarted = false
   let shutdownRequested = false
 
+  // Repeated callers must receive the exact cached startup Promise.
+  // eslint-disable-next-line @typescript-eslint/promise-function-async
   const start = (): Promise<StorageStartupOutcome> => {
     if (startPromise != null) return startPromise
     startPromise = (async() => {
@@ -172,13 +174,17 @@ export const createStorageCoordinator = (
     const completed = await Promise.race([
       startPromise.then(() => true, () => true),
       new Promise<boolean>(resolve => {
-        timeout = setTimeout(() => resolve(false), shutdownTimeoutMs)
+        timeout = setTimeout(() => {
+          resolve(false)
+        }, shutdownTimeoutMs)
       }),
     ])
     if (timeout != null) clearTimeout(timeout)
     return completed
   }
 
+  // Repeated callers must receive the exact cached shutdown Promise.
+  // eslint-disable-next-line @typescript-eslint/promise-function-async
   const shutdown = (): Promise<void> => {
     if (shutdownPromise != null) return shutdownPromise
     shutdownPromise = (async() => {

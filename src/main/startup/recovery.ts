@@ -45,16 +45,17 @@ const targetDetail = (target: StorageRecoveryTarget): string[] => {
 
 export const showStorageRecovery = async(outcome: RecoveryOutcome): Promise<void> => {
   const affectedPath = targetPath(outcome.target)
+  const canOpenDataFolder = affectedPath != null
   const response = await dialog.showMessageBox({
     type: 'error',
     message: 'Storage recovery required',
     detail: targetDetail(outcome.target).join('\n'),
-    buttons: ['Open data folder', 'Quit'],
+    buttons: canOpenDataFolder ? ['Open data folder', 'Quit'] : ['Quit'],
     defaultId: 0,
-    cancelId: 1,
+    cancelId: canOpenDataFolder ? 1 : 0,
     noLink: true,
   })
-  if (response.response == 0 && affectedPath != null) {
+  if (response.response == 0 && canOpenDataFolder) {
     try {
       await shell.openPath(path.dirname(affectedPath))
     } finally {

@@ -313,7 +313,7 @@ const credentialMigrationRecovery = (diagnostic: string): CredentialRecoveryOutc
   target: {
     kind: 'external-migration',
     component: 'credentials',
-    affectedPath: null,
+    affectedPath: path.join(global.lxDataPath, 'credentials.v1.json'),
     diagnostics: [diagnostic],
   },
 })
@@ -335,6 +335,7 @@ export const runStorageMigrationHooks = async(result: { existed: boolean }): Pro
   try {
     vault = await initializeCredentialVault()
     if (!credentialVaultReadable(vault)) return credentialMigrationRecovery('credentials.vault_unreadable')
+    global.lx.storage?.registerShutdownFlusher('credential-vault', async() => { await vault.flush() })
   } catch {
     return credentialMigrationRecovery('credentials.vault_unreadable')
   }
@@ -346,6 +347,10 @@ export const runStorageMigrationHooks = async(result: { existed: boolean }): Pro
         migrateLegacyAccountProfiles: input => global.lx.worker.dbService.migrateLegacyAccountProfiles(input),
       },
     })
+    if (global.lx.credentialMigration.status == 'secure-storage-unavailable' &&
+      global.lx.credentialMigration.volatileEntries == 0) {
+      return credentialMigrationRecovery('credentials.memory_only_entries_unavailable')
+    }
   } catch {
     return credentialMigrationRecovery('credentials.legacy_migration_failed')
   }
@@ -353,9 +358,11 @@ export const runStorageMigrationHooks = async(result: { existed: boolean }): Pro
     const accountRepository = createAccountRepository({
       vault,
       profiles: global.lx.worker.dbService,
+      profileRoot: global.lxDataPath,
     })
     await accountRepository.hydrate()
     global.lx.accountRepository = accountRepository
+    global.lx.storage?.registerShutdownFlusher('account-repository', async() => { await accountRepository.flush() })
   } catch {
     return credentialMigrationRecovery('credentials.profile_repository_unreadable')
   }

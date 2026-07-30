@@ -1,5 +1,8 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
+const fsp = require('node:fs/promises')
+const os = require('node:os')
+const path = require('node:path')
 const { after, describe, it } = require('node:test')
 const typescript = require('typescript')
 
@@ -248,5 +251,93 @@ describe('account repository', () => {
       updatedAtMs: null,
       persistence: null,
     })
+  })
+
+  it('rolls back an interrupted save during next-start reconciliation', async() => {
+    const profileRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-account-save-intent-'))
+    const vault = createVault()
+    const profiles = createProfiles()
+    const originalUpsert = profiles.upsertAccountProfile
+    profiles.upsertAccountProfile = async() => { throw new Error('injected profile failure') }
+    const first = createAccountRepository({ vault, profiles, profileRoot })
+    try {
+      await assert.rejects(first.save('netease', {
+        cookie: 'new-cookie',
+        profile: { userId: 1, nickname: 'New', avatarUrl: '' },
+        updatedAtMs: 2,
+      }), /injected profile failure/)
+
+      profiles.upsertAccountProfile = originalUpsert
+      const restarted = createAccountRepository({ vault, profiles, profileRoot })
+      await restarted.hydrate()
+
+      assert.equal(restarted.getCookie('netease'), null)
+      assert.equal(restarted.getStatus('netease').loggedIn, false)
+      assert.equal(vault.read({ kind: 'netease-cookie' }).status, 'missing')
+    } finally {
+      await fsp.rm(profileRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('finishes an interrupted logout during next-start reconciliation', async() => {
+    const profileRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-account-clear-intent-'))
+    const vault = createVault({
+      'qq-music-cookie': { status: 'available', value: 'old-cookie' },
+    })
+    const profiles = createProfiles({
+      qq_music: {
+        provider: 'qq_music',
+        profileJson: '{"nickname":"Old","uin":"7"}',
+        updatedAtMs: 1,
+      },
+    })
+    const originalRemove = vault.remove
+    vault.remove = async() => { throw new Error('injected vault failure') }
+    const first = createAccountRepository({ vault, profiles, profileRoot })
+    try {
+      await first.hydrate()
+      await assert.rejects(first.clear('qq_music'), /injected vault failure/)
+
+      vault.remove = originalRemove
+      const restarted = createAccountRepository({ vault, profiles, profileRoot })
+      await restarted.hydrate()
+
+      assert.equal(restarted.getCookie('qq_music'), null)
+      assert.equal(restarted.getStatus('qq_music').loggedIn, false)
+      assert.equal(vault.read({ kind: 'qq-music-cookie' }).status, 'missing')
+    } finally {
+      await fsp.rm(profileRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('surfaces one undecryptable provider without classifying another as unavailable', async() => {
+    const vault = createVault({
+      'qq-music-cookie': { status: 'available', value: 'qq-cookie' },
+    })
+    vault.read = ref => ref.kind == 'netease-cookie'
+      ? { status: 'undecryptable' }
+      : createVault({ 'qq-music-cookie': { status: 'available', value: 'qq-cookie' } }).read(ref)
+    const repository = createAccountRepository({
+      vault,
+      profiles: createProfiles({
+        qq_music: {
+          provider: 'qq_music',
+          profileJson: '{"nickname":"Q","uin":"7"}',
+          updatedAtMs: 1,
+        },
+      }),
+    })
+
+    await repository.hydrate()
+
+    assert.deepEqual(repository.getStatus('netease'), {
+      loggedIn: false,
+      profile: null,
+      updatedAtMs: null,
+      persistence: null,
+      unavailableReason: 'credential_undecryptable',
+    })
+    assert.equal(repository.getStatus('qq_music').loggedIn, true)
+    assert.equal(Object.hasOwn(repository.getStatus('qq_music'), 'unavailableReason'), false)
   })
 })

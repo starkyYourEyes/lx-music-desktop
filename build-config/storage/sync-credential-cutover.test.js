@@ -530,4 +530,155 @@ describe('sync credential cutover', () => {
       await fsp.rm(root, { recursive: true, force: true })
     }
   })
+
+  it('reconciles interrupted client credential saves and removals on restart', async() => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-client-intent-'))
+    const vault = createVault()
+    global.lxDataPath = root
+    global.lx = { credentialVault: vault, appSetting: {} }
+    try {
+      let clientData = freshRequire('../../src/main/modules/sync/client/data.ts')
+      await assert.rejects(clientData.setSyncAuthKey('server_a', {
+        clientId: 'client_a',
+        key: 'CLIENT_KEY_SENTINEL',
+        serverName: 'Server',
+      }, { failAt: 'after-vault-write' }), /injected failure/i)
+
+      clientData = freshRequire('../../src/main/modules/sync/client/data.ts')
+      assert.equal(await clientData.getSyncAuthKey('server_a'), null)
+
+      await clientData.setSyncAuthKey('server_a', {
+        clientId: 'client_a',
+        key: 'CLIENT_KEY_SENTINEL',
+        serverName: 'Server',
+      })
+      await assert.rejects(
+        clientData.removeSyncAuthKey('server_a', { failAt: 'after-vault-remove' }),
+        /injected failure/i,
+      )
+
+      clientData = freshRequire('../../src/main/modules/sync/client/data.ts')
+      assert.equal(await clientData.getSyncAuthKey('server_a'), null)
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reconciles interrupted server credential saves and removals on restart', async() => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-server-intent-'))
+    const vault = createVault()
+    global.lxDataPath = root
+    global.lx = {
+      credentialVault: vault,
+      appSetting: { 'sync.server.maxSsnapshotNum': 3, 'list.addMusicLocationType': 'add_start' },
+    }
+    const keyInfo = {
+      clientId: 'device_a',
+      key: 'SERVER_KEY_SENTINEL',
+      deviceName: 'Desktop',
+      isMobile: false,
+    }
+    try {
+      let { UserDataManage } = freshRequire('../../src/main/modules/sync/server/user/data.ts')
+      let manager = new UserDataManage('default')
+      await assert.rejects(manager.saveClientKeyInfo(keyInfo, { failAt: 'after-vault-write' }), /injected failure/i)
+
+      ;({ UserDataManage } = freshRequire('../../src/main/modules/sync/server/user/data.ts'))
+      manager = new UserDataManage('default')
+      assert.equal(await manager.getClientKeyInfo('device_a'), null)
+
+      await manager.saveClientKeyInfo(keyInfo)
+      await assert.rejects(manager.removeClientKeyInfo('device_a', { failAt: 'after-vault-remove' }), /injected failure/i)
+
+      ;({ UserDataManage } = freshRequire('../../src/main/modules/sync/server/user/data.ts'))
+      manager = new UserDataManage('default')
+      assert.equal(await manager.getClientKeyInfo('device_a'), null)
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('serializes later client and server removals behind blocked saves', async() => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-overlap-intent-'))
+    const vault = createVault()
+    const originalWrite = vault.write
+    let releaseWrite
+    let writeCalls = 0
+    vault.write = async(...args) => {
+      writeCalls++
+      if (writeCalls <= 2) await new Promise(resolve => { releaseWrite = resolve })
+      return await originalWrite.apply(vault, args)
+    }
+    const waitForWriteCall = async expected => {
+      if (writeCalls >= expected) return
+      await new Promise(resolve => setImmediate(resolve))
+      await waitForWriteCall(expected)
+    }
+    global.lxDataPath = root
+    global.lx = {
+      credentialVault: vault,
+      appSetting: { 'sync.server.maxSsnapshotNum': 3, 'list.addMusicLocationType': 'add_start' },
+    }
+    try {
+      const clientData = freshRequire('../../src/main/modules/sync/client/data.ts')
+      const clientSave = clientData.setSyncAuthKey('server_a', {
+        clientId: 'client_a',
+        key: 'CLIENT_KEY_SENTINEL',
+        serverName: 'Server',
+      })
+      await waitForWriteCall(1)
+      const clientRemove = clientData.removeSyncAuthKey('server_a')
+      releaseWrite()
+      await Promise.all([clientSave, clientRemove])
+      assert.equal(await clientData.getSyncAuthKey('server_a'), null)
+
+      const { UserDataManage } = freshRequire('../../src/main/modules/sync/server/user/data.ts')
+      const manager = new UserDataManage('default')
+      const serverSave = manager.saveClientKeyInfo({
+        clientId: 'device_a',
+        key: 'SERVER_KEY_SENTINEL',
+        deviceName: 'Desktop',
+        isMobile: false,
+      })
+      await waitForWriteCall(2)
+      const serverRemove = manager.removeClientKeyInfo('device_a')
+      releaseWrite()
+      await Promise.all([serverSave, serverRemove])
+      assert.equal(await manager.getClientKeyInfo('device_a'), null)
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('registers client and server credential flushers with the storage coordinator', async() => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-flushers-'))
+    const registrations = new Map()
+    global.lxDataPath = root
+    global.lx = {
+      credentialVault: createVault(),
+      storage: {
+        registerShutdownFlusher(name, flush) {
+          registrations.set(name, flush)
+          return () => {}
+        },
+      },
+      appSetting: { 'sync.server.maxSsnapshotNum': 3, 'list.addMusicLocationType': 'add_start' },
+    }
+    try {
+      const clientData = freshRequire('../../src/main/modules/sync/client/data.ts')
+      await clientData.setSyncAuthKey('server_a', {
+        clientId: 'client_a',
+        key: 'CLIENT_KEY_SENTINEL',
+        serverName: 'Server',
+      })
+      const { UserDataManage } = freshRequire('../../src/main/modules/sync/server/user/data.ts')
+      const manager = new UserDataManage('default')
+      await manager.getAllClientKeyInfo()
+
+      assert.deepEqual([...registrations.keys()].sort(), ['sync-client-credentials', 'sync-server-credentials'])
+      await Promise.all([...registrations.values()].map(async flush => { await flush() }))
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  })
 })

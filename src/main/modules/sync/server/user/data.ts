@@ -6,6 +6,7 @@ import { File } from '@common/constants_sync'
 import { createAtomicJsonFile, type AtomicJsonFile } from '@main/storage/atomicJsonFile'
 import { getCredentialVault } from '@main/storage/credentials'
 import type { SyncKeyPayloadV1 } from '@main/storage/credentials/types'
+import { createOperationJournal, type OperationJournal } from '@main/storage/operationJournal'
 import { exists } from '../../utils'
 
 interface ServerInfo {
@@ -37,6 +38,56 @@ const isDevicesInfoV2 = (value: unknown): value is DevicesInfoV2 => isRecord(val
 
 export const toPublicDevice = ({ key: _key, ...device }: LX.Sync.ServerKeyInfo): LX.Sync.SyncServerDevice => device
 
+interface SyncCredentialMutationOptions {
+  failAt?: 'after-vault-write' | 'after-vault-remove'
+}
+
+let operationJournal: OperationJournal | null = null
+const operationTails = new Map<string, Promise<void>>()
+const activeManagers = new Set<UserDataManage>()
+let shutdownFlusherRegistered = false
+
+const registerShutdownFlusher = (): void => {
+  if (shutdownFlusherRegistered || global.lx.storage == null) return
+  global.lx.storage.registerShutdownFlusher('sync-server-credentials', flushSyncServerData)
+  shutdownFlusherRegistered = true
+}
+
+const operationKey = (userName: string, clientId: string): string => JSON.stringify([userName, clientId])
+
+const parseOperationKey = (value: string): { userName: string, clientId: string } | null => {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    return null
+  }
+  return Array.isArray(parsed) && parsed.length == 2 && parsed.every(item => typeof item == 'string' && item.length > 0)
+    ? { userName: parsed[0] as string, clientId: parsed[1] as string }
+    : null
+}
+
+const getOperationJournal = (): OperationJournal => {
+  operationJournal ??= createOperationJournal({
+    filePath: path.join(global.lxDataPath, File.serverDataPath, 'credential-operations.v1.json'),
+  })
+  return operationJournal
+}
+
+const serializeCredentialOperation = async<Value>(key: string, operation: () => Promise<Value>): Promise<Value> => {
+  const previous = operationTails.get(key) ?? Promise.resolve()
+  const result = previous.then(operation, operation)
+  operationTails.set(key, result.then(() => undefined, () => undefined))
+  return await result
+}
+
+const failIfRequested = (
+  options: SyncCredentialMutationOptions | undefined,
+  stage: SyncCredentialMutationOptions['failAt'],
+): void => {
+  if (options?.failAt == stage) throw new Error(`injected failure: ${stage}`)
+}
+
 let serverInfo: ServerInfo
 let serverInfoQueue = Promise.resolve()
 let lastServerInfoError: unknown = null
@@ -67,6 +118,7 @@ const persistServerInfo = async(): Promise<void> => {
 }
 
 export const initServerInfo = async() => {
+  registerShutdownFlusher()
   if (serverInfo != null) return
   const serverInfoFilePath = path.join(global.lxDataPath, File.serverDataPath, File.serverInfoJSON)
   if (await exists(serverInfoFilePath)) {
@@ -132,10 +184,32 @@ export class UserDataManage {
     const document = await this.metadataFile.read()
     if (document != null && document.userName == this.userName) {
       this.devicesInfo = document
-      return
+    } else {
+      this.devicesInfo = { version: 2, userName: this.userName, clients: {} }
+      await this.metadataFile.replace(this.devicesInfo)
     }
-    this.devicesInfo = { version: 2, userName: this.userName, clients: {} }
-    await this.metadataFile.replace(this.devicesInfo)
+    for (const intent of await getOperationJournal().list()) {
+      const destination = parseOperationKey(intent.key)
+      if (destination == null) throw new Error('Invalid sync server operation key')
+      if (destination.userName != this.userName) continue
+      await serializeCredentialOperation(intent.key, async() => {
+        await getCredentialVault().remove({
+          kind: 'sync-server-device',
+          userName: this.userName,
+          clientId: destination.clientId,
+        })
+        if (Object.hasOwn(this.devicesInfo.clients, destination.clientId)) {
+          const next: DevicesInfoV2 = {
+            ...this.devicesInfo,
+            clients: { ...this.devicesInfo.clients },
+          }
+          Reflect.deleteProperty(next.clients, destination.clientId)
+          await this.metadataFile.replace(next)
+          this.devicesInfo = next
+        }
+        await getOperationJournal().complete(intent.key, intent.revision)
+      })
+    }
   }
 
   getAllClientKeyInfo = async(): Promise<LX.Sync.SyncServerDevice[]> => {
@@ -143,38 +217,66 @@ export class UserDataManage {
     return Object.values(this.devicesInfo.clients).sort((a, b) => (b.lastConnectDate ?? 0) - (a.lastConnectDate ?? 0))
   }
 
-  saveClientKeyInfo = async(keyInfo: LX.Sync.ServerKeyInfo): Promise<void> => {
+  saveClientKeyInfo = async(
+    keyInfo: LX.Sync.ServerKeyInfo,
+    options?: SyncCredentialMutationOptions,
+  ): Promise<void> => {
     await this.ready
-    if (this.devicesInfo.clients[keyInfo.clientId] == null && Object.keys(this.devicesInfo.clients).length > 101) throw new Error('max keys')
-    const vault = getCredentialVault()
-    const ref = { kind: 'sync-server-device' as const, userName: this.userName, clientId: keyInfo.clientId }
-    const credential: SyncKeyPayloadV1 = { version: 1, key: keyInfo.key }
-    await vault.write(ref, credential)
-    if (!await vault.verify(ref, credential)) throw new Error('Sync server credential verification failed')
-    this.devicesInfo.clients[keyInfo.clientId] = toPublicDevice(keyInfo)
-    await this.metadataFile.replace(this.devicesInfo)
+    const key = operationKey(this.userName, keyInfo.clientId)
+    await serializeCredentialOperation(key, async() => {
+      if (this.devicesInfo.clients[keyInfo.clientId] == null && Object.keys(this.devicesInfo.clients).length > 101) throw new Error('max keys')
+      const journal = getOperationJournal()
+      const revision = await journal.begin(key, 'save')
+      const vault = getCredentialVault()
+      const ref = { kind: 'sync-server-device' as const, userName: this.userName, clientId: keyInfo.clientId }
+      const credential: SyncKeyPayloadV1 = { version: 1, key: keyInfo.key }
+      await vault.write(ref, credential)
+      failIfRequested(options, 'after-vault-write')
+      if (!await vault.verify(ref, credential)) throw new Error('Sync server credential verification failed')
+      const next: DevicesInfoV2 = {
+        ...this.devicesInfo,
+        clients: { ...this.devicesInfo.clients, [keyInfo.clientId]: toPublicDevice(keyInfo) },
+      }
+      await this.metadataFile.replace(next)
+      await journal.complete(key, revision)
+      this.devicesInfo = next
+    })
   }
 
   getClientKeyInfo = async(clientId?: string | null): Promise<LX.Sync.ServerKeyInfo | null> => {
     await this.ready
     if (!clientId) return null
-    const device = this.devicesInfo.clients[clientId]
-    if (device == null) return null
-    const credential = getCredentialVault().read<SyncKeyPayloadV1>({
-      kind: 'sync-server-device',
-      userName: this.userName,
-      clientId,
+    return await serializeCredentialOperation(operationKey(this.userName, clientId), async() => {
+      const device = this.devicesInfo.clients[clientId]
+      if (device == null) return null
+      const credential = getCredentialVault().read<SyncKeyPayloadV1>({
+        kind: 'sync-server-device',
+        userName: this.userName,
+        clientId,
+      })
+      if (credential.status != 'available' && credential.status != 'memory-only') return null
+      return { ...device, key: credential.value.key }
     })
-    if (credential.status != 'available' && credential.status != 'memory-only') return null
-    return { ...device, key: credential.value.key }
   }
 
-  removeClientKeyInfo = async(clientId: string) => {
+  removeClientKeyInfo = async(clientId: string, options?: SyncCredentialMutationOptions): Promise<void> => {
     await this.ready
-    const ref = { kind: 'sync-server-device' as const, userName: this.userName, clientId }
-    await getCredentialVault().remove(ref)
-    Reflect.deleteProperty(this.devicesInfo.clients, clientId)
-    await this.metadataFile.replace(this.devicesInfo)
+    const key = operationKey(this.userName, clientId)
+    await serializeCredentialOperation(key, async() => {
+      const journal = getOperationJournal()
+      const revision = await journal.begin(key, 'remove')
+      const ref = { kind: 'sync-server-device' as const, userName: this.userName, clientId }
+      await getCredentialVault().remove(ref)
+      failIfRequested(options, 'after-vault-remove')
+      const next: DevicesInfoV2 = {
+        ...this.devicesInfo,
+        clients: { ...this.devicesInfo.clients },
+      }
+      Reflect.deleteProperty(next.clients, clientId)
+      await this.metadataFile.replace(next)
+      await journal.complete(key, revision)
+      this.devicesInfo = next
+    })
   }
 
   isIncluedsClient = async(clientId: string) => {
@@ -182,7 +284,15 @@ export class UserDataManage {
     return Object.hasOwn(this.devicesInfo.clients, clientId)
   }
 
+  flush = async(): Promise<void> => {
+    await this.ready
+    await Promise.all(operationTails.values())
+    await this.metadataFile.flush()
+    await operationJournal?.flush()
+  }
+
   constructor(userName: string) {
+    registerShutdownFlusher()
     this.userName = userName
     this.userDir = path.join(global.lxDataPath, File.serverDataPath)
     this.devicesFilePath = path.join(this.userDir, File.userDevicesJSON)
@@ -193,5 +303,13 @@ export class UserDataManage {
       mode: 0o600,
     })
     this.ready = this.init()
+    activeManagers.add(this)
   }
+}
+
+export const flushSyncServerData = async(): Promise<void> => {
+  await flushServerInfo()
+  await Promise.all([...activeManagers].map(async manager => { await manager.flush() }))
+  await Promise.all(operationTails.values())
+  await operationJournal?.flush()
 }

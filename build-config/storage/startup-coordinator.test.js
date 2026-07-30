@@ -547,4 +547,46 @@ describe('storage recovery dialog', () => {
     assert.deepEqual(openedPaths, ['C:\\profiles\\alice\\LxDatas'])
     assert.equal(quitCalls, 1)
   })
+
+  it('omits the data-folder action when the recovery target has no usable path', async() => {
+    const openedPaths = []
+    const messages = []
+    let quitCalls = 0
+    const originalLoad = Module._load
+    Module._load = function(request, parent, isMain) {
+      if (request == 'electron') {
+        return {
+          app: { quit: () => { quitCalls++ } },
+          dialog: {
+            showMessageBox: async options => {
+              messages.push(options)
+              return { response: 0 }
+            },
+          },
+          shell: { openPath: async target => { openedPaths.push(target) } },
+        }
+      }
+      return originalLoad.call(this, request, parent, isMain)
+    }
+    try {
+      const { showStorageRecovery } = require(recoveryPath)
+      await showStorageRecovery({
+        status: 'recovery',
+        reason: 'credential_startup_check_failed',
+        target: {
+          kind: 'external-migration',
+          component: 'credentials',
+          affectedPath: null,
+          diagnostics: ['credentials.vault_unreadable'],
+        },
+      })
+    } finally {
+      Module._load = originalLoad
+    }
+
+    assert.deepEqual(messages[0].buttons, ['Quit'])
+    assert.equal(messages[0].defaultId, 0)
+    assert.deepEqual(openedPaths, [])
+    assert.equal(quitCalls, 1)
+  })
 })

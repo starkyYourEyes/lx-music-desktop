@@ -16,12 +16,12 @@ export interface LegacyCredentialSource {
 }
 
 export interface SourceFileIdentity {
-  dev: number
-  ino: number
-  size: number
-  mtimeMs: number
-  ctimeMs: number
-  birthtimeMs: number
+  dev: number | bigint
+  ino: number | bigint
+  size: number | bigint
+  mtimeMs: number | bigint
+  ctimeMs: number | bigint
+  birthtimeMs: number | bigint
 }
 
 export interface LegacyAccountProfile {

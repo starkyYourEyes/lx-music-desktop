@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { canonicalJson, type JsonValue } from '../../../common/storage/canonicalJson'
 import {
   normalizePublicAccountProfile,
@@ -5,6 +6,7 @@ import {
 } from '../../../common/storage/accountProfile'
 import { assertCookieCredential, type CredentialRef } from '../credentials/types'
 import type { CredentialRead, CredentialVault } from '../credentials/credentialVault'
+import { createOperationJournal, type OperationJournal } from '../operationJournal'
 import type {
   AccountProfileProvider,
   AccountProfileRow,
@@ -18,6 +20,7 @@ export interface AccountStatus {
   profile: JsonValue | null
   updatedAtMs: number | null
   persistence: AccountPersistence | null
+  unavailableReason?: 'credential_undecryptable'
 }
 
 export interface AccountRepository {
@@ -30,6 +33,7 @@ export interface AccountRepository {
     updatedAtMs: number
   }) => Promise<{ persistence: AccountPersistence }>
   clear: (provider: AccountProvider) => Promise<void>
+  flush: () => Promise<void>
 }
 
 type Awaitable<Value> = Value | Promise<Value>
@@ -43,6 +47,7 @@ export interface AccountProfileStore {
 export interface CreateAccountRepositoryOptions {
   vault: Pick<CredentialVault, 'read' | 'write' | 'remove' | 'verify'>
   profiles: AccountProfileStore
+  profileRoot?: string
 }
 
 interface HydratedAccount {
@@ -76,7 +81,11 @@ const credentialRef = (provider: AccountProvider): CredentialRef => provider == 
 const readCookie = (read: CredentialRead<unknown>): {
   cookie: string | null
   persistence: AccountPersistence | null
+  unavailableReason?: 'credential_undecryptable'
 } => {
+  if (read.status == 'undecryptable') {
+    return { cookie: null, persistence: null, unavailableReason: 'credential_undecryptable' }
+  }
   if (read.status != 'available' && read.status != 'memory-only') {
     return { cookie: null, persistence: null }
   }
@@ -115,7 +124,14 @@ const hydratedAccount = (
   credential: ReturnType<typeof readCookie>,
   profile: ReturnType<typeof parseProfileRow>,
 ): HydratedAccount => {
-  if (credential.cookie == null) return { cookie: null, status: emptyStatus() }
+  if (credential.cookie == null) {
+    return {
+      cookie: null,
+      status: credential.unavailableReason == null
+        ? emptyStatus()
+        : { ...emptyStatus(), unavailableReason: credential.unavailableReason },
+    }
+  }
   if (profile.profile != null && publicProfileContainsValue(profile.profile, credential.cookie)) {
     return { cookie: null, status: emptyStatus() }
   }
@@ -130,12 +146,19 @@ const hydratedAccount = (
   }
 }
 
-export const createAccountRepository = ({ vault, profiles: profileStore }: CreateAccountRepositoryOptions): AccountRepository => {
+export const createAccountRepository = ({
+  vault,
+  profiles: profileStore,
+  profileRoot,
+}: CreateAccountRepositoryOptions): AccountRepository => {
   const accounts = new Map<AccountProvider, HydratedAccount>(providers.map(provider => [
     provider,
     { cookie: null, status: emptyStatus() },
   ]))
   const operationTails = new Map<AccountProvider, Promise<void>>()
+  const operationJournal: OperationJournal | null = profileRoot == null ? null : createOperationJournal({
+    filePath: path.join(profileRoot, 'account-credential-operations.v1.json'),
+  })
 
   const serialize = async<Value>(provider: AccountProvider, operation: () => Promise<Value>): Promise<Value> => {
     const previous = operationTails.get(provider) ?? Promise.resolve()
@@ -153,7 +176,32 @@ export const createAccountRepository = ({ vault, profiles: profileStore }: Creat
     return hydratedAccount(credential, row)
   }
 
+  const clearDestinations = async(provider: AccountProvider): Promise<void> => {
+    const results = await Promise.allSettled([
+      Promise.resolve().then(async() => { await vault.remove(credentialRef(provider)) }),
+      Promise.resolve().then(async() => { await profileStore.removeAccountProfile(provider) }),
+    ])
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status == 'rejected')
+      .map(result => result.reason)
+    if (failures.length == 1) throw failures[0]
+    if (failures.length > 1) throw new AggregateError(failures, 'Account clear failed')
+  }
+
+  const reconcilePendingOperations = async(): Promise<void> => {
+    if (operationJournal == null) return
+    for (const intent of await operationJournal.list()) {
+      const provider = intent.key
+      assertProvider(provider)
+      await serialize(provider, async() => {
+        await clearDestinations(provider)
+        await operationJournal.complete(provider, intent.revision)
+      })
+    }
+  }
+
   const hydrate = async(): Promise<void> => {
+    await reconcilePendingOperations()
     const hydrated = await Promise.all(providers.map(async provider => [provider, await readAccount(provider)] as const))
     for (const [provider, account] of hydrated) accounts.set(provider, account)
   }
@@ -184,6 +232,7 @@ export const createAccountRepository = ({ vault, profiles: profileStore }: Creat
 
     return await serialize(provider, async() => {
       const ref = credentialRef(provider)
+      const revision = await operationJournal?.begin(provider, 'save')
       const result = await vault.write(ref, cookie)
       if (!await vault.verify(ref, cookie)) throw new Error('Account credential verification failed')
       await profileStore.upsertAccountProfile(row)
@@ -192,6 +241,7 @@ export const createAccountRepository = ({ vault, profiles: profileStore }: Creat
         account.status.updatedAtMs != row.updatedAtMs || canonicalJson(account.status.profile) != row.profileJson) {
         throw new Error('Account persistence readback failed')
       }
+      if (revision != null) await operationJournal?.complete(provider, revision)
       accounts.set(provider, account)
       return result
     })
@@ -200,18 +250,24 @@ export const createAccountRepository = ({ vault, profiles: profileStore }: Creat
   const clear = async(provider: AccountProvider): Promise<void> => {
     assertProvider(provider)
     await serialize(provider, async() => {
-      const results = await Promise.allSettled([
-        Promise.resolve().then(async() => { await vault.remove(credentialRef(provider)) }),
-        Promise.resolve().then(async() => { await profileStore.removeAccountProfile(provider) }),
-      ])
+      const revision = await operationJournal?.begin(provider, 'remove')
+      let failure: unknown = null
+      try {
+        await clearDestinations(provider)
+        if (revision != null) await operationJournal?.complete(provider, revision)
+      } catch (error) {
+        failure = error
+      }
       accounts.set(provider, { cookie: null, status: emptyStatus() })
-      const failures = results
-        .filter((result): result is PromiseRejectedResult => result.status == 'rejected')
-        .map(result => result.reason)
-      if (failures.length == 1) throw failures[0]
-      if (failures.length > 1) throw new AggregateError(failures, 'Account clear failed')
+      if (failure instanceof Error) throw failure
+      if (failure != null) throw new Error('Account clear failed')
     })
   }
 
-  return { hydrate, getStatus, getCookie, save, clear }
+  const flush = async(): Promise<void> => {
+    await Promise.all(operationTails.values())
+    await operationJournal?.flush()
+  }
+
+  return { hydrate, getStatus, getCookie, save, clear, flush }
 }

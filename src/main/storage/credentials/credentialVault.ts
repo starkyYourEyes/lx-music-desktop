@@ -37,6 +37,7 @@ export interface CredentialVault {
   verify: <T>(ref: CredentialRef, expected: T) => Promise<boolean>
   getMigrationMarker: (name: string) => { sourceId: string, completedAtMs: number } | null
   putMigrationMarker: (name: string, sourceId: string, completedAtMs: number) => Promise<void>
+  getSessionStatus: () => { persistence: 'encrypted' | 'memory-only', volatileEntries: number }
   flush: () => Promise<void>
 }
 
@@ -232,18 +233,18 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
     return result
   }
 
-  const persist = async(
+  const commitEnvelope = async(
     mutate: (next: CredentialVaultStorageFileV1) => void,
-    options?: { retainUnsafeCiphertext?: boolean },
-  ): Promise<void> => serialize(async() => {
+    persistOptions?: { retainUnsafeCiphertext?: boolean },
+  ): Promise<void> => {
     const next = cloneEnvelope(envelope)
     mutate(next)
-    if (!options?.retainUnsafeCiphertext) removeUnsafeCiphertextEntries(next)
+    if (!persistOptions?.retainUnsafeCiphertext) removeUnsafeCiphertextEntries(next)
     await file.replace(next)
-    // Serialized vault mutations make this post-commit assignment race-free.
+    // Every caller holds the vault lifecycle queue across this commit.
     // eslint-disable-next-line require-atomic-updates
     envelope = next
-  })
+  }
 
   const read = <T>(ref: CredentialRef): CredentialRead<T> => {
     const entryId = toCredentialEntryId(ref)
@@ -264,38 +265,40 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
     const payload = normalizePayload(ref, value)
     const encryptedPayload: EncryptedCredentialPayloadV1 = { version: 1, entryId, payload }
     const plaintext = canonicalJson(encryptedPayload as unknown as JsonValue)
-    if (options.cipher.mode == 'memory-only') {
-      memoryEntries.set(entryId, JSON.parse(canonicalJson(payload)) as JsonValue)
-      if (envelope.entries[entryId] != null) {
-        await persist(next => {
-          Reflect.deleteProperty(next.entries, entryId)
-        }, { retainUnsafeCiphertext: true })
+    return await serialize(async() => {
+      if (options.cipher.mode == 'memory-only') {
+        memoryEntries.set(entryId, JSON.parse(canonicalJson(payload)) as JsonValue)
+        if (envelope.entries[entryId] != null) {
+          await commitEnvelope(next => {
+            Reflect.deleteProperty(next.entries, entryId)
+          }, { retainUnsafeCiphertext: true })
+        }
+        return { persistence: 'memory-only' }
       }
-      return { persistence: 'memory-only' }
-    }
-    const entry = {
-      version: 1 as const,
-      ciphertext: options.cipher.encrypt(plaintext).toString('base64'),
-      updatedAtMs: now(),
-    }
-    await persist(next => {
-      next.entries[entryId] = entry
+      const entry = {
+        version: 1 as const,
+        ciphertext: options.cipher.encrypt(plaintext).toString('base64'),
+        updatedAtMs: now(),
+      }
+      await commitEnvelope(next => {
+        next.entries[entryId] = entry
+      })
+      volatileUndecryptableEntryIds.delete(entryId)
+      return { persistence: 'encrypted' }
     })
-    volatileUndecryptableEntryIds.delete(entryId)
-    return { persistence: 'encrypted' }
   }
 
   const remove = async(ref: CredentialRef): Promise<void> => {
     const entryId = toCredentialEntryId(ref)
-    memoryEntries.delete(entryId)
-    if (envelope.entries[entryId] == null) {
+    await serialize(async() => {
+      memoryEntries.delete(entryId)
+      if (envelope.entries[entryId] != null) {
+        await commitEnvelope(next => {
+          Reflect.deleteProperty(next.entries, entryId)
+        })
+      }
       volatileUndecryptableEntryIds.delete(entryId)
-      return
-    }
-    await persist(next => {
-      Reflect.deleteProperty(next.entries, entryId)
     })
-    volatileUndecryptableEntryIds.delete(entryId)
   }
 
   const verify = async<T>(ref: CredentialRef, expected: T): Promise<boolean> => {
@@ -318,15 +321,32 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
 
   const putMigrationMarker = async(name: string, sourceId: string, completedAtMs: number): Promise<void> => {
     assertMarker(name, sourceId, completedAtMs)
-    await persist(next => {
-      next.migrationMarkers[name] = { sourceId, completedAtMs }
-    }, options.cipher.mode == 'memory-only' ? { retainUnsafeCiphertext: true } : undefined)
+    await serialize(async() => {
+      await commitEnvelope(next => {
+        next.migrationMarkers[name] = { sourceId, completedAtMs }
+      }, options.cipher.mode == 'memory-only' ? { retainUnsafeCiphertext: true } : undefined)
+    })
   }
+
+  const getSessionStatus = (): { persistence: 'encrypted' | 'memory-only', volatileEntries: number } => ({
+    persistence: options.cipher.mode,
+    volatileEntries: memoryEntries.size,
+  })
 
   const flush = async(): Promise<void> => {
     await lifecycle
     await file.flush()
   }
 
-  return { mode: options.cipher.mode, read, write, remove, verify, getMigrationMarker, putMigrationMarker, flush }
+  return {
+    mode: options.cipher.mode,
+    read,
+    write,
+    remove,
+    verify,
+    getMigrationMarker,
+    putMigrationMarker,
+    getSessionStatus,
+    flush,
+  }
 }

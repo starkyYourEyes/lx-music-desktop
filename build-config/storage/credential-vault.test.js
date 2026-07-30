@@ -267,6 +267,29 @@ describe('credential vault', () => {
     })
   })
 
+  it('serializes remove invocation behind an in-flight write before checking existence', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const profileRoot = await makeProfileRoot()
+    const vault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    const ref = { kind: 'netease-cookie' }
+
+    const writing = vault.write(ref, { version: 1, cookie: 'fixture-cookie' })
+    const removing = vault.remove(ref)
+    await Promise.all([writing, removing])
+
+    assert.deepEqual(vault.read(ref), { status: 'missing' })
+  })
+
+  it('reports the initialized vault session persistence without entry details', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const profileRoot = await makeProfileRoot()
+    const vault = await createCredentialVault({ profileRoot, cipher: memoryOnlyCipher })
+
+    assert.deepEqual(vault.getSessionStatus(), { persistence: 'memory-only', volatileEntries: 0 })
+    await vault.write({ kind: 'netease-cookie' }, { version: 1, cookie: 'fixture-cookie' })
+    assert.deepEqual(vault.getSessionStatus(), { persistence: 'memory-only', volatileEntries: 1 })
+  })
+
   it('persists migration markers atomically with the envelope', async() => {
     const { createCredentialVault } = require(vaultPath)
     const profileRoot = await makeProfileRoot()

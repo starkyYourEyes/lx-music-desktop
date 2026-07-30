@@ -299,7 +299,7 @@ const assertCredentialHookRecovery = async({ runMigrationHooks, expectedDiagnost
     target: {
       kind: 'external-migration',
       component: 'credentials',
-      affectedPath: null,
+      affectedPath: path.join(global.lxDataPath, 'credentials.v1.json'),
       diagnostics: [expectedDiagnostic],
     },
   })
@@ -604,6 +604,72 @@ describe('credential startup gate', () => {
     })
   })
 
+  it('shows fixed recovery when previously migrated memory-only credentials are gone', async() => {
+    const root = await makeRoot()
+    createLiveGlobal(root)
+    const sentinel = 'MEMORY_ONLY_RESTART_SENTINEL'
+    const vault = {
+      mode: 'memory-only',
+      read: () => ({ status: 'missing' }),
+    }
+    const runMigrationHooks = loadStorageMigrationHooks({
+      initializeCredentialVault: async() => {
+        global.lx.credentialVault = vault
+        return vault
+      },
+      migrateLegacyCredentials: async() => ({ status: 'secure-storage-unavailable', volatileEntries: 0 }),
+      createAccountRepository: () => { throw new Error('must not create repository') },
+    })
+
+    await assertCredentialHookRecovery({
+      runMigrationHooks,
+      expectedDiagnostic: 'credentials.memory_only_entries_unavailable',
+      sentinel,
+    })
+  })
+
+  it('passes the profile root and registers credential shutdown flushers after hydration', async() => {
+    const root = await makeRoot()
+    createLiveGlobal(root)
+    const registrations = new Map()
+    const calls = []
+    global.lx.storage = {
+      registerShutdownFlusher(name, flush) {
+        registrations.set(name, flush)
+        return () => {}
+      },
+    }
+    const vault = {
+      mode: 'encrypted',
+      read: () => ({ status: 'missing' }),
+      flush: async() => { calls.push('vault:flush') },
+    }
+    let repositoryOptions
+    const accountRepository = {
+      hydrate: async() => { calls.push('account:hydrate') },
+      getStatus: () => ({ loggedIn: false, profile: null, updatedAtMs: null, persistence: null }),
+      flush: async() => { calls.push('account:flush') },
+    }
+    const runMigrationHooks = loadStorageMigrationHooks({
+      initializeCredentialVault: async() => {
+        global.lx.credentialVault = vault
+        return vault
+      },
+      migrateLegacyCredentials: async() => ({ status: 'complete', encryptedEntries: 0, memoryOnlyEntries: 0, profiles: 0 }),
+      createAccountRepository: options => {
+        repositoryOptions = options
+        return accountRepository
+      },
+    })
+
+    assert.equal(await runMigrationHooks({ existed: true }), undefined)
+    assert.equal(repositoryOptions.profileRoot, root)
+    assert.deepEqual([...registrations.keys()], ['credential-vault', 'account-repository'])
+    await registrations.get('credential-vault')()
+    await registrations.get('account-repository')()
+    assert.deepEqual(calls, ['account:hydrate', 'vault:flush', 'account:flush'])
+  })
+
   it('shows credential recovery when live account hydration fails', async() => {
     const root = await makeRoot()
     createLiveGlobal(root)
@@ -726,5 +792,22 @@ describe('credential startup gate', () => {
       assert.equal(calls.filter(call => Array.isArray(call) && call[0] == 'recovery:show').length, 1)
       assert.equal(JSON.stringify({ outcome, calls }).includes(sentinel), false)
     }
+  })
+
+  it('preserves the fixed source-scan diagnostic and a contained credential recovery path', async() => {
+    const { createStorageCoordinator } = require(coordinatorPath)
+    const recoveryPath = path.join('C:\\profiles\\fixture', 'credentials.v1.json')
+    const { deps } = createCoordinatorDependencies(async() => ({
+      vaultReadable: true,
+      profileRepositoryReadable: true,
+      activePlaintextSources: ['legacy.credential-source-scan'],
+      recoveryPath,
+    }))
+
+    const outcome = await createStorageCoordinator(deps).start()
+
+    assert.equal(outcome.status, 'recovery')
+    assert.equal(outcome.target.affectedPath, recoveryPath)
+    assert.deepEqual(outcome.target.diagnostics, ['credentials.source_scan_failed'])
   })
 })

@@ -1,3 +1,4 @@
+import path from 'node:path'
 import type { DatabaseStartupResult } from '../worker/dbService/db'
 import type { AccountRepository } from '../storage/accounts/accountRepository'
 import type { CredentialVault } from '../storage/credentials/credentialVault'
@@ -38,6 +39,7 @@ export interface CredentialStartupCheck {
   vaultReadable: boolean
   profileRepositoryReadable: boolean
   activePlaintextSources: string[]
+  recoveryPath?: string
 }
 
 export interface CredentialStartupCheckOptions {
@@ -121,6 +123,7 @@ export const checkCredentialStartup = async({
       vaultReadable: probeVault(vault),
       profileRepositoryReadable: probeProfileRepository(profileRepository),
       activePlaintextSources: ['legacy.credential-source-scan'],
+      recoveryPath: path.join(dataRoot, 'credentials.v1.json'),
     }
   }
   return {
@@ -167,9 +170,11 @@ const credentialRecovery = (check: CredentialStartupCheck): RecoveryOutcome | un
   if (!check.vaultReadable) diagnostics.push('credentials.vault_unreadable')
   if (!check.profileRepositoryReadable) diagnostics.push('credentials.profile_repository_unreadable')
   for (const source of Array.from(new Set(check.activePlaintextSources))) {
-    diagnostics.push(credentialSourceIdentifierSet.has(source)
-      ? `credentials.plaintext_source:${source}`
-      : 'credentials.plaintext_source:unknown')
+    diagnostics.push(source == 'legacy.credential-source-scan'
+      ? 'credentials.source_scan_failed'
+      : credentialSourceIdentifierSet.has(source)
+        ? `credentials.plaintext_source:${source}`
+        : 'credentials.plaintext_source:unknown')
   }
   return {
     status: 'recovery',
@@ -177,7 +182,7 @@ const credentialRecovery = (check: CredentialStartupCheck): RecoveryOutcome | un
     target: {
       kind: 'external-migration',
       component: 'credentials',
-      affectedPath: null,
+      affectedPath: check.recoveryPath ?? null,
       diagnostics,
     },
   }

@@ -72,20 +72,33 @@ const freshRequire = request => {
   return require(request)
 }
 
-const createServerService = ({ getUserSpace, migrateData = async() => {} }) => {
+const createServerService = ({
+  getUserSpace,
+  migrateData = async() => {},
+  serverRuntime,
+  toPublicDevice = ({ key: _key, ...device }) => device,
+  sendServerStatus = () => {},
+}) => {
   return loadTsModule(path.join(sourceRoot, 'main/modules/sync/server/server/server.ts'), {
-    'node:http': {},
-    ws: { WebSocketServer: class {} },
+    'node:http': serverRuntime?.http ?? {},
+    ws: { WebSocketServer: serverRuntime?.WebSocketServer ?? class {} },
     './sync': { registerLocalSyncEvent() {}, unregisterLocalSyncEvent() {}, callObj: {}, sync: async() => {} },
     './auth': { authCode: async() => {}, authConnect: async() => {} },
     '@common/constants_sync': {
       SYNC_CLOSE_CODE: { normal: 1000, failed: 4100 },
       SYNC_CODE: { helloMsg: 'hello', idPrefix: 'id:', msgAuthFailed: 'failed' },
     },
-    '../user': { getUserSpace, releaseUserSpace() {}, getServerId: () => 'server', initServerInfo: async() => {}, toPublicDevice: ({ key: _key, ...device }) => device },
-    '@common/utils/syncRpc': { createSyncRpc: () => ({}) },
+    '../user': { getUserSpace, releaseUserSpace() {}, getServerId: () => 'server', initServerInfo: async() => {}, toPublicDevice },
+    '@common/utils/syncRpc': {
+      createSyncRpc: () => ({
+        remote: {},
+        createQueueRemote: () => ({}),
+        message() {},
+        destroy() {},
+      }),
+    },
     '../../log': { info() {}, warn() {}, error() {} },
-    '@main/modules/winMain': { sendServerStatus() {} },
+    '@main/modules/winMain': { sendServerStatus },
     '../utils/tools': { decryptMsg: async(_keyInfo, value) => value, encryptMsg: async(_keyInfo, value) => value, generateCode: () => 'code' },
     '../../migrate': { __esModule: true, default: migrateData },
     'node:net': {},
@@ -93,6 +106,54 @@ const createServerService = ({ getUserSpace, migrateData = async() => {} }) => {
     '@common/utils/common': { arrRemove() {} },
     '@common/syncProtocol': { getSyncProtocol: () => ({ id: 'current' }) },
   })
+}
+
+const createServerRuntime = () => {
+  let webSocketServer
+  const httpHandlers = new Map()
+  const createHttpServer = () => ({
+    on(event, handler) {
+      httpHandlers.set(event, handler)
+    },
+    listen() {
+      httpHandlers.get('listening')?.()
+    },
+    address() {
+      return { port: 9527 }
+    },
+    close(callback) {
+      callback()
+    },
+  })
+
+  class WebSocketServer {
+    clients = new Set()
+    handlers = new Map()
+
+    constructor() {
+      webSocketServer = this
+    }
+
+    on(event, handler) {
+      this.handlers.set(event, handler)
+    }
+
+    emit(event, ...args) {
+      this.handlers.get(event)?.(...args)
+    }
+
+    close() {
+      this.emit('close')
+    }
+  }
+
+  return {
+    http: { createServer: createHttpServer },
+    WebSocketServer,
+    connect(socket, request) {
+      webSocketServer.emit('connection', socket, request)
+    },
+  }
 }
 
 describe('sync credential cutover', () => {
@@ -157,6 +218,60 @@ describe('sync credential cutover', () => {
     assert.equal(Object.hasOwn(devices[0], 'key'), false)
   })
 
+  it('projects a connected keyed status device at the exported status boundary', async() => {
+    const runtime = createServerRuntime()
+    const keyInfo = {
+      clientId: 'device_a',
+      key: 'SERVER_KEY_SENTINEL',
+      deviceName: 'Desktop',
+      isMobile: false,
+      lastConnectDate: 1,
+    }
+    let publicDeviceCalls = 0
+    let resolveConnected
+    const connected = new Promise(resolve => { resolveConnected = resolve })
+    const service = createServerService({
+      serverRuntime: runtime,
+      getUserSpace: () => ({
+        dataManage: {
+          getClientKeyInfo: async() => keyInfo,
+          saveClientKeyInfo: async() => {},
+        },
+      }),
+      // The connection path places the first result in internal status; getStatus must project it again.
+      toPublicDevice: device => {
+        publicDeviceCalls += 1
+        if (publicDeviceCalls == 1) return device
+        const { key: _key, ...publicDevice } = device
+        return publicDevice
+      },
+      sendServerStatus: status => {
+        if (status.devices.length) resolveConnected()
+      },
+    })
+    const socket = {
+      on() {},
+      addEventListener() {},
+      send() {},
+      ping() {},
+      close() {},
+      terminate() {},
+    }
+
+    await service.startServer(9527)
+    runtime.connect(socket, { url: '/?i=device_a' })
+    await connected
+    const status = service.getStatus()
+    await service.stopServer()
+
+    assert.equal(status.devices.length, 1)
+    assert.equal(status.devices[0].clientId, 'device_a')
+    assert.equal(status.devices[0].deviceName, 'Desktop')
+    assert.equal(status.devices[0].isMobile, false)
+    assert.equal(typeof status.devices[0].lastConnectDate, 'number')
+    assert.doesNotMatch(JSON.stringify(status), /SERVER_KEY_SENTINEL/)
+  })
+
   it('migrates legacy devices before the device-list service reads metadata', async() => {
     const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-device-list-'))
     global.lxDataPath = root
@@ -206,6 +321,58 @@ describe('sync credential cutover', () => {
         },
       },
     })
+    await fsp.rm(root, { recursive: true, force: true })
+  })
+
+  it('keeps completed device metadata readable when obsolete legacy JSON is malformed', async() => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-completed-cutover-'))
+    global.lxDataPath = root
+    global.lx = {
+      credentialVault: createVault(),
+      appSetting: { 'sync.server.maxSsnapshotNum': 3, 'list.addMusicLocationType': 'add_start' },
+    }
+    const clientMetadataPath = path.join(root, 'sync/client/servers.v1.json')
+    const deviceMetadataPath = path.join(root, 'sync/server/devices.v2.json')
+    const clientMetadata = {
+      version: 1,
+      servers: {
+        server_a: { clientId: 'client_a', serverName: 'Server' },
+      },
+    }
+    const deviceMetadata = {
+      version: 2,
+      userName: 'default',
+      clients: {
+        device_a: { clientId: 'device_a', deviceName: 'Desktop', isMobile: false, lastConnectDate: 42 },
+      },
+    }
+    await writeJson(clientMetadataPath, clientMetadata)
+    await writeJson(deviceMetadataPath, deviceMetadata)
+    await fsp.writeFile(path.join(root, 'sync/client/syncAuthKey.json'), '{ malformed')
+    await fsp.writeFile(path.join(root, 'sync/server/devices.json'), '{ malformed')
+    const originalClientMetadata = await fsp.readFile(clientMetadataPath, 'utf8')
+    const originalDeviceMetadata = await fsp.readFile(deviceMetadataPath, 'utf8')
+    const migrateData = freshRequire('../../src/main/modules/sync/migrate.ts').default
+    const { UserDataManage } = freshRequire('../../src/main/modules/sync/server/user/data.ts')
+    let manager
+    const service = createServerService({
+      migrateData,
+      getUserSpace: () => {
+        manager ??= new UserDataManage('default')
+        return { getDecices: () => manager.getAllClientKeyInfo() }
+      },
+    })
+
+    const devices = await service.getDevices()
+
+    assert.deepEqual(devices, [{
+      clientId: 'device_a',
+      deviceName: 'Desktop',
+      isMobile: false,
+      lastConnectDate: 42,
+    }])
+    assert.equal(await fsp.readFile(clientMetadataPath, 'utf8'), originalClientMetadata)
+    assert.equal(await fsp.readFile(deviceMetadataPath, 'utf8'), originalDeviceMetadata)
     await fsp.rm(root, { recursive: true, force: true })
   })
 

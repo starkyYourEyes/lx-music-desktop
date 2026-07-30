@@ -89,17 +89,21 @@ const cutoverExistingMetadata = async(dataPath: string) => {
   const serverPath = path.join(dataPath, File.serverDataPath)
   const currentClients = path.join(clientPath, File.syncAuthKeysJSON)
   const currentDevices = path.join(serverPath, File.userDevicesJSON)
-  const legacyClients = await readJson(path.join(clientPath, legacyClientKeysJSON))
-  const legacyDevices = await readJson(path.join(serverPath, legacyDevicesJSON))
-  if (!await exists(currentClients) && legacyClients != null) {
-    await replaceMetadata(currentClients, { version: 1, servers: toProfiles(legacyClients) })
+  if (!await exists(currentClients)) {
+    const legacyClients = await readJson(path.join(clientPath, legacyClientKeysJSON))
+    if (legacyClients != null) {
+      await replaceMetadata(currentClients, { version: 1, servers: toProfiles(legacyClients) })
+    }
   }
-  if (!await exists(currentDevices) && isRecord(legacyDevices)) {
-    await replaceMetadata(currentDevices, {
-      version: 2,
-      userName: typeof legacyDevices.userName == 'string' ? legacyDevices.userName : 'default',
-      clients: toDevices(legacyDevices.clients),
-    })
+  if (!await exists(currentDevices)) {
+    const legacyDevices = await readJson(path.join(serverPath, legacyDevicesJSON))
+    if (isRecord(legacyDevices)) {
+      await replaceMetadata(currentDevices, {
+        version: 2,
+        userName: typeof legacyDevices.userName == 'string' ? legacyDevices.userName : 'default',
+        clients: toDevices(legacyDevices.clients),
+      })
+    }
   }
 }
 

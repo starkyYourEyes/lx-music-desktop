@@ -11,6 +11,7 @@ import { isMac } from '@common/utils'
 import createWorkers from './worker'
 import { migrateDBData } from './utils/migrate'
 import { initializeCredentialVault } from './storage/credentials'
+import { createAccountRepository } from './storage/accounts/accountRepository'
 import { migrateLegacyCredentials } from './migration/credentials/credentialMigration'
 import { setProxyByHost } from '@common/utils/request'
 import { getWebContentsNavigationDecision } from '@main/utils/webContentsNavigationGuard'
@@ -313,6 +314,12 @@ export const runStorageMigrationHooks = async(result: { existed: boolean }): Pro
       migrateLegacyAccountProfiles: input => global.lx.worker.dbService.migrateLegacyAccountProfiles(input),
     },
   })
+  const accountRepository = createAccountRepository({
+    vault,
+    profiles: global.lx.worker.dbService,
+  })
+  await accountRepository.hydrate()
+  global.lx.accountRepository = accountRepository
   return undefined
 }
 

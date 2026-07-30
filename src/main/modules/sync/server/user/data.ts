@@ -1,7 +1,6 @@
 import path from 'node:path'
 import fs from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { throttle } from '@common/utils/common'
 import { filterFileName, toMD5 } from '../utils'
 import { File } from '@common/constants_sync'
 import { createAtomicJsonFile, type AtomicJsonFile } from '@main/storage/atomicJsonFile'
@@ -38,10 +37,35 @@ const isDevicesInfoV2 = (value: unknown): value is DevicesInfoV2 => isRecord(val
 
 export const toPublicDevice = ({ key: _key, ...device }: LX.Sync.ServerKeyInfo): LX.Sync.SyncServerDevice => device
 
-const saveServerInfoThrottle = throttle(() => {
-  fs.writeFile(path.join(global.lxDataPath, File.serverDataPath, File.serverInfoJSON), JSON.stringify(serverInfo), () => {})
-})
 let serverInfo: ServerInfo
+let serverInfoQueue = Promise.resolve()
+let lastServerInfoError: unknown = null
+
+const serializeServerInfo = async<Value>(operation: () => Promise<Value>): Promise<Value> => {
+  const result = serverInfoQueue.then(operation, operation)
+  serverInfoQueue = result.then(() => {
+    lastServerInfoError = null
+  }, error => {
+    lastServerInfoError = error
+  })
+  return await result
+}
+
+const persistServerInfo = async(): Promise<void> => {
+  const directory = path.join(global.lxDataPath, File.serverDataPath)
+  const destination = path.join(directory, File.serverInfoJSON)
+  const temporary = `${destination}.next`
+  await fs.promises.mkdir(directory, { recursive: true })
+  await fs.promises.writeFile(temporary, JSON.stringify(serverInfo), { mode: 0o600 })
+  const handle = await fs.promises.open(temporary, 'r+')
+  try {
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+  await fs.promises.rename(temporary, destination)
+}
+
 export const initServerInfo = async() => {
   if (serverInfo != null) return
   const serverInfoFilePath = path.join(global.lxDataPath, File.serverDataPath, File.serverInfoJSON)
@@ -54,8 +78,7 @@ export const initServerInfo = async() => {
       serverId: randomBytes(4 * 4).toString('base64'),
       version: 2,
     }
-    await fs.promises.mkdir(path.join(global.lxDataPath, File.serverDataPath), { recursive: true })
-    saveServerInfoThrottle()
+    await serializeServerInfo(persistServerInfo)
   }
 }
 export const getServerId = () => serverInfo.serverId
@@ -65,8 +88,16 @@ export const getVersion = async() => {
 }
 export const setVersion = async(version: number) => {
   await initServerInfo()
-  serverInfo.version = version
-  saveServerInfoThrottle()
+  await serializeServerInfo(async() => {
+    serverInfo.version = version
+    await persistServerInfo()
+  })
+}
+
+export const flushServerInfo = async(): Promise<void> => {
+  await serverInfoQueue
+  if (lastServerInfoError instanceof Error) throw lastServerInfoError
+  if (lastServerInfoError != null) throw new Error('Server info persistence failed')
 }
 
 export const getUserDirname = (userName: string) => `${filterFileName(userName)}_${toMD5(userName).substring(0, 6)}`

@@ -410,4 +410,124 @@ describe('sync credential cutover', () => {
     assert.doesNotMatch(JSON.stringify(metadata), /SERVER_KEY_SENTINEL/)
     await fsp.rm(root, { recursive: true, force: true })
   })
+
+  it('canonicalizes same-count versioned metadata only after vaulting discovered keys', async() => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-canonical-metadata-'))
+    const vault = createVault()
+    global.lxDataPath = root
+    global.lx = { credentialVault: vault, appSetting: {} }
+    await writeJson(path.join(root, 'sync/client/servers.v1.json'), {
+      version: 1,
+      servers: {
+        server_a: {
+          clientId: 'client_a',
+          serverName: 'Server',
+          key: 'CLIENT_KEY_SENTINEL',
+          forbidden: 'remove-me',
+        },
+      },
+      forbidden: true,
+    })
+    await writeJson(path.join(root, 'sync/server/devices.v2.json'), {
+      version: 2,
+      userName: 'default',
+      clients: {
+        device_a: {
+          clientId: 'device_a',
+          deviceName: 'Desktop',
+          isMobile: false,
+          key: 'SERVER_KEY_SENTINEL',
+          forbidden: 'remove-me',
+        },
+      },
+      forbidden: true,
+    })
+
+    await freshRequire('../../src/main/modules/sync/migrate.ts').default(root)
+
+    assert.deepEqual(JSON.parse(await fsp.readFile(path.join(root, 'sync/client/servers.v1.json'), 'utf8')), {
+      version: 1,
+      servers: { server_a: { clientId: 'client_a', serverName: 'Server' } },
+    })
+    assert.deepEqual(JSON.parse(await fsp.readFile(path.join(root, 'sync/server/devices.v2.json'), 'utf8')), {
+      version: 2,
+      userName: 'default',
+      clients: { device_a: { clientId: 'device_a', deviceName: 'Desktop', isMobile: false } },
+    })
+    assert.equal(vault.read({ kind: 'sync-client', serverId: 'server_a' }).status, 'available')
+    assert.equal(vault.read({ kind: 'sync-server-device', userName: 'default', clientId: 'device_a' }).status, 'available')
+    await fsp.rm(root, { recursive: true, force: true })
+  })
+
+  it('resumes every root sync migration phase before verified source cleanup', async() => {
+    const phases = [
+      'after-directories',
+      'after-server-info',
+      'after-server-metadata',
+      'after-snapshots',
+      'after-client-metadata',
+    ]
+    for (const failAt of phases) {
+      const root = await fsp.mkdtemp(path.join(os.tmpdir(), `lx-sync-resume-${failAt}-`))
+      const vault = createVault()
+      global.lxDataPath = root
+      global.lx = { credentialVault: vault, appSetting: {} }
+      const legacyPath = path.join(root, 'sync.json')
+      const snapshotPath = path.join(root, 'snapshot_fixture.json')
+      await writeJson(legacyPath, {
+        serverId: 'server_a',
+        clients: {
+          device_a: {
+            clientId: 'device_a',
+            key: 'SERVER_KEY_SENTINEL',
+            deviceName: 'Desktop',
+            isMobile: false,
+            lastSyncDate: 123,
+            snapshotKey: 'snapshot_a',
+          },
+        },
+        syncAuthKey: {
+          server_a: {
+            clientId: 'client_a',
+            key: 'CLIENT_KEY_SENTINEL',
+            serverName: 'Server',
+          },
+        },
+        snapshotInfo: { clients: {} },
+      })
+      await writeJson(snapshotPath, { fixture: true })
+      const migrateData = freshRequire('../../src/main/modules/sync/migrate.ts').default
+
+      await assert.rejects(migrateData(root, { failAt }), /injected failure/i)
+      assert.equal(fs.existsSync(legacyPath), true)
+
+      await migrateData(root)
+
+      assert.equal(fs.existsSync(legacyPath), false)
+      assert.equal(fs.existsSync(snapshotPath), false)
+      assert.deepEqual(JSON.parse(await fsp.readFile(path.join(root, 'sync/server/serverInfo.json'), 'utf8')), {
+        serverId: 'server_a',
+        version: 2,
+      })
+      assert.equal(fs.existsSync(path.join(root, 'sync/server/list/snapshot/snapshot_fixture.json')), true)
+      assert.equal(vault.read({ kind: 'sync-client', serverId: 'server_a' }).status, 'available')
+      assert.equal(vault.read({ kind: 'sync-server-device', userName: 'default', clientId: 'device_a' }).status, 'available')
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('awaits server identity persistence and propagates its failure', async() => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-server-info-'))
+    global.lxDataPath = root
+    global.lx = { appSetting: {} }
+    const blockedTemporaryPath = path.join(root, 'sync/server/serverInfo.json.next')
+    await fsp.mkdir(blockedTemporaryPath, { recursive: true })
+    try {
+      const serverData = freshRequire('../../src/main/modules/sync/server/user/data.ts')
+      await assert.rejects(serverData.initServerInfo(), /EISDIR|directory|illegal operation/i)
+      await assert.rejects(serverData.flushServerInfo(), /EISDIR|directory|illegal operation/i)
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  })
 })

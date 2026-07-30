@@ -105,6 +105,117 @@ describe('credential vault', () => {
     assert.deepEqual(reloaded.read({ kind: 'netease-cookie' }), { status: 'undecryptable' })
   })
 
+  it('binds ciphertext to the exact credential reference across same-schema entries', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const { toCredentialEntryId } = require('../../src/main/storage/credentials/types.ts')
+    const substitutions = [
+      {
+        source: { kind: 'netease-cookie' },
+        target: { kind: 'qq-music-cookie' },
+        payload: { version: 1, cookie: 'cookie=value' },
+      },
+      {
+        source: { kind: 'sync-client', serverId: 'server-a' },
+        target: { kind: 'sync-client', serverId: 'server-b' },
+        payload: { version: 1, key: 'client-key' },
+      },
+      {
+        source: { kind: 'sync-client', serverId: 'server-a' },
+        target: { kind: 'sync-server-device', userName: 'alice', clientId: 'desktop' },
+        payload: { version: 1, key: 'shared-schema-key' },
+      },
+      {
+        source: { kind: 'legacy-quarantine', sourceSha256: 'a'.repeat(64) },
+        target: { kind: 'legacy-quarantine', sourceSha256: 'b'.repeat(64) },
+        payload: { version: 1, secret: 'quarantined' },
+      },
+    ]
+    const statuses = []
+
+    for (const substitution of substitutions) {
+      const profileRoot = await makeProfileRoot()
+      const filePath = path.join(profileRoot, 'credentials.v1.json')
+      const vault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+      await vault.write(substitution.source, substitution.payload)
+      const envelope = JSON.parse(await fsp.readFile(filePath, 'utf8'))
+      const sourceId = toCredentialEntryId(substitution.source)
+      const targetId = toCredentialEntryId(substitution.target)
+      envelope.entries[targetId] = envelope.entries[sourceId]
+      delete envelope.entries[sourceId]
+      await fsp.writeFile(filePath, JSON.stringify(envelope))
+
+      const reloaded = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+      statuses.push(reloaded.read(substitution.target).status)
+    }
+
+    assert.deepEqual(statuses, substitutions.map(() => 'undecryptable'))
+  })
+
+  it('rejects plaintext-capable extra fields at every envelope level', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const validEntry = {
+      version: 1,
+      ciphertext: Buffer.from('ciphertext').toString('base64'),
+      updatedAtMs: 1,
+    }
+    const validMarker = {
+      sourceSha256: 'a'.repeat(64),
+      completedAtMs: 1,
+    }
+    const fixtures = [
+      { version: 1, entries: {}, migrationMarkers: {}, plaintext: 'TOP_SECRET' },
+      { version: 1, entries: { entry: { ...validEntry, plaintext: 'ENTRY_SECRET' } }, migrationMarkers: {} },
+      { version: 1, entries: {}, migrationMarkers: { marker: { ...validMarker, plaintext: 'MARKER_SECRET' } } },
+    ]
+    const rejected = []
+
+    for (const fixture of fixtures) {
+      const profileRoot = await makeProfileRoot()
+      await fsp.writeFile(path.join(profileRoot, 'credentials.v1.json'), JSON.stringify(fixture))
+      try {
+        await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+        rejected.push(false)
+      } catch {
+        rejected.push(true)
+      }
+    }
+
+    assert.deepEqual(rejected, [true, true, true])
+  })
+
+  it('isolates and preserves approved structural corruption in one entry', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const corruptions = [
+      () => ({}),
+      entry => ({ ...entry, ciphertext: '' }),
+      entry => ({ ...entry, ciphertext: 'abc' }),
+      entry => ({ ...entry, ciphertext: '!!!!' }),
+      entry => ({ ...entry, version: 2, updatedAtMs: -1 }),
+    ]
+
+    for (const corrupt of corruptions) {
+      const profileRoot = await makeProfileRoot()
+      const filePath = path.join(profileRoot, 'credentials.v1.json')
+      const firstVault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+      await firstVault.write({ kind: 'netease-cookie' }, { version: 1, cookie: 'bad-entry' })
+      await firstVault.write({ kind: 'qq-music-cookie' }, { version: 1, cookie: 'healthy-entry' })
+      const envelope = JSON.parse(await fsp.readFile(filePath, 'utf8'))
+      const corruptedEntry = corrupt(envelope.entries['netease-cookie'])
+      envelope.entries['netease-cookie'] = corruptedEntry
+      await fsp.writeFile(filePath, JSON.stringify(envelope))
+
+      const vault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+      assert.deepEqual(vault.read({ kind: 'netease-cookie' }), { status: 'undecryptable' })
+      assert.deepEqual(vault.read({ kind: 'qq-music-cookie' }), {
+        status: 'available',
+        value: { version: 1, cookie: 'healthy-entry' },
+      })
+      await vault.write({ kind: 'qq-music-cookie' }, { version: 1, cookie: 'updated-healthy-entry' })
+      const preserved = JSON.parse(await fsp.readFile(filePath, 'utf8'))
+      assert.deepEqual(preserved.entries['netease-cookie'], corruptedEntry)
+    }
+  })
+
   it('removes only the requested entry', async() => {
     const { createCredentialVault } = require(vaultPath)
     const profileRoot = await makeProfileRoot()
@@ -166,5 +277,18 @@ describe('credential vault', () => {
       value: { version: 1, cookie: 'SECRET' },
     })
     assert.equal(fs.existsSync(filePath), false)
+  })
+
+  it('removes persisted ciphertext even when secure storage is memory-only', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const profileRoot = await makeProfileRoot()
+    const encryptedVault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    await encryptedVault.write({ kind: 'qq-music-cookie' }, { version: 1, cookie: 'old-persisted-cookie' })
+
+    const memoryVault = await createCredentialVault({ profileRoot, cipher: memoryOnlyCipher })
+    await memoryVault.remove({ kind: 'qq-music-cookie' })
+
+    const reloaded = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    assert.deepEqual(reloaded.read({ kind: 'qq-music-cookie' }), { status: 'missing' })
   })
 })

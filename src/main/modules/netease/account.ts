@@ -42,6 +42,8 @@ export const createNeteaseAccountService = ({
   api: NeteaseAccountApi
   now?: () => number
 }) => {
+  let accountGeneration = 0
+
   const getAccountData = () => {
     const status = accounts.getStatus('netease')
     return {
@@ -51,23 +53,41 @@ export const createNeteaseAccountService = ({
     }
   }
 
-  const refreshLoginStatus = async(cookie: string): Promise<LX.Netease.AccountStatus> => {
+  const getLoggedOutStatus = (): LX.Netease.AccountStatus => ({
+    isLoggedIn: false,
+    profile: null,
+  })
+
+  const isCurrentAccount = (cookie: string, generation: number) => {
+    return generation == accountGeneration && accounts.getCookie('netease') == cookie
+  }
+
+  const refreshLoginStatus = async(
+    cookie: string,
+    sourceCookie: string,
+    generation: number,
+  ): Promise<LX.Netease.AccountStatus> => {
     if (!cookie) return { isLoggedIn: false, profile: null }
 
     const result = await api.login_status({ cookie })
+    if (!isCurrentAccount(sourceCookie, generation)) return getLoggedOutStatus()
     const profile = normalizeProfile(result.body?.data?.profile ?? result.body?.profile)
     if (profile == null) {
+      if (!isCurrentAccount(sourceCookie, generation)) return getLoggedOutStatus()
       await accounts.clear('netease')
       return { isLoggedIn: false, profile: null }
     }
     const mergedCookie = normalizeCookie(result.body?.cookie || result.cookie) || cookie
+    if (!isCurrentAccount(sourceCookie, generation)) return getLoggedOutStatus()
     await accounts.save('netease', {
       cookie: mergedCookie,
       profile: toRepositoryProfile(profile),
       updatedAtMs: now(),
     })
 
-    return { isLoggedIn: true, profile }
+    return isCurrentAccount(mergedCookie, generation)
+      ? { isLoggedIn: true, profile }
+      : getLoggedOutStatus()
   }
 
   const getAccountStatus = async(): Promise<LX.Netease.AccountStatus> => {
@@ -76,7 +96,8 @@ export const createNeteaseAccountService = ({
     if (account.profile && now() - account.updatedAt < 5 * 60 * 1000) {
       return { isLoggedIn: true, profile: account.profile }
     }
-    return refreshLoginStatus(account.cookie).catch(() => ({
+    const generation = accountGeneration
+    return refreshLoginStatus(account.cookie, account.cookie, generation).catch(() => ({
       isLoggedIn: !!account.profile,
       profile: account.profile,
     }))
@@ -92,17 +113,27 @@ export const createNeteaseAccountService = ({
   }
 
   const checkLoginQr = async(key: string): Promise<LX.Netease.LoginQrCheck> => {
+    const generation = ++accountGeneration
+    const sourceCookie = accounts.getCookie('netease') ?? ''
     const result = await api.login_qr_check({ key })
     const code = Number(result.body?.code ?? 0)
     const message = result.body?.message ?? ''
-    if (code !== 803) return { code, message, isLoggedIn: false, profile: null }
-    const status = await refreshLoginStatus(normalizeCookie(result.body?.cookie || result.cookie))
+    if (code !== 803 || !isCurrentAccount(sourceCookie, generation)) {
+      return { code, message, isLoggedIn: false, profile: null }
+    }
+    const status = await refreshLoginStatus(
+      normalizeCookie(result.body?.cookie || result.cookie),
+      sourceCookie,
+      generation,
+    )
     return { code, message, ...status }
   }
 
   const logout = async() => {
     const cookie = accounts.getCookie('netease')
+    const generation = ++accountGeneration
     if (cookie) await api.logout({ cookie }).catch(() => null)
+    if (!isCurrentAccount(cookie ?? '', generation)) return
     await accounts.clear('netease')
   }
 

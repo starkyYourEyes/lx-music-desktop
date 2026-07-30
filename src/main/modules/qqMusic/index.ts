@@ -401,6 +401,7 @@ export const createQQMusicAccountService = ({
       profile: toRepositoryProfile(account.profile),
       updatedAtMs: account.updatedAt,
     })
+    if (generation != loginGeneration) return getExpiredLoginCheck()
     scheduleAccountRefresh(account)
     return {
       state: result.state,

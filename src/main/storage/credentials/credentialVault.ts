@@ -202,10 +202,13 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
     return result
   }
 
-  const persist = async(mutate: (next: CredentialVaultStorageFileV1) => void): Promise<void> => serialize(async() => {
+  const persist = async(
+    mutate: (next: CredentialVaultStorageFileV1) => void,
+    options?: { retainUnsafeCiphertext?: boolean },
+  ): Promise<void> => serialize(async() => {
     const next = cloneEnvelope(envelope)
     mutate(next)
-    removeUnsafeCiphertextEntries(next)
+    if (!options?.retainUnsafeCiphertext) removeUnsafeCiphertextEntries(next)
     await file.replace(next)
     // Serialized vault mutations make this post-commit assignment race-free.
     // eslint-disable-next-line require-atomic-updates
@@ -236,7 +239,7 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
       if (envelope.entries[entryId] != null) {
         await persist(next => {
           Reflect.deleteProperty(next.entries, entryId)
-        })
+        }, { retainUnsafeCiphertext: true })
       }
       return { persistence: 'memory-only' }
     }
@@ -287,7 +290,7 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
     assertMarker(name, sourceSha256, completedAtMs)
     await persist(next => {
       next.migrationMarkers[name] = { sourceSha256, completedAtMs }
-    })
+    }, options.cipher.mode == 'memory-only' ? { retainUnsafeCiphertext: true } : undefined)
   }
 
   const flush = async(): Promise<void> => {

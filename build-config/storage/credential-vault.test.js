@@ -326,4 +326,30 @@ describe('credential vault', () => {
     const reloaded = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
     assert.deepEqual(reloaded.read({ kind: 'qq-music-cookie' }), { status: 'missing' })
   })
+
+  it('keeps an unrelated malformed ciphertext diagnostic during memory-only target cleanup and marker persistence', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const profileRoot = await makeProfileRoot()
+    const filePath = path.join(profileRoot, 'credentials.v1.json')
+    const encryptedVault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    await encryptedVault.write({ kind: 'qq-music-cookie' }, { version: 1, cookie: 'stale-target-cookie' })
+    await encryptedVault.write({ kind: 'netease-cookie' }, { version: 1, cookie: 'unrelated-cookie' })
+    const seeded = JSON.parse(await fsp.readFile(filePath, 'utf8'))
+    const malformedEntry = { ...seeded.entries['netease-cookie'], ciphertext: 'malformed-ciphertext' }
+    seeded.entries['netease-cookie'] = malformedEntry
+    await fsp.writeFile(filePath, JSON.stringify(seeded))
+
+    const memoryVault = await createCredentialVault({ profileRoot, cipher: memoryOnlyCipher })
+    await memoryVault.write({ kind: 'qq-music-cookie' }, { version: 1, cookie: 'process-only-cookie' })
+    await memoryVault.putMigrationMarker('legacy-data:memory-only', 'a'.repeat(64), 100)
+
+    const persisted = JSON.parse(await fsp.readFile(filePath, 'utf8'))
+    assert.deepEqual(persisted.entries['netease-cookie'], malformedEntry)
+    assert.equal(Object.hasOwn(persisted.entries, 'qq-music-cookie'), false)
+    assert.doesNotMatch(await fsp.readFile(filePath, 'utf8'), /process-only-cookie/)
+
+    const reloaded = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    assert.deepEqual(reloaded.read({ kind: 'netease-cookie' }), { status: 'undecryptable' })
+    assert.deepEqual(reloaded.read({ kind: 'qq-music-cookie' }), { status: 'missing' })
+  })
 })

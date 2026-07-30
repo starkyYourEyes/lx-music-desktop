@@ -4,7 +4,11 @@ import {
   createUpsertAccountProfileStatement,
 } from './statements'
 import { normalizePublicAccountProfile } from '../../../../../common/storage/accountProfile'
+import { sha256Canonical, type JsonValue } from '../../../../../common/storage/canonicalJson'
 import type { AccountProfileProvider, AccountProfileRow } from './index'
+import { getDB } from '../../db'
+import { putMigrationMarker } from '../../migrate'
+import type { MigrationMarker } from '../../migrations/types'
 
 const providers: readonly AccountProfileProvider[] = ['netease', 'qq_music']
 
@@ -49,4 +53,22 @@ export const upsertAccountProfileRow = (row: AccountProfileRow): void => {
 export const deleteAccountProfile = (provider: AccountProfileProvider): void => {
   assertProvider(provider)
   createRemoveAccountProfileStatement().run(provider)
+}
+
+export const migrateAccountProfileRows = (rows: AccountProfileRow[], marker: MigrationMarker): void => {
+  for (const row of rows) assertRow(row)
+  const db = getDB()
+  db.transaction(() => {
+    for (const row of rows) createUpsertAccountProfileStatement().run(row)
+    const storedRows = rows.map(row => queryAccountProfile(row.provider))
+    if (storedRows.some(row => row == null) || storedRows.length != rows.length) {
+      throw new Error('Account profile migration readback failed')
+    }
+    const expected = rows.map(row => ({ ...row })).sort((left, right) => left.provider.localeCompare(right.provider))
+    const actual = storedRows.map(row => row!).sort((left, right) => left.provider.localeCompare(right.provider))
+    if (sha256Canonical(expected as unknown as JsonValue) != sha256Canonical(actual as unknown as JsonValue)) {
+      throw new Error('Account profile migration hash verification failed')
+    }
+    putMigrationMarker(db, marker)
+  })()
 }

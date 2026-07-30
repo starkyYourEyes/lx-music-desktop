@@ -1,8 +1,10 @@
 import {
   close,
+  getDB,
   getDatabaseHealth,
   init,
 } from './db'
+import { getMigrationMarker } from './migrate'
 import { exposeWorker } from '../utils/worker'
 import { list, lyric, music_url, music_other_source, download, dislike_list, account_profile } from './modules/index'
 
@@ -12,6 +14,7 @@ const common = {
   init,
   close,
   getDatabaseHealth,
+  getMigrationMarker: (name: string) => getMigrationMarker(getDB(), name),
 }
 
 exposeWorker(Object.assign(common, list, lyric, music_url, music_other_source, download, dislike_list, account_profile))

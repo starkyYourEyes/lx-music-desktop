@@ -10,6 +10,8 @@ import { createAppEvent, createDislikeEvent, createListEvent } from '@main/event
 import { isMac } from '@common/utils'
 import createWorkers from './worker'
 import { migrateDBData } from './utils/migrate'
+import { initializeCredentialVault } from './storage/credentials'
+import { migrateLegacyCredentials } from './migration/credentials/credentialMigration'
 import { setProxyByHost } from '@common/utils/request'
 import { getWebContentsNavigationDecision } from '@main/utils/webContentsNavigationGuard'
 import { getPortableUserDataPaths, migrateLegacyUserData } from './migration/legacyUserData'
@@ -303,6 +305,15 @@ const initTheme = () => {
 let isInitialized = false
 export const runStorageMigrationHooks = async(result: { existed: boolean }): Promise<undefined> => {
   if (!result.existed) await migrateDBData()
+  const vault = await initializeCredentialVault()
+  await migrateLegacyCredentials({
+    dataRoot: global.lxDataPath,
+    vault,
+    profiles: {
+      migrateLegacyAccountProfiles: input => global.lx.worker.dbService.migrateLegacyAccountProfiles(input),
+      getMigrationMarker: name => global.lx.worker.dbService.getMigrationMarker(name),
+    },
+  })
   return undefined
 }
 

@@ -1,78 +1,65 @@
-import fs from 'node:fs'
 import path from 'node:path'
-import { File } from '../../../../common/constants_sync'
-import { exists } from '../utils'
+import { File } from '@common/constants_sync'
+import { createAtomicJsonFile, type AtomicJsonFile } from '@main/storage/atomicJsonFile'
+import { getCredentialVault } from '@main/storage/credentials'
+import type { SyncKeyPayloadV1 } from '@main/storage/credentials/types'
 
-
-let syncAuthKeys: Record<string, LX.Sync.ClientKeyInfo>
-
-
-const saveSyncAuthKeys = async() => {
-  const syncAuthKeysFilePath = path.join(global.lxDataPath, File.clientDataPath, File.syncAuthKeysJSON)
-  return fs.promises.writeFile(syncAuthKeysFilePath, JSON.stringify(syncAuthKeys), 'utf8')
+interface ClientServersFileV1 {
+  version: 1
+  servers: Record<string, LX.Sync.SyncClientProfile>
 }
 
-export const initClientInfo = async() => {
-  if (syncAuthKeys != null) return
-  const syncAuthKeysFilePath = path.join(global.lxDataPath, File.clientDataPath, File.syncAuthKeysJSON)
-  if (await fs.promises.stat(syncAuthKeysFilePath).then(() => true).catch(() => false)) {
-    // eslint-disable-next-line require-atomic-updates
-    syncAuthKeys = JSON.parse((await fs.promises.readFile(syncAuthKeysFilePath)).toString())
-  } else {
-    // eslint-disable-next-line require-atomic-updates
-    syncAuthKeys = {}
-    const syncDataPath = path.join(global.lxDataPath, File.clientDataPath)
-    if (!await exists(syncDataPath)) {
-      await fs.promises.mkdir(syncDataPath, { recursive: true })
-    }
-    void saveSyncAuthKeys()
-  }
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value != null && typeof value == 'object' && !Array.isArray(value)
+
+const isProfile = (value: unknown): value is LX.Sync.SyncClientProfile => isRecord(value) &&
+  typeof value.clientId == 'string' && value.clientId.length > 0 &&
+  typeof value.serverName == 'string' && value.serverName.length > 0 &&
+  (value.syncProtocol == null || value.syncProtocol == 'current' || value.syncProtocol == 'legacy') &&
+  Object.keys(value).every(key => ['clientId', 'serverName', 'syncProtocol'].includes(key))
+
+const isClientServersFileV1 = (value: unknown): value is ClientServersFileV1 => isRecord(value) &&
+  value.version == 1 && isRecord(value.servers) && Object.values(value.servers).every(isProfile) &&
+  Object.keys(value).every(key => ['version', 'servers'].includes(key))
+
+let profiles: Record<string, LX.Sync.SyncClientProfile> | null = null
+let metadataFile: AtomicJsonFile<ClientServersFileV1> | null = null
+
+const getMetadataFile = () => {
+  metadataFile ??= createAtomicJsonFile<ClientServersFileV1>({
+    filePath: path.join(global.lxDataPath, File.clientDataPath, File.syncAuthKeysJSON),
+    validate: isClientServersFileV1,
+    shouldPreservePrevious: () => false,
+    mode: 0o600,
+  })
+  return metadataFile
 }
 
-export const getSyncAuthKey = async(serverId: string) => {
+const toProfile = ({ key: _key, ...profile }: LX.Sync.ClientKeyInfo): LX.Sync.SyncClientProfile => profile
+
+const initClientInfo = async() => {
+  if (profiles != null) return
+  const document = await getMetadataFile().read()
+  // eslint-disable-next-line require-atomic-updates
+  profiles = document?.servers ?? {}
+  if (document == null) await getMetadataFile().replace({ version: 1, servers: profiles })
+}
+
+export const getSyncAuthKey = async(serverId: string): Promise<LX.Sync.ClientKeyInfo | null> => {
   await initClientInfo()
-  return syncAuthKeys[serverId] ?? null
+  const profile = profiles![serverId]
+  if (profile == null) return null
+  const credential = getCredentialVault().read<SyncKeyPayloadV1>({ kind: 'sync-client', serverId })
+  if (credential.status != 'available' && credential.status != 'memory-only') return null
+  return { ...profile, key: credential.value.key }
 }
+
 export const setSyncAuthKey = async(serverId: string, info: LX.Sync.ClientKeyInfo) => {
   await initClientInfo()
-  syncAuthKeys[serverId] = info
-  void saveSyncAuthKeys()
+  const vault = getCredentialVault()
+  const credential: SyncKeyPayloadV1 = { version: 1, key: info.key }
+  await vault.write({ kind: 'sync-client', serverId }, credential)
+  if (!await vault.verify({ kind: 'sync-client', serverId }, credential)) throw new Error('Sync client credential verification failed')
+  profiles![serverId] = toProfile(info)
+  await getMetadataFile().replace({ version: 1, servers: profiles! })
 }
-
-// let syncHost: string
-// export const getSyncHost = async() => {
-//   if (syncHost === undefined) {
-//     const store = getStore(STORE_NAMES.SYNC)
-//     syncHost = (store.get('syncHost') as typeof syncHost | null) ?? ''
-//   }
-//   return syncHost
-// }
-// export const setSyncHost = async(host: string) => {
-//   // let hostInfo = await getData(syncHostPrefix) || {}
-//   // hostInfo.host = host
-//   // hostInfo.port = port
-//   syncHost = host
-//   const store = getStore(STORE_NAMES.SYNC)
-//   store.set('syncHost', syncHost)
-// }
-// let syncHostHistory: string[]
-// export const getSyncHostHistory = async() => {
-//   if (syncHostHistory === undefined) {
-//     const store = getStore(STORE_NAMES.SYNC)
-//     syncHostHistory = (store.get('syncHostHistory') as string[]) ?? []
-//   }
-//   return syncHostHistory
-// }
-// export const addSyncHostHistory = async(host: string) => {
-//   let syncHostHistory = await getSyncHostHistory()
-//   if (syncHostHistory.some(h => h == host)) return
-//   syncHostHistory.unshift(host)
-//   if (syncHostHistory.length > 20) syncHostHistory = syncHostHistory.slice(0, 20) // 最多存储20个
-//   const store = getStore(STORE_NAMES.SYNC)
-//   store.set('syncHostHistory', syncHostHistory)
-// }
-// export const removeSyncHostHistory = async(index: number) => {
-//   syncHostHistory.splice(index, 1)
-//   const store = getStore(STORE_NAMES.SYNC)
-//   store.set('syncHostHistory', syncHostHistory)
-// }

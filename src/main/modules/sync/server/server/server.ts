@@ -3,7 +3,7 @@ import { WebSocketServer } from 'ws'
 import { registerLocalSyncEvent, callObj, sync, unregisterLocalSyncEvent } from './sync'
 import { authCode, authConnect } from './auth'
 import { SYNC_CLOSE_CODE, SYNC_CODE } from '@common/constants_sync'
-import { getUserSpace, releaseUserSpace, getServerId, initServerInfo } from '../user'
+import { getUserSpace, releaseUserSpace, getServerId, initServerInfo, toPublicDevice } from '../user'
 import { createSyncRpc } from '@common/utils/syncRpc'
 import log from '../../log'
 import { sendServerStatus } from '@main/modules/winMain'
@@ -64,13 +64,13 @@ const handleConnection = async(socket: LX.Sync.Server.Socket, request: IncomingM
 
   //   // if (typeof socket.handshake.query.i != 'string') return socket.disconnect(true)
   const userSpace = getUserSpace()
-  const keyInfo = userSpace.dataManage.getClientKeyInfo(clientId)
+  const keyInfo = await userSpace.dataManage.getClientKeyInfo(clientId)
   if (!keyInfo) {
     socket.close(SYNC_CLOSE_CODE.failed)
     return
   }
   keyInfo.lastConnectDate = Date.now()
-  userSpace.dataManage.saveClientKeyInfo(keyInfo)
+  await userSpace.dataManage.saveClientKeyInfo(keyInfo)
   //   // socket.lx_keyInfo = keyInfo
   socket.keyInfo = keyInfo
   socket.userInfo = { name: 'default' }
@@ -84,7 +84,7 @@ const handleConnection = async(socket: LX.Sync.Server.Socket, request: IncomingM
     log.warn(err)
     return
   }
-  status.devices.push(keyInfo)
+  status.devices.push(toPublicDevice(keyInfo))
   // handleConnection(io, socket)
   sendServerStatus(status)
   socket.onClose(() => {

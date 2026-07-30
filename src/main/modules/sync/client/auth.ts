@@ -39,7 +39,6 @@ const hello = async(urlInfo: LX.Sync.Client.UrlInfo) => request(`${urlInfo.httpP
   .then(({ text }) => text == SYNC_CODE.helloMsg)
   .catch((err: any) => {
     log.error('[auth] hello', err.message)
-    console.log(err)
     return false
   })
 
@@ -50,7 +49,6 @@ const getServerId = async(urlInfo: LX.Sync.Client.UrlInfo) => request(`${urlInfo
   })
   .catch((err: any) => {
     log.error('[auth] getServerId', err.message)
-    console.log(err)
     throw err
   })
 
@@ -139,7 +137,6 @@ const auth = async(urlInfo: LX.Sync.Client.UrlInfo, serverId: string, authCode?:
 }
 
 export default async(urlInfo: LX.Sync.Client.UrlInfo, authCode?: string) => {
-  console.log('connect: ', urlInfo.href, authCode)
   if (!await hello(urlInfo)) throw new Error(SYNC_CODE.connectServiceFailed)
   const serverId = await getServerId(urlInfo)
   if (!serverId) throw new Error(SYNC_CODE.getServiceIdFailed)

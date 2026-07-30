@@ -46,14 +46,17 @@ declare namespace LX {
     | SyncAction<'user_api_pull', UserApiSyncServiceParams>
     | SyncAction<'user_api_push', UserApiSyncServiceParams>
 
-    type ServerDevices = ServerKeyInfo[]
+    type SyncClientProfile = Omit<ClientKeyInfo, 'key'>
+    type SyncServerDevice = Omit<ServerKeyInfo, 'key'>
+
+    type ServerDevices = SyncServerDevice[]
 
     interface ServerStatus {
       status: boolean
       message: string
       address: string[]
       code: string
-      devices: ServerKeyInfo[]
+      devices: SyncServerDevice[]
     }
 
     interface ClientStatus {

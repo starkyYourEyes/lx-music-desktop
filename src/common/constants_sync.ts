@@ -59,7 +59,7 @@ export const File = {
 
   serverInfoJSON: 'serverInfo.json',
   userDir: 'users',
-  userDevicesJSON: 'devices.json',
+  userDevicesJSON: 'devices.v2.json',
   listDir: 'list',
   listSnapshotDir: 'snapshot',
   listSnapshotInfoJSON: 'snapshotInfo.json',
@@ -67,7 +67,7 @@ export const File = {
   dislikeSnapshotDir: 'snapshot',
   dislikeSnapshotInfoJSON: 'snapshotInfo.json',
 
-  syncAuthKeysJSON: 'syncAuthKey.json',
+  syncAuthKeysJSON: 'servers.v1.json',
 } as const
 
 export const FeaturesList = [

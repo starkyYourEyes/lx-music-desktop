@@ -24,6 +24,7 @@ export interface CredentialCipher {
 }
 
 const identifierSegmentPattern = /^[A-Za-z0-9._@-]{1,256}$/
+const standardBase64Pattern = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
 const maxCookieOrSyncKeyLength = 64 * 1024
 const maxWebDAVFieldLength = 4 * 1024
 
@@ -41,6 +42,14 @@ const assertIdentifierSegment = (value: unknown, field: string): string => {
   return value
 }
 
+const assertSyncIdentifier = (value: unknown, field: string): string => {
+  if (typeof value != 'string' || value.length == 0 || value.length > 256 ||
+      (!identifierSegmentPattern.test(value) && (!standardBase64Pattern.test(value) || Buffer.from(value, 'base64').toString('base64') != value))) {
+    throw new Error(`Invalid credential identifier ${field}`)
+  }
+  return value
+}
+
 export const toCredentialEntryId = (reference: CredentialRef): string => {
   switch (reference.kind) {
     case 'netease-cookie':
@@ -48,9 +57,9 @@ export const toCredentialEntryId = (reference: CredentialRef): string => {
     case 'webdav-basic':
       return reference.kind
     case 'sync-client':
-      return `${reference.kind}:${assertIdentifierSegment(reference.serverId, 'serverId')}`
+      return `${reference.kind}:${assertSyncIdentifier(reference.serverId, 'serverId')}`
     case 'sync-server-device':
-      return `${reference.kind}:${assertIdentifierSegment(reference.userName, 'userName')}:${assertIdentifierSegment(reference.clientId, 'clientId')}`
+      return `${reference.kind}:${assertIdentifierSegment(reference.userName, 'userName')}:${assertSyncIdentifier(reference.clientId, 'clientId')}`
     case 'legacy-quarantine':
       return `${reference.kind}:${assertIdentifierSegment(reference.sourceSha256, 'sourceSha256')}`
     default:

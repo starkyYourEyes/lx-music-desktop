@@ -34,7 +34,7 @@ export const sync: {
       message: string
       address: string[]
       code: string
-      devices: LX.Sync.ServerKeyInfo[]
+      devices: LX.Sync.SyncServerDevice[]
     }
   }
   client: {

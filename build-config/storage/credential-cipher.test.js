@@ -50,6 +50,32 @@ describe('credential cipher', () => {
     assert.throws(() => toCredentialEntryId({ kind: '../x' }))
   })
 
+  it('accepts only canonical standard Base64 sync identifiers', () => {
+    const { toCredentialEntryId } = require(typesPath)
+    const standardBase64Ids = ['MDEyMzQ1Njc4OWFiY2RlZg==', '+/v7+/v7+/v7+/v7+/v7+w==']
+    for (const standardBase64Id of standardBase64Ids) {
+      assert.equal(
+        toCredentialEntryId({ kind: 'sync-client', serverId: standardBase64Id }),
+        `sync-client:${standardBase64Id}`,
+      )
+      assert.equal(
+        toCredentialEntryId({ kind: 'sync-server-device', userName: 'default', clientId: standardBase64Id }),
+        `sync-server-device:default:${standardBase64Id}`,
+      )
+    }
+    for (const invalidId of [
+      '../x',
+      'MDEyMzQ1Njc4OWFiY2RlZg=',
+      'MDEyMzQ1Njc4OWFiY2RlZg===',
+      'MDEyMzQ1Njc4OWFiY2RlZg==junk',
+      'MDEyMzQ1Njc4OWFiY2RlZg==/',
+    ]) {
+      assert.throws(() => toCredentialEntryId({ kind: 'sync-client', serverId: invalidId }))
+      assert.throws(() => toCredentialEntryId({ kind: 'sync-server-device', userName: 'default', clientId: invalidId }))
+    }
+    assert.throws(() => toCredentialEntryId({ kind: 'sync-server-device', userName: '../x', clientId: standardBase64Ids[0] }))
+  })
+
   it('validates credential payload bounds before vault persistence', () => {
     const { assertCookieCredential, assertSyncKeyCredential, assertWebDAVCredential } = require(typesPath)
 

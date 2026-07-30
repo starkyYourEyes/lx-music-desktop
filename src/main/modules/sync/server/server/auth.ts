@@ -20,9 +20,9 @@ const getAvailableIP = (req: http.IncomingMessage) => {
   return ip && (requestIps.get(ip) ?? 0) < 10 ? ip : null
 }
 
-const verifyByKey = (encryptMsg: string, userId: string) => {
+const verifyByKey = async(encryptMsg: string, userId: string) => {
   const userSpace = getUserSpace()
-  const keyInfo = userSpace.dataManage.getClientKeyInfo(userId)
+  const keyInfo = await userSpace.dataManage.getClientKeyInfo(userId)
   if (!keyInfo) return null
   let text
   try {
@@ -36,14 +36,14 @@ const verifyByKey = (encryptMsg: string, userId: string) => {
     const deviceName = text.replace(protocol.syncAuthPrefix, '') || 'Unknown'
     if (deviceName != keyInfo.deviceName) {
       keyInfo.deviceName = deviceName
-      userSpace.dataManage.saveClientKeyInfo(keyInfo)
+      await userSpace.dataManage.saveClientKeyInfo(keyInfo)
     }
     return aesEncrypt(SYNC_CODE.helloMsg, keyInfo.key)
   }
   return null
 }
 
-const verifyByCode = (encryptMsg: string, password: string) => {
+const verifyByCode = async(encryptMsg: string, password: string) => {
   let key = toMD5(password).substring(0, 16)
   // const iv = Buffer.from(key.split('').reverse().join('')).toString('base64')
   key = Buffer.from(key).toString('base64')
@@ -77,7 +77,7 @@ const verifyByCode = (encryptMsg: string, password: string) => {
     return null
   }
   const userSpace = getUserSpace()
-  userSpace.dataManage.saveClientKeyInfo(keyInfo)
+  await userSpace.dataManage.saveClientKeyInfo(keyInfo)
   return response
 }
 
@@ -90,8 +90,8 @@ export const authCode = async(req: http.IncomingMessage, res: http.ServerRespons
     if (typeof req.headers.m == 'string' && req.headers.m) {
       const userId = req.headers.i
       const _msg = typeof userId == 'string' && userId
-        ? verifyByKey(req.headers.m, userId)
-        : verifyByCode(req.headers.m, password)
+        ? await verifyByKey(req.headers.m, userId)
+        : await verifyByCode(req.headers.m, password)
       if (_msg != null) {
         msg = _msg
         code = 200
@@ -113,9 +113,9 @@ export const authCode = async(req: http.IncomingMessage, res: http.ServerRespons
   res.end(msg)
 }
 
-const verifyConnection = (encryptMsg: string, userId: string) => {
+const verifyConnection = async(encryptMsg: string, userId: string) => {
   const userSpace = getUserSpace()
-  const keyInfo = userSpace.dataManage.getClientKeyInfo(userId)
+  const keyInfo = await userSpace.dataManage.getClientKeyInfo(userId)
   if (!keyInfo) return false
   let text
   try {
@@ -132,7 +132,7 @@ export const authConnect = async(req: http.IncomingMessage) => {
     const query = querystring.parse((req.url!).split('?')[1])
     const i = query.i
     const t = query.t
-    if (typeof i == 'string' && typeof t == 'string' && verifyConnection(t, i)) return
+    if (typeof i == 'string' && typeof t == 'string' && await verifyConnection(t, i)) return
 
     const num = requestIps.get(ip) ?? 0
     requestIps.set(ip, num + 1)

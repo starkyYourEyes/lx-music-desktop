@@ -271,13 +271,38 @@ describe('credential vault', () => {
     const { createCredentialVault } = require(vaultPath)
     const profileRoot = await makeProfileRoot()
     const vault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
-    const sourceSha256 = 'a'.repeat(64)
+    const sourceId = 'legacy-data:netease'
 
-    await vault.putMigrationMarker('legacy-data:netease', sourceSha256, 9876)
+    await vault.putMigrationMarker('legacy-data:netease', sourceId, 9876)
 
     const reloaded = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
     assert.deepEqual(reloaded.getMigrationMarker('legacy-data:netease'), {
-      sourceSha256,
+      sourceId,
+      completedAtMs: 9876,
+    })
+  })
+
+  it('canonicalizes legacy source hashes without retaining or re-deriving them', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const profileRoot = await makeProfileRoot()
+    const filePath = path.join(profileRoot, 'credentials.v1.json')
+    await fsp.writeFile(filePath, JSON.stringify({
+      version: 1,
+      entries: {},
+      migrationMarkers: {
+        'legacy-data:netease': { sourceSha256: 'a'.repeat(64), completedAtMs: 9876 },
+      },
+    }))
+
+    const vault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+
+    assert.deepEqual(vault.getMigrationMarker('legacy-data:netease'), {
+      sourceId: 'legacy-data:netease',
+      completedAtMs: 9876,
+    })
+    const persisted = JSON.parse(await fsp.readFile(filePath, 'utf8'))
+    assert.deepEqual(persisted.migrationMarkers['legacy-data:netease'], {
+      sourceId: 'legacy-data:netease',
       completedAtMs: 9876,
     })
   })

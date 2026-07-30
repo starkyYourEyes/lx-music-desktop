@@ -18,7 +18,7 @@ export interface CredentialVaultFileV1 {
     updatedAtMs: number
   }>
   migrationMarkers: Record<string, {
-    sourceSha256: string
+    sourceId: string
     completedAtMs: number
   }>
 }
@@ -35,8 +35,8 @@ export interface CredentialVault {
   write: <T>(ref: CredentialRef, value: T) => Promise<{ persistence: 'encrypted' | 'memory-only' }>
   remove: (ref: CredentialRef) => Promise<void>
   verify: <T>(ref: CredentialRef, expected: T) => Promise<boolean>
-  getMigrationMarker: (name: string) => { sourceSha256: string, completedAtMs: number } | null
-  putMigrationMarker: (name: string, sourceSha256: string, completedAtMs: number) => Promise<void>
+  getMigrationMarker: (name: string) => { sourceId: string, completedAtMs: number } | null
+  putMigrationMarker: (name: string, sourceId: string, completedAtMs: number) => Promise<void>
   flush: () => Promise<void>
 }
 
@@ -59,7 +59,10 @@ interface CredentialVaultStorageEntryV1 {
 interface CredentialVaultStorageFileV1 {
   version: 1
   entries: Record<string, CredentialVaultStorageEntryV1>
-  migrationMarkers: CredentialVaultFileV1['migrationMarkers']
+  migrationMarkers: Record<string, CredentialVaultFileV1['migrationMarkers'][string] | {
+    sourceSha256: string
+    completedAtMs: number
+  }>
 }
 
 interface EncryptedCredentialPayloadV1 {
@@ -88,10 +91,15 @@ const base64IsValid = (value: unknown): value is string => {
   return Buffer.from(value, 'base64').toString('base64') == value
 }
 
-const migrationMarkerIsValid = (value: unknown): boolean => recordIsValid(value) &&
-  hasExactKeys(value, ['sourceSha256', 'completedAtMs']) &&
-  typeof value.sourceSha256 == 'string' && /^[a-f0-9]{64}$/i.test(value.sourceSha256) &&
-  timestampIsValid(value.completedAtMs)
+const sourceIdIsValid = (value: unknown): value is string =>
+  typeof value == 'string' && /^[\x21-\x7e]{1,512}$/.test(value)
+
+const migrationMarkerIsValid = (value: unknown): boolean => {
+  if (!recordIsValid(value) || !timestampIsValid(value.completedAtMs)) return false
+  if (hasExactKeys(value, ['sourceId', 'completedAtMs'])) return sourceIdIsValid(value.sourceId)
+  return hasExactKeys(value, ['sourceSha256', 'completedAtMs']) &&
+    typeof value.sourceSha256 == 'string' && /^[a-f0-9]{64}$/i.test(value.sourceSha256)
+}
 
 const credentialEntryIsDecryptable = (value: CredentialVaultStorageEntryV1): value is CredentialVaultFileV1['entries'][string] =>
   value.version == 1 && base64IsValid(value.ciphertext) && timestampIsValid(value.updatedAtMs)
@@ -124,6 +132,22 @@ const emptyEnvelope = (): CredentialVaultStorageFileV1 => ({
   migrationMarkers: {},
 })
 
+const normalizeMigrationMarkers = (value: CredentialVaultStorageFileV1): {
+  envelope: CredentialVaultStorageFileV1
+  changed: boolean
+} => {
+  let changed = false
+  const markers: CredentialVaultFileV1['migrationMarkers'] = {}
+  for (const [name, marker] of Object.entries(value.migrationMarkers)) {
+    if ('sourceId' in marker) markers[name] = { sourceId: marker.sourceId, completedAtMs: marker.completedAtMs }
+    else {
+      changed = true
+      markers[name] = { sourceId: name, completedAtMs: marker.completedAtMs }
+    }
+  }
+  return { envelope: { ...value, migrationMarkers: markers }, changed }
+}
+
 const cloneEnvelope = (value: CredentialVaultStorageFileV1): CredentialVaultStorageFileV1 =>
   JSON.parse(canonicalJson(value as unknown as JsonValue))
 
@@ -135,6 +159,9 @@ const removeUnsafeCiphertextEntries = (value: CredentialVaultStorageFileV1): voi
 
 const containsUnsafeCiphertext = (value: CredentialVaultStorageFileV1): boolean =>
   Object.values(value.entries).some(entry => !base64IsValid(entry.ciphertext))
+
+const containsLegacySourceHash = (value: CredentialVaultStorageFileV1): boolean =>
+  Object.values(value.migrationMarkers).some(marker => 'sourceSha256' in marker)
 
 const isJsonValue = (value: unknown): value is JsonValue => {
   if (value == null || ['string', 'number', 'boolean'].includes(typeof value)) return true
@@ -173,9 +200,9 @@ const parseEncryptedPayload = (entryId: string, plaintext: string): JsonValue =>
 const markerNameIsValid = (name: string): boolean =>
   /^[\x21-\x7e]{1,512}$/.test(name) && !['__proto__', 'constructor', 'prototype'].includes(name)
 
-const assertMarker = (name: string, sourceSha256: string, completedAtMs: number): void => {
+const assertMarker = (name: string, sourceId: string, completedAtMs: number): void => {
   if (!markerNameIsValid(name)) throw new Error('Invalid credential migration marker name')
-  if (!/^[a-f0-9]{64}$/i.test(sourceSha256)) throw new Error('Invalid credential migration source hash')
+  if (!sourceIdIsValid(sourceId)) throw new Error('Invalid credential migration source identity')
   if (!timestampIsValid(completedAtMs)) throw new Error('Invalid credential migration timestamp')
 }
 
@@ -184,10 +211,13 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
   const file = options.file ?? createAtomicJsonFile<CredentialVaultStorageFileV1>({
     filePath: path.join(options.profileRoot, 'credentials.v1.json'),
     validate: isCredentialVaultStorageFileV1,
-    shouldPreservePrevious: current => !containsUnsafeCiphertext(current),
+    shouldPreservePrevious: current => !containsUnsafeCiphertext(current) && !containsLegacySourceHash(current),
     mode: 0o600,
   })
-  let envelope = await file.read() ?? emptyEnvelope()
+  const loadedEnvelope = await file.read() ?? emptyEnvelope()
+  const normalizedMarkers = normalizeMigrationMarkers(loadedEnvelope)
+  if (normalizedMarkers.changed) await file.replace(normalizedMarkers.envelope)
+  let envelope = normalizedMarkers.envelope
   const memoryEntries = new Map<string, JsonValue>()
   const volatileUndecryptableEntryIds = new Set(
     Object.entries(envelope.entries)
@@ -280,16 +310,16 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
     return canonicalJson(actual.value) == canonicalJson(normalizedExpected)
   }
 
-  const getMigrationMarker = (name: string): { sourceSha256: string, completedAtMs: number } | null => {
+  const getMigrationMarker = (name: string): { sourceId: string, completedAtMs: number } | null => {
     if (!markerNameIsValid(name) || !Object.hasOwn(envelope.migrationMarkers, name)) return null
     const marker = envelope.migrationMarkers[name]
-    return { ...marker }
+    return 'sourceId' in marker ? { ...marker } : { sourceId: name, completedAtMs: marker.completedAtMs }
   }
 
-  const putMigrationMarker = async(name: string, sourceSha256: string, completedAtMs: number): Promise<void> => {
-    assertMarker(name, sourceSha256, completedAtMs)
+  const putMigrationMarker = async(name: string, sourceId: string, completedAtMs: number): Promise<void> => {
+    assertMarker(name, sourceId, completedAtMs)
     await persist(next => {
-      next.migrationMarkers[name] = { sourceSha256, completedAtMs }
+      next.migrationMarkers[name] = { sourceId, completedAtMs }
     }, options.cipher.mode == 'memory-only' ? { retainUnsafeCiphertext: true } : undefined)
   }
 

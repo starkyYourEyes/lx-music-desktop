@@ -168,7 +168,8 @@ export const updateSetting = (setting?: Partial<LX.AppSetting>, isInit: boolean 
 
   result.setting.version = defaultSetting.version
 
-  electronStore_config.override({ version: result.setting.version, setting: result.setting })
+  const persistedSetting = sanitizeSettingUpdate(result.setting) as LX.AppSetting
+  electronStore_config.override({ version: result.setting.version, setting: persistedSetting })
   return result
 }
 

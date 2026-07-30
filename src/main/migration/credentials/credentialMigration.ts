@@ -44,7 +44,6 @@ export const migrateLegacyCredentials = async(deps: CredentialMigrationDeps): Pr
   }
   let encryptedEntries = 0
   let memoryOnlyEntries = 0
-  const memoryOnlySources: string[] = []
   const credentialsByDestination = new Map<string, typeof inventory.credentials>()
   for (const source of inventory.credentials) {
     const destination = toCredentialEntryId(source.ref)
@@ -59,29 +58,20 @@ export const migrateLegacyCredentials = async(deps: CredentialMigrationDeps): Pr
     if (!await deps.vault.verify(source.ref, source.value)) throw new Error('Credential migration destination verification failed')
     for (const contributingSource of sources) {
       const existing = deps.vault.getMigrationMarker(contributingSource.markerName)
-      if (existing == null || existing.sourceSha256 != contributingSource.sourceSha256) {
-        await deps.vault.putMigrationMarker(contributingSource.markerName, contributingSource.sourceSha256, now())
+      if (existing == null || existing.sourceId != contributingSource.markerName) {
+        await deps.vault.putMigrationMarker(contributingSource.markerName, contributingSource.markerName, now())
       }
     }
     if (persisted.persistence == 'encrypted') encryptedEntries++
     else {
       memoryOnlyEntries++
-      memoryOnlySources.push(...sources.map(contributingSource => contributingSource.sourceSha256))
     }
   }
   if (inventory.credentials.length) {
-    await deps.vault.putMigrationMarker(
-      credentialMarkerName,
-      sha256Canonical({ version: 1, sources: inventory.credentials.map(source => ({ markerName: source.markerName, sourceSha256: source.sourceSha256 })).sort((left, right) => left.markerName.localeCompare(right.markerName)) }),
-      now(),
-    )
+    await deps.vault.putMigrationMarker(credentialMarkerName, credentialMarkerName, now())
   }
   if (memoryOnlyEntries > 0) {
-    await deps.vault.putMigrationMarker(
-      memoryOnlyMarkerName,
-      sha256Canonical({ version: 1, sources: memoryOnlySources.sort() }),
-      now(),
-    )
+    await deps.vault.putMigrationMarker(memoryOnlyMarkerName, memoryOnlyMarkerName, now())
   }
   failIfRequested(deps, 'after-vault-write')
 

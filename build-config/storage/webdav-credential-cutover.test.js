@@ -281,9 +281,30 @@ describe('WebDAV credential cutover', () => {
 
     assert.equal(settingWrites.length, 1)
     assert.equal(settingWrites[0].setting['webdav.url'], 'https://safe.example.test/dav')
-    assert.equal(settingWrites[0].setting['webdav.username'], '')
-    assert.equal(settingWrites[0].setting['webdav.password'], '')
+    assert.equal(Object.hasOwn(settingWrites[0].setting, 'webdav.username'), false)
+    assert.equal(Object.hasOwn(settingWrites[0].setting, 'webdav.password'), false)
     assert.doesNotMatch(JSON.stringify(settingWrites[0]), /SETTINGS_(?:USER|PASS)_SENTINEL/)
+  })
+
+  it('keeps a full default config unconfigured on first and second launch', async() => {
+    const { updateSetting } = require('../../src/main/utils/index.ts')
+    const { collectLegacyCredentialInventory } = require('../../src/main/migration/credentials/legacySources.ts')
+    const defaultSetting = require('../../src/common/defaultSetting.ts').default
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-webdav-default-relaunch-'))
+    try {
+      const firstLaunch = updateSetting({ ...defaultSetting }, true)
+      const persisted = settingWrites.at(-1)
+      assert.equal(Object.hasOwn(persisted.setting, 'webdav.username'), false)
+      assert.equal(Object.hasOwn(persisted.setting, 'webdav.password'), false)
+      fs.writeFileSync(path.join(root, 'config_v2.json'), JSON.stringify(persisted))
+
+      assert.deepEqual((await collectLegacyCredentialInventory(root)).credentials, [])
+      assert.deepEqual((await collectLegacyCredentialInventory(root)).credentials, [])
+      assert.equal(firstLaunch.setting['webdav.username'], '')
+      assert.equal(firstLaunch.setting['webdav.password'], '')
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('rejects URL userinfo from runtime settings without persisting or echoing it', () => {

@@ -7,7 +7,7 @@ import { normalizePublicAccountProfile } from '../../../../../common/storage/acc
 import { sha256Canonical, type JsonValue } from '../../../../../common/storage/canonicalJson'
 import type { AccountProfileProvider, AccountProfileRow } from './index'
 import { getDB } from '../../db'
-import { putMigrationMarker } from '../../migrate'
+import { getMigrationMarker, putMigrationMarker } from '../../migrate'
 import type { MigrationMarker } from '../../migrations/types'
 
 const providers: readonly AccountProfileProvider[] = ['netease', 'qq_music']
@@ -59,6 +59,11 @@ export const migrateAccountProfileRows = (rows: AccountProfileRow[], marker: Mig
   for (const row of rows) assertRow(row)
   const db = getDB()
   db.transaction(() => {
+    const existing = getMigrationMarker(db, marker.name)
+    if (existing != null) {
+      if (existing.sourceSha256 == marker.sourceSha256) return
+      throw new Error(`Migration marker ${marker.name} source conflict`)
+    }
     for (const row of rows) createUpsertAccountProfileStatement().run(row)
     const storedRows = rows.map(row => queryAccountProfile(row.provider))
     if (storedRows.some(row => row == null) || storedRows.length != rows.length) {

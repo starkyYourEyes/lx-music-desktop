@@ -6,11 +6,22 @@ import { assertCookieCredential, assertSyncKeyCredential, assertWebDAVCredential
 
 export interface LegacyCredentialSource {
   markerName: string
-  sourceSha256: string
   ref: CredentialRef
   value: JsonValue
+  trustedRoot: string
   documentPath: string
+  documentIdentity: SourceFileIdentity
+  read: (document: Record<string, unknown>) => JsonValue | undefined
   redact: (document: Record<string, unknown>) => void
+}
+
+export interface SourceFileIdentity {
+  dev: number
+  ino: number
+  size: number
+  mtimeMs: number
+  ctimeMs: number
+  birthtimeMs: number
 }
 
 export interface LegacyAccountProfile {
@@ -27,6 +38,8 @@ export interface LegacyCredentialInventory {
 interface SourceDocument {
   path: string
   value: Record<string, unknown>
+  trustedRoot: string
+  identity: SourceFileIdentity
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -38,10 +51,56 @@ const isMissing = (error: unknown): error is NodeJS.ErrnoException =>
 const sourceMarker = (documentPath: string, ref: CredentialRef): string =>
   `legacy_data_v1.credentials.${sha256Canonical({ version: 1, documentPath, entryId: toCredentialEntryId(ref) })}`
 
-const sourceHash = (documentPath: string, ref: CredentialRef, value: JsonValue): string =>
-  sha256Canonical({ version: 1, documentPath, entryId: toCredentialEntryId(ref), value })
+const identityOf = (stats: Awaited<ReturnType<typeof fs.lstat>>): SourceFileIdentity => ({
+  dev: stats.dev,
+  ino: stats.ino,
+  size: stats.size,
+  mtimeMs: stats.mtimeMs,
+  ctimeMs: stats.ctimeMs,
+  birthtimeMs: stats.birthtimeMs,
+})
 
-const readJsonDocument = async(filePath: string): Promise<SourceDocument | null> => {
+const isContained = (root: string, candidate: string): boolean => {
+  const relative = path.relative(root, candidate)
+  return relative != '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+}
+
+const assertPathWithoutReparsePoints = async(root: string, candidate: string): Promise<void> => {
+  const resolved = path.resolve(candidate)
+  if (!isContained(root, resolved)) throw new Error('Invalid legacy credential source path')
+  const relative = path.relative(root, resolved)
+  let current = root
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment)
+    let stats: Awaited<ReturnType<typeof fs.lstat>>
+    try {
+      stats = await fs.lstat(current)
+    } catch (error) {
+      if (isMissing(error)) return
+      throw error
+    }
+    if (stats.isSymbolicLink()) throw new Error('Invalid legacy credential source path')
+  }
+}
+
+const resolveTrustedDataRoot = async(dataRoot: string): Promise<string> => {
+  const resolved = path.resolve(dataRoot)
+  const parsed = path.parse(resolved)
+  let current = parsed.root
+  for (const segment of path.relative(parsed.root, resolved).split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment)
+    const stats = await fs.lstat(current)
+    if (stats.isSymbolicLink()) throw new Error('Invalid legacy credential data root')
+  }
+  const stats = await fs.lstat(resolved)
+  if (!stats.isDirectory()) throw new Error('Invalid legacy credential data root')
+  const real = await fs.realpath(resolved)
+  if (path.relative(real, resolved) != '') throw new Error('Invalid legacy credential data root')
+  return real
+}
+
+const readJsonDocument = async(trustedRoot: string, filePath: string): Promise<SourceDocument | null> => {
+  await assertPathWithoutReparsePoints(trustedRoot, filePath)
   let stats: Awaited<ReturnType<typeof fs.lstat>>
   try {
     stats = await fs.lstat(filePath)
@@ -52,7 +111,7 @@ const readJsonDocument = async(filePath: string): Promise<SourceDocument | null>
   if (stats.isSymbolicLink() || !stats.isFile()) throw new Error('Invalid legacy credential source path')
   const value: unknown = JSON.parse(await fs.readFile(filePath, 'utf8'))
   if (!isRecord(value)) throw new Error('Invalid legacy credential source document')
-  return { path: filePath, value }
+  return { path: filePath, value, trustedRoot, identity: identityOf(stats) }
 }
 
 const append = (
@@ -60,16 +119,25 @@ const append = (
   document: SourceDocument,
   ref: CredentialRef,
   value: JsonValue,
+  read: (document: Record<string, unknown>) => JsonValue | undefined,
   redact: (document: Record<string, unknown>) => void,
 ): void => {
   values.push({
     markerName: sourceMarker(document.path, ref),
-    sourceSha256: sourceHash(document.path, ref, value),
     ref,
     value,
+    trustedRoot: document.trustedRoot,
     documentPath: document.path,
+    documentIdentity: document.identity,
+    read,
     redact,
   })
+}
+
+const readAccountCookie = (key: string): ((document: Record<string, unknown>) => JsonValue | undefined) => document => {
+  const account = document[key]
+  if (!isRecord(account) || typeof account.cookie != 'string') return undefined
+  return { version: 1, cookie: account.cookie }
 }
 
 const removeAccountCookie = (key: string): ((document: Record<string, unknown>) => void) => document => {
@@ -100,7 +168,7 @@ const accountInventory = (document: SourceDocument, credentials: LegacyCredentia
     }
     if (typeof account.cookie != 'string' || account.cookie.length == 0) continue
     const cookie = assertCookieCredential(account.cookie)
-    append(credentials, document, entry.ref, { version: 1, cookie }, removeAccountCookie(entry.key))
+    append(credentials, document, entry.ref, { version: 1, cookie }, readAccountCookie(entry.key), removeAccountCookie(entry.key))
   }
 }
 
@@ -112,6 +180,10 @@ const clientInventory = (document: SourceDocument, credentials: LegacyCredential
     const ref: CredentialRef = { kind: 'sync-client', serverId }
     const value = { version: 1, key: assertSyncKeyCredential(info.key) } as const
     append(credentials, document, ref, value, current => {
+      const clients = containerKey == null ? current : current[containerKey]
+      if (!isRecord(clients) || !isRecord(clients[serverId]) || typeof clients[serverId].key != 'string') return undefined
+      return { version: 1, key: clients[serverId].key }
+    }, current => {
       const clients = containerKey == null ? current : current[containerKey]
       if (!isRecord(clients) || !isRecord(clients[serverId])) return
       Reflect.deleteProperty(clients[serverId], 'key')
@@ -127,6 +199,10 @@ const serverInventory = (document: SourceDocument, credentials: LegacyCredential
     const ref: CredentialRef = { kind: 'sync-server-device', userName, clientId }
     const value = { version: 1, key: assertSyncKeyCredential(info.key) } as const
     append(credentials, document, ref, value, current => {
+      const currentClients = current.clients
+      if (!isRecord(currentClients) || !isRecord(currentClients[clientId]) || typeof currentClients[clientId].key != 'string') return undefined
+      return { version: 1, key: currentClients[clientId].key }
+    }, current => {
       const currentClients = current.clients
       if (!isRecord(currentClients) || !isRecord(currentClients[clientId])) return
       Reflect.deleteProperty(currentClients[clientId], 'key')
@@ -157,23 +233,34 @@ const userInventory = async(dataRoot: string, credentials: LegacyCredentialSourc
     await ensureContainedRealPath(userRoot, directory)
     const directoryStats = await fs.lstat(directory)
     if (directoryStats.isSymbolicLink() || !directoryStats.isDirectory()) throw new Error('Invalid sync user path')
-    const document = await readJsonDocument(path.join(directory, 'devices.json'))
+    const document = await readJsonDocument(dataRoot, path.join(directory, 'devices.json'))
     if (document != null) serverInventory(document, credentials, directoryName)
   }
 }
 
 export const collectLegacyCredentialInventory = async(dataRoot: string): Promise<LegacyCredentialInventory> => {
+  dataRoot = await resolveTrustedDataRoot(dataRoot)
   const credentials: LegacyCredentialSource[] = []
   const profiles: LegacyAccountProfile[] = []
-  const data = await readJsonDocument(path.join(dataRoot, 'data.json'))
+  const data = await readJsonDocument(dataRoot, path.join(dataRoot, 'data.json'))
   if (data != null) accountInventory(data, credentials, profiles)
 
-  const config = await readJsonDocument(path.join(dataRoot, 'config_v2.json'))
+  const config = await readJsonDocument(dataRoot, path.join(dataRoot, 'config_v2.json'))
   const setting = config?.value.setting
-  if (config != null && isRecord(setting) && (Object.hasOwn(setting, 'webdav.username') || Object.hasOwn(setting, 'webdav.password'))) {
+  const hasWebDAVUsername = isRecord(setting) && Object.hasOwn(setting, 'webdav.username')
+  const hasWebDAVPassword = isRecord(setting) && Object.hasOwn(setting, 'webdav.password')
+  const webDAVIsEmpty = hasWebDAVUsername && hasWebDAVPassword && setting['webdav.username'] === '' && setting['webdav.password'] === ''
+  if (config != null && isRecord(setting) && (hasWebDAVUsername || hasWebDAVPassword) && !webDAVIsEmpty) {
     const ref: CredentialRef = { kind: 'webdav-basic' }
     const value = assertWebDAVCredential({ version: 1, username: setting['webdav.username'], password: setting['webdav.password'] })
     append(credentials, config, ref, value as unknown as JsonValue, document => {
+      const currentSetting = document.setting
+      if (!isRecord(currentSetting)) return undefined
+      const username = currentSetting['webdav.username']
+      const password = currentSetting['webdav.password']
+      if (typeof username != 'string' || typeof password != 'string') return undefined
+      return { version: 1, username, password }
+    }, document => {
       const currentSetting = document.setting
       if (!isRecord(currentSetting)) return
       Reflect.deleteProperty(currentSetting, 'webdav.username')
@@ -181,13 +268,13 @@ export const collectLegacyCredentialInventory = async(dataRoot: string): Promise
     })
   }
 
-  const client = await readJsonDocument(path.join(dataRoot, 'sync', 'client', 'syncAuthKey.json'))
+  const client = await readJsonDocument(dataRoot, path.join(dataRoot, 'sync', 'client', 'syncAuthKey.json'))
   if (client != null) clientInventory(client, credentials)
-  const server = await readJsonDocument(path.join(dataRoot, 'sync', 'server', 'devices.json'))
+  const server = await readJsonDocument(dataRoot, path.join(dataRoot, 'sync', 'server', 'devices.json'))
   if (server != null) serverInventory(server, credentials, typeof server.value.userName == 'string' ? server.value.userName : 'default')
   await userInventory(dataRoot, credentials)
 
-  const legacy = await readJsonDocument(path.join(dataRoot, 'sync.json'))
+  const legacy = await readJsonDocument(dataRoot, path.join(dataRoot, 'sync.json'))
   if (legacy != null) {
     clientInventory(legacy, credentials, 'syncAuthKey')
     serverInventory({ ...legacy, value: { clients: legacy.value.clients } }, credentials, 'default')

@@ -349,12 +349,127 @@ describe('legacy credential migration', () => {
     const configPath = path.join(root, 'config_v2.json')
     await writeJson(configPath, { setting: { 'webdav.username': 'only-user', keep: true } })
     const vault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher })
+    let vaultWrites = 0
+    const originalWrite = vault.write
+    vault.write = async(...args) => {
+      vaultWrites++
+      return await originalWrite(...args)
+    }
 
     await assert.rejects(
       migrateLegacyCredentials({ dataRoot: root, vault, profiles: { migrateLegacyAccountProfiles: async() => {} }, now: () => 100 }),
       /WebDAV password/i,
     )
     assert.deepEqual(await readJson(configPath), { setting: { 'webdav.username': 'only-user', keep: true } })
+    assert.equal(vaultWrites, 0)
+  })
+
+  it('treats a persisted both-empty WebDAV pair as unconfigured', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const { createCredentialVault } = require(vaultPath)
+    const root = await makeRoot()
+    const configPath = path.join(root, 'config_v2.json')
+    await writeJson(configPath, {
+      version: 2,
+      setting: { 'webdav.username': '', 'webdav.password': '', keep: true },
+    })
+    const vault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher })
+    let vaultWrites = 0
+    const originalWrite = vault.write
+    vault.write = async(...args) => {
+      vaultWrites++
+      return await originalWrite(...args)
+    }
+
+    assert.deepEqual(await migrateLegacyCredentials({
+      dataRoot: root,
+      vault,
+      profiles: { migrateLegacyAccountProfiles: async() => {} },
+      now: () => 100,
+    }), { status: 'complete', encryptedEntries: 0, memoryOnlyEntries: 0, profiles: 0 })
+    assert.equal(vaultWrites, 0)
+  })
+
+  it('persists only non-secret source identities in credential migration markers', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const { createCredentialVault } = require(vaultPath)
+    const { collectLegacyCredentialInventory } = require('../../src/main/migration/credentials/legacySources.ts')
+    const root = await makeRoot()
+    await writeJson(path.join(root, 'config_v2.json'), {
+      setting: { 'webdav.username': 'weak-user', 'webdav.password': 'weak-password' },
+    })
+    const inventory = await collectLegacyCredentialInventory(root)
+    assert.equal(Object.hasOwn(inventory.credentials[0], 'sourceSha256'), false)
+    const vault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher })
+
+    await migrateLegacyCredentials({
+      dataRoot: root,
+      vault,
+      profiles: { migrateLegacyAccountProfiles: async() => {} },
+      now: () => 100,
+    })
+
+    const envelope = await readJson(path.join(root, 'credentials.v1.json'))
+    for (const [name, marker] of Object.entries(envelope.migrationMarkers)) {
+      assert.deepEqual(Object.keys(marker).sort(), ['completedAtMs', 'sourceId'])
+      assert.equal(typeof marker.sourceId, 'string')
+      assert.equal(marker.sourceId.length > 0, true)
+      if (name.startsWith('legacy_data_v1.credentials.') && name != 'legacy_data_v1.credentials.memory-only') {
+        assert.equal(marker.sourceId, name)
+      }
+    }
+  })
+
+  it('preflights every inventoried value before redacting any source', async() => {
+    const { collectLegacyCredentialInventory } = require('../../src/main/migration/credentials/legacySources.ts')
+    const { redactLegacySecrets } = require('../../src/main/migration/credentials/redactLegacySecrets.ts')
+    const root = await makeRoot()
+    const dataPath = path.join(root, 'data.json')
+    const configPath = path.join(root, 'config_v2.json')
+    await writeJson(dataPath, { neteaseAccount: { cookie: 'original-cookie' } })
+    await writeJson(configPath, { setting: { 'webdav.username': 'user', 'webdav.password': 'original-password' } })
+    const inventory = await collectLegacyCredentialInventory(root)
+    await writeJson(configPath, { setting: { 'webdav.username': 'user', 'webdav.password': 'changed-password' } })
+    const dataBefore = await fsp.readFile(dataPath, 'utf8')
+    const configBefore = await fsp.readFile(configPath, 'utf8')
+
+    await assert.rejects(redactLegacySecrets(inventory.credentials), /changed|identity|source/i)
+
+    assert.equal(await fsp.readFile(dataPath, 'utf8'), dataBefore)
+    assert.equal(await fsp.readFile(configPath, 'utf8'), configBefore)
+  })
+
+  it('rejects a source file replaced after inventory even when its value is unchanged', async() => {
+    const { collectLegacyCredentialInventory } = require('../../src/main/migration/credentials/legacySources.ts')
+    const { redactLegacySecrets } = require('../../src/main/migration/credentials/redactLegacySecrets.ts')
+    const root = await makeRoot()
+    const dataPath = path.join(root, 'data.json')
+    const displacedPath = path.join(root, 'data.displaced.json')
+    const document = { neteaseAccount: { cookie: 'same-cookie' }, keep: true }
+    await writeJson(dataPath, document)
+    const inventory = await collectLegacyCredentialInventory(root)
+    await fsp.rename(dataPath, displacedPath)
+    await writeJson(dataPath, document)
+
+    await assert.rejects(redactLegacySecrets(inventory.credentials), /identity|source/i)
+    assert.deepEqual(await readJson(dataPath), document)
+  })
+
+  it('rejects a data root reached through an ancestor symbolic link', async t => {
+    const { collectLegacyCredentialInventory } = require('../../src/main/migration/credentials/legacySources.ts')
+    const container = await makeRoot()
+    const actualRoot = path.join(container, 'actual')
+    const linkedRoot = path.join(container, 'linked')
+    await fsp.mkdir(actualRoot)
+    await writeJson(path.join(actualRoot, 'data.json'), { neteaseAccount: { cookie: 'cookie' } })
+    try {
+      await fsp.symlink(actualRoot, linkedRoot, 'junction')
+    } catch (error) {
+      if (error && error.code == 'EPERM') return t.skip('symbolic links require local privilege')
+      throw error
+    }
+
+    await assert.rejects(collectLegacyCredentialInventory(linkedRoot), /data root|source path/i)
   })
 
   it('rejects a symbolic sync user directory', async t => {

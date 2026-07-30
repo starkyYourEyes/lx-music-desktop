@@ -83,4 +83,44 @@ describe('account profile storage', () => {
     repo.removeAccountProfile('qq_music')
     assert.equal(repo.getAccountProfile('qq_music'), null)
   })
+
+  it('commits legacy profiles and their marker atomically and skips a committed replay', async() => {
+    const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-account-profile-migration-'))
+    tempDirs.push(profileRoot)
+    await dbService.init({
+      dataPath: profileRoot,
+      backupDir: path.join(profileRoot, 'backups'),
+      previousShutdownWasClean: true,
+    })
+    const marker = {
+      name: 'legacy_data_v1.account_profiles',
+      sourceSha256: 'a'.repeat(64),
+      completedAtMs: 100,
+      detailsJson: '{"version":1,"profileCount":1}',
+    }
+    const legacyRow = {
+      provider: 'netease',
+      profileJson: '{"avatarUrl":"","nickname":"Legacy","userId":1}',
+      updatedAtMs: 10,
+    }
+
+    repo.migrateLegacyAccountProfiles({ rows: [legacyRow], marker })
+    assert.deepEqual(repo.getAccountProfile('netease'), legacyRow)
+    assert.equal(dbService.getDB().prepare('SELECT COUNT(*) AS count FROM migration_markers WHERE name = ?').get(marker.name).count, 1)
+
+    const refreshedRow = {
+      provider: 'netease',
+      profileJson: '{"avatarUrl":"","nickname":"Refreshed","userId":1}',
+      updatedAtMs: 20,
+    }
+    repo.upsertAccountProfile(refreshedRow)
+    repo.migrateLegacyAccountProfiles({ rows: [legacyRow], marker })
+    assert.deepEqual(repo.getAccountProfile('netease'), refreshedRow)
+
+    assert.throws(() => repo.migrateLegacyAccountProfiles({
+      rows: [{ ...legacyRow, updatedAtMs: 30 }],
+      marker: { ...marker, sourceSha256: 'b'.repeat(64) },
+    }), /migration marker/i)
+    assert.deepEqual(repo.getAccountProfile('netease'), refreshedRow)
+  })
 })

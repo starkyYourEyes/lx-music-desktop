@@ -399,7 +399,10 @@ export const startServer = async(port: number) => {
   })
 }
 
-export const getStatus = (): LX.Sync.ServerStatus => status
+export const getStatus = (): LX.Sync.ServerStatus => ({
+  ...status,
+  devices: status.devices.map(device => toPublicDevice(device as LX.Sync.ServerKeyInfo)),
+})
 
 export const generateCode = async() => {
   status.code = handleGenerateCode()
@@ -408,8 +411,9 @@ export const generateCode = async() => {
 }
 
 export const getDevices = async() => {
+  await migrateData(global.lxDataPath)
   const userSpace = getUserSpace()
-  return userSpace.getDecices()
+  return (await userSpace.getDecices()).map(device => toPublicDevice(device as LX.Sync.ServerKeyInfo))
 }
 
 export const removeDevice = async(clientId: string) => {

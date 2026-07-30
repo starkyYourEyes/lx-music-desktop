@@ -44,7 +44,9 @@ const toServerDevice = (value: unknown): LX.Sync.SyncServerDevice | null => {
     clientId: value.clientId,
     deviceName: value.deviceName,
     isMobile: value.isMobile,
-    ...(typeof value.lastConnectDate == 'number' ? { lastConnectDate: value.lastConnectDate } : {}),
+    ...(typeof value.lastConnectDate == 'number'
+      ? { lastConnectDate: value.lastConnectDate }
+      : typeof value.lastSyncDate == 'number' ? { lastConnectDate: value.lastSyncDate } : {}),
     ...(syncProtocol == null ? {} : { syncProtocol }),
   }
 }

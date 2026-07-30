@@ -84,26 +84,63 @@ const readJson = async(filePath: string): Promise<unknown | null> => {
   return JSON.parse((await fs.promises.readFile(filePath)).toString())
 }
 
+const mergeMissing = <Value>(preferred: Record<string, Value>, fallback: Record<string, Value>): Record<string, Value> => ({
+  ...fallback,
+  ...preferred,
+})
+
 const cutoverExistingMetadata = async(dataPath: string) => {
   const clientPath = path.join(dataPath, File.clientDataPath)
   const serverPath = path.join(dataPath, File.serverDataPath)
   const currentClients = path.join(clientPath, File.syncAuthKeysJSON)
   const currentDevices = path.join(serverPath, File.userDevicesJSON)
-  if (!await exists(currentClients)) {
+  const rootLegacy = await readJson(path.join(dataPath, 'sync.json'))
+  const rootProfiles = isRecord(rootLegacy) ? toProfiles(rootLegacy.syncAuthKey) : {}
+  const rootDevices = isRecord(rootLegacy) ? toDevices(rootLegacy.clients) : {}
+
+  const hasCurrentClients = await exists(currentClients)
+  let hasClientMetadataSource = hasCurrentClients || Object.keys(rootProfiles).length > 0
+  let currentProfiles: Record<string, LX.Sync.SyncClientProfile> = {}
+  if (hasCurrentClients) {
+    const current = await readJson(currentClients)
+    if (!isRecord(current) || current.version != 1 || !isRecord(current.servers)) throw new Error('Invalid sync client metadata')
+    currentProfiles = toProfiles(current.servers)
+  } else {
     const legacyClients = await readJson(path.join(clientPath, legacyClientKeysJSON))
-    if (legacyClients != null) {
-      await replaceMetadata(currentClients, { version: 1, servers: toProfiles(legacyClients) })
+    hasClientMetadataSource ||= legacyClients != null
+    currentProfiles = toProfiles(legacyClients)
+  }
+  const mergedProfiles = mergeMissing(currentProfiles, rootProfiles)
+  if (hasClientMetadataSource && (!hasCurrentClients || Object.keys(mergedProfiles).length != Object.keys(currentProfiles).length)) {
+    await replaceMetadata(currentClients, { version: 1, servers: mergedProfiles })
+  }
+
+  const hasCurrentDevices = await exists(currentDevices)
+  let hasDeviceMetadataSource = hasCurrentDevices || Object.keys(rootDevices).length > 0
+  let currentUserName = 'default'
+  let currentDeviceValues: Record<string, LX.Sync.SyncServerDevice> = {}
+  if (hasCurrentDevices) {
+    const current = await readJson(currentDevices)
+    if (!isRecord(current) || current.version != 2 || typeof current.userName != 'string' || !isRecord(current.clients)) {
+      throw new Error('Invalid sync server metadata')
+    }
+    currentUserName = current.userName
+    currentDeviceValues = toDevices(current.clients)
+  } else {
+    const legacyDevices = await readJson(path.join(serverPath, legacyDevicesJSON))
+    hasDeviceMetadataSource ||= legacyDevices != null
+    if (isRecord(legacyDevices)) {
+      currentUserName = typeof legacyDevices.userName == 'string' ? legacyDevices.userName : 'default'
+      currentDeviceValues = toDevices(legacyDevices.clients)
     }
   }
-  if (!await exists(currentDevices)) {
-    const legacyDevices = await readJson(path.join(serverPath, legacyDevicesJSON))
-    if (isRecord(legacyDevices)) {
-      await replaceMetadata(currentDevices, {
-        version: 2,
-        userName: typeof legacyDevices.userName == 'string' ? legacyDevices.userName : 'default',
-        clients: toDevices(legacyDevices.clients),
-      })
-    }
+  const mergedDevices = mergeMissing(currentDeviceValues, rootDevices)
+  if (hasDeviceMetadataSource && (!hasCurrentDevices || Object.keys(mergedDevices).length != Object.keys(currentDeviceValues).length)) {
+    await replaceMetadata(currentDevices, {
+      version: 2,
+      userName: currentUserName,
+      clients: mergedDevices,
+    })
   }
 }
 

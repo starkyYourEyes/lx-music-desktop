@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { sha256Canonical, type JsonValue } from '../../../common/storage/canonicalJson'
+import { canonicalJson, sha256Canonical, type JsonValue } from '../../../common/storage/canonicalJson'
 import { normalizePublicAccountProfile } from '../../../common/storage/accountProfile'
 import { assertCookieCredential, assertSyncKeyCredential, assertWebDAVCredential, toCredentialEntryId, type CredentialRef } from '../../storage/credentials/types'
 
@@ -189,14 +189,16 @@ export const collectLegacyCredentialInventory = async(dataRoot: string): Promise
 
   const legacy = await readJsonDocument(path.join(dataRoot, 'sync.json'))
   if (legacy != null) {
-    if (client == null) clientInventory(legacy, credentials, 'syncAuthKey')
-    if (server == null) serverInventory({ ...legacy, value: { clients: legacy.value.clients } }, credentials, 'default')
+    clientInventory(legacy, credentials, 'syncAuthKey')
+    serverInventory({ ...legacy, value: { clients: legacy.value.clients } }, credentials, 'default')
   }
-  const destinations = new Set<string>()
+  const destinations = new Map<string, string>()
   for (const credential of credentials) {
     const destination = toCredentialEntryId(credential.ref)
-    if (destinations.has(destination)) throw new Error('Duplicate legacy credential destination')
-    destinations.add(destination)
+    const value = canonicalJson(credential.value)
+    const existing = destinations.get(destination)
+    if (existing != null && existing != value) throw new Error('Conflicting legacy credential destination')
+    destinations.set(destination, value)
   }
   return { credentials, profiles }
 }

@@ -1,9 +1,10 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
+const Module = require('node:module')
 const os = require('node:os')
 const path = require('node:path')
-const { afterEach, describe, it } = require('node:test')
+const { after, afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
 
 // eslint-disable-next-line n/no-deprecated-api
@@ -18,6 +19,13 @@ require.extensions['.ts'] = (module, filename) => {
 const migrationPath = '../../src/main/migration/credentials/credentialMigration.ts'
 const vaultPath = '../../src/main/storage/credentials/credentialVault.ts'
 const temporaryRoots = []
+const sourceRoot = path.resolve(__dirname, '../../src')
+const originalResolveFilename = Module._resolveFilename
+Module._resolveFilename = function(request, parent, isMain, options) {
+  if (request.startsWith('@main/')) request = path.join(sourceRoot, 'main', request.slice('@main/'.length))
+  if (request.startsWith('@common/')) request = path.join(sourceRoot, 'common', request.slice('@common/'.length))
+  return originalResolveFilename.call(this, request, parent, isMain, options)
+}
 
 const encryptedCipher = {
   mode: 'encrypted',
@@ -48,7 +56,15 @@ const writeJson = async(filePath, value) => {
 const readJson = async filePath => JSON.parse(await fsp.readFile(filePath, 'utf8'))
 
 afterEach(async() => {
+  delete global.lx
+  delete global.lxDataPath
   await Promise.all(temporaryRoots.splice(0).map(root => fsp.rm(root, { recursive: true, force: true })))
+})
+
+after(() => {
+  Module._resolveFilename = originalResolveFilename
+  // eslint-disable-next-line n/no-deprecated-api
+  delete require.extensions['.ts']
 })
 
 describe('legacy credential migration', () => {
@@ -128,25 +144,124 @@ describe('legacy credential migration', () => {
     })
   }
 
-  it('uses legacy sync.json only when the newer client source is absent', async() => {
+  it('coalesces canonically identical mixed sync sources while accounting for and redacting every source', async() => {
     const { migrateLegacyCredentials } = require(migrationPath)
     const { createCredentialVault } = require(vaultPath)
     const root = await makeRoot()
-    await writeJson(path.join(root, 'sync.json'), {
-      syncAuthKey: { legacy_server: { key: 'legacy-client-key' } },
-      clients: { legacy_device: { clientId: 'legacy-device', key: 'legacy-server-key', deviceName: 'Old', isMobile: false } },
+    const clientPath = path.join(root, 'sync/client/syncAuthKey.json')
+    const serverPath = path.join(root, 'sync/server/devices.json')
+    const legacyPath = path.join(root, 'sync.json')
+    await writeJson(clientPath, {
+      shared_server: { clientId: 'client-current', key: 'shared-client-key', serverName: 'Current Server' },
+    })
+    await writeJson(serverPath, {
+      userName: 'default',
+      clients: { shared_device: { clientId: 'shared-device', key: 'shared-server-key', deviceName: 'Current Device', isMobile: false } },
+    })
+    await writeJson(legacyPath, {
+      syncAuthKey: { shared_server: { clientId: 'client-legacy', key: 'shared-client-key', serverName: 'Legacy Server' } },
+      clients: { shared_device: { clientId: 'shared-device', key: 'shared-server-key', deviceName: 'Legacy Device', isMobile: false } },
     })
     const vault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher })
     const profileStore = { migrateLegacyAccountProfiles: async() => {}, getMigrationMarker: async() => null }
 
-    await migrateLegacyCredentials({ dataRoot: root, vault, profiles: profileStore, now: () => 100 })
+    assert.deepEqual(await migrateLegacyCredentials({ dataRoot: root, vault, profiles: profileStore, now: () => 100 }), {
+      status: 'complete', encryptedEntries: 2, memoryOnlyEntries: 0, profiles: 0,
+    })
+
+    assert.equal(await vault.verify({ kind: 'sync-client', serverId: 'shared_server' }, { version: 1, key: 'shared-client-key' }), true)
+    assert.equal(await vault.verify({ kind: 'sync-server-device', userName: 'default', clientId: 'shared_device' }, { version: 1, key: 'shared-server-key' }), true)
+    assert.equal(Object.keys((await readJson(path.join(root, 'credentials.v1.json'))).entries).length, 2)
+    const markerNames = Object.keys((await readJson(path.join(root, 'credentials.v1.json'))).migrationMarkers)
+    assert.equal(markerNames.filter(name => name.startsWith('legacy_data_v1.credentials.') && name != 'legacy_data_v1.credentials.memory-only').length, 4)
+    assert.deepEqual(await readJson(clientPath), {
+      shared_server: { clientId: 'client-current', serverName: 'Current Server' },
+    })
+    assert.deepEqual(await readJson(serverPath), {
+      userName: 'default',
+      clients: { shared_device: { clientId: 'shared-device', deviceName: 'Current Device', isMobile: false } },
+    })
+    assert.deepEqual(await readJson(legacyPath), {
+      syncAuthKey: { shared_server: { clientId: 'client-legacy', serverName: 'Legacy Server' } },
+      clients: { shared_device: { clientId: 'shared-device', deviceName: 'Legacy Device', isMobile: false } },
+    })
+  })
+
+  it('migrates legacy-only mixed sync destinations with their public metadata', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const { createCredentialVault } = require(vaultPath)
+    const root = await makeRoot()
+    await writeJson(path.join(root, 'sync/client/syncAuthKey.json'), {
+      current_server: { clientId: 'current-client', key: 'current-client-key', serverName: 'Current Server' },
+    })
+    await writeJson(path.join(root, 'sync/server/devices.json'), {
+      userName: 'default',
+      clients: { current_device: { clientId: 'current-device', key: 'current-server-key', deviceName: 'Current Device', isMobile: false } },
+    })
+    await writeJson(path.join(root, 'sync.json'), {
+      syncAuthKey: { legacy_server: { clientId: 'legacy-client', key: 'legacy-client-key', serverName: 'Legacy Server', syncProtocol: 'legacy' } },
+      clients: { legacy_device: { clientId: 'legacy-device', key: 'legacy-server-key', deviceName: 'Legacy Device', isMobile: true, lastSyncDate: 55 } },
+    })
+    const vault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher })
+
+    assert.deepEqual(await migrateLegacyCredentials({
+      dataRoot: root,
+      vault,
+      profiles: { migrateLegacyAccountProfiles: async() => {} },
+      now: () => 100,
+    }), { status: 'complete', encryptedEntries: 4, memoryOnlyEntries: 0, profiles: 0 })
+    global.lxDataPath = root
+    global.lx = { credentialVault: vault, appSetting: {} }
+    await require('../../src/main/modules/sync/migrate.ts').default(root)
 
     assert.equal(await vault.verify({ kind: 'sync-client', serverId: 'legacy_server' }, { version: 1, key: 'legacy-client-key' }), true)
     assert.equal(await vault.verify({ kind: 'sync-server-device', userName: 'default', clientId: 'legacy_device' }, { version: 1, key: 'legacy-server-key' }), true)
-    assert.deepEqual(await readJson(path.join(root, 'sync.json')), {
-      syncAuthKey: { legacy_server: {} },
-      clients: { legacy_device: { clientId: 'legacy-device', deviceName: 'Old', isMobile: false } },
+    assert.deepEqual(await readJson(path.join(root, 'sync/client/servers.v1.json')), {
+      version: 1,
+      servers: {
+        current_server: { clientId: 'current-client', serverName: 'Current Server' },
+        legacy_server: { clientId: 'legacy-client', serverName: 'Legacy Server', syncProtocol: 'legacy' },
+      },
     })
+    assert.deepEqual(await readJson(path.join(root, 'sync/server/devices.v2.json')), {
+      version: 2,
+      userName: 'default',
+      clients: {
+        current_device: { clientId: 'current-device', deviceName: 'Current Device', isMobile: false },
+        legacy_device: { clientId: 'legacy-device', deviceName: 'Legacy Device', isMobile: true, lastConnectDate: 55 },
+      },
+    })
+  })
+
+  it('rejects conflicting mixed sync credentials before any source, destination, marker, or metadata changes', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const { createCredentialVault } = require(vaultPath)
+    const root = await makeRoot()
+    const clientPath = path.join(root, 'sync/client/syncAuthKey.json')
+    const legacyPath = path.join(root, 'sync.json')
+    const clientMetadataPath = path.join(root, 'sync/client/servers.v1.json')
+    await writeJson(clientPath, {
+      shared_server: { clientId: 'current-client', key: 'current-key', serverName: 'Current Server' },
+    })
+    await writeJson(legacyPath, {
+      syncAuthKey: { shared_server: { clientId: 'legacy-client', key: 'conflicting-key', serverName: 'Legacy Server' } },
+    })
+    await writeJson(clientMetadataPath, {
+      version: 1, servers: { preserved: { clientId: 'preserved-client', serverName: 'Preserved' } },
+    })
+    const vault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher, now: () => 1 })
+    await vault.write({ kind: 'sync-client', serverId: 'shared_server' }, { version: 1, key: 'preexisting-key' })
+    const paths = [clientPath, legacyPath, clientMetadataPath, path.join(root, 'credentials.v1.json')]
+    const before = await Promise.all(paths.map(filePath => fsp.readFile(filePath, 'utf8')))
+
+    await assert.rejects(
+      migrateLegacyCredentials({ dataRoot: root, vault, profiles: { migrateLegacyAccountProfiles: async() => {} }, now: () => 100 }),
+      error => error instanceof Error && error.message == 'Conflicting legacy credential destination',
+    )
+
+    const after = await Promise.all(paths.map(filePath => fsp.readFile(filePath, 'utf8')))
+    assert.deepEqual(after, before)
+    assert.equal(await vault.verify({ kind: 'sync-client', serverId: 'shared_server' }, { version: 1, key: 'preexisting-key' }), true)
   })
 
   it('keeps no stale encrypted destination after a memory-only migration and reports it on restart', async() => {
@@ -201,7 +316,7 @@ describe('legacy credential migration', () => {
 
     await assert.rejects(
       migrateLegacyCredentials({ dataRoot: root, vault, profiles: { migrateLegacyAccountProfiles: async() => {} }, now: () => 100 }),
-      /duplicate legacy credential destination/i,
+      /conflicting legacy credential destination/i,
     )
     assert.equal((await readJson(rootDevices)).clients.device_a.key, 'first-key')
     assert.equal((await readJson(userDevices)).clients.device_a.key, 'second-key')

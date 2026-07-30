@@ -121,7 +121,98 @@ const createNeteaseService = accounts => {
   })
 }
 
-const createCoordinatorDependencies = checkCredentials => {
+const createInMemoryServerRuntime = () => {
+  let webSocketServer
+  const httpHandlers = new Map()
+  class WebSocketServer {
+    clients = new Set()
+    handlers = new Map()
+
+    constructor() {
+      webSocketServer = this
+    }
+
+    on(event, handler) {
+      this.handlers.set(event, handler)
+    }
+
+    emit(event, ...args) {
+      this.handlers.get(event)?.(...args)
+    }
+
+    close() {
+      this.emit('close')
+    }
+  }
+  return {
+    http: {
+      createServer: () => ({
+        on(event, handler) { httpHandlers.set(event, handler) },
+        listen() { httpHandlers.get('listening')?.() },
+        address: () => ({ port: 9527 }),
+        close: callback => { callback() },
+      }),
+    },
+    WebSocketServer,
+    connect(socket, request) {
+      webSocketServer.emit('connection', socket, request)
+    },
+  }
+}
+
+const createInMemoryServerService = ({ runtime, getUserSpace, toPublicDevice, onStatus }) =>
+  loadTsModule(path.join(sourceRoot, 'main/modules/sync/server/server/server.ts'), {
+    'node:http': runtime.http,
+    ws: { WebSocketServer: runtime.WebSocketServer },
+    './sync': { registerLocalSyncEvent() {}, unregisterLocalSyncEvent() {}, callObj: {}, sync: async() => {} },
+    './auth': { authCode: async() => {}, authConnect: async() => {} },
+    '@common/constants_sync': {
+      SYNC_CLOSE_CODE: { normal: 1000, failed: 4100 },
+      SYNC_CODE: { helloMsg: 'hello', idPrefix: 'id:', msgAuthFailed: 'failed' },
+    },
+    '../user': { getUserSpace, releaseUserSpace() {}, getServerId: () => 'server', initServerInfo: async() => {}, toPublicDevice },
+    '@common/utils/syncRpc': {
+      createSyncRpc: () => ({ remote: {}, createQueueRemote: () => ({}), message() {}, destroy() {} }),
+    },
+    '../../log': { info() {}, warn() {}, error() {} },
+    '@main/modules/winMain': { sendServerStatus: onStatus },
+    '../utils/tools': { decryptMsg: async(_key, value) => value, encryptMsg: async(_key, value) => value, generateCode: () => 'code' },
+    '../../migrate': { __esModule: true, default: async() => {} },
+    'node:net': {},
+    '@common/utils/nodejs': { getAddress: () => [] },
+    '@common/utils/common': { arrRemove() {} },
+    '@common/syncProtocol': { getSyncProtocol: () => ({ id: 'current' }) },
+  })
+
+const createClientStatusService = () => loadTsModule(path.join(sourceRoot, 'main/modules/sync/client/client.ts'), {
+  ws: class {},
+  './utils': {},
+  './sync': { callObj: {} },
+  '../log': { info() {}, error() {} },
+  '@common/utils/common': { arrRemove() {}, dateFormat: () => '' },
+  '@main/modules/winMain': { sendClientStatus: () => {} },
+  '@common/utils/syncRpc': { createSyncRpc: () => ({}) },
+  '@common/constants_sync': { SYNC_CLOSE_CODE: { normal: 1000, failed: 4100 } },
+  '@common/utils/nodejs': { getAddress: () => [] },
+  '../utils': { aesEncrypt: value => value },
+  '@common/syncProtocol': { getSyncProtocol: () => ({ id: 'current', syncConnectMessage: '' }) },
+})
+
+const createSyncExportFacade = ({ client, server }) => loadTsModule(path.join(sourceRoot, 'main/modules/sync/index.ts'), {
+  './client': {
+    connectServer: async() => {},
+    disconnectServer: async() => {},
+    getStatus: client.getStatus,
+  },
+  './server': server,
+  './client/modules/userApi/service': {
+    getRemoteUserApiMeta: async() => null,
+    pullUserApiFromServer: async() => null,
+    pushUserApiToServer: async() => null,
+  },
+})
+
+const createCoordinatorDependencies = (checkCredentials, runMigrationHooks = async() => {}) => {
   const calls = []
   const deps = {
     runState: {
@@ -133,7 +224,10 @@ const createCoordinatorDependencies = checkCredentials => {
       return { status: 'ready', existed: true, schemaVersion: 4, migratedVersions: [], backupPath: null }
     },
     closeDatabase: async() => { calls.push('database:close') },
-    runMigrationHooks: async() => { calls.push('migration:run') },
+    runMigrationHooks: async result => {
+      calls.push('migration:run')
+      return await runMigrationHooks(result)
+    },
     checkCredentials: async() => {
       calls.push('credentials:check')
       return await checkCredentials()
@@ -145,6 +239,75 @@ const createCoordinatorDependencies = checkCredentials => {
     flushStores: async() => { calls.push('stores:flush') },
   }
   return { calls, deps }
+}
+
+const loadStorageMigrationHooks = ({
+  initializeCredentialVault,
+  migrateLegacyCredentials,
+  createAccountRepository,
+  migrateDBData = async() => {},
+}) => loadTsModule(path.join(sourceRoot, 'main/app.ts'), {
+  electron: { app: {}, shell: {}, screen: {}, nativeTheme: {} },
+  '@common/constants': { URL_SCHEME_RXP: /^$/ },
+  './utils': {
+    getProxy: () => null,
+    getTheme: () => null,
+    initHotKey: async() => ({ local: {}, global: {} }),
+    initSetting: async() => ({ setting: {} }),
+    parseEnvParams: () => ({ cmdParams: {}, deeplink: null }),
+  },
+  '@common/config': { navigationUrlWhiteList: [] },
+  '@common/defaultSetting': {},
+  './modules/winMain': { isExistWindow: () => false, showWindow: () => {} },
+  '@main/event': { createAppEvent: () => ({}), createDislikeEvent: () => ({}), createListEvent: () => ({}) },
+  '@common/utils': { isMac: false },
+  './worker': () => ({}),
+  './utils/migrate': { migrateDBData },
+  './storage/credentials': { initializeCredentialVault },
+  './storage/accounts/accountRepository': { createAccountRepository },
+  './migration/credentials/credentialMigration': { migrateLegacyCredentials },
+  '@common/utils/request': { setProxyByHost: () => {} },
+  '@main/utils/webContentsNavigationGuard': { getWebContentsNavigationDecision: () => 'allow' },
+  './migration/legacyUserData': { getPortableUserDataPaths: () => null, migrateLegacyUserData: async() => {} },
+  '@common/projectIdentity': { PROJECT_IDENTITY: {} },
+}).runStorageMigrationHooks
+
+const createLiveGlobal = (root, profileStore = createProfileStore()) => {
+  global.lxDataPath = root
+  global.lx = {
+    credentialVault: null,
+    accountRepository: null,
+    worker: { dbService: profileStore },
+  }
+  return profileStore
+}
+
+const assertCredentialHookRecovery = async({ runMigrationHooks, expectedDiagnostic, sentinel }) => {
+  const { createStorageCoordinator, checkCredentialStartup } = require(coordinatorPath)
+  const { calls, deps } = createCoordinatorDependencies(
+    async() => await checkCredentialStartup({
+      dataRoot: global.lxDataPath,
+      vault: global.lx.credentialVault,
+      profileRepository: global.lx.accountRepository,
+    }),
+    runMigrationHooks,
+  )
+  const outcome = await createStorageCoordinator(deps).start()
+  assert.deepEqual(outcome, {
+    status: 'recovery',
+    reason: 'credential_startup_check_failed',
+    target: {
+      kind: 'external-migration',
+      component: 'credentials',
+      affectedPath: null,
+      diagnostics: [expectedDiagnostic],
+    },
+  })
+  assert.equal(calls.some(call => call == 'credentials:check'), false)
+  assert.equal(calls.some(call => call == 'settings:init'), false)
+  assert.equal(calls.some(call => call == 'modules:register'), false)
+  assert.equal(calls.filter(call => Array.isArray(call) && call[0] == 'recovery:show').length, 1)
+  assert.equal(JSON.stringify({ outcome, calls }).includes(sentinel), false)
 }
 
 afterEach(async() => {
@@ -173,6 +336,8 @@ describe('complete credential profile cutover', () => {
       'SYNC_CLIENT_KEY_SENTINEL',
       'SYNC_SERVER_KEY_SENTINEL',
       'SYNC_USER_KEY_SENTINEL',
+      'SYNC_LEGACY_CLIENT_KEY_SENTINEL',
+      'SYNC_LEGACY_SERVER_KEY_SENTINEL',
     ]
     const root = await makeRoot()
     const encryptedVaultPath = path.join(root, 'credentials.v1.json')
@@ -225,6 +390,16 @@ describe('complete credential profile cutover', () => {
         },
       },
     })
+    await writeJson(path.join(root, 'sync.json'), {
+      syncAuthKey: {
+        server_a: { clientId: 'legacy-client-a', key: knownSecrets[4], serverName: 'Duplicate Server A' },
+        server_legacy: { clientId: 'client-legacy', key: knownSecrets[7], serverName: 'Legacy Server', syncProtocol: 'legacy' },
+      },
+      clients: {
+        device_a: { clientId: 'device_a', key: knownSecrets[5], deviceName: 'Duplicate Desktop', isMobile: false },
+        device_legacy: { clientId: 'device_legacy', key: knownSecrets[8], deviceName: 'Legacy Phone', isMobile: true, lastSyncDate: 30 },
+      },
+    })
 
     const { createCredentialVault } = require(vaultPath)
     const { migrateLegacyCredentials } = require(migrationPath)
@@ -258,7 +433,7 @@ describe('complete credential profile cutover', () => {
       profiles: profileStore,
       now: () => 10_000,
     })
-    assert.deepEqual(migration, { status: 'complete', encryptedEntries: 6, memoryOnlyEntries: 0, profiles: 2 })
+    assert.deepEqual(migration, { status: 'complete', encryptedEntries: 8, memoryOnlyEntries: 0, profiles: 2 })
 
     await accounts.hydrate()
     global.lxDataPath = root
@@ -279,25 +454,63 @@ describe('complete credential profile cutover', () => {
     const syncClientData = require('../../src/main/modules/sync/client/data.ts')
     const { UserDataManage } = require('../../src/main/modules/sync/server/user/data.ts')
     const clientCredential = await syncClientData.getSyncAuthKey('server_a')
+    const legacyClientCredential = await syncClientData.getSyncAuthKey('server_legacy')
     const serverData = new UserDataManage('default')
     const serverCredential = await serverData.getClientKeyInfo('device_a')
-    const publicDevices = await serverData.getAllClientKeyInfo()
-    const syncStatus = loadTsModule(path.join(sourceRoot, 'main/modules/sync/client/client.ts'), {
-      ws: class {},
-      './utils': {},
-      './sync': { callObj: {} },
-      '../log': {},
-      '@common/utils/common': {},
-      '@main/modules/winMain': {},
-      '@common/utils/syncRpc': {},
-      '@common/constants_sync': {},
-      '@common/utils/nodejs': {},
-      '../utils': {},
-      '@common/syncProtocol': {},
-    }).getStatus()
+    const legacyServerCredential = await serverData.getClientKeyInfo('device_legacy')
+    const clientStatusService = createClientStatusService()
+    clientStatusService.sendSyncStatus({ status: true, message: 'fixture-ready' })
+    const runtime = createInMemoryServerRuntime()
+    let resolveConnected
+    const connected = new Promise(resolve => { resolveConnected = resolve })
+    const { toPublicDevice } = require('../../src/main/modules/sync/server/user/data.ts')
+    const serverService = createInMemoryServerService({
+      runtime,
+      getUserSpace: () => ({
+        dataManage: {
+          getClientKeyInfo: clientId => serverData.getClientKeyInfo(clientId),
+          saveClientKeyInfo: async() => {},
+        },
+        getDecices: () => serverData.getAllClientKeyInfo(),
+      }),
+      toPublicDevice,
+      onStatus: status => {
+        if (status.devices.length > 0) resolveConnected()
+      },
+    })
+    const sync = createSyncExportFacade({ client: clientStatusService, server: serverService })
+    const socket = {
+      on() {},
+      addEventListener() {},
+      send() {},
+      ping() {},
+      close() {},
+      terminate() {},
+    }
+    const originalLog = console.log
+    console.log = () => {}
+    let syncClientStatus
+    let syncServerStatus
+    let publicDevices
+    let serverStarted = false
+    try {
+      await serverService.startServer(9527)
+      serverStarted = true
+      runtime.connect(socket, { url: '/?i=device_a' })
+      await connected
+      syncClientStatus = sync.getClientStatus()
+      syncServerStatus = sync.getServerStatus()
+      publicDevices = await sync.getServerDevices()
+    } finally {
+      if (serverStarted) await serverService.stopServer()
+      console.log = originalLog
+    }
 
     assert.equal(clientCredential.key, knownSecrets[4])
+    assert.equal(legacyClientCredential.key, knownSecrets[7])
     assert.equal(serverCredential.key, knownSecrets[5])
+    assert.equal(legacyServerCredential.key, knownSecrets[8])
+    assert.equal(syncServerStatus.devices.some(device => device.clientId == 'device_a'), true)
     assert.equal(await vault.verify(
       { kind: 'sync-server-device', userName: 'alice', clientId: 'device_b' },
       { version: 1, key: knownSecrets[6] },
@@ -313,7 +526,7 @@ describe('complete credential profile cutover', () => {
       activePlaintextSources: [],
     })
 
-    const allRendererResponses = [qqStatus, neteaseStatus, webDAVStatus, syncStatus, publicDevices]
+    const allRendererResponses = [qqStatus, neteaseStatus, webDAVStatus, syncClientStatus, syncServerStatus, publicDevices]
     const profileJsonText = await readProfileJsonText(root, encryptedVaultPath)
     const vaultText = await fsp.readFile(encryptedVaultPath, 'utf8')
     for (const secret of knownSecrets) {
@@ -325,6 +538,150 @@ describe('complete credential profile cutover', () => {
 })
 
 describe('credential startup gate', () => {
+  it('shows credential recovery when live vault initialization fails', async() => {
+    const root = await makeRoot()
+    createLiveGlobal(root)
+    const sentinel = 'VAULT_INITIALIZATION_FAILURE_SENTINEL'
+    const runMigrationHooks = loadStorageMigrationHooks({
+      initializeCredentialVault: async() => { throw new Error(sentinel) },
+      migrateLegacyCredentials: async() => { throw new Error('must not migrate') },
+      createAccountRepository: () => { throw new Error('must not create repository') },
+    })
+
+    await assertCredentialHookRecovery({
+      runMigrationHooks,
+      expectedDiagnostic: 'credentials.vault_unreadable',
+      sentinel,
+    })
+  })
+
+  it('shows credential recovery when a live vault read fails during hydration', async() => {
+    const root = await makeRoot()
+    const profileStore = createLiveGlobal(root)
+    const sentinel = 'VAULT_READ_FAILURE_SENTINEL'
+    const vault = {
+      mode: 'encrypted',
+      read: () => { throw new Error(sentinel) },
+    }
+    const runMigrationHooks = loadStorageMigrationHooks({
+      initializeCredentialVault: async() => {
+        global.lx.credentialVault = vault
+        return vault
+      },
+      migrateLegacyCredentials: async() => ({ status: 'complete', encryptedEntries: 0, memoryOnlyEntries: 0, profiles: 0 }),
+      createAccountRepository: require('../../src/main/storage/accounts/accountRepository.ts').createAccountRepository,
+    })
+    global.lx.worker.dbService = profileStore
+
+    await assertCredentialHookRecovery({
+      runMigrationHooks,
+      expectedDiagnostic: 'credentials.vault_unreadable',
+      sentinel,
+    })
+  })
+
+  it('shows credential recovery when live credential inventory migration fails', async() => {
+    const root = await makeRoot()
+    const profileStore = createLiveGlobal(root)
+    const sentinel = 'INVENTORY_FAILURE_SENTINEL'
+    await fsp.writeFile(path.join(root, 'sync.json'), `{ "secret": "${sentinel}"`, 'utf8')
+    const { createCredentialVault } = require(vaultPath)
+    const vault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher })
+    const runMigrationHooks = loadStorageMigrationHooks({
+      initializeCredentialVault: async() => {
+        global.lx.credentialVault = vault
+        return vault
+      },
+      migrateLegacyCredentials: require(migrationPath).migrateLegacyCredentials,
+      createAccountRepository: require('../../src/main/storage/accounts/accountRepository.ts').createAccountRepository,
+    })
+    global.lx.worker.dbService = profileStore
+
+    await assertCredentialHookRecovery({
+      runMigrationHooks,
+      expectedDiagnostic: 'credentials.legacy_migration_failed',
+      sentinel,
+    })
+  })
+
+  it('shows credential recovery when live account hydration fails', async() => {
+    const root = await makeRoot()
+    createLiveGlobal(root)
+    const sentinel = 'ACCOUNT_HYDRATION_FAILURE_SENTINEL'
+    const vault = {
+      mode: 'encrypted',
+      read: () => ({ status: 'missing' }),
+    }
+    const runMigrationHooks = loadStorageMigrationHooks({
+      initializeCredentialVault: async() => {
+        global.lx.credentialVault = vault
+        return vault
+      },
+      migrateLegacyCredentials: async() => ({ status: 'complete', encryptedEntries: 0, memoryOnlyEntries: 0, profiles: 0 }),
+      createAccountRepository: () => ({
+        hydrate: async() => { throw new Error(sentinel) },
+        getStatus: () => ({ loggedIn: false, profile: null, updatedAtMs: null, persistence: null }),
+      }),
+    })
+
+    await assertCredentialHookRecovery({
+      runMigrationHooks,
+      expectedDiagnostic: 'credentials.profile_repository_unreadable',
+      sentinel,
+    })
+  })
+
+  it('keeps unrelated database failures fatal without showing credential recovery', async() => {
+    const { createStorageCoordinator } = require(coordinatorPath)
+    const { calls, deps } = createCoordinatorDependencies(async() => ({
+      vaultReadable: true,
+      profileRepositoryReadable: true,
+      activePlaintextSources: [],
+    }))
+    deps.initDatabase = async() => {
+      calls.push('database:init')
+      const error = new Error('DATABASE_FAILURE_SENTINEL')
+      error.code = 'database_open_failed'
+      throw error
+    }
+
+    assert.deepEqual(await createStorageCoordinator(deps).start(), { status: 'fatal', reason: 'database_open_failed' })
+    assert.equal(calls.some(call => Array.isArray(call) && call[0] == 'recovery:show'), false)
+    assert.equal(calls.some(call => call == 'migration:run'), false)
+  })
+
+  it('keeps pre-credential legacy database migration failures fatal', async() => {
+    const root = await makeRoot()
+    createLiveGlobal(root)
+    const runMigrationHooks = loadStorageMigrationHooks({
+      migrateDBData: async() => {
+        const error = new Error('LEGACY_DATABASE_FAILURE_SENTINEL')
+        error.code = 'legacy_database_migration_failed'
+        throw error
+      },
+      initializeCredentialVault: async() => { throw new Error('must not initialize vault') },
+      migrateLegacyCredentials: async() => { throw new Error('must not migrate credentials') },
+      createAccountRepository: () => { throw new Error('must not create repository') },
+    })
+    const { createStorageCoordinator } = require(coordinatorPath)
+    const { calls, deps } = createCoordinatorDependencies(async() => ({
+      vaultReadable: true,
+      profileRepositoryReadable: true,
+      activePlaintextSources: [],
+    }), runMigrationHooks)
+    deps.initDatabase = async() => {
+      calls.push('database:init')
+      return { status: 'ready', existed: false, schemaVersion: 4, migratedVersions: [], backupPath: null }
+    }
+
+    assert.deepEqual(await createStorageCoordinator(deps).start(), {
+      status: 'fatal', reason: 'legacy_database_migration_failed',
+    })
+    assert.equal(calls.some(call => Array.isArray(call) && call[0] == 'recovery:show'), false)
+    assert.equal(calls.some(call => call == 'credentials:check'), false)
+    assert.equal(calls.some(call => call == 'settings:init'), false)
+  })
+
   it('checks credentials after migration and before settings and module registration', async() => {
     const { createStorageCoordinator } = require(coordinatorPath)
     const { calls, deps } = createCoordinatorDependencies(async() => ({

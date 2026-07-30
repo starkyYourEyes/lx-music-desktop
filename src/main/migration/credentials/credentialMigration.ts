@@ -1,6 +1,7 @@
 import { sha256Canonical, type JsonValue } from '../../../common/storage/canonicalJson'
 import type { AccountProfileRow } from '../../worker/dbService/modules/account_profile'
 import type { CredentialVault } from '../../storage/credentials/credentialVault'
+import { toCredentialEntryId } from '../../storage/credentials/types'
 import { collectLegacyCredentialInventory, type LegacyAccountProfile } from './legacySources'
 import { redactLegacySecrets } from './redactLegacySecrets'
 
@@ -44,18 +45,28 @@ export const migrateLegacyCredentials = async(deps: CredentialMigrationDeps): Pr
   let encryptedEntries = 0
   let memoryOnlyEntries = 0
   const memoryOnlySources: string[] = []
-
+  const credentialsByDestination = new Map<string, typeof inventory.credentials>()
   for (const source of inventory.credentials) {
-    const existing = deps.vault.getMigrationMarker(source.markerName)
+    const destination = toCredentialEntryId(source.ref)
+    const sources = credentialsByDestination.get(destination) ?? []
+    sources.push(source)
+    credentialsByDestination.set(destination, sources)
+  }
+
+  for (const sources of Array.from(credentialsByDestination.values())) {
+    const source = sources[0]
     const persisted = await deps.vault.write(source.ref, source.value)
     if (!await deps.vault.verify(source.ref, source.value)) throw new Error('Credential migration destination verification failed')
-    if (existing == null || existing.sourceSha256 != source.sourceSha256) {
-      await deps.vault.putMigrationMarker(source.markerName, source.sourceSha256, now())
+    for (const contributingSource of sources) {
+      const existing = deps.vault.getMigrationMarker(contributingSource.markerName)
+      if (existing == null || existing.sourceSha256 != contributingSource.sourceSha256) {
+        await deps.vault.putMigrationMarker(contributingSource.markerName, contributingSource.sourceSha256, now())
+      }
     }
     if (persisted.persistence == 'encrypted') encryptedEntries++
     else {
       memoryOnlyEntries++
-      memoryOnlySources.push(source.sourceSha256)
+      memoryOnlySources.push(...sources.map(contributingSource => contributingSource.sourceSha256))
     }
   }
   if (inventory.credentials.length) {

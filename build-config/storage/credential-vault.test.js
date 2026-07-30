@@ -1,0 +1,170 @@
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const fsp = require('node:fs/promises')
+const os = require('node:os')
+const path = require('node:path')
+const { afterEach, describe, it } = require('node:test')
+const typescript = require('typescript')
+
+// eslint-disable-next-line n/no-deprecated-api
+require.extensions['.ts'] = (module, filename) => {
+  const source = fs.readFileSync(filename, 'utf8')
+  const output = typescript.transpileModule(source, {
+    compilerOptions: { module: typescript.ModuleKind.CommonJS, esModuleInterop: true },
+  }).outputText
+  module._compile(output, filename)
+}
+
+const vaultPath = '../../src/main/storage/credentials/credentialVault.ts'
+const tempDirs = []
+
+afterEach(async() => {
+  await Promise.all(tempDirs.splice(0).map(directory => fsp.rm(directory, { recursive: true, force: true })))
+})
+
+const makeProfileRoot = async() => {
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-credential-vault-'))
+  tempDirs.push(directory)
+  return directory
+}
+
+const encryptedCipher = {
+  mode: 'encrypted',
+  encrypt: plaintext => Buffer.concat([Buffer.from('vault-test:'), Buffer.from(plaintext).reverse()]),
+  decrypt: ciphertext => {
+    if (!ciphertext.subarray(0, 11).equals(Buffer.from('vault-test:'))) throw new Error('invalid ciphertext')
+    return Buffer.from(ciphertext.subarray(11)).reverse().toString('utf8')
+  },
+}
+
+const memoryOnlyCipher = {
+  mode: 'memory-only',
+  encrypt: () => { throw new Error('must not encrypt') },
+  decrypt: () => { throw new Error('must not decrypt') },
+}
+
+describe('credential vault', () => {
+  it('stores no plaintext secret and round-trips each entry independently', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const profileRoot = await makeProfileRoot()
+    const filePath = path.join(profileRoot, 'credentials.v1.json')
+    const vault = await createCredentialVault({ profileRoot, cipher: encryptedCipher, now: () => 1234 })
+
+    await vault.write({ kind: 'netease-cookie' }, { version: 1, cookie: 'COOKIE_SENTINEL' })
+    await vault.write({ kind: 'webdav-basic' }, { version: 1, username: 'u', password: 'PASS_SENTINEL' })
+    await vault.flush()
+
+    assert.doesNotMatch(await fsp.readFile(filePath, 'utf8'), /COOKIE_SENTINEL|PASS_SENTINEL/)
+    assert.deepEqual(vault.read({ kind: 'netease-cookie' }), {
+      status: 'available',
+      value: { version: 1, cookie: 'COOKIE_SENTINEL' },
+    })
+    assert.deepEqual(vault.read({ kind: 'webdav-basic' }), {
+      status: 'available',
+      value: { version: 1, username: 'u', password: 'PASS_SENTINEL' },
+    })
+  })
+
+  it('preserves an undecryptable entry without affecting another entry', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const profileRoot = await makeProfileRoot()
+    const filePath = path.join(profileRoot, 'credentials.v1.json')
+    const firstVault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    await firstVault.write({ kind: 'netease-cookie' }, { version: 1, cookie: 'bad-later' })
+    await firstVault.write({ kind: 'qq-music-cookie' }, { version: 1, cookie: 'still-good' })
+
+    const envelope = JSON.parse(await fsp.readFile(filePath, 'utf8'))
+    const corruptedCiphertext = Buffer.from('corrupt-entry').toString('base64')
+    envelope.entries['netease-cookie'].ciphertext = corruptedCiphertext
+    await fsp.writeFile(filePath, JSON.stringify(envelope))
+
+    const vault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    assert.deepEqual(vault.read({ kind: 'netease-cookie' }), { status: 'undecryptable' })
+    assert.deepEqual(vault.read({ kind: 'qq-music-cookie' }), {
+      status: 'available',
+      value: { version: 1, cookie: 'still-good' },
+    })
+
+    await vault.write({ kind: 'qq-music-cookie' }, { version: 1, cookie: 'updated-good' })
+    const preserved = JSON.parse(await fsp.readFile(filePath, 'utf8'))
+    assert.equal(preserved.entries['netease-cookie'].ciphertext, corruptedCiphertext)
+  })
+
+  it('rejects decrypted payloads that belong to another credential kind', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const profileRoot = await makeProfileRoot()
+    const filePath = path.join(profileRoot, 'credentials.v1.json')
+    const vault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    await vault.write({ kind: 'webdav-basic' }, { version: 1, username: 'u', password: 'p' })
+
+    const envelope = JSON.parse(await fsp.readFile(filePath, 'utf8'))
+    envelope.entries['netease-cookie'] = envelope.entries['webdav-basic']
+    await fsp.writeFile(filePath, JSON.stringify(envelope))
+
+    const reloaded = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    assert.deepEqual(reloaded.read({ kind: 'netease-cookie' }), { status: 'undecryptable' })
+  })
+
+  it('removes only the requested entry', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const profileRoot = await makeProfileRoot()
+    const vault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    await vault.write({ kind: 'netease-cookie' }, 'netease-cookie=value')
+    await vault.write({ kind: 'qq-music-cookie' }, 'qq-cookie=value')
+
+    await vault.remove({ kind: 'netease-cookie' })
+
+    assert.deepEqual(vault.read({ kind: 'netease-cookie' }), { status: 'missing' })
+    assert.deepEqual(vault.read({ kind: 'qq-music-cookie' }), {
+      status: 'available',
+      value: 'qq-cookie=value',
+    })
+  })
+
+  it('persists migration markers atomically with the envelope', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const profileRoot = await makeProfileRoot()
+    const vault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    const sourceSha256 = 'a'.repeat(64)
+
+    await vault.putMigrationMarker('legacy-data:netease', sourceSha256, 9876)
+
+    const reloaded = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    assert.deepEqual(reloaded.getMigrationMarker('legacy-data:netease'), {
+      sourceSha256,
+      completedAtMs: 9876,
+    })
+  })
+
+  it('verifies values by canonical JSON rather than object key order', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const profileRoot = await makeProfileRoot()
+    const vault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    await vault.write({ kind: 'webdav-basic' }, { version: 1, username: 'u', password: 'p' })
+
+    assert.equal(await vault.verify(
+      { kind: 'webdav-basic' },
+      { password: 'p', username: 'u', version: 1 },
+    ), true)
+    assert.equal(await vault.verify(
+      { kind: 'webdav-basic' },
+      { version: 1, username: 'u', password: 'different' },
+    ), false)
+  })
+
+  it('keeps memory-only values off disk', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const profileRoot = await makeProfileRoot()
+    const filePath = path.join(profileRoot, 'credentials.v1.json')
+    const vault = await createCredentialVault({ profileRoot, cipher: memoryOnlyCipher })
+
+    const result = await vault.write({ kind: 'qq-music-cookie' }, { version: 1, cookie: 'SECRET' })
+
+    assert.deepEqual(result, { persistence: 'memory-only' })
+    assert.deepEqual(vault.read({ kind: 'qq-music-cookie' }), {
+      status: 'memory-only',
+      value: { version: 1, cookie: 'SECRET' },
+    })
+    assert.equal(fs.existsSync(filePath), false)
+  })
+})

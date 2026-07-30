@@ -4,6 +4,7 @@
 import { type DislikeType, type AppType, type ListType } from '@main/event'
 import { type DBSeriveTypes } from '@main/worker/utils'
 import { type StorageCoordinator } from '@main/startup/storageCoordinator'
+import { type CredentialVault } from '@main/storage/credentials/credentialVault'
 
 interface Lx {
   inited: boolean
@@ -28,6 +29,7 @@ interface Lx {
     dbService: DBSeriveTypes
   }
   storage: StorageCoordinator | null
+  credentialVault?: CredentialVault
   theme: LX.ThemeSetting
   player_status: LX.Player.Status
 }

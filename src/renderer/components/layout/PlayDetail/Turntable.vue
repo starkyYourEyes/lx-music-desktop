@@ -148,7 +148,7 @@ const handleImageError = () => {
 }
 
 .tonearmPlaying {
-  transform: rotate(18deg);
+  transform: rotate(40deg);
 }
 
 .pivot {
@@ -166,14 +166,13 @@ const handleImageError = () => {
 .arm {
   position: absolute;
   left: 18px;
-  top: 18px;
+  top: 14px;
   width: calc(100% - 35px);
-  height: 58px;
-  border-right: 7px solid currentColor;
-  border-bottom: 7px solid currentColor;
-  border-radius: 0 0 50% 0;
-  transform: skewX(18deg) rotate(5deg);
-  transform-origin: left top;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  transform: rotate(17deg);
+  transform-origin: left center;
 }
 
 .head {

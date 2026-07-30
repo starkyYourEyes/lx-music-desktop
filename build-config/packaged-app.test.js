@@ -25,3 +25,28 @@ test('packaged application contains a valid manifest and main process bundle', (
   assert.equal(manifest.name, 'starky-lx-music-desktop')
   assert.doesNotMatch(mainBundle, /Worker__webpack_require__\.wc/)
 })
+
+test('packaged application contains the external database runtime', () => {
+  const manifest = JSON.parse(extractVerifiedFile(
+    path.join('node_modules', 'better-sqlite3', 'package.json'),
+  ).toString('utf8'))
+  const entry = extractVerifiedFile(path.join(
+    'node_modules',
+    'better-sqlite3',
+    'lib',
+    'index.js',
+  ))
+  const nativeBinding = extractVerifiedFile(
+    path.join(
+      'node_modules',
+      'better-sqlite3',
+      'build',
+      'Release',
+      'better_sqlite3.node',
+    ),
+  )
+
+  assert.equal(manifest.name, 'better-sqlite3')
+  assert.notEqual(entry.length, 0)
+  assert.notEqual(nativeBinding.length, 0)
+})

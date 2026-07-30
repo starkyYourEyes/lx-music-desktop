@@ -34,7 +34,7 @@ export const normalizeListeningTimeStats = (stats?: Partial<ListeningTimeStats> 
   const nextStats = createDefaultListeningTimeStats()
   if (!stats) return nextStats
 
-  nextStats.totalSeconds = Math.max(0, Math.floor(Number(stats.totalSeconds) || 0))
+  nextStats.totalSeconds = Math.max(0, Number(stats.totalSeconds) || 0)
   nextStats.daily = { ...(stats.daily ?? {}) }
   nextStats.songs = { ...(stats.songs ?? {}) }
   nextStats.updatedAt = Number(stats.updatedAt) || Date.now()
@@ -48,7 +48,7 @@ export const addListeningTime = (
   song: ListeningTimeSong | null,
   date = new Date(),
 ): ListeningTimeStats => {
-  const safeSeconds = Math.max(0, Math.floor(seconds))
+  const safeSeconds = Math.max(0, seconds)
   if (!safeSeconds) return stats
 
   const dayKey = getLocalDateKey(date)

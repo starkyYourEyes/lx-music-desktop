@@ -182,9 +182,38 @@ const tonearmPlaying = getDirectDeclarations(getRule(turntableStyle, '.tonearmPl
 expectDeclaration(
   tonearmPlaying,
   'transform',
-  'rotate(18deg)',
+  'rotate(40deg)',
   'Playing tonearm should rotate onto the outer groove',
 )
+
+const arm = getDirectDeclarations(getRule(turntableStyle, '.arm'))
+expectDeclaration(
+  arm,
+  'height',
+  '7px',
+  'Tonearm shaft should be a single straight bar',
+)
+expectDeclaration(
+  arm,
+  'background',
+  'currentColor',
+  'Tonearm shaft should be drawn as a solid bar',
+)
+expectDeclaration(
+  arm,
+  'transform',
+  'rotate(17deg)',
+  'Tonearm shaft should run directly from the pivot to the cartridge',
+)
+expectDeclaration(
+  arm,
+  'transform-origin',
+  'left center',
+  'Tonearm shaft should begin at the pivot center',
+)
+assert(!arm.has('border-left'), 'Tonearm shaft should not use a bent left border')
+assert(!arm.has('border-right'), 'Tonearm shaft should not use a bent right border')
+assert(!arm.has('border-bottom'), 'Tonearm shaft should not use a bent bottom border')
 
 const reducedMotion = getRule(turntableStyle, '@media (prefers-reduced-motion: reduce)')
 const reducedRecord = getDirectDeclarations(getRule(reducedMotion, '.record'))

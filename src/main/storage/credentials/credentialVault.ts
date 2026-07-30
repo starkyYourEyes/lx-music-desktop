@@ -132,6 +132,9 @@ const removeUnsafeCiphertextEntries = (value: CredentialVaultStorageFileV1): voi
   }
 }
 
+const containsUnsafeCiphertext = (value: CredentialVaultStorageFileV1): boolean =>
+  Object.values(value.entries).some(entry => !base64IsValid(entry.ciphertext))
+
 const isJsonValue = (value: unknown): value is JsonValue => {
   if (value == null || ['string', 'number', 'boolean'].includes(typeof value)) return true
   if (Array.isArray(value)) return value.every(isJsonValue)
@@ -180,6 +183,7 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
   const file = options.file ?? createAtomicJsonFile<CredentialVaultStorageFileV1>({
     filePath: path.join(options.profileRoot, 'credentials.v1.json'),
     validate: isCredentialVaultStorageFileV1,
+    shouldPreservePrevious: current => !containsUnsafeCiphertext(current),
     mode: 0o600,
   })
   let envelope = await file.read() ?? emptyEnvelope()

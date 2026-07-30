@@ -238,6 +238,11 @@ describe('credential vault', () => {
     const durableBytes = await fsp.readFile(filePath, 'utf8')
     const durableEnvelope = JSON.parse(durableBytes)
     assert.doesNotMatch(durableBytes, /PLAINTEXT_CIPHERTEXT_SENTINEL/)
+    assert.equal(fs.existsSync(`${filePath}.previous`), false)
+    const vaultArtifacts = (await fsp.readdir(profileRoot)).filter(name => name.startsWith('credentials.v1.json'))
+    for (const artifact of vaultArtifacts) {
+      assert.doesNotMatch(await fsp.readFile(path.join(profileRoot, artifact), 'utf8'), /PLAINTEXT_CIPHERTEXT_SENTINEL/)
+    }
     assert.equal(Object.hasOwn(durableEnvelope.entries, 'netease-cookie'), false)
     assert.deepEqual(vault.read({ kind: 'netease-cookie' }), { status: 'undecryptable' })
     assert.deepEqual(vault.read({ kind: 'qq-music-cookie' }), {

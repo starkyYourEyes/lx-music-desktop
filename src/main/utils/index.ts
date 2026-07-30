@@ -8,6 +8,7 @@ import { migrateDataJson, migrateHotKey, migrateUserApi, parseDataFile } from '.
 import { nativeTheme, powerSaveBlocker } from 'electron'
 import { joinPath } from '@common/utils/nodejs'
 import themes from '@common/theme/index.json'
+import { normalizeWebDAVRootUrl } from '@common/utils/webdavUrl'
 
 export const parseEnvParams = (argv = process.argv): { cmdParams: LX.CmdParams, deeplink: string | null } => {
   const cmdParams: LX.CmdParams = {}
@@ -48,6 +49,13 @@ export const sanitizeSettingUpdate = (setting?: Partial<LX.AppSetting>): Partial
   if (setting == null) return setting
   const sanitized = { ...setting }
   for (const key of webDAVCredentialSettingKeys) Reflect.deleteProperty(sanitized, key)
+  if (Object.hasOwn(sanitized, 'webdav.url')) {
+    try {
+      normalizeWebDAVRootUrl(sanitized['webdav.url'])
+    } catch {
+      throw new Error('Invalid WebDAV URL')
+    }
+  }
   return sanitized
 }
 

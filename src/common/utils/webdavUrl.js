@@ -48,6 +48,7 @@ const decodePathname = pathname => {
 const normalizeWebDAVRootUrl = value => {
   const url = new URL(String(value ?? ''))
   if (!HTTP_PROTOCOLS.has(url.protocol)) throw new Error('WebDAV URL must use HTTP or HTTPS')
+  if (url.username || url.password) throw new Error('WebDAV URL must not contain credentials')
   if (!url.pathname.endsWith('/')) url.pathname += '/'
   url.hash = ''
   return url.toString()

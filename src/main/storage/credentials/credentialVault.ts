@@ -47,10 +47,11 @@ interface CreateCredentialVaultOptions {
 }
 
 type CorruptibleNumberMetadata = number | boolean | null
+type CorruptibleCiphertext = string | number | boolean | null
 
 interface CredentialVaultStorageEntryV1 {
   version?: CorruptibleNumberMetadata
-  ciphertext?: string
+  ciphertext?: CorruptibleCiphertext
   updatedAtMs?: CorruptibleNumberMetadata
 }
 
@@ -97,10 +98,13 @@ const credentialEntryIsDecryptable = (value: CredentialVaultStorageEntryV1): val
 const corruptibleNumberMetadataIsValid = (value: unknown): value is CorruptibleNumberMetadata =>
   value == null || typeof value == 'boolean' || (typeof value == 'number' && Number.isFinite(value))
 
+const corruptibleCiphertextIsValid = (value: unknown): value is CorruptibleCiphertext =>
+  typeof value == 'string' || corruptibleNumberMetadataIsValid(value)
+
 const credentialStorageEntryIsValid = (value: unknown): value is CredentialVaultStorageEntryV1 => {
   if (!recordIsValid(value) || !hasOnlyKeys(value, ['version', 'ciphertext', 'updatedAtMs'])) return false
   if (Object.hasOwn(value, 'version') && !corruptibleNumberMetadataIsValid(value.version)) return false
-  if (Object.hasOwn(value, 'ciphertext') && typeof value.ciphertext != 'string') return false
+  if (Object.hasOwn(value, 'ciphertext') && !corruptibleCiphertextIsValid(value.ciphertext)) return false
   return !Object.hasOwn(value, 'updatedAtMs') || corruptibleNumberMetadataIsValid(value.updatedAtMs)
 }
 
@@ -121,6 +125,12 @@ const emptyEnvelope = (): CredentialVaultStorageFileV1 => ({
 
 const cloneEnvelope = (value: CredentialVaultStorageFileV1): CredentialVaultStorageFileV1 =>
   JSON.parse(canonicalJson(value as unknown as JsonValue))
+
+const removeUnsafeCiphertextEntries = (value: CredentialVaultStorageFileV1): void => {
+  for (const [entryId, entry] of Object.entries(value.entries)) {
+    if (!base64IsValid(entry.ciphertext)) Reflect.deleteProperty(value.entries, entryId)
+  }
+}
 
 const isJsonValue = (value: unknown): value is JsonValue => {
   if (value == null || ['string', 'number', 'boolean'].includes(typeof value)) return true
@@ -174,6 +184,11 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
   })
   let envelope = await file.read() ?? emptyEnvelope()
   const memoryEntries = new Map<string, JsonValue>()
+  const volatileUndecryptableEntryIds = new Set(
+    Object.entries(envelope.entries)
+      .filter(([, entry]) => !base64IsValid(entry.ciphertext))
+      .map(([entryId]) => entryId),
+  )
   let lifecycle = Promise.resolve()
 
   const serialize = async<T>(operation: () => Promise<T>): Promise<T> => {
@@ -185,6 +200,7 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
   const persist = async(mutate: (next: CredentialVaultStorageFileV1) => void): Promise<void> => serialize(async() => {
     const next = cloneEnvelope(envelope)
     mutate(next)
+    removeUnsafeCiphertextEntries(next)
     await file.replace(next)
     // Serialized vault mutations make this post-commit assignment race-free.
     // eslint-disable-next-line require-atomic-updates
@@ -195,7 +211,7 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
     const entryId = toCredentialEntryId(ref)
     if (memoryEntries.has(entryId)) return { status: 'memory-only', value: memoryEntries.get(entryId) as T }
     const entry = envelope.entries[entryId]
-    if (entry == null) return { status: 'missing' }
+    if (entry == null) return volatileUndecryptableEntryIds.has(entryId) ? { status: 'undecryptable' } : { status: 'missing' }
     if (!credentialEntryIsDecryptable(entry)) return { status: 'undecryptable' }
     try {
       const plaintext = options.cipher.decrypt(Buffer.from(entry.ciphertext, 'base64'))
@@ -222,16 +238,21 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
     await persist(next => {
       next.entries[entryId] = entry
     })
+    volatileUndecryptableEntryIds.delete(entryId)
     return { persistence: 'encrypted' }
   }
 
   const remove = async(ref: CredentialRef): Promise<void> => {
     const entryId = toCredentialEntryId(ref)
     memoryEntries.delete(entryId)
-    if (envelope.entries[entryId] == null) return
+    if (envelope.entries[entryId] == null) {
+      volatileUndecryptableEntryIds.delete(entryId)
+      return
+    }
     await persist(next => {
       Reflect.deleteProperty(next.entries, entryId)
     })
+    volatileUndecryptableEntryIds.delete(entryId)
   }
 
   const verify = async<T>(ref: CredentialRef, expected: T): Promise<boolean> => {

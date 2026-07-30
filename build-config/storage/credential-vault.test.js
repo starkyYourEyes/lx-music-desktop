@@ -183,24 +183,25 @@ describe('credential vault', () => {
     assert.deepEqual(rejected, [true, true, true])
   })
 
-  it('isolates and preserves approved structural corruption in one entry', async() => {
+  it('isolates structural corruption and persists only base64 ciphertext', async() => {
     const { createCredentialVault } = require(vaultPath)
     const corruptions = [
-      () => ({}),
-      entry => ({ ...entry, ciphertext: '' }),
-      entry => ({ ...entry, ciphertext: 'abc' }),
-      entry => ({ ...entry, ciphertext: '!!!!' }),
-      entry => ({ ...entry, version: 2, updatedAtMs: -1 }),
+      { mutate: () => ({}), preserve: false },
+      { mutate: entry => ({ ...entry, ciphertext: '' }), preserve: false },
+      { mutate: entry => ({ ...entry, ciphertext: 'abc' }), preserve: false },
+      { mutate: entry => ({ ...entry, ciphertext: '!!!!' }), preserve: false },
+      { mutate: entry => ({ ...entry, ciphertext: null }), preserve: false },
+      { mutate: entry => ({ ...entry, version: 2, updatedAtMs: -1 }), preserve: true },
     ]
 
-    for (const corrupt of corruptions) {
+    for (const corruption of corruptions) {
       const profileRoot = await makeProfileRoot()
       const filePath = path.join(profileRoot, 'credentials.v1.json')
       const firstVault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
       await firstVault.write({ kind: 'netease-cookie' }, { version: 1, cookie: 'bad-entry' })
       await firstVault.write({ kind: 'qq-music-cookie' }, { version: 1, cookie: 'healthy-entry' })
       const envelope = JSON.parse(await fsp.readFile(filePath, 'utf8'))
-      const corruptedEntry = corrupt(envelope.entries['netease-cookie'])
+      const corruptedEntry = corruption.mutate(envelope.entries['netease-cookie'])
       envelope.entries['netease-cookie'] = corruptedEntry
       await fsp.writeFile(filePath, JSON.stringify(envelope))
 
@@ -211,9 +212,38 @@ describe('credential vault', () => {
         value: { version: 1, cookie: 'healthy-entry' },
       })
       await vault.write({ kind: 'qq-music-cookie' }, { version: 1, cookie: 'updated-healthy-entry' })
-      const preserved = JSON.parse(await fsp.readFile(filePath, 'utf8'))
-      assert.deepEqual(preserved.entries['netease-cookie'], corruptedEntry)
+      const persisted = JSON.parse(await fsp.readFile(filePath, 'utf8'))
+      if (corruption.preserve) assert.deepEqual(persisted.entries['netease-cookie'], corruptedEntry)
+      else assert.equal(Object.hasOwn(persisted.entries, 'netease-cookie'), false)
+      assert.deepEqual(vault.read({ kind: 'netease-cookie' }), { status: 'undecryptable' })
     }
+  })
+
+  it('does not rewrite a plaintext ciphertext sentinel during an unrelated write', async() => {
+    const { createCredentialVault } = require(vaultPath)
+    const profileRoot = await makeProfileRoot()
+    const filePath = path.join(profileRoot, 'credentials.v1.json')
+    const firstVault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    await firstVault.write({ kind: 'netease-cookie' }, { version: 1, cookie: 'bad-entry' })
+    await firstVault.write({ kind: 'qq-music-cookie' }, { version: 1, cookie: 'healthy-entry' })
+    const envelope = JSON.parse(await fsp.readFile(filePath, 'utf8'))
+    envelope.entries['netease-cookie'].ciphertext = 'PLAINTEXT_CIPHERTEXT_SENTINEL'
+    await fsp.writeFile(filePath, JSON.stringify(envelope))
+
+    const vault = await createCredentialVault({ profileRoot, cipher: encryptedCipher })
+    assert.deepEqual(vault.read({ kind: 'netease-cookie' }), { status: 'undecryptable' })
+    assert.equal(vault.read({ kind: 'qq-music-cookie' }).status, 'available')
+    await vault.write({ kind: 'qq-music-cookie' }, { version: 1, cookie: 'updated-healthy-entry' })
+
+    const durableBytes = await fsp.readFile(filePath, 'utf8')
+    const durableEnvelope = JSON.parse(durableBytes)
+    assert.doesNotMatch(durableBytes, /PLAINTEXT_CIPHERTEXT_SENTINEL/)
+    assert.equal(Object.hasOwn(durableEnvelope.entries, 'netease-cookie'), false)
+    assert.deepEqual(vault.read({ kind: 'netease-cookie' }), { status: 'undecryptable' })
+    assert.deepEqual(vault.read({ kind: 'qq-music-cookie' }), {
+      status: 'available',
+      value: { version: 1, cookie: 'updated-healthy-entry' },
+    })
   })
 
   it('removes only the requested entry', async() => {

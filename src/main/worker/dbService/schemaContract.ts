@@ -160,6 +160,16 @@ export const databaseSchemaContract: SchemaContract = {
       indexes: [{ name: 'migration_markers.name.primary', columns: ['name'], unique: true, partial: false }],
       foreignKeys: [],
     },
+    {
+      name: 'account_profiles',
+      columns: [
+        column('provider', 'TEXT', false, 1),
+        column('profile_json', 'TEXT', true),
+        column('updated_at_ms', 'INTEGER', true),
+      ],
+      indexes: [{ name: 'account_profiles.provider.primary', columns: ['provider'], unique: true, partial: false }],
+      foreignKeys: [],
+    },
   ],
 }
 

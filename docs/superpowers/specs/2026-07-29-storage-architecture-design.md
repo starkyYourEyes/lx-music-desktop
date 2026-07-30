@@ -760,6 +760,15 @@ Normal backups use the SQLite online backup API. Renaming the database, WAL,
 and SHM is only a corruption-isolation operation after the connection is
 closed; it is not a normal backup mechanism.
 
+The filesystem threat model rejects stable symbolic links, non-regular
+database targets, competing creators, and path replacements that remain
+visible across the guarded SQLite open. It does not claim to resist a
+same-user malicious process that performs an ABA path replacement entirely
+inside the native `sqlite3_open_v2` call. The bundled `better-sqlite3` API does
+not expose `SQLITE_OPEN_NOFOLLOW`, so that syscall-level guarantee would
+require native dependency support. This same-user ABA attacker is excluded
+from the current desktop application threat model.
+
 ## Backup and Export
 
 Two backup products have different purposes.

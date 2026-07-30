@@ -17,6 +17,7 @@ require.extensions['.ts'] = (module, filename) => {
 }
 
 const Database = require('better-sqlite3')
+const { migrations } = require('../../src/main/worker/dbService/migrations/index.ts')
 const tables = require('../../src/main/worker/dbService/tables.ts').default
 const MIGRATION_3_CHECKSUM = '9243aa510e8355d2c3d0f687c6736654adf584ec6007b1bcf46f374a9d694e41'
 const tempDirs = []
@@ -619,7 +620,7 @@ describe('database startup orchestration', () => {
 
     assert.equal(result.status, 'ready')
     assert.equal(result.existed, false)
-    assert.equal(result.schemaVersion, 3)
+    assert.equal(result.schemaVersion, migrations.at(-1).version)
     assert.deepEqual(result.migratedVersions, [])
     assert.equal(result.backupPath, null)
     assert.equal(backupCalls, 0)

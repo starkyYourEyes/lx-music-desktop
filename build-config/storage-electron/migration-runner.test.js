@@ -27,6 +27,7 @@ const {
   runMigrations,
 } = require('../../src/main/worker/dbService/migrate.ts')
 const { migration3 } = require('../../src/main/worker/dbService/migrations/0003_storage_foundation.ts')
+const { migrations } = require('../../src/main/worker/dbService/migrations/index.ts')
 
 const MIGRATION_3_CHECKSUM = '9243aa510e8355d2c3d0f687c6736654adf584ec6007b1bcf46f374a9d694e41'
 const LEGACY_SCHEMA = new Map([
@@ -486,6 +487,7 @@ describe('database migrations', () => {
     const result = await dbService.init({ dataPath: profileRoot, backupDir, previousShutdownWasClean: true })
     const db = dbService.getAppDB()
     databases.push(db)
+    const latestSchemaVersion = migrations.at(-1).version
 
     assert.equal(result.status, 'ready')
     assert.deepEqual({
@@ -495,13 +497,16 @@ describe('database migrations', () => {
       backupPath: result.backupPath,
     }, {
       existed: false,
-      schemaVersion: 3,
+      schemaVersion: latestSchemaVersion,
       migratedVersions: [],
       backupPath: null,
     })
     assert.equal(dbService.getDB(), db)
-    assert.equal(getSchemaVersion(db), 3)
-    assert.deepEqual(readLedger(db).map(row => [row.version, row.name]), [[3, 'storage_foundation']])
+    assert.equal(getSchemaVersion(db), latestSchemaVersion)
+    assert.deepEqual(
+      readLedger(db).map(row => [row.version, row.name, row.checksum]),
+      migrations.map(migration => [migration.version, migration.name, migration.checksum]),
+    )
     assert.equal(db.pragma('foreign_keys', { simple: true }), 1)
     assert.equal(db.pragma('journal_mode', { simple: true }), 'wal')
     assert.equal(fs.existsSync(backupDir), false)

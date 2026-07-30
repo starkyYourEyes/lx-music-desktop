@@ -19,6 +19,7 @@ require.extensions['.ts'] = (module, filename) => {
 
 const Database = require('better-sqlite3')
 const {
+  bootstrapDatabaseSchema,
   getMigrationMarker,
   getPendingMigrations,
   getSchemaVersion,
@@ -108,6 +109,42 @@ const loadDbServiceWithBoundaries = ({ DatabaseImplementation, fileSystem = fs }
 }
 
 describe('database migrations', () => {
+  it('bootstraps a missing database to the requested registry target atomically', () => {
+    const db = new Database(':memory:')
+    databases.push(db)
+    const bootstrapMigration4 = createMigration(4, 'bootstrap_four', database => {
+      database.exec('CREATE TABLE bootstrap_four (id INTEGER PRIMARY KEY)')
+    })
+
+    const result = bootstrapDatabaseSchema(db, [migration3, bootstrapMigration4], { now: () => 1234 })
+
+    assert.deepEqual(result, { fromVersion: 2, toVersion: 4, applied: [3, 4] })
+    assert.equal(getSchemaVersion(db), 4)
+    assert.equal(hasObject(db, 'bootstrap_four'), true)
+    assert.deepEqual(readLedger(db).map(row => [row.version, row.name]), [
+      [3, 'storage_foundation'],
+      [4, 'bootstrap_four'],
+    ])
+  })
+
+  it('rolls back the baseline and ledger when fresh bootstrap fails', () => {
+    const db = new Database(':memory:')
+    databases.push(db)
+    const failingMigration4 = createMigration(4, 'bootstrap_failure', database => {
+      database.exec('CREATE TABLE bootstrap_partial (id INTEGER PRIMARY KEY)')
+      throw new Error('injected bootstrap failure')
+    })
+
+    assert.throws(
+      () => bootstrapDatabaseSchema(db, [migration3, failingMigration4], { now: () => 1234 }),
+      /injected bootstrap failure/,
+    )
+    assert.equal(hasObject(db, 'db_info'), false)
+    assert.equal(hasObject(db, 'schema_migrations'), false)
+    assert.equal(hasObject(db, 'migration_markers'), false)
+    assert.equal(hasObject(db, 'bootstrap_partial'), false)
+  })
+
   it('bridges legacy version 2 and applies all pending migrations atomically', () => {
     const db = createLegacyDatabase('2')
 

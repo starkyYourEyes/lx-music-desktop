@@ -1,10 +1,17 @@
-import { init } from './db'
+import {
+  close,
+  getDatabaseHealth,
+  init,
+} from './db'
 import { exposeWorker } from '../utils/worker'
 import { list, lyric, music_url, music_other_source, download, dislike_list } from './modules/index'
 
+export { init }
 
 const common = {
   init,
+  close,
+  getDatabaseHealth,
 }
 
 exposeWorker(Object.assign(common, list, lyric, music_url, music_other_source, download, dislike_list))

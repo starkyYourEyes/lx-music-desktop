@@ -4,10 +4,18 @@ import { markRaw, toRaw } from '@common/utils/vueTools'
 import * as hotKeys from '@common/hotKey'
 import { APP_EVENT_NAMES, DATA_KEYS, DEFAULT_SETTING } from '@common/constants'
 import type { ListeningTimeStats } from '@common/utils/listeningTime'
+import type { StorageCapabilitiesV1, StorageRequestV1 } from '@common/storage/contracts'
 
 type RemoveListener = () => void
 
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
+
+// Preserve the direct IPC Promise rather than adding an async adoption wrapper.
+// eslint-disable-next-line @typescript-eslint/promise-function-async
+export const getStorageCapabilities = (): Promise<StorageCapabilitiesV1> => rendererInvoke<StorageRequestV1, StorageCapabilitiesV1>(
+  WIN_MAIN_RENDERER_EVENT_NAME.storage_capabilities_get,
+  { version: 1, type: 'capabilities.get' },
+)
 
 export const getSetting = async() => {
   return rendererInvoke<LX.AppSetting>(CMMON_EVENT_NAME.get_app_setting)

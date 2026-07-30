@@ -3,6 +3,12 @@ import { dialog, shell } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
 import { log } from '@common/utils'
+import {
+  cleanupAtomicJsonOwnedTempsSync,
+  createAtomicJsonFile,
+  type AtomicFileSystem,
+  type AtomicJsonFile,
+} from '../storage/atomicJsonFile'
 
 type Stores = Record<string, Store>
 
@@ -12,43 +18,55 @@ const isStoreRecord = (value: unknown): value is Record<string, any> => {
   return value != null && typeof value == 'object' && !Array.isArray(value)
 }
 
+const toStorePersistenceError = (): Error => new Error('Store persistence failed')
+
 
 class Store {
   private readonly filePath: string
-  private readonly dirPath: string
+  private readonly atomicFile: AtomicJsonFile<Record<string, any>>
   private store: Record<string, any>
+  private writeError: Error | null = null
 
-  private writeFile() {
-    const tempPath = this.filePath + '.' + Math.random().toString().substring(2, 10) + '.temp'
+  private enqueueWrite() {
+    let snapshot: Record<string, any>
     try {
-      fs.writeFileSync(tempPath, JSON.stringify(this.store, null, '\t'), 'utf8')
-    } catch (err: any) {
-      if (err.code === 'ENOENT') {
-        fs.mkdirSync(this.dirPath, { recursive: true })
-        fs.writeFileSync(tempPath, JSON.stringify(this.store, null, '\t'), 'utf8')
-      } else throw err
+      snapshot = structuredClone(this.store)
+    } catch {
+      this.writeError ??= toStorePersistenceError()
+      return
     }
-    fs.renameSync(tempPath, this.filePath)
+    void this.atomicFile.replace(snapshot).catch(() => {
+      this.writeError ??= toStorePersistenceError()
+    })
   }
 
-  constructor(filePath: string, clearInvalidConfig: boolean = false) {
+  constructor(filePath: string, clearInvalidConfig: boolean = false, atomicFileSystem?: AtomicFileSystem) {
     this.filePath = filePath
-    this.dirPath = path.dirname(this.filePath)
+    try {
+      cleanupAtomicJsonOwnedTempsSync(filePath)
+    } catch {
+      throw new Error('Store data load failed')
+    }
+    this.atomicFile = createAtomicJsonFile({
+      filePath,
+      validate: isStoreRecord,
+      fs: atomicFileSystem,
+      initialCleanupComplete: true,
+    })
 
     let store: Record<string, any>
     if (fs.existsSync(this.filePath)) {
-      if (clearInvalidConfig) {
-        try {
-          store = JSON.parse(fs.readFileSync(this.filePath, 'utf8'))
-        } catch {
-          store = {}
-        }
-      } else store = JSON.parse(fs.readFileSync(this.filePath, 'utf8'))
+      try {
+        store = JSON.parse(fs.readFileSync(this.filePath, 'utf8'))
+      } catch {
+        if (clearInvalidConfig) store = {}
+        else throw new Error('Store data load failed')
+      }
     } else store = {}
 
     if (!isStoreRecord(store)) {
       if (clearInvalidConfig) store = {}
-      else throw new Error('parse data error: ' + String(store))
+      else throw new Error('Store data load failed')
     }
     this.store = store
   }
@@ -62,26 +80,32 @@ class Store {
   }
 
   set(key: string, value: any) {
-    const previousDescriptor = Object.getOwnPropertyDescriptor(this.store, key)
     Object.defineProperty(this.store, key, {
       value,
       enumerable: true,
       writable: true,
       configurable: true,
     })
-    try {
-      this.writeFile()
-    } catch (err) {
-      if (previousDescriptor) Object.defineProperty(this.store, key, previousDescriptor)
-      else Reflect.deleteProperty(this.store, key)
-      throw err
-    }
+    this.enqueueWrite()
   }
 
   override(value: Record<string, any>) {
     if (!isStoreRecord(value)) throw new Error('invalid store data')
     this.store = value
-    this.writeFile()
+    this.enqueueWrite()
+  }
+
+  async flush(): Promise<void> {
+    try {
+      await this.atomicFile.flush()
+    } catch {
+      this.writeError ??= toStorePersistenceError()
+    }
+    if (this.writeError != null) throw this.writeError
+  }
+
+  async cleanupOwnedTemps(): Promise<void> {
+    await this.atomicFile.cleanupOwnedTemps()
   }
 }
 
@@ -105,21 +129,27 @@ export default (name: string, isIgnoredError = true, isShowErrorAlert = true): S
     if (!isIgnoredError) throw error
 
 
-    const backPath = storePath + '.bak'
-    fs.renameSync(storePath, backPath)
     if (isShowErrorAlert) {
       dialog.showMessageBoxSync({
         type: 'error',
         message: name + ' data load error',
-        detail: `We have helped you back up the old ${name} file to: ${backPath}\nYou can try to repair and restore it manually\n\nError detail: ${error.message}`,
+        detail: `The invalid ${name} file has been preserved at: ${storePath}\nYou can try to repair it manually\n\nError detail: ${error.message}`,
       })
-      shell.showItemInFolder(backPath)
+      shell.showItemInFolder(storePath)
     }
 
 
-    store = new Store(storePath, true)
+    store = stores[name] = new Store(storePath, true)
   }
   return store
+}
+
+export const flushStores = async(): Promise<void> => {
+  await Promise.all(Object.values(stores).map(async store => store.flush()))
+}
+
+export const cleanupStoreTemps = async(): Promise<void> => {
+  await Promise.all(Object.values(stores).map(async store => store.cleanupOwnedTemps()))
 }
 
 export {

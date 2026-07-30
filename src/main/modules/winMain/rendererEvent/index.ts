@@ -9,6 +9,7 @@ import userApi from './userApi'
 import sync from './sync'
 import party from './party'
 import data from './data'
+import storage from './storage'
 import music from './music'
 import webdav from './webdav'
 import localMusic from './localMusic'
@@ -42,6 +43,7 @@ export default () => {
   sync()
   party()
   data()
+  storage()
   music()
   webdav()
   localMusic()

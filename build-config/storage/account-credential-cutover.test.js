@@ -393,4 +393,69 @@ describe('account credential cutover', () => {
     assert.equal(accounts.getCookie('netease'), 'new-cookie')
     assert.deepEqual(accounts.getStatus('netease').profile, { userId: 2, nickname: 'New', avatarUrl: '' })
   })
+
+  it('persists a later NetEase QR login after an older queued logout clear completes', async() => {
+    const accounts = createRepository()
+    await saveAccount(accounts, 'netease', 'old-cookie', { userId: 1, nickname: 'Old', avatarUrl: '' }, 0)
+    const clearStarted = deferred()
+    const clearGate = deferred()
+    const qrCheckStarted = deferred()
+    const qrResponse = deferred()
+    const saveStarted = deferred()
+    const saveGate = deferred()
+    const originalClear = accounts.clear
+    const originalSave = accounts.save
+    accounts.clear = async(...args) => {
+      clearStarted.resolve()
+      await clearGate.promise
+      return await originalClear.apply(accounts, args)
+    }
+    accounts.save = async(...args) => {
+      if (args[0] == 'netease' && args[1].cookie == 'new-cookie') {
+        saveStarted.resolve()
+        await saveGate.promise
+      }
+      return await originalSave.apply(accounts, args)
+    }
+    const { service } = createNeteaseService({
+      accounts,
+      api: {
+        login_qr_key: async() => ({}),
+        login_qr_create: async() => ({}),
+        login_qr_check: async() => {
+          qrCheckStarted.resolve()
+          return await qrResponse.promise
+        },
+        login_status: async() => ({ body: { profile: { userId: 2, nickname: 'New', avatarUrl: '' } } }),
+        logout: async() => ({}),
+      },
+    })
+
+    const loggingOut = service.logout()
+    await clearStarted.promise
+    const checking = service.checkLoginQr('new-key')
+    await qrCheckStarted.promise
+    clearGate.resolve()
+    await loggingOut
+    qrResponse.resolve({ body: { code: 803, message: 'new', cookie: 'new-cookie' } })
+    const firstOutcome = await Promise.race([
+      saveStarted.promise.then(() => 'save-started'),
+      checking.then(result => ({ result })),
+    ])
+    assert.equal(firstOutcome, 'save-started')
+    let settled = false
+    const checkingFinished = checking.then(() => { settled = true })
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(settled, false)
+    saveGate.resolve()
+
+    assert.deepEqual(await checking, {
+      code: 803,
+      message: 'new',
+      isLoggedIn: true,
+      profile: { userId: 2, nickname: 'New', avatarUrl: '', backgroundUrl: undefined, signature: undefined },
+    })
+    await checkingFinished
+    assert.equal(accounts.getCookie('netease'), 'new-cookie')
+  })
 })

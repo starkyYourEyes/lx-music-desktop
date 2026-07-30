@@ -62,30 +62,37 @@ export const createNeteaseAccountService = ({
     return generation == accountGeneration && accounts.getCookie('netease') == cookie
   }
 
+  const isCurrentGeneration = (generation: number) => generation == accountGeneration
+
   const refreshLoginStatus = async(
     cookie: string,
     sourceCookie: string,
     generation: number,
+    canReplaceSourceAccount = false,
   ): Promise<LX.Netease.AccountStatus> => {
     if (!cookie) return { isLoggedIn: false, profile: null }
 
+    const isCurrentRefresh = () => canReplaceSourceAccount
+      ? isCurrentGeneration(generation)
+      : isCurrentAccount(sourceCookie, generation)
+
     const result = await api.login_status({ cookie })
-    if (!isCurrentAccount(sourceCookie, generation)) return getLoggedOutStatus()
+    if (!isCurrentRefresh()) return getLoggedOutStatus()
     const profile = normalizeProfile(result.body?.data?.profile ?? result.body?.profile)
     if (profile == null) {
-      if (!isCurrentAccount(sourceCookie, generation)) return getLoggedOutStatus()
+      if (!isCurrentRefresh()) return getLoggedOutStatus()
       await accounts.clear('netease')
       return { isLoggedIn: false, profile: null }
     }
     const mergedCookie = normalizeCookie(result.body?.cookie || result.cookie) || cookie
-    if (!isCurrentAccount(sourceCookie, generation)) return getLoggedOutStatus()
+    if (!isCurrentRefresh()) return getLoggedOutStatus()
     await accounts.save('netease', {
       cookie: mergedCookie,
       profile: toRepositoryProfile(profile),
       updatedAtMs: now(),
     })
 
-    return isCurrentAccount(mergedCookie, generation)
+    return isCurrentGeneration(generation) && accounts.getCookie('netease') == mergedCookie
       ? { isLoggedIn: true, profile }
       : getLoggedOutStatus()
   }
@@ -118,13 +125,14 @@ export const createNeteaseAccountService = ({
     const result = await api.login_qr_check({ key })
     const code = Number(result.body?.code ?? 0)
     const message = result.body?.message ?? ''
-    if (code !== 803 || !isCurrentAccount(sourceCookie, generation)) {
+    if (code !== 803 || !isCurrentGeneration(generation)) {
       return { code, message, isLoggedIn: false, profile: null }
     }
     const status = await refreshLoginStatus(
       normalizeCookie(result.body?.cookie || result.cookie),
       sourceCookie,
       generation,
+      true,
     )
     return { code, message, ...status }
   }

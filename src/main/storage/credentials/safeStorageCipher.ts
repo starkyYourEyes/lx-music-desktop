@@ -1,10 +1,10 @@
 import type { CredentialCipher } from './types'
 
 interface SafeStorageSource {
-  isEncryptionAvailable(): boolean
-  getSelectedStorageBackend?(): string
-  encryptString(plaintext: string): Buffer
-  decryptString(ciphertext: Buffer): string
+  isEncryptionAvailable: () => boolean
+  getSelectedStorageBackend?: () => string
+  encryptString: (plaintext: string) => Buffer
+  decryptString: (ciphertext: Buffer) => string
 }
 
 export interface CredentialCipherDependencies {

@@ -258,11 +258,18 @@ describe('sync credential cutover', () => {
       terminate() {},
     }
 
-    await service.startServer(9527)
-    runtime.connect(socket, { url: '/?i=device_a' })
-    await connected
-    const status = service.getStatus()
-    await service.stopServer()
+    const originalLog = console.log
+    console.log = () => {}
+    let status
+    try {
+      await service.startServer(9527)
+      runtime.connect(socket, { url: '/?i=device_a' })
+      await connected
+      status = service.getStatus()
+      await service.stopServer()
+    } finally {
+      console.log = originalLog
+    }
 
     assert.equal(status.devices.length, 1)
     assert.equal(status.devices[0].clientId, 'device_a')

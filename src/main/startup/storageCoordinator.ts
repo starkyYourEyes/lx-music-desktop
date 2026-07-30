@@ -1,4 +1,7 @@
 import type { DatabaseStartupResult } from '../worker/dbService/db'
+import type { AccountRepository } from '../storage/accounts/accountRepository'
+import type { CredentialVault } from '../storage/credentials/credentialVault'
+import { collectLegacyCredentialInventory } from '../migration/credentials/legacySources'
 import type { RunStateStore } from './runState'
 
 export type StorageRecoveryTarget =
@@ -31,6 +34,18 @@ export interface StorageCoordinator {
   shutdown: () => Promise<void>
 }
 
+export interface CredentialStartupCheck {
+  vaultReadable: boolean
+  profileRepositoryReadable: boolean
+  activePlaintextSources: string[]
+}
+
+export interface CredentialStartupCheckOptions {
+  dataRoot: string
+  vault: Pick<CredentialVault, 'read'> | null | undefined
+  profileRepository: Pick<AccountRepository, 'getStatus'> | null | undefined
+}
+
 type DatabaseReadyResult = Extract<DatabaseStartupResult, { status: 'ready' }>
 type RecoveryOutcome = Extract<StorageStartupOutcome, { status: 'recovery' }>
 
@@ -44,6 +59,7 @@ export interface StorageCoordinatorDependencies {
   initDatabase: (previousShutdownWasClean: boolean) => Promise<DatabaseStartupResult>
   closeDatabase: () => Promise<void> | void
   runMigrationHooks: (result: DatabaseReadyResult) => Promise<RecoveryOutcome | undefined>
+  checkCredentials: () => Promise<CredentialStartupCheck>
   initSettings: () => Promise<void>
   registerModules: () => void
   appInited: () => void
@@ -54,6 +70,65 @@ export interface StorageCoordinatorDependencies {
 }
 
 const SHUTDOWN_TIMEOUT_MS = 3_000
+
+const credentialSourceIdentifiers = {
+  'netease-cookie': 'legacy.data.netease-cookie',
+  'qq-music-cookie': 'legacy.data.qq-music-cookie',
+  'webdav-basic': 'legacy.config.webdav-basic',
+  'sync-client': 'legacy.sync.client-key',
+  'sync-server-device': 'legacy.sync.server-device-key',
+  'legacy-quarantine': 'legacy.credential-quarantine',
+} as const
+
+const credentialSourceIdentifierSet = new Set<string>(Object.values(credentialSourceIdentifiers))
+
+const probeVault = (vault: CredentialStartupCheckOptions['vault']): boolean => {
+  if (vault == null) return false
+  try {
+    vault.read({ kind: 'netease-cookie' })
+    vault.read({ kind: 'qq-music-cookie' })
+    vault.read({ kind: 'webdav-basic' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+const probeProfileRepository = (repository: CredentialStartupCheckOptions['profileRepository']): boolean => {
+  if (repository == null) return false
+  try {
+    repository.getStatus('netease')
+    repository.getStatus('qq_music')
+    return true
+  } catch {
+    return false
+  }
+}
+
+export const checkCredentialStartup = async({
+  dataRoot,
+  vault,
+  profileRepository,
+}: CredentialStartupCheckOptions): Promise<CredentialStartupCheck> => {
+  let activePlaintextSources: string[]
+  try {
+    const inventory = await collectLegacyCredentialInventory(dataRoot)
+    activePlaintextSources = Array.from(new Set(
+      inventory.credentials.map(source => credentialSourceIdentifiers[source.ref.kind]),
+    ))
+  } catch {
+    return {
+      vaultReadable: probeVault(vault),
+      profileRepositoryReadable: probeProfileRepository(profileRepository),
+      activePlaintextSources: ['legacy.credential-source-scan'],
+    }
+  }
+  return {
+    vaultReadable: probeVault(vault),
+    profileRepositoryReadable: probeProfileRepository(profileRepository),
+    activePlaintextSources,
+  }
+}
 
 const failureCode = (error: unknown, fallback: string): string => {
   if (error != null && typeof error == 'object' && 'code' in error && typeof error.code == 'string') {
@@ -85,6 +160,28 @@ const databaseRecovery = (
     diagnostics: [...result.diagnostics],
   },
 })
+
+const credentialRecovery = (check: CredentialStartupCheck): RecoveryOutcome | undefined => {
+  if (check.vaultReadable && check.profileRepositoryReadable && check.activePlaintextSources.length == 0) return
+  const diagnostics: string[] = []
+  if (!check.vaultReadable) diagnostics.push('credentials.vault_unreadable')
+  if (!check.profileRepositoryReadable) diagnostics.push('credentials.profile_repository_unreadable')
+  for (const source of Array.from(new Set(check.activePlaintextSources))) {
+    diagnostics.push(credentialSourceIdentifierSet.has(source)
+      ? `credentials.plaintext_source:${source}`
+      : 'credentials.plaintext_source:unknown')
+  }
+  return {
+    status: 'recovery',
+    reason: 'credential_startup_check_failed',
+    target: {
+      kind: 'external-migration',
+      component: 'credentials',
+      affectedPath: null,
+      diagnostics,
+    },
+  }
+}
 
 export const createStorageCoordinator = (
   dependencies: StorageCoordinatorDependencies,
@@ -120,6 +217,13 @@ export const createStorageCoordinator = (
         if (migrationOutcome?.status == 'recovery') {
           await dependencies.showRecovery(migrationOutcome)
           return migrationOutcome
+        }
+
+        const credentialOutcome = credentialRecovery(await dependencies.checkCredentials())
+        if (shutdownRequested) return startupCancelled()
+        if (credentialOutcome != null) {
+          await dependencies.showRecovery(credentialOutcome)
+          return credentialOutcome
         }
 
         await dependencies.initSettings()

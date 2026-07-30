@@ -104,6 +104,10 @@ const createDeps = (overrides = {}) => {
     },
     closeDatabase: async() => { calls.push('db:close') },
     runMigrationHooks: async() => { calls.push('migration-hooks') },
+    checkCredentials: async() => {
+      calls.push('credentials:check')
+      return { vaultReadable: true, profileRepositoryReadable: true, activePlaintextSources: [] }
+    },
     initSettings: async() => { calls.push('settings:init') },
     registerModules: () => { calls.push('modules:register') },
     appInited: () => { calls.push('app:inited') },
@@ -191,7 +195,7 @@ describe('storage startup coordinator', () => {
     releaseDatabase()
     assert.deepEqual(await first, { status: 'ready', schemaVersion: 3 })
     assert.deepEqual(calls, [
-      'run-state:unclean', 'db:init', 'migration-hooks', 'settings:init', 'modules:register', 'app:inited',
+      'run-state:unclean', 'db:init', 'migration-hooks', 'credentials:check', 'settings:init', 'modules:register', 'app:inited',
     ])
 
     assert.strictEqual(await coordinator.start(), await first)

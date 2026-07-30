@@ -2,9 +2,9 @@ export type CredentialRef =
   | { kind: 'netease-cookie' }
   | { kind: 'qq-music-cookie' }
   | { kind: 'webdav-basic' }
-  | { kind: 'sync-client'; serverId: string }
-  | { kind: 'sync-server-device'; userName: string; clientId: string }
-  | { kind: 'legacy-quarantine'; sourceSha256: string }
+  | { kind: 'sync-client', serverId: string }
+  | { kind: 'sync-server-device', userName: string, clientId: string }
+  | { kind: 'legacy-quarantine', sourceSha256: string }
 
 export interface WebDAVCredentialPayloadV1 {
   version: 1
@@ -19,8 +19,8 @@ export interface SyncKeyPayloadV1 {
 
 export interface CredentialCipher {
   readonly mode: 'encrypted' | 'memory-only'
-  encrypt(plaintext: string): Buffer
-  decrypt(ciphertext: Buffer): string
+  encrypt: (plaintext: string) => Buffer
+  decrypt: (ciphertext: Buffer) => string
 }
 
 const identifierSegmentPattern = /^[A-Za-z0-9._@-]{1,256}$/

@@ -836,6 +836,11 @@ describe('database startup orchestration', () => {
         },
         closeDatabase: () => dbService.close(),
         runMigrationHooks: async() => undefined,
+        checkCredentials: async() => ({
+          vaultReadable: true,
+          profileRepositoryReadable: true,
+          activePlaintextSources: [],
+        }),
         initSettings: async() => {},
         registerModules: () => {},
         appInited: () => {},
@@ -1469,6 +1474,11 @@ describe('database startup orchestration', () => {
       initDatabase: () => dbService.init(initOptions(paths)),
       closeDatabase: () => dbService.close(),
       runMigrationHooks: async() => undefined,
+      checkCredentials: async() => ({
+        vaultReadable: true,
+        profileRepositoryReadable: true,
+        activePlaintextSources: [],
+      }),
       initSettings: async() => {},
       registerModules: () => {},
       appInited: () => {},

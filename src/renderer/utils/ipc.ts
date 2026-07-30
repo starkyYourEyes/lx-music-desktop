@@ -656,6 +656,21 @@ export const testWebDAV = async(config: LX.Music.WebDAVConfig) => {
   return rendererInvoke<LX.Music.WebDAVConfig, boolean>(WIN_MAIN_RENDERER_EVENT_NAME.webdav_test, config)
 }
 
+export const getWebDAVCredentialStatus = async() => {
+  return rendererInvoke<LX.Music.WebDAVCredentialStatus>(WIN_MAIN_RENDERER_EVENT_NAME.webdav_get_credential_status)
+}
+
+export const setWebDAVCredentials = async(credentials: LX.Music.WebDAVCredentialInput) => {
+  return rendererInvoke<LX.Music.WebDAVCredentialInput, LX.Music.WebDAVCredentialSaveResult>(
+    WIN_MAIN_RENDERER_EVENT_NAME.webdav_set_credentials,
+    credentials,
+  )
+}
+
+export const removeWebDAVCredentials = async() => {
+  await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.webdav_remove_credentials)
+}
+
 export const listWebDAVMusics = async(params?: LX.Music.WebDAVListMusicParams) => {
   return rendererInvoke<LX.Music.WebDAVListMusicParams | undefined, LX.Music.MusicInfoWebDAV[]>(WIN_MAIN_RENDERER_EVENT_NAME.webdav_list_musics, params)
 }

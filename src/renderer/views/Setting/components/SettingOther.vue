@@ -21,12 +21,16 @@ dd
       input.input.gap-left(type="text" :value="appSetting['webdav.url']" :placeholder="PROJECT_IDENTITY.defaultWebdavUrl" @change="handleWebDAVUrlChange")
     .p
       | 用户名
-      input.input.gap-left(type="text" :value="appSetting['webdav.username']" placeholder="name@example.com" @change="handleWebDAVUsernameChange")
+      input.input.gap-left(v-model="webDAVUsername" type="text" placeholder="name@example.com")
     .p
       | 密码
-      input.input.gap-left(type="password" :value="appSetting['webdav.password']" placeholder="WebDAV 应用密码" @change="handleWebDAVPasswordChange")
+      input.input.gap-left(v-model="webDAVPassword" type="password" placeholder="WebDAV 应用密码")
     .p
       base-btn.btn(min :disabled="isTestingWebDAV" @click="handleTestWebDAV") 测试连接
+      base-btn.btn(min :disabled="isUpdatingWebDAVCredentials" @click="handleSaveWebDAVCredentials") 保存
+      base-btn.btn(min :disabled="isUpdatingWebDAVCredentials || !webDAVCredentialStatus.configured" @click="handleRemoveWebDAVCredentials") 清除
+    .p(v-if="webDAVCredentialStatus.configured")
+      | 已保存：{{ webDAVCredentialStatus.usernameHint }}
     .p
       base-checkbox(id="setting_webdav_auto_refresh" :model-value="appSetting['webdav.autoRefresh']" label="启动时自动更新我的云盘" @update:model-value="updateSetting({'webdav.autoRefresh': $event})")
 
@@ -94,6 +98,7 @@ import {
   getLyricRawCount, clearLyricRaw,
   getLyricEditedCount, clearLyricEdited,
   testWebDAV,
+  getWebDAVCredentialStatus, setWebDAVCredentials, removeWebDAVCredentials,
 } from '@renderer/utils/ipc'
 import { sizeFormate } from '@common/utils/common'
 import { dialog } from '@renderer/plugins/Dialog'
@@ -145,22 +150,27 @@ export default {
     refreshCacheSize()
 
     const isTestingWebDAV = ref(false)
+    const isUpdatingWebDAVCredentials = ref(false)
+    const webDAVUsername = ref('')
+    const webDAVPassword = ref('')
+    const webDAVCredentialStatus = ref({
+      configured: false,
+      usernameHint: null,
+      persistence: 'missing',
+    })
+    const refreshWebDAVCredentialStatus = async() => {
+      webDAVCredentialStatus.value = await getWebDAVCredentialStatus()
+    }
     const handleWebDAVUrlChange = (event) => {
       updateSetting({ 'webdav.url': event.target.value.trim() })
-    }
-    const handleWebDAVUsernameChange = (event) => {
-      updateSetting({ 'webdav.username': event.target.value.trim() })
-    }
-    const handleWebDAVPasswordChange = (event) => {
-      updateSetting({ 'webdav.password': event.target.value })
     }
     const handleTestWebDAV = async() => {
       isTestingWebDAV.value = true
       try {
         await testWebDAV({
           url: appSetting['webdav.url'],
-          username: appSetting['webdav.username'],
-          password: appSetting['webdav.password'],
+          username: webDAVUsername.value.trim(),
+          password: webDAVPassword.value,
         })
         void dialog('WebDAV 连接成功')
       } catch (err) {
@@ -169,6 +179,37 @@ export default {
         isTestingWebDAV.value = false
       }
     }
+    const handleSaveWebDAVCredentials = async() => {
+      isUpdatingWebDAVCredentials.value = true
+      try {
+        await setWebDAVCredentials({
+          username: webDAVUsername.value.trim(),
+          password: webDAVPassword.value,
+        })
+        webDAVUsername.value = ''
+        webDAVPassword.value = ''
+        await refreshWebDAVCredentialStatus()
+        void dialog('WebDAV 凭据已保存')
+      } catch (err) {
+        void dialog(`WebDAV 凭据保存失败：${err.message}`)
+      } finally {
+        isUpdatingWebDAVCredentials.value = false
+      }
+    }
+    const handleRemoveWebDAVCredentials = async() => {
+      isUpdatingWebDAVCredentials.value = true
+      try {
+        await removeWebDAVCredentials()
+        webDAVUsername.value = ''
+        webDAVPassword.value = ''
+        await refreshWebDAVCredentialStatus()
+      } catch (err) {
+        void dialog(`WebDAV 凭据清除失败：${err.message}`)
+      } finally {
+        isUpdatingWebDAVCredentials.value = false
+      }
+    }
+    void refreshWebDAVCredentialStatus().catch(() => {})
 
     const otherSourceCount = ref(0)
     const isDisabledOtherSourceCacheClear = ref(false)
@@ -267,10 +308,14 @@ export default {
       clearResourceCache,
 
       isTestingWebDAV,
+      isUpdatingWebDAVCredentials,
+      webDAVUsername,
+      webDAVPassword,
+      webDAVCredentialStatus,
       handleWebDAVUrlChange,
-      handleWebDAVUsernameChange,
-      handleWebDAVPasswordChange,
       handleTestWebDAV,
+      handleSaveWebDAVCredentials,
+      handleRemoveWebDAVCredentials,
       otherSourceCount,
       isDisabledOtherSourceCacheClear,
       handleClearOtherSourceCache,

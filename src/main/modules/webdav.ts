@@ -22,6 +22,8 @@ import {
   normalizeWebDAVRootUrl,
   resolveWebDAVHref,
 } from '@common/utils/webdavUrl'
+import { assertWebDAVCredential, type WebDAVCredentialPayloadV1 } from '@main/storage/credentials/types'
+import type { CredentialVault } from '@main/storage/credentials/credentialVault'
 
 const AUDIO_EXTS = new Set(['mp3', 'flac', 'ogg', 'oga', 'wav', 'm4a'])
 const LYRIC_EXTS = new Set(['lrc'])
@@ -65,11 +67,83 @@ const MAX_TOKEN_COUNT = 128
 
 const normalizeDirUrl = (url: string) => normalizeWebDAVRootUrl(url)
 
-const getConfiguredWebDAV = (): LX.Music.WebDAVConfig => ({
-  url: global.lx.appSetting['webdav.url'],
-  username: global.lx.appSetting['webdav.username'],
-  password: global.lx.appSetting['webdav.password'],
+const webDAVCredentialRef = { kind: 'webdav-basic' } as const
+
+const getCredentialVault = (): CredentialVault => {
+  if (global.lx.credentialVault == null) throw new Error('Credential vault has not been initialized')
+  return global.lx.credentialVault
+}
+
+const maskUsername = (username: string): string => {
+  if (username.length == 1) return '*'
+  if (username.length == 2) return `${username[0]}*`
+  return `${username[0]}***${username.at(-1)}`
+}
+
+const isPlainExactRecord = (value: unknown, keys: readonly string[]): value is Record<string, unknown> => {
+  if (value == null || typeof value != 'object' || Array.isArray(value) || Object.getPrototypeOf(value) != Object.prototype) return false
+  const actualKeys = Object.keys(value)
+  return actualKeys.length == keys.length && actualKeys.every(key => keys.includes(key))
+}
+
+const assertWebDAVCredentialInput = (input: unknown): WebDAVCredentialPayloadV1 => {
+  if (!isPlainExactRecord(input, ['username', 'password'])) throw new Error('Invalid WebDAV credential input')
+  return assertWebDAVCredential({ version: 1, username: input.username, password: input.password })
+}
+
+const assertWebDAVTestConfig = (input: unknown): LX.Music.WebDAVConfig => {
+  try {
+    if (!isPlainExactRecord(input, ['url', 'username', 'password'])) throw new Error()
+    if (typeof input.url != 'string' || input.url.length == 0 || Buffer.byteLength(input.url, 'utf8') > 8 * 1024) throw new Error()
+    const credential = assertWebDAVCredential({ version: 1, username: input.username, password: input.password })
+    normalizeDirUrl(input.url)
+    return { url: input.url, username: credential.username, password: credential.password }
+  } catch {
+    throw new Error('Invalid WebDAV test config')
+  }
+}
+
+export const createWebDAVCredentialService = (vault: CredentialVault) => ({
+  async getCredentialStatus(): Promise<LX.Music.WebDAVCredentialStatus> {
+    const credential = vault.read<WebDAVCredentialPayloadV1>(webDAVCredentialRef)
+    if (credential.status != 'available' && credential.status != 'memory-only') {
+      return { configured: false, usernameHint: null, persistence: 'missing' }
+    }
+    return {
+      configured: true,
+      usernameHint: maskUsername(credential.value.username),
+      persistence: credential.status == 'available' ? 'encrypted' : 'memory-only',
+    }
+  },
+  async setCredentials(input: LX.Music.WebDAVCredentialInput): Promise<LX.Music.WebDAVCredentialSaveResult> {
+    const credential = assertWebDAVCredentialInput(input)
+    const result = await vault.write(webDAVCredentialRef, credential)
+    if (!await vault.verify(webDAVCredentialRef, credential)) throw new Error('WebDAV credential verification failed')
+    return result
+  },
+  async removeCredentials(): Promise<void> {
+    await vault.remove(webDAVCredentialRef)
+    if (vault.read(webDAVCredentialRef).status != 'missing') throw new Error('WebDAV credential removal verification failed')
+  },
 })
+
+export const getWebDAVCredentialStatus = async(): Promise<LX.Music.WebDAVCredentialStatus> =>
+  createWebDAVCredentialService(getCredentialVault()).getCredentialStatus()
+
+export const setWebDAVCredentials = async(input: LX.Music.WebDAVCredentialInput): Promise<LX.Music.WebDAVCredentialSaveResult> =>
+  createWebDAVCredentialService(getCredentialVault()).setCredentials(input)
+
+export const removeWebDAVCredentials = async(): Promise<void> =>
+  createWebDAVCredentialService(getCredentialVault()).removeCredentials()
+
+export const getConfiguredWebDAV = (): LX.Music.WebDAVConfig => {
+  const credential = getCredentialVault().read<WebDAVCredentialPayloadV1>(webDAVCredentialRef)
+  return {
+    url: global.lx.appSetting['webdav.url'],
+    username: credential.status == 'available' || credential.status == 'memory-only' ? credential.value.username : '',
+    password: credential.status == 'available' || credential.status == 'memory-only' ? credential.value.password : '',
+  }
+}
 
 const assertConfig = (config: LX.Music.WebDAVConfig) => {
   if (!config.url || !config.username || !config.password) throw new Error('WebDAV config is incomplete')
@@ -530,7 +604,8 @@ const ensureServer = async() => {
   return serverStartPromise
 }
 
-export const testWebDAV = async(config: LX.Music.WebDAVConfig) => {
+export const testWebDAV = async(input: LX.Music.WebDAVConfig) => {
+  const config = assertWebDAVTestConfig(input)
   assertConfig(config)
   await propfind(config.url, config)
   return true
@@ -540,8 +615,8 @@ export const listWebDAVMusics = async(params?: LX.Music.WebDAVListMusicParams) =
   const settingConfig = getConfiguredWebDAV()
   const config: LX.Music.WebDAVConfig = {
     url: params?.url ?? settingConfig.url,
-    username: params?.username ?? settingConfig.username,
-    password: params?.password ?? settingConfig.password,
+    username: settingConfig.username,
+    password: settingConfig.password,
   }
   assertConfig(config)
   return scanMusics(config.url, config)

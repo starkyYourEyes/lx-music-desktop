@@ -89,16 +89,18 @@ const accountInventory = (document: SourceDocument, credentials: LegacyCredentia
   ]
   for (const entry of entries) {
     const account = document.value[entry.key]
-    if (!isRecord(account) || typeof account.cookie != 'string' || account.cookie.length == 0) continue
+    if (!isRecord(account)) continue
+    if (account.profile != null) {
+      const profile = normalizePublicAccountProfile(entry.provider, account.profile)
+      const updatedAtMs = account.updatedAt
+      if (typeof updatedAtMs != 'number' || !Number.isSafeInteger(updatedAtMs) || updatedAtMs < 0) {
+        throw new Error('Invalid legacy account timestamp')
+      }
+      profiles.push({ provider: entry.provider, profileJson: JSON.stringify(profile), updatedAtMs })
+    }
+    if (typeof account.cookie != 'string' || account.cookie.length == 0) continue
     const cookie = assertCookieCredential(account.cookie)
     append(credentials, document, entry.ref, { version: 1, cookie }, removeAccountCookie(entry.key))
-    if (account.profile == null) continue
-    const profile = normalizePublicAccountProfile(entry.provider, account.profile)
-    const updatedAtMs = account.updatedAt
-    if (typeof updatedAtMs != 'number' || !Number.isSafeInteger(updatedAtMs) || updatedAtMs < 0) {
-      throw new Error('Invalid legacy account timestamp')
-    }
-    profiles.push({ provider: entry.provider, profileJson: JSON.stringify(profile), updatedAtMs })
   }
 }
 
@@ -117,8 +119,7 @@ const clientInventory = (document: SourceDocument, credentials: LegacyCredential
   }
 }
 
-const serverInventory = (document: SourceDocument, credentials: LegacyCredentialSource[], userNameFallback: string): void => {
-  const userName = typeof document.value.userName == 'string' ? document.value.userName : userNameFallback
+const serverInventory = (document: SourceDocument, credentials: LegacyCredentialSource[], userName: string): void => {
   const clients = document.value.clients
   if (!isRecord(clients)) return
   for (const [clientId, info] of Object.entries(clients)) {
@@ -169,8 +170,7 @@ export const collectLegacyCredentialInventory = async(dataRoot: string): Promise
 
   const config = await readJsonDocument(path.join(dataRoot, 'config_v2.json'))
   const setting = config?.value.setting
-  if (config != null && isRecord(setting) && typeof setting['webdav.username'] == 'string' && typeof setting['webdav.password'] == 'string' &&
-      setting['webdav.username'].length > 0 && setting['webdav.password'].length > 0) {
+  if (config != null && isRecord(setting) && (Object.hasOwn(setting, 'webdav.username') || Object.hasOwn(setting, 'webdav.password'))) {
     const ref: CredentialRef = { kind: 'webdav-basic' }
     const value = assertWebDAVCredential({ version: 1, username: setting['webdav.username'], password: setting['webdav.password'] })
     append(credentials, config, ref, value as unknown as JsonValue, document => {
@@ -184,13 +184,19 @@ export const collectLegacyCredentialInventory = async(dataRoot: string): Promise
   const client = await readJsonDocument(path.join(dataRoot, 'sync', 'client', 'syncAuthKey.json'))
   if (client != null) clientInventory(client, credentials)
   const server = await readJsonDocument(path.join(dataRoot, 'sync', 'server', 'devices.json'))
-  if (server != null) serverInventory(server, credentials, 'default')
+  if (server != null) serverInventory(server, credentials, typeof server.value.userName == 'string' ? server.value.userName : 'default')
   await userInventory(dataRoot, credentials)
 
   const legacy = await readJsonDocument(path.join(dataRoot, 'sync.json'))
   if (legacy != null) {
     if (client == null) clientInventory(legacy, credentials, 'syncAuthKey')
-    if (server == null) serverInventory({ ...legacy, value: { userName: 'default', clients: legacy.value.clients } }, credentials, 'default')
+    if (server == null) serverInventory({ ...legacy, value: { clients: legacy.value.clients } }, credentials, 'default')
+  }
+  const destinations = new Set<string>()
+  for (const credential of credentials) {
+    const destination = toCredentialEntryId(credential.ref)
+    if (destinations.has(destination)) throw new Error('Duplicate legacy credential destination')
+    destinations.add(destination)
   }
   return { credentials, profiles }
 }

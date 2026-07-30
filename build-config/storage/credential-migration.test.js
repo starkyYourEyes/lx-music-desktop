@@ -28,6 +28,12 @@ const encryptedCipher = {
   },
 }
 
+const memoryOnlyCipher = {
+  mode: 'memory-only',
+  encrypt: () => { throw new Error('must not encrypt') },
+  decrypt: () => { throw new Error('must not decrypt') },
+}
+
 const makeRoot = async() => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-credential-migration-'))
   temporaryRoots.push(root)
@@ -141,5 +147,118 @@ describe('legacy credential migration', () => {
       syncAuthKey: { legacy_server: {} },
       clients: { legacy_device: { clientId: 'legacy-device', deviceName: 'Old', isMobile: false } },
     })
+  })
+
+  it('keeps no stale encrypted destination after a memory-only migration and reports it on restart', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const { createCredentialVault } = require(vaultPath)
+    const root = await makeRoot()
+    await writeJson(path.join(root, 'data.json'), {
+      neteaseAccount: { cookie: 'memory-only-cookie', profile: { userId: 1, nickname: 'N', avatarUrl: '' }, updatedAt: 1 },
+    })
+    const encryptedVault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher })
+    await encryptedVault.write({ kind: 'netease-cookie' }, { version: 1, cookie: 'stale-encrypted-cookie' })
+    const memoryVault = await createCredentialVault({ profileRoot: root, cipher: memoryOnlyCipher })
+    const profiles = { migrateLegacyAccountProfiles: async() => {} }
+
+    assert.deepEqual(await migrateLegacyCredentials({ dataRoot: root, vault: memoryVault, profiles, now: () => 100 }), {
+      status: 'secure-storage-unavailable', volatileEntries: 1,
+    })
+    assert.equal(await memoryVault.verify({ kind: 'netease-cookie' }, { version: 1, cookie: 'memory-only-cookie' }), true)
+    assert.equal(Object.hasOwn((await readJson(path.join(root, 'credentials.v1.json'))).entries, 'netease-cookie'), false)
+
+    const restartedMemoryVault = await createCredentialVault({ profileRoot: root, cipher: memoryOnlyCipher })
+    assert.deepEqual(await migrateLegacyCredentials({ dataRoot: root, vault: restartedMemoryVault, profiles, now: () => 200 }), {
+      status: 'secure-storage-unavailable', volatileEntries: 0,
+    })
+    const restartedEncryptedVault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher })
+    assert.deepEqual(restartedEncryptedVault.read({ kind: 'netease-cookie' }), { status: 'missing' })
+  })
+
+  it('uses the validated user directory name rather than devices.json userName', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const { createCredentialVault } = require(vaultPath)
+    const root = await makeRoot()
+    await writeJson(path.join(root, 'sync', 'server', 'users', 'alice', 'devices.json'), {
+      userName: 'bob', clients: { device_a: { key: 'alice-key' } },
+    })
+    const vault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher })
+    await migrateLegacyCredentials({ dataRoot: root, vault, profiles: { migrateLegacyAccountProfiles: async() => {} }, now: () => 100 })
+
+    assert.equal(await vault.verify({ kind: 'sync-server-device', userName: 'alice', clientId: 'device_a' }, { version: 1, key: 'alice-key' }), true)
+    assert.deepEqual(vault.read({ kind: 'sync-server-device', userName: 'bob', clientId: 'device_a' }), { status: 'missing' })
+  })
+
+  it('rejects colliding sync destinations before redacting either source', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const { createCredentialVault } = require(vaultPath)
+    const root = await makeRoot()
+    const rootDevices = path.join(root, 'sync', 'server', 'devices.json')
+    const userDevices = path.join(root, 'sync', 'server', 'users', 'default', 'devices.json')
+    await writeJson(rootDevices, { userName: 'default', clients: { device_a: { key: 'first-key' } } })
+    await writeJson(userDevices, { userName: 'ignored', clients: { device_a: { key: 'second-key' } } })
+    const vault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher })
+
+    await assert.rejects(
+      migrateLegacyCredentials({ dataRoot: root, vault, profiles: { migrateLegacyAccountProfiles: async() => {} }, now: () => 100 }),
+      /duplicate legacy credential destination/i,
+    )
+    assert.equal((await readJson(rootDevices)).clients.device_a.key, 'first-key')
+    assert.equal((await readJson(userDevices)).clients.device_a.key, 'second-key')
+  })
+
+  it('migrates an account profile even when its cookie is absent', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const { createCredentialVault } = require(vaultPath)
+    const root = await makeRoot()
+    await writeJson(path.join(root, 'data.json'), {
+      neteaseAccount: { profile: { userId: 5, nickname: 'Profile', avatarUrl: '' }, updatedAt: 9 },
+    })
+    const rows = []
+    const vault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher })
+    const result = await migrateLegacyCredentials({
+      dataRoot: root,
+      vault,
+      profiles: { migrateLegacyAccountProfiles: async input => { rows.push(...input.rows) } },
+      now: () => 100,
+    })
+
+    assert.deepEqual(result, { status: 'complete', encryptedEntries: 0, memoryOnlyEntries: 0, profiles: 1 })
+    assert.deepEqual(rows.map(row => ({ ...row, profileJson: JSON.parse(row.profileJson) })), [{ provider: 'netease', profileJson: { userId: 5, nickname: 'Profile', avatarUrl: '' }, updatedAtMs: 9 }])
+  })
+
+  it('rejects a partial WebDAV source without exposing settings', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const { createCredentialVault } = require(vaultPath)
+    const root = await makeRoot()
+    const configPath = path.join(root, 'config_v2.json')
+    await writeJson(configPath, { setting: { 'webdav.username': 'only-user', keep: true } })
+    const vault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher })
+
+    await assert.rejects(
+      migrateLegacyCredentials({ dataRoot: root, vault, profiles: { migrateLegacyAccountProfiles: async() => {} }, now: () => 100 }),
+      /WebDAV password/i,
+    )
+    assert.deepEqual(await readJson(configPath), { setting: { 'webdav.username': 'only-user', keep: true } })
+  })
+
+  it('rejects a symbolic sync user directory', async t => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const { createCredentialVault } = require(vaultPath)
+    const root = await makeRoot()
+    const userRoot = path.join(root, 'sync', 'server', 'users')
+    await fsp.mkdir(userRoot, { recursive: true })
+    try {
+      await fsp.symlink(root, path.join(userRoot, 'alice'), 'junction')
+    } catch (error) {
+      if (error && error.code == 'EPERM') return t.skip('symbolic links require local privilege')
+      throw error
+    }
+    const vault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher })
+
+    await assert.rejects(
+      migrateLegacyCredentials({ dataRoot: root, vault, profiles: { migrateLegacyAccountProfiles: async() => {} }, now: () => 100 }),
+      /Invalid sync user path/,
+    )
   })
 })

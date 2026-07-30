@@ -17,10 +17,9 @@ interface DatabaseMigrationMarker {
 
 export interface CredentialMigrationDeps {
   dataRoot: string
-  vault: Pick<CredentialVault, 'write' | 'verify' | 'getMigrationMarker' | 'putMigrationMarker'>
+  vault: Pick<CredentialVault, 'mode' | 'write' | 'verify' | 'getMigrationMarker' | 'putMigrationMarker'>
   profiles: {
     migrateLegacyAccountProfiles: (input: { rows: AccountProfileRow[], marker: DatabaseMigrationMarker }) => Promise<void> | void
-    getMigrationMarker?: (name: string) => Promise<DatabaseMigrationMarker | null> | DatabaseMigrationMarker | null
   }
   now?: () => number
   failAt?: 'after-vault-write' | 'after-profile-write' | 'after-source-redaction'
@@ -28,6 +27,7 @@ export interface CredentialMigrationDeps {
 
 const profileMarkerName = 'legacy_data_v1.account_profiles'
 const credentialMarkerName = 'legacy_data_v1.credentials'
+const memoryOnlyMarkerName = 'legacy_data_v1.credentials.memory-only'
 
 const toProfileRows = (profiles: readonly LegacyAccountProfile[]): AccountProfileRow[] => profiles.map(profile => ({ ...profile }))
 
@@ -38,8 +38,12 @@ const failIfRequested = (deps: CredentialMigrationDeps, stage: CredentialMigrati
 export const migrateLegacyCredentials = async(deps: CredentialMigrationDeps): Promise<CredentialMigrationResult> => {
   const inventory = await collectLegacyCredentialInventory(deps.dataRoot)
   const now = deps.now ?? Date.now
+  if (inventory.credentials.length == 0 && deps.vault.mode == 'memory-only' && deps.vault.getMigrationMarker(memoryOnlyMarkerName) != null) {
+    return { status: 'secure-storage-unavailable', volatileEntries: 0 }
+  }
   let encryptedEntries = 0
   let memoryOnlyEntries = 0
+  const memoryOnlySources: string[] = []
 
   for (const source of inventory.credentials) {
     const existing = deps.vault.getMigrationMarker(source.markerName)
@@ -49,12 +53,22 @@ export const migrateLegacyCredentials = async(deps: CredentialMigrationDeps): Pr
       await deps.vault.putMigrationMarker(source.markerName, source.sourceSha256, now())
     }
     if (persisted.persistence == 'encrypted') encryptedEntries++
-    else memoryOnlyEntries++
+    else {
+      memoryOnlyEntries++
+      memoryOnlySources.push(source.sourceSha256)
+    }
   }
   if (inventory.credentials.length) {
     await deps.vault.putMigrationMarker(
       credentialMarkerName,
-      sha256Canonical({ version: 1, sources: inventory.credentials.map(source => ({ markerName: source.markerName, sourceSha256: source.sourceSha256 })) }),
+      sha256Canonical({ version: 1, sources: inventory.credentials.map(source => ({ markerName: source.markerName, sourceSha256: source.sourceSha256 })).sort((left, right) => left.markerName.localeCompare(right.markerName)) }),
+      now(),
+    )
+  }
+  if (memoryOnlyEntries > 0) {
+    await deps.vault.putMigrationMarker(
+      memoryOnlyMarkerName,
+      sha256Canonical({ version: 1, sources: memoryOnlySources.sort() }),
       now(),
     )
   }

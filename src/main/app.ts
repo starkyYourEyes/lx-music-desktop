@@ -306,12 +306,11 @@ let isInitialized = false
 export const runStorageMigrationHooks = async(result: { existed: boolean }): Promise<undefined> => {
   if (!result.existed) await migrateDBData()
   const vault = await initializeCredentialVault()
-  await migrateLegacyCredentials({
+  global.lx.credentialMigration = await migrateLegacyCredentials({
     dataRoot: global.lxDataPath,
     vault,
     profiles: {
       migrateLegacyAccountProfiles: input => global.lx.worker.dbService.migrateLegacyAccountProfiles(input),
-      getMigrationMarker: name => global.lx.worker.dbService.getMigrationMarker(name),
     },
   })
   return undefined

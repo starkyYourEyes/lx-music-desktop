@@ -30,6 +30,7 @@ export type CredentialRead<T> =
   | { status: 'memory-only', value: T }
 
 export interface CredentialVault {
+  readonly mode: CredentialCipher['mode']
   read: <T>(ref: CredentialRef) => CredentialRead<T>
   write: <T>(ref: CredentialRef, value: T) => Promise<{ persistence: 'encrypted' | 'memory-only' }>
   remove: (ref: CredentialRef) => Promise<void>
@@ -232,6 +233,11 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
     const plaintext = canonicalJson(encryptedPayload as unknown as JsonValue)
     if (options.cipher.mode == 'memory-only') {
       memoryEntries.set(entryId, JSON.parse(canonicalJson(payload)) as JsonValue)
+      if (envelope.entries[entryId] != null) {
+        await persist(next => {
+          Reflect.deleteProperty(next.entries, entryId)
+        })
+      }
       return { persistence: 'memory-only' }
     }
     const entry = {
@@ -279,10 +285,6 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
 
   const putMigrationMarker = async(name: string, sourceSha256: string, completedAtMs: number): Promise<void> => {
     assertMarker(name, sourceSha256, completedAtMs)
-    if (options.cipher.mode == 'memory-only') {
-      envelope.migrationMarkers[name] = { sourceSha256, completedAtMs }
-      return
-    }
     await persist(next => {
       next.migrationMarkers[name] = { sourceSha256, completedAtMs }
     })
@@ -293,5 +295,5 @@ export const createCredentialVault = async(options: CreateCredentialVaultOptions
     await file.flush()
   }
 
-  return { read, write, remove, verify, getMigrationMarker, putMigrationMarker, flush }
+  return { mode: options.cipher.mode, read, write, remove, verify, getMigrationMarker, putMigrationMarker, flush }
 }

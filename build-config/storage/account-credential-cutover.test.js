@@ -458,4 +458,100 @@ describe('account credential cutover', () => {
     await checkingFinished
     assert.equal(accounts.getCookie('netease'), 'new-cookie')
   })
+
+  it('clears a QR credential saved while a later NetEase logout waits for its provider', async() => {
+    const accounts = createRepository()
+    await saveAccount(accounts, 'netease', 'old-cookie', { userId: 1, nickname: 'Old', avatarUrl: '' }, 0)
+    const saveStarted = deferred()
+    const saveGate = deferred()
+    const logoutStarted = deferred()
+    const logoutGate = deferred()
+    const clearStarted = deferred()
+    const clearGate = deferred()
+    const originalSave = accounts.save
+    const originalClear = accounts.clear
+    accounts.save = async(...args) => {
+      if (args[0] == 'netease' && args[1].cookie == 'new-cookie') {
+        saveStarted.resolve()
+        await saveGate.promise
+      }
+      return await originalSave.apply(accounts, args)
+    }
+    accounts.clear = async(...args) => {
+      clearStarted.resolve()
+      await clearGate.promise
+      return await originalClear.apply(accounts, args)
+    }
+    let logoutCookie
+    const { service } = createNeteaseService({
+      accounts,
+      api: {
+        login_qr_key: async() => ({}),
+        login_qr_create: async() => ({}),
+        login_qr_check: async() => ({ body: { code: 803, message: 'new', cookie: 'new-cookie' } }),
+        login_status: async() => ({ body: { profile: { userId: 2, nickname: 'New', avatarUrl: '' } } }),
+        logout: async({ cookie }) => {
+          logoutCookie = cookie
+          logoutStarted.resolve()
+          await logoutGate.promise
+        },
+      },
+    })
+
+    const checking = service.checkLoginQr('new-key')
+    await saveStarted.promise
+    const loggingOut = service.logout()
+    await logoutStarted.promise
+    saveGate.resolve()
+    assert.deepEqual(await checking, { code: 803, message: 'new', isLoggedIn: false, profile: null })
+    logoutGate.resolve()
+    const firstOutcome = await Promise.race([
+      clearStarted.promise.then(() => 'clear-started'),
+      loggingOut.then(() => 'logout-finished'),
+    ])
+    assert.equal(firstOutcome, 'clear-started')
+    let logoutFinished = false
+    const logoutFinishedPromise = loggingOut.then(() => { logoutFinished = true })
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(logoutFinished, false)
+    clearGate.resolve()
+    await logoutFinishedPromise
+
+    assert.equal(logoutCookie, 'old-cookie')
+    assert.equal(accounts.getCookie('netease'), null)
+  })
+
+  it('does not overwrite an unrelated current NetEase credential with a QR response', async() => {
+    const accounts = createRepository()
+    await saveAccount(accounts, 'netease', 'old-cookie', { userId: 1, nickname: 'Old', avatarUrl: '' }, 0)
+    const qrResponse = deferred()
+    const { service } = createNeteaseService({
+      accounts,
+      api: {
+        login_qr_key: async() => ({}),
+        login_qr_create: async() => ({}),
+        login_qr_check: async() => await qrResponse.promise,
+        login_status: async() => ({ body: { profile: { userId: 2, nickname: 'New', avatarUrl: '' } } }),
+        logout: async() => ({}),
+      },
+    })
+
+    const checking = service.checkLoginQr('new-key')
+    await new Promise(resolve => setImmediate(resolve))
+    await accounts.save('netease', {
+      cookie: 'unrelated-cookie',
+      profile: { userId: 3, nickname: 'Unrelated', avatarUrl: '' },
+      updatedAtMs: 0,
+    })
+    qrResponse.resolve({ body: { code: 803, message: 'new', cookie: 'new-cookie' } })
+
+    assert.deepEqual(await checking, { code: 803, message: 'new', isLoggedIn: false, profile: null })
+    assert.equal(accounts.getCookie('netease'), 'unrelated-cookie')
+    assert.deepEqual(accounts.saves, [{
+      provider: 'netease',
+      cookie: 'unrelated-cookie',
+      profile: { userId: 3, nickname: 'Unrelated', avatarUrl: '' },
+      updatedAtMs: 0,
+    }])
+  })
 })

@@ -73,7 +73,10 @@ export const createNeteaseAccountService = ({
     if (!cookie) return { isLoggedIn: false, profile: null }
 
     const isCurrentRefresh = () => canReplaceSourceAccount
-      ? isCurrentGeneration(generation)
+      ? isCurrentGeneration(generation) && (() => {
+        const currentCookie = accounts.getCookie('netease') ?? ''
+        return currentCookie == sourceCookie || !currentCookie
+      })()
       : isCurrentAccount(sourceCookie, generation)
 
     const result = await api.login_status({ cookie })
@@ -141,7 +144,7 @@ export const createNeteaseAccountService = ({
     const cookie = accounts.getCookie('netease')
     const generation = ++accountGeneration
     if (cookie) await api.logout({ cookie }).catch(() => null)
-    if (!isCurrentAccount(cookie ?? '', generation)) return
+    if (!isCurrentGeneration(generation)) return
     await accounts.clear('netease')
   }
 

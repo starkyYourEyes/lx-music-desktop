@@ -28,7 +28,7 @@ const maxCookieOrSyncKeyLength = 64 * 1024
 const maxWebDAVFieldLength = 4 * 1024
 
 const assertString = (value: unknown, maximumLength: number, field: string): string => {
-  if (typeof value != 'string' || value.length == 0 || value.length > maximumLength) {
+  if (typeof value != 'string' || value.length == 0 || Buffer.byteLength(value, 'utf8') > maximumLength) {
     throw new Error(`Invalid credential ${field}`)
   }
   return value

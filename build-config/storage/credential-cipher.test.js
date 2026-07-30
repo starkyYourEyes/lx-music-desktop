@@ -65,6 +65,21 @@ describe('credential cipher', () => {
     assert.throws(() => assertWebDAVCredential({ version: 1, username: 'x'.repeat(4 * 1024 + 1), password: 'secret' }))
   })
 
+  it('measures credential payload limits as UTF-8 bytes', () => {
+    const { assertCookieCredential, assertSyncKeyCredential, assertWebDAVCredential } = require(typesPath)
+    const maxCookie = '😀'.repeat(16 * 1024)
+    const maxWebDAVField = '😀'.repeat(1024)
+
+    assert.equal(assertCookieCredential(maxCookie), maxCookie)
+    assert.throws(() => assertSyncKeyCredential('😀'.repeat(16 * 1024 + 1)))
+    assert.deepEqual(assertWebDAVCredential({ version: 1, username: maxWebDAVField, password: maxWebDAVField }), {
+      version: 1,
+      username: maxWebDAVField,
+      password: maxWebDAVField,
+    })
+    assert.throws(() => assertWebDAVCredential({ version: 1, username: '😀'.repeat(1024 + 1), password: 'secret' }))
+  })
+
   it('checks storage availability before each cryptographic operation', () => {
     const { createCredentialCipher } = require(cipherPath)
     let available = true

@@ -393,7 +393,11 @@ describe('online backup', () => {
     try {
       const { createOnlineBackup } = require(backupPath)
 
-      await createOnlineBackup(db, destination, { nativeBinding: expectedNativeBinding })
+      await createOnlineBackup(db, destination, {
+        nativeBinding: expectedNativeBinding,
+        readonly: false,
+        fileMustExist: false,
+      })
     } finally {
       Module._load = originalLoad
       delete require.cache[backupPath]
@@ -596,6 +600,57 @@ describe('database startup orchestration', () => {
     assert.equal(dbService.getAppDB().pragma('foreign_keys', { simple: true }), 1)
     assert.equal(dbService.getAppDB().pragma('journal_mode', { simple: true }), 'wal')
     assert.equal(fs.existsSync(path.join(paths.dataPath, 'activity.db')), false)
+  })
+
+  it('passes the startup packaged binding into read-only backup verification', async() => {
+    const paths = makePaths('lx-recovery-startup-packaged-binding-')
+    const installedNativeBinding = require.resolve('better-sqlite3/build/Release/better_sqlite3.node')
+    const bindingSuffix = path.join('better-sqlite3', 'build', 'Release', 'better_sqlite3.node')
+    const verificationOpens = []
+    let expectedNativeBinding
+    class PackagedBindingDatabase {
+      constructor(filename, options) {
+        if (!options?.readonly) {
+          if (typeof options?.nativeBinding != 'string') throw new Error('startup_native_binding_missing')
+          expectedNativeBinding = options.nativeBinding
+        } else {
+          verificationOpens.push(options)
+          if (options.nativeBinding != expectedNativeBinding) {
+            throw new Error('packaged_default_binding_lookup_failed')
+          }
+          if (!options.fileMustExist) throw new Error('backup_verification_must_be_readonly')
+        }
+        return new Database(filename, options?.nativeBinding == null
+          ? options
+          : { ...options, nativeBinding: installedNativeBinding })
+      }
+    }
+    const dbService = loadDbServiceWithBoundaries({
+      DatabaseImplementation: PackagedBindingDatabase,
+      fileSystem: {
+        ...fs,
+        statSync: filename => String(filename).endsWith(bindingSuffix)
+          ? fs.statSync(installedNativeBinding)
+          : fs.statSync(filename),
+      },
+    })
+
+    try {
+      const result = await dbService.init(initOptions(paths))
+
+      assert.deepEqual({
+        status: result.status,
+        reason: result.status == 'recovery' ? result.reason : null,
+      }, { status: 'ready', reason: null })
+      assert.deepEqual(verificationOpens, [{
+        nativeBinding: expectedNativeBinding,
+        readonly: true,
+        fileMustExist: true,
+      }])
+    } finally {
+      dbService.close()
+      clearDbServiceCache()
+    }
   })
 
   it('kills backup-after-migration and skipped-check implementations by preserving exact observable order', async() => {

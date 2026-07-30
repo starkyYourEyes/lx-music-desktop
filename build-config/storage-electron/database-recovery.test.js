@@ -364,6 +364,44 @@ describe('online backup', () => {
 
     assert.equal(fs.readFileSync(destination, 'utf8'), 'not sqlite')
   })
+
+  it('uses the packaged native binding when verifying an online backup', async() => {
+    const root = tempDir('lx-recovery-packaged-binding-')
+    const source = path.join(root, 'source.db')
+    const destination = path.join(root, 'backup.db')
+    const expectedNativeBinding = require.resolve('better-sqlite3/build/Release/better_sqlite3.node')
+    const db = openTracked(source)
+    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
+    const backupPath = require.resolve('../../src/main/worker/dbService/databaseBackup.ts')
+    delete require.cache[backupPath]
+    const originalLoad = Module._load
+    class PackagedBindingDatabase {
+      constructor(filename, options) {
+        if (!options?.readonly || !options.fileMustExist) {
+          throw new Error('backup_verification_must_be_readonly')
+        }
+        if (options?.readonly && options.nativeBinding != expectedNativeBinding) {
+          throw new Error('packaged_default_binding_lookup_failed')
+        }
+        return new Database(filename, options)
+      }
+    }
+    Module._load = function(request, parent, isMain) {
+      if (request == 'better-sqlite3') return PackagedBindingDatabase
+      return originalLoad.call(this, request, parent, isMain)
+    }
+    try {
+      const { createOnlineBackup } = require(backupPath)
+
+      await createOnlineBackup(db, destination, { nativeBinding: expectedNativeBinding })
+    } finally {
+      Module._load = originalLoad
+      delete require.cache[backupPath]
+    }
+
+    const restored = openTracked(destination, { readonly: true, fileMustExist: true })
+    assert.equal(restored.pragma('quick_check', { simple: true }), 'ok')
+  })
 })
 
 describe('PRAGMA structural verification', () => {

@@ -525,7 +525,7 @@ const initializeDatabase = async(
   if (pending.length > 0) {
     try {
       backupPath = allocateBackupPath(options.backupDir, fromVersion, pending[pending.length - 1].version)
-      await createOnlineBackup(localWriteDb, backupPath)
+      await createOnlineBackup(localWriteDb, backupPath, nativeOptions)
     } catch {
       if (!isCurrentAttempt(generation, key)) {
         closeConnection(localWriteDb)

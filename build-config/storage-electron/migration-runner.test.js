@@ -477,7 +477,7 @@ describe('database migrations', () => {
     assert.equal(openCalls, 0)
   })
 
-  it('initializes a new app database through backup and migration 3 with authoritative pragmas', async() => {
+  it('bootstraps a new app database without migration backup metadata', async() => {
     const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-migration-init-'))
     tempDirs.push(profileRoot)
     const dbService = require('../../src/main/worker/dbService/db.ts')
@@ -492,18 +492,19 @@ describe('database migrations', () => {
       existed: result.existed,
       schemaVersion: result.schemaVersion,
       migratedVersions: result.migratedVersions,
-      backupDir: path.dirname(result.backupPath),
+      backupPath: result.backupPath,
     }, {
       existed: false,
       schemaVersion: 3,
-      migratedVersions: [3],
-      backupDir: path.resolve(backupDir),
+      migratedVersions: [],
+      backupPath: null,
     })
     assert.equal(dbService.getDB(), db)
     assert.equal(getSchemaVersion(db), 3)
     assert.deepEqual(readLedger(db).map(row => [row.version, row.name]), [[3, 'storage_foundation']])
     assert.equal(db.pragma('foreign_keys', { simple: true }), 1)
     assert.equal(db.pragma('journal_mode', { simple: true }), 'wal')
+    assert.equal(fs.existsSync(backupDir), false)
     assert.equal(fs.existsSync(path.join(profileRoot, 'lx.data.db')), true)
     assert.equal(fs.existsSync(path.join(profileRoot, 'activity.db')), false)
   })

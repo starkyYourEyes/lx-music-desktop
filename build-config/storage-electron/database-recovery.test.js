@@ -17,6 +17,7 @@ require.extensions['.ts'] = (module, filename) => {
 }
 
 const Database = require('better-sqlite3')
+const tables = require('../../src/main/worker/dbService/tables.ts').default
 const MIGRATION_3_CHECKSUM = '9243aa510e8355d2c3d0f687c6736654adf584ec6007b1bcf46f374a9d694e41'
 const tempDirs = []
 const databases = []
@@ -195,6 +196,17 @@ const createDatabaseSymlinkOrSkip = (testContext, {
 const createV3Database = databasePath => {
   const db = openTracked(databasePath)
   db.exec(V3_SCHEMA)
+  db.pragma('journal_mode = WAL')
+  db.pragma('foreign_keys = ON')
+  return db
+}
+
+const createV2Database = databasePath => {
+  const db = openTracked(databasePath)
+  db.exec(`
+    ${Array.from(tables.values()).join('\n')}
+    INSERT INTO db_info(field_name, field_value) VALUES ('version', '2');
+  `)
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
   return db
@@ -582,21 +594,37 @@ describe('database startup orchestration', () => {
     assert.deepEqual(events.slice(0, 4), ['open', 'foreign_keys', 'wal', 'baseline_write'])
   })
 
-  it('kills missing-backup fresh initialization by migrating v2 through a verified online backup', async() => {
+  it('bootstraps a fresh database without entering the backup boundary', async() => {
     const paths = makePaths('lx-recovery-fresh-')
-    const dbService = loadDbServiceWithBoundaries()
+    let backupCalls = 0
+    const verificationOptions = []
+    const actualVerify = require('../../src/main/worker/dbService/verifyDB.ts')
+    const dbService = loadDbServiceWithBoundaries({
+      backupModule: {
+        createOnlineBackup: async() => {
+          backupCalls++
+          throw new Error('fresh startup must not create a backup')
+        },
+      },
+      verifyModule: {
+        ...actualVerify,
+        verifyDatabase: (db, options) => {
+          verificationOptions.push(options)
+          return actualVerify.verifyDatabase(db, options)
+        },
+      },
+    })
 
     const result = await dbService.init(initOptions(paths))
 
     assert.equal(result.status, 'ready')
     assert.equal(result.existed, false)
     assert.equal(result.schemaVersion, 3)
-    assert.deepEqual(result.migratedVersions, [3])
-    assert.match(result.backupPath, /lx\.data\.db\.pre-migration-v2-to-v3\.\d+-0\.backup$/)
-    assert.equal(path.dirname(result.backupPath), path.resolve(paths.backupDir))
-    const backup = openTracked(result.backupPath, { readonly: true, fileMustExist: true })
-    assert.equal(backup.pragma('quick_check', { simple: true }), 'ok')
-    assert.equal(backup.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value, '2')
+    assert.deepEqual(result.migratedVersions, [])
+    assert.equal(result.backupPath, null)
+    assert.equal(backupCalls, 0)
+    assert.equal(fs.existsSync(paths.backupDir), false)
+    assert.deepEqual(verificationOptions, [{ runQuickCheck: true, runForeignKeyCheck: true }])
     assert.equal(dbService.getAppDB().pragma('foreign_keys', { simple: true }), 1)
     assert.equal(dbService.getAppDB().pragma('journal_mode', { simple: true }), 'wal')
     assert.equal(fs.existsSync(path.join(paths.dataPath, 'activity.db')), false)
@@ -604,6 +632,7 @@ describe('database startup orchestration', () => {
 
   it('passes the startup packaged binding into read-only backup verification', async() => {
     const paths = makePaths('lx-recovery-startup-packaged-binding-')
+    createV2Database(paths.databasePath).close()
     const installedNativeBinding = require.resolve('better-sqlite3/build/Release/better_sqlite3.node')
     const bindingSuffix = path.join('better-sqlite3', 'build', 'Release', 'better_sqlite3.node')
     const verificationOpens = []
@@ -655,6 +684,7 @@ describe('database startup orchestration', () => {
 
   it('kills backup-after-migration and skipped-check implementations by preserving exact observable order', async() => {
     const paths = makePaths('lx-recovery-order-')
+    createV2Database(paths.databasePath).close()
     const events = []
     const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
     const actualMigrate = require('../../src/main/worker/dbService/migrate.ts')
@@ -810,6 +840,7 @@ describe('database startup orchestration', () => {
 
   it('kills migration-after-backup-failure by returning recovery and leaving v2 authoritative', async() => {
     const paths = makePaths('lx-recovery-backup-fail-')
+    createV2Database(paths.databasePath).close()
     const dbService = loadDbServiceWithBoundaries({
       backupModule: { createOnlineBackup: async() => { throw new Error('secret backup failure') } },
     })
@@ -829,6 +860,7 @@ describe('database startup orchestration', () => {
 
   it('kills migration-after-invalid-backup by preserving the failed candidate and v2 source', async() => {
     const paths = makePaths('lx-recovery-invalid-candidate-')
+    createV2Database(paths.databasePath).close()
     const dbService = loadDbServiceWithBoundaries({
       backupModule: {
         createOnlineBackup: async(_db, destination) => {
@@ -1053,6 +1085,7 @@ describe('database startup orchestration', () => {
 
   it('kills backup collision overwrites by selecting the first unused counter', async() => {
     const paths = makePaths('lx-recovery-collision-')
+    createV2Database(paths.databasePath).close()
     fs.mkdirSync(paths.backupDir, { recursive: true })
     const originalNow = Date.now
     Date.now = () => 1234
@@ -1316,6 +1349,7 @@ describe('database startup orchestration', () => {
 
   it('kills backup-path traversal by rejecting a resolved candidate outside backupDir', async() => {
     const paths = makePaths('lx-recovery-backup-containment-')
+    createV2Database(paths.databasePath).close()
     const escaped = path.join(paths.root, 'escaped-backup.db')
     const pathModule = {
       ...path,
@@ -1460,6 +1494,7 @@ describe('database startup orchestration', () => {
 
   it('kills duplicate same-key initialization by sharing backup work and cloning cached results', async() => {
     const paths = makePaths('lx-recovery-init-reuse-')
+    createV2Database(paths.databasePath).close()
     const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
     let openCalls = 0
     let backupCalls = 0
@@ -1513,6 +1548,7 @@ describe('database startup orchestration', () => {
   it('kills profile replacement by rejecting different keys while active and initialized', async() => {
     const firstPaths = makePaths('lx-recovery-init-conflict-a-')
     const secondPaths = makePaths('lx-recovery-init-conflict-b-')
+    createV2Database(firstPaths.databasePath).close()
     const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
     let releaseBackup
     let signalBackupStarted
@@ -1581,6 +1617,7 @@ describe('database startup orchestration', () => {
   it('kills orphaned initializing writers by invalidating an active attempt on close', async() => {
     const firstPaths = makePaths('lx-recovery-init-cancel-a-')
     const secondPaths = makePaths('lx-recovery-init-cancel-b-')
+    createV2Database(firstPaths.databasePath).close()
     const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
     let releaseBackup
     let signalBackupStarted
@@ -1668,6 +1705,6 @@ describe('worker startup API', () => {
     assert.equal(first.existed, false)
     assert.deepEqual(second, first)
     assert.equal(require('../../src/main/worker/dbService/db.ts').getAppDB(), handle)
-    assert.equal(fs.readdirSync(paths.backupDir).filter(name => name.endsWith('.backup')).length, 1)
+    assert.equal(fs.existsSync(paths.backupDir), false)
   })
 })

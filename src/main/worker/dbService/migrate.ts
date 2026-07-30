@@ -133,7 +133,10 @@ export const getPendingMigrations = (
   return registry.filter(migration => migration.version > currentVersion && migration.version <= target)
 }
 
-type MigrationOptions = { now?: () => number, targetSchemaVersion?: number }
+interface MigrationOptions {
+  now?: () => number
+  targetSchemaVersion?: number
+}
 
 const applyMigrations = (
   db: Database.Database,

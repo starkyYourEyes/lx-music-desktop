@@ -126,6 +126,7 @@ const showAddMenu = (event: MouseEvent) => {
   width: 30px;
   height: 30px;
   padding: 7px;
+  box-sizing: border-box;
   border: 0;
   border-radius: 3px;
   color: var(--color-font);

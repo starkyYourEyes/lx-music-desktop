@@ -56,30 +56,149 @@ const quoteIdentifier = (value: string): string => `"${value.replace(/"/g, '""')
 const sameColumns = (actual: readonly unknown[], expected: readonly string[]): boolean =>
   actual.length == expected.length && actual.every((value, index) => value == expected[index])
 
-const lowercaseSqlSyntax = (value: string): string => {
-  let result = ''
-  let quoted = false
-  for (let index = 0; index < value.length; index++) {
-    const character = value[index]
-    if (character == "'") {
-      result += character
-      if (quoted && value[index + 1] == "'") {
-        result += value[++index]
+const isSqlWordCharacter = (value: string | undefined): boolean =>
+  value != null && /[a-z0-9_$]/i.test(value)
+
+const isSqlQuote = (value: string): boolean => value == "'" || value == '"' || value == '`' || value == '['
+
+const readQuotedEnd = (sql: string, start: number): number => {
+  const delimiter = sql[start] == '[' ? ']' : sql[start]
+  for (let index = start + 1; index < sql.length; index++) {
+    if (sql[index] == '\\' && delimiter != ']' && index + 1 < sql.length) {
+      index++
+    } else if (sql[index] == delimiter) {
+      if (sql[index + 1] == delimiter) {
+        index++
       } else {
-        quoted = !quoted
+        return index + 1
       }
-    } else {
-      result += quoted ? character : character.toLowerCase()
     }
   }
-  return result
+  return sql.length
 }
 
-const normalizeSql = (value: string): string => lowercaseSqlSyntax(value)
-  .replace(/\s+/g, ' ')
-  .replace(/\s*(>=|<=|=)\s*/g, '$1')
-  .replace(/\s*([(),])\s*/g, '$1')
-  .trim()
+const readCommentEnd = (sql: string, start: number): number | null => {
+  if (sql[start] == '-' && sql[start + 1] == '-') {
+    const end = sql.indexOf('\n', start + 2)
+    return end == -1 ? sql.length : end + 1
+  }
+  if (sql[start] == '/' && sql[start + 1] == '*') {
+    const end = sql.indexOf('*/', start + 2)
+    return end == -1 ? sql.length : end + 2
+  }
+  return null
+}
+
+const skipSqlTrivia = (sql: string, start: number): number => {
+  let index = start
+  while (index < sql.length) {
+    if (/\s/.test(sql[index])) {
+      index++
+      continue
+    }
+    const commentEnd = readCommentEnd(sql, index)
+    if (commentEnd == null) break
+    index = commentEnd
+  }
+  return index
+}
+
+const findSqlKeyword = (sql: string, keyword: string, start = 0): number => {
+  for (let index = start; index < sql.length;) {
+    if (isSqlQuote(sql[index])) {
+      index = readQuotedEnd(sql, index)
+      continue
+    }
+    const commentEnd = readCommentEnd(sql, index)
+    if (commentEnd != null) {
+      index = commentEnd
+      continue
+    }
+    if (!isSqlWordCharacter(sql[index - 1]) &&
+      sql.slice(index, index + keyword.length).toLowerCase() == keyword &&
+      !isSqlWordCharacter(sql[index + keyword.length])) return index
+    index++
+  }
+  return -1
+}
+
+const findBalancedParenthesisEnd = (sql: string, start: number): number | null => {
+  let depth = 0
+  for (let index = start; index < sql.length;) {
+    if (isSqlQuote(sql[index])) {
+      index = readQuotedEnd(sql, index)
+      continue
+    }
+    const commentEnd = readCommentEnd(sql, index)
+    if (commentEnd != null) {
+      index = commentEnd
+      continue
+    }
+    if (sql[index] == '(') {
+      depth++
+    } else if (sql[index] == ')' && --depth == 0) {
+      return index
+    }
+    index++
+  }
+  return null
+}
+
+const isSqlTightCharacter = (value: string | undefined): boolean =>
+  value != null && /[(),;<>!=+*/%|&~-]/.test(value)
+
+const normalizeSqlExpression = (sql: string): string => {
+  let result = ''
+  let needsSpace = false
+  for (let index = 0; index < sql.length;) {
+    if (isSqlQuote(sql[index])) {
+      const end = readQuotedEnd(sql, index)
+      if (needsSpace && result.length > 0 && !isSqlTightCharacter(result.at(-1))) result += ' '
+      result += sql.slice(index, end)
+      needsSpace = false
+      index = end
+      continue
+    }
+    const commentEnd = readCommentEnd(sql, index)
+    if (commentEnd != null) {
+      needsSpace = true
+      index = commentEnd
+      continue
+    }
+    if (/\s/.test(sql[index])) {
+      needsSpace = true
+      index++
+      continue
+    }
+    if (isSqlTightCharacter(sql[index])) {
+      result = result.trimEnd() + sql[index].toLowerCase()
+    } else {
+      if (needsSpace && result.length > 0 && !isSqlTightCharacter(result.at(-1))) result += ' '
+      result += sql[index].toLowerCase()
+    }
+    needsSpace = false
+    index++
+  }
+  return result.trim()
+}
+
+const extractCheckExpressions = (sql: string): string[] => {
+  const expressions: string[] = []
+  for (let start = 0; start < sql.length;) {
+    const checkStart = findSqlKeyword(sql, 'check', start)
+    if (checkStart == -1) break
+    const open = skipSqlTrivia(sql, checkStart + 'check'.length)
+    if (sql[open] != '(') {
+      start = open
+      continue
+    }
+    const close = findBalancedParenthesisEnd(sql, open)
+    if (close == null) break
+    expressions.push(sql.slice(open + 1, close))
+    start = close + 1
+  }
+  return expressions
+}
 
 const readSchemaSql = (db: Database.Database, type: 'table' | 'index', name: string): string | null =>
   (db.prepare<[string, string]>('SELECT sql FROM sqlite_master WHERE type = ? AND name = ?')
@@ -87,13 +206,13 @@ const readSchemaSql = (db: Database.Database, type: 'table' | 'index', name: str
 
 const readWhere = (sql: string | null): string | null => {
   if (sql == null) return null
-  const match = /\bwhere\b([\s\S]*)$/i.exec(sql)
-  return match ? normalizeSql(match[1]) : null
+  const where = findSqlKeyword(sql, 'where')
+  return where == -1 ? null : normalizeSqlExpression(sql.slice(where + 'where'.length))
 }
 
 const sameDefault = (actual: string | null, expected: string | null): boolean => {
   if (actual == null || expected == null) return actual == expected
-  const unwrap = (value: string): string => normalizeSql(value).replace(/^\((.*)\)$/, '$1')
+  const unwrap = (value: string): string => normalizeSqlExpression(value).replace(/^\((.*)\)$/, '$1')
   return unwrap(actual) == unwrap(expected)
 }
 
@@ -175,7 +294,7 @@ const verifyStructure = (db: Database.Database, contract: SchemaContract): strin
       if (matching.length == 0) {
         diagnostics.push(`schema.index_invalid:${table.name}.${expected.name}`)
       } else if (expected.where !== undefined &&
-        !matching.some(index => readWhere(index.sql) == normalizeSql(expected.where!))) {
+        !matching.some(index => readWhere(index.sql) == normalizeSqlExpression(expected.where!))) {
         diagnostics.push(`schema.index_where:${table.name}.${expected.name}`)
       }
     }
@@ -186,9 +305,11 @@ const verifyStructure = (db: Database.Database, contract: SchemaContract): strin
       }
     }
     const tableSql = readSchemaSql(db, 'table', table.name)
-    const normalizedTableSql = tableSql == null ? '' : normalizeSql(tableSql)
+    const actualChecks = tableSql == null
+      ? []
+      : extractCheckExpressions(tableSql).map(normalizeSqlExpression)
     for (const expected of table.checks ?? []) {
-      if (!normalizedTableSql.includes(normalizeSql(expected.expression))) {
+      if (!actualChecks.includes(normalizeSqlExpression(expected.expression))) {
         diagnostics.push(`schema.check_missing:${table.name}.${expected.name}`)
       }
     }

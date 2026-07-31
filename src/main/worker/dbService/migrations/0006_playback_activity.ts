@@ -173,7 +173,7 @@ CREATE TABLE recent_tracks (
 CREATE INDEX recent_tracks_order ON recent_tracks(recency_seq DESC);
 
 CREATE TABLE listening_daily (
-  local_day TEXT PRIMARY KEY CHECK(length(local_day) = 10),
+  local_day TEXT NOT NULL PRIMARY KEY CHECK(length(local_day) = 10),
   baseline_played_ms INTEGER NOT NULL DEFAULT 0 CHECK(
     typeof(baseline_played_ms) = 'integer' AND baseline_played_ms BETWEEN 0 AND 9007199254740991
   ),
@@ -235,7 +235,7 @@ CREATE TABLE activity_totals (
 );
 
 CREATE TABLE projection_state (
-  name TEXT PRIMARY KEY CHECK(name IN ('recent','statistics')),
+  name TEXT NOT NULL PRIMARY KEY CHECK(name IN ('recent','statistics')),
   version INTEGER NOT NULL CHECK(
     typeof(version) = 'integer' AND version BETWEEN 1 AND 9007199254740991
   ),

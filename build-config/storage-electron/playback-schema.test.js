@@ -16,7 +16,10 @@ require.extensions['.ts'] = (module, filename) => {
 const Database = require('better-sqlite3')
 const { bootstrapDatabaseSchema, getSchemaVersion, runMigrations } = require('../../src/main/worker/dbService/migrate.ts')
 const { migrations } = require('../../src/main/worker/dbService/migrations/index.ts')
-const { verifyDatabase } = require('../../src/main/worker/dbService/verifyDB.ts')
+const {
+  verifyDatabase,
+  verifyDatabaseAgainstContract,
+} = require('../../src/main/worker/dbService/verifyDB.ts')
 
 const PLAYBACK_TABLES = [
   'activity_totals',
@@ -88,7 +91,7 @@ const EXPECTED_COLUMNS = {
     ['updated_at_ms', 'INTEGER', 1, 0],
   ],
   listening_daily: [
-    ['local_day', 'TEXT', 0, 1],
+    ['local_day', 'TEXT', 1, 1],
     ['baseline_played_ms', 'INTEGER', 1, 0],
     ['live_played_ms', 'INTEGER', 1, 0],
     ['baseline_active_ms', 'INTEGER', 1, 0],
@@ -113,7 +116,7 @@ const EXPECTED_COLUMNS = {
     ['updated_at_ms', 'INTEGER', 1, 0],
   ],
   projection_state: [
-    ['name', 'TEXT', 0, 1],
+    ['name', 'TEXT', 1, 1],
     ['version', 'INTEGER', 1, 0],
     ['last_session_id', 'INTEGER', 0, 0],
     ['visible_after_ms', 'INTEGER', 0, 0],
@@ -264,6 +267,30 @@ const insertEvent = (db, sessionId, sequenceNo, eventType, reason, overrides = {
 
 const assertConstraint = action => assert.throws(action, /constraint/i)
 
+const rebuildResumeState = (db, checkpointDefinition) => db.exec(`
+  DROP TABLE playback_resume_state;
+  CREATE TABLE playback_resume_state (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    playback_group_uuid TEXT NOT NULL,
+    checkpoint_seq ${checkpointDefinition},
+    source TEXT NOT NULL,
+    source_track_id TEXT NOT NULL,
+    list_id TEXT,
+    index_hint INTEGER CHECK(index_hint IS NULL OR (
+      typeof(index_hint) = 'integer' AND index_hint BETWEEN 0 AND 1000000
+    )),
+    position_ms INTEGER NOT NULL CHECK(
+      typeof(position_ms) = 'integer' AND position_ms BETWEEN 0 AND 9007199254740991
+    ),
+    duration_ms INTEGER CHECK(duration_ms IS NULL OR (
+      typeof(duration_ms) = 'integer' AND duration_ms BETWEEN 0 AND 9007199254740991
+    )),
+    updated_at_ms INTEGER NOT NULL CHECK(
+      typeof(updated_at_ms) = 'integer' AND updated_at_ms BETWEEN 0 AND 9007199254740991
+    )
+  );
+`)
+
 describe('playback activity schema migration', () => {
   it('upgrades an authoritative v5 database to v6 exactly once', () => {
     const { db } = bootstrap(5)
@@ -354,6 +381,33 @@ describe('playback activity schema migration', () => {
     assert.deepEqual(verifyDatabase(db, { runQuickCheck: true, runForeignKeyCheck: true }), { ok: true, diagnostics: [] })
   })
 
+  it('rejects repeated null listening-day identities', () => {
+    const { db } = bootstrap()
+    const insertNullDay = () => db.prepare(`
+      INSERT INTO listening_daily(local_day, updated_at_ms) VALUES(NULL, 0)
+    `).run()
+
+    assertConstraint(insertNullDay)
+    assertConstraint(insertNullDay)
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM listening_daily WHERE local_day IS NULL').get().count, 0)
+    db.prepare("INSERT INTO listening_daily(local_day, updated_at_ms) VALUES('2026-08-01', 0)").run()
+  })
+
+  it('rejects repeated null projection identities', () => {
+    const { db } = bootstrap()
+    const insertNullProjection = () => db.prepare(`
+      INSERT INTO projection_state(name, version, updated_at_ms) VALUES(NULL, 1, 0)
+    `).run()
+
+    assertConstraint(insertNullProjection)
+    assertConstraint(insertNullProjection)
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM projection_state WHERE name IS NULL').get().count, 0)
+    assert.deepEqual(db.prepare('SELECT name FROM projection_state ORDER BY name').all(), [
+      { name: 'recent' },
+      { name: 'statistics' },
+    ])
+  })
+
   it('rejects a playback open-group index with the wrong partial predicate', () => {
     const { db } = bootstrap()
     db.exec(`
@@ -383,6 +437,70 @@ describe('playback activity schema migration', () => {
       ok: false,
       reason: 'schema_invalid',
       diagnostics: ['schema.index_where:playback_sessions.playback_one_open_group'],
+    })
+  })
+
+  it('rejects a canonical check weakened by a permissive alternative', () => {
+    const { db } = bootstrap()
+    rebuildResumeState(db, `INTEGER NOT NULL CHECK(
+      (typeof(checkpoint_seq) = 'integer'
+        AND checkpoint_seq BETWEEN 0 AND 9007199254740991)
+      OR checkpoint_seq = 1.5
+    )`)
+
+    assert.deepEqual(verifyDatabase(db, { runQuickCheck: false, runForeignKeyCheck: false }), {
+      ok: false,
+      reason: 'schema_invalid',
+      diagnostics: ['schema.check_missing:playback_resume_state.checkpoint_seq.integer'],
+    })
+  })
+
+  it('ignores canonical check text that appears only in a SQL comment', () => {
+    const { db } = bootstrap()
+    rebuildResumeState(db, `INTEGER NOT NULL /* CHECK(
+      typeof(checkpoint_seq) = 'integer' AND checkpoint_seq BETWEEN 0 AND 9007199254740991
+    ) */`)
+
+    assert.deepEqual(verifyDatabase(db, { runQuickCheck: false, runForeignKeyCheck: false }), {
+      ok: false,
+      reason: 'schema_invalid',
+      diagnostics: ['schema.check_missing:playback_resume_state.checkpoint_seq.integer'],
+    })
+  })
+
+  it('preserves quoted literal punctuation when verifying checks and partial predicates', () => {
+    const db = openDatabase()
+    db.exec(`
+      CREATE TABLE literal_check(value TEXT CHECK(value IN ('a,b')));
+      CREATE INDEX literal_partial ON literal_check(value) WHERE value = 'a,b';
+    `)
+    const contract = {
+      tables: [{
+        name: 'literal_check',
+        columns: [{ name: 'value', type: 'TEXT', notNull: false, primaryKeyPosition: 0 }],
+        indexes: [{
+          name: 'literal_partial',
+          columns: ['value'],
+          unique: false,
+          partial: true,
+          where: "value = 'a, b'",
+        }],
+        foreignKeys: [],
+        checks: [{ name: 'value.literal', expression: "value IN ('a, b')" }],
+      }],
+    }
+
+    assert.deepEqual(verifyDatabaseAgainstContract(
+      db,
+      contract,
+      { runQuickCheck: false, runForeignKeyCheck: false },
+    ), {
+      ok: false,
+      reason: 'schema_invalid',
+      diagnostics: [
+        'schema.index_where:literal_check.literal_partial',
+        'schema.check_missing:literal_check.value.literal',
+      ],
     })
   })
 

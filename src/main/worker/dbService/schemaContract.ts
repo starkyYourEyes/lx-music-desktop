@@ -473,7 +473,7 @@ export const databaseSchemaContract: SchemaContract = {
     {
       name: 'listening_daily',
       columns: [
-        column('local_day', 'TEXT', false, 1),
+        column('local_day', 'TEXT', true, 1),
         column('baseline_played_ms', 'INTEGER', true, 0, '0'),
         column('live_played_ms', 'INTEGER', true, 0, '0'),
         column('baseline_active_ms', 'INTEGER', true, 0, '0'),
@@ -549,7 +549,7 @@ export const databaseSchemaContract: SchemaContract = {
     {
       name: 'projection_state',
       columns: [
-        column('name', 'TEXT', false, 1),
+        column('name', 'TEXT', true, 1),
         column('version', 'INTEGER', true),
         column('last_session_id', 'INTEGER'),
         column('visible_after_ms', 'INTEGER'),

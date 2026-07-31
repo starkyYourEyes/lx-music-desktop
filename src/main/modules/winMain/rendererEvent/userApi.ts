@@ -13,6 +13,10 @@ import {
   setAllowShowUpdateAlert,
 } from '@main/modules/userApi'
 import { sendEvent } from '@main/modules/winMain/main'
+import {
+  parseUserApiCancellationPayload,
+  parseUserApiRequestPayload,
+} from '@main/modules/userApi/ipcValidation'
 
 const REPLACE_ERROR_LIMITS = {
   message: 500,
@@ -84,11 +88,11 @@ export default () => {
     await setAllowShowUpdateAlert(id, enable)
   })
 
-  mainHandle<LX.UserApi.UserApiRequestParams>(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api, async({ params }) => {
-    return request(params)
+  mainHandle<unknown>(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api, async({ params }) => {
+    return request(parseUserApiRequestPayload(params))
   })
-  mainHandle<LX.UserApi.UserApiRequestCancelParams>(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api_cancel, async({ params }) => {
-    cancelRequest(typeof params == 'string' ? params : params.requestId)
+  mainHandle<unknown>(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api_cancel, async({ params }) => {
+    cancelRequest(parseUserApiCancellationPayload(params))
   })
 }
 

@@ -113,6 +113,39 @@ describe('legacy listening conversion', async() => {
     assert.deepEqual(result.tracks.map(track => track.baselinePlayedMs), [334, 0, 0])
   })
 
+  it('clamps huge finite negative seconds to zero across every legacy baseline', () => {
+    const result = convertLegacyListeningStats({
+      totalSeconds: -Number.MAX_VALUE,
+      daily: { '2026-07-29': -Number.MAX_VALUE },
+      songs: {
+        negative: { id: 'track-1', source: 'test', name: 'One', singer: 'Singer', seconds: -Number.MAX_VALUE },
+      },
+    })
+
+    assert.equal(result.totalPlayedMs, 0)
+    assert.equal(result.daily[0].baselinePlayedMs, 0)
+    assert.equal(result.tracks[0].baselinePlayedMs, 0)
+  })
+
+  it('saturates mismatches from multiple capped daily and track baselines', () => {
+    const result = convertLegacyListeningStats({
+      totalSeconds: 0,
+      daily: {
+        '2026-07-29': Number.MAX_VALUE,
+        '2026-07-30': Number.MAX_VALUE,
+      },
+      songs: {
+        first: { id: 'track-1', source: 'test', name: 'One', singer: 'Singer', seconds: Number.MAX_VALUE },
+        second: { id: 'track-2', source: 'test', name: 'Two', singer: 'Singer', seconds: Number.MAX_VALUE },
+      },
+    })
+
+    assert.deepEqual(result.mismatch, {
+      totalVsDailyMs: -9007199254740991,
+      totalVsTracksMs: -9007199254740991,
+    })
+  })
+
   it('skips tracks with invalid or out-of-bounds fields', () => {
     const result = convertLegacyListeningStats({
       totalSeconds: 1,

@@ -16,10 +16,10 @@ const maxTrackStringLength = 256
 
 const secondsToMs = (seconds: unknown): number => {
   const numericSeconds = Number(seconds)
-  if (!Number.isFinite(numericSeconds)) return 0
+  if (!Number.isFinite(numericSeconds) || numericSeconds <= 0) return 0
   const roundedMilliseconds = Math.round(numericSeconds * 1000)
   if (!Number.isFinite(roundedMilliseconds) || roundedMilliseconds > Number.MAX_SAFE_INTEGER) return Number.MAX_SAFE_INTEGER
-  return Math.max(0, roundedMilliseconds)
+  return roundedMilliseconds
 }
 
 const asRecord = (value: unknown): Record<string, unknown> | null => (
@@ -40,6 +40,19 @@ const isCalendarDay = (value: string): boolean => {
 const isTrackString = (value: unknown): value is string => (
   typeof value == 'string' && value.length > 0 && value.length <= maxTrackStringLength
 )
+
+const calculateSaturatedMismatch = (
+  totalPlayedMs: number,
+  entries: ReadonlyArray<{ baselinePlayedMs: number }>,
+): number => {
+  const maxSafeInteger = BigInt(Number.MAX_SAFE_INTEGER)
+  let mismatch = BigInt(totalPlayedMs)
+  for (const entry of entries) {
+    mismatch -= BigInt(entry.baselinePlayedMs)
+    if (mismatch <= -maxSafeInteger) return -Number.MAX_SAFE_INTEGER
+  }
+  return Number(mismatch)
+}
 
 export const convertLegacyListeningStats = (value: unknown): LegacyListeningImportV1 => {
   const stats = asRecord(value) ?? {}
@@ -72,15 +85,13 @@ export const convertLegacyListeningStats = (value: unknown): LegacyListeningImpo
     }
   }
 
-  const dailyPlayedMs = daily.reduce((total, entry) => total + entry.baselinePlayedMs, 0)
-  const tracksPlayedMs = tracks.reduce((total, entry) => total + entry.baselinePlayedMs, 0)
   return {
     totalPlayedMs,
     daily,
     tracks,
     mismatch: {
-      totalVsDailyMs: totalPlayedMs - dailyPlayedMs,
-      totalVsTracksMs: totalPlayedMs - tracksPlayedMs,
+      totalVsDailyMs: calculateSaturatedMismatch(totalPlayedMs, daily),
+      totalVsTracksMs: calculateSaturatedMismatch(totalPlayedMs, tracks),
     },
     baselineActiveTimeKnown: false,
   }

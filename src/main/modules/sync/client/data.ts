@@ -4,31 +4,26 @@ import { createAtomicJsonFile, type AtomicJsonFile } from '@main/storage/atomicJ
 import { getCredentialVault } from '@main/storage/credentials'
 import type { SyncKeyPayloadV1 } from '@main/storage/credentials/types'
 import { createOperationJournal, type OperationJournal } from '@main/storage/operationJournal'
-
-interface ClientServersFileV1 {
-  version: 1
-  servers: Record<string, LX.Sync.SyncClientProfile>
-}
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value != null && typeof value == 'object' && !Array.isArray(value)
-
-const isProfile = (value: unknown): value is LX.Sync.SyncClientProfile => isRecord(value) &&
-  typeof value.clientId == 'string' && value.clientId.length > 0 &&
-  typeof value.serverName == 'string' && value.serverName.length > 0 &&
-  (value.syncProtocol == null || value.syncProtocol == 'current' || value.syncProtocol == 'legacy') &&
-  Object.keys(value).every(key => ['clientId', 'serverName', 'syncProtocol'].includes(key))
-
-const isClientServersFileV1 = (value: unknown): value is ClientServersFileV1 => isRecord(value) &&
-  value.version == 1 && isRecord(value.servers) && Object.values(value.servers).every(isProfile) &&
-  Object.keys(value).every(key => ['version', 'servers'].includes(key))
+import {
+  isSyncClientServersFileV1,
+  type SyncClientServersFileV1,
+} from '@common/storage/syncMetadata'
 
 let profiles: Record<string, LX.Sync.SyncClientProfile> | null = null
-let metadataFile: AtomicJsonFile<ClientServersFileV1> | null = null
+let metadataFile: AtomicJsonFile<SyncClientServersFileV1> | null = null
 let operationJournal: OperationJournal | null = null
 let initializationPromise: Promise<void> | null = null
 let shutdownFlusherRegistered = false
-const operationTails = new Map<string, Promise<void>>()
+let operationQueue = Promise.resolve()
+
+export class SyncCredentialUnavailableError extends Error {
+  readonly unavailableReason = 'credential_undecryptable' as const
+
+  constructor() {
+    super('credential unavailable')
+    this.name = 'SyncCredentialUnavailableError'
+  }
+}
 
 interface SyncCredentialMutationOptions {
   failAt?: 'after-vault-write' | 'after-vault-remove'
@@ -39,9 +34,9 @@ const getMetadataFile = () => {
     global.lx.storage.registerShutdownFlusher('sync-client-credentials', flushSyncClientData)
     shutdownFlusherRegistered = true
   }
-  metadataFile ??= createAtomicJsonFile<ClientServersFileV1>({
+  metadataFile ??= createAtomicJsonFile<SyncClientServersFileV1>({
     filePath: path.join(global.lxDataPath, File.clientDataPath, File.syncAuthKeysJSON),
-    validate: isClientServersFileV1,
+    validate: isSyncClientServersFileV1,
     shouldPreservePrevious: () => false,
     mode: 0o600,
   })
@@ -64,10 +59,9 @@ const failIfRequested = (
   if (options?.failAt == stage) throw new Error(`injected failure: ${stage}`)
 }
 
-const serialize = async<Value>(serverId: string, operation: () => Promise<Value>): Promise<Value> => {
-  const previous = operationTails.get(serverId) ?? Promise.resolve()
-  const result = previous.then(operation, operation)
-  operationTails.set(serverId, result.then(() => undefined, () => undefined))
+const serialize = async<Value>(_serverId: string, operation: () => Promise<Value>): Promise<Value> => {
+  const result = operationQueue.then(operation, operation)
+  operationQueue = result.then(() => undefined, () => undefined)
   return await result
 }
 
@@ -96,7 +90,8 @@ export const getSyncAuthKey = async(serverId: string): Promise<LX.Sync.ClientKey
     const profile = profiles![serverId]
     if (profile == null) return null
     const credential = getCredentialVault().read<SyncKeyPayloadV1>({ kind: 'sync-client', serverId })
-    if (credential.status != 'available' && credential.status != 'memory-only') return null
+    if (credential.status == 'undecryptable') throw new SyncCredentialUnavailableError()
+    if (credential.status == 'missing') return null
     return { ...profile, key: credential.value.key }
   })
 }
@@ -147,7 +142,7 @@ export const removeSyncAuthKey = async(
 
 export const flushSyncClientData = async(): Promise<void> => {
   await initializationPromise
-  await Promise.all(operationTails.values())
+  await operationQueue
   await operationJournal?.flush()
   await metadataFile?.flush()
 }

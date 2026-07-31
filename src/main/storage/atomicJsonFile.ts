@@ -104,6 +104,7 @@ export function createAtomicJsonFile<T>(options: {
   filePath: string
   validate: (value: unknown) => value is T
   shouldPreservePrevious?: (current: T) => boolean
+  allowInvalidPrevious?: boolean
   mode?: number
   fs?: AtomicFileSystem
   initialCleanupComplete?: boolean
@@ -310,9 +311,17 @@ export function createAtomicJsonFile<T>(options: {
       if (!isMissing(error)) throw error
     }
     if (destinationBytes != null) {
-      const destination = parseAndValidate(destinationBytes, 'durable destination')
-      if (options.shouldPreservePrevious?.(destination) ?? true) await preservePrevious(destinationBytes)
-      else await removePrevious()
+      let destination: T | null = null
+      try {
+        destination = parseAndValidate(destinationBytes, 'durable destination')
+      } catch (error) {
+        if (!options.allowInvalidPrevious) throw error
+      }
+      if (destination != null && (options.shouldPreservePrevious?.(destination) ?? true)) {
+        await preservePrevious(destinationBytes)
+      } else {
+        await removePrevious()
+      }
     }
 
     let replaced = false

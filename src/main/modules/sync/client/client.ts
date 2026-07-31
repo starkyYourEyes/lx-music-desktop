@@ -22,6 +22,8 @@ let status: LX.Sync.ClientStatus = {
 export const sendSyncStatus = (newStatus: Omit<LX.Sync.ClientStatus, 'address'>) => {
   status.status = newStatus.status
   status.message = newStatus.message
+  if (newStatus.unavailableReason == null) Reflect.deleteProperty(status, 'unavailableReason')
+  else status.unavailableReason = newStatus.unavailableReason
   if (status.status) {
     status.address = getAddress()
   }

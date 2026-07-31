@@ -381,7 +381,12 @@ describe('WebDAV credential cutover', () => {
       },
       {
         read: { status: 'undecryptable' },
-        expected: { configured: false, usernameHint: null, persistence: 'missing' },
+        expected: {
+          configured: false,
+          usernameHint: null,
+          persistence: 'missing',
+          unavailableReason: 'credential_undecryptable',
+        },
       },
     ]
 

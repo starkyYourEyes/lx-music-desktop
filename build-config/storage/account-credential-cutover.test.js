@@ -150,8 +150,15 @@ describe('account credential cutover', () => {
   it('treats an unavailable NetEase credential as logged out without clearing QQ Music', async() => {
     const accounts = createRepository()
     accounts.getStatus = provider => provider == 'netease'
-      ? { loggedIn: false, profile: null, updatedAtMs: null, persistence: null }
+      ? {
+          loggedIn: false,
+          profile: null,
+          updatedAtMs: null,
+          persistence: null,
+          unavailableReason: 'credential_undecryptable',
+        }
       : { loggedIn: true, profile: { uin: '7', nickname: 'Q' }, updatedAtMs: 1, persistence: 'encrypted' }
+    accounts.getCookie = provider => provider == 'qq_music' ? qqCookie('7') : null
     const { service } = createNeteaseService({
       accounts,
       api: {
@@ -163,7 +170,57 @@ describe('account credential cutover', () => {
       },
     })
 
-    assert.deepEqual(await service.getAccountStatus(), { isLoggedIn: false, profile: null })
+    assert.deepEqual(await service.getAccountStatus(), {
+      isLoggedIn: false,
+      profile: null,
+      unavailableReason: 'credential_undecryptable',
+    })
+    assert.deepEqual(createQQMusicService({ accounts }).service.getAccountStatus(), {
+      isLoggedIn: true,
+      profile: { uin: '7', nickname: 'Q' },
+    })
+    assert.deepEqual(accounts.clears, [])
+  })
+
+  it('projects an unavailable QQ Music credential without affecting NetEase', async() => {
+    const accounts = createRepository()
+    accounts.getStatus = provider => provider == 'qq_music'
+      ? {
+          loggedIn: false,
+          profile: null,
+          updatedAtMs: null,
+          persistence: null,
+          unavailableReason: 'credential_undecryptable',
+        }
+      : {
+          loggedIn: true,
+          profile: { userId: 1, nickname: 'N', avatarUrl: '' },
+          updatedAtMs: 1,
+          persistence: 'encrypted',
+        }
+    accounts.getCookie = provider => provider == 'netease' ? 'NETEASE_COOKIE_SENTINEL' : null
+    const qq = createQQMusicService({ accounts }).service
+    const netease = createNeteaseService({
+      accounts,
+      now: () => 1,
+      api: {
+        login_qr_key: async() => ({}),
+        login_qr_create: async() => ({}),
+        login_qr_check: async() => ({}),
+        login_status: async() => ({}),
+        logout: async() => ({}),
+      },
+    }).service
+
+    assert.deepEqual(qq.getAccountStatus(), {
+      isLoggedIn: false,
+      profile: null,
+      unavailableReason: 'credential_undecryptable',
+    })
+    assert.deepEqual(await netease.getAccountStatus(), {
+      isLoggedIn: true,
+      profile: { userId: 1, nickname: 'N', avatarUrl: '', backgroundUrl: undefined, signature: undefined },
+    })
     assert.deepEqual(accounts.clears, [])
   })
 

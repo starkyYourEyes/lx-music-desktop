@@ -131,6 +131,7 @@ declare namespace LX {
       configured: boolean
       usernameHint: string | null
       persistence: 'encrypted' | 'memory-only' | 'missing'
+      unavailableReason?: 'credential_undecryptable'
     }
 
     interface WebDAVCredentialSaveResult {

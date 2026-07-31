@@ -8,7 +8,7 @@ export interface UserSpace {
   dataManage: UserDataManage
   listManage: ListManage
   dislikeManage: DislikeManage
-  getDecices: () => Promise<LX.Sync.SyncServerDevice[]>
+  getDecices: () => Promise<LX.Sync.SyncServerDeviceStatus[]>
   removeDevice: (clientId: string) => Promise<void>
 }
 const users = new Map<string, UserSpace>()

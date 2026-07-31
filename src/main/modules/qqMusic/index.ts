@@ -33,6 +33,7 @@ interface QQMusicProfile {
 interface QQMusicAccountStatus {
   isLoggedIn: boolean
   profile: QQMusicProfile | null
+  unavailableReason?: 'credential_undecryptable'
 }
 
 interface QQMusicAccountData {
@@ -355,6 +356,14 @@ export const createQQMusicAccountService = ({
   })
 
   const getAccountStatus = (): QQMusicAccountStatus => {
+    const repositoryStatus = accounts.getStatus('qq_music')
+    if (repositoryStatus.unavailableReason != null) {
+      return {
+        isLoggedIn: false,
+        profile: null,
+        unavailableReason: repositoryStatus.unavailableReason,
+      }
+    }
     const account = getAccountData(accounts)
     return {
       isLoggedIn: !!account.cookie && !!account.profile,

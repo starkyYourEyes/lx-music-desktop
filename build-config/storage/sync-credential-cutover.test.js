@@ -66,6 +66,55 @@ const writeJson = async(filePath, value) => {
   await fsp.writeFile(filePath, JSON.stringify(value))
 }
 
+const deferred = () => {
+  let resolvePromise
+  const promise = new Promise(resolve => { resolvePromise = resolve })
+  return { promise, resolve: resolvePromise }
+}
+
+const createGatedMetadataFile = initialValue => {
+  let value = structuredClone(initialValue)
+  let nextGate = null
+  let replaceCalls = 0
+  return {
+    file: {
+      async read() {
+        return structuredClone(value)
+      },
+      async replace(nextValue) {
+        replaceCalls++
+        const snapshot = structuredClone(nextValue)
+        const gate = nextGate
+        nextGate = null
+        if (gate != null) {
+          gate.started.resolve()
+          await gate.release.promise
+        }
+        value = snapshot
+        return { fileSha256: 'fixture' }
+      },
+      async flush() {},
+    },
+    gateNextReplace() {
+      const gate = { started: deferred(), release: deferred() }
+      nextGate = gate
+      return { started: gate.started.promise, release: gate.release.resolve }
+    },
+    read: () => structuredClone(value),
+    getReplaceCalls: () => replaceCalls,
+  }
+}
+
+const createJournal = () => {
+  let revision = 0
+  return {
+    async begin() { return ++revision },
+    async complete() {},
+    async list() { return [] },
+    async flush() {},
+  }
+}
+
 const freshRequire = request => {
   const resolved = require.resolve(request)
   delete require.cache[resolved]
@@ -156,6 +205,44 @@ const createServerRuntime = () => {
   }
 }
 
+const createClientStatusService = unavailableError => {
+  const sentStatuses = []
+  const service = loadTsModule(path.join(sourceRoot, 'main/modules/sync/client/index.ts'), {
+    './auth': { __esModule: true, default: async() => { throw unavailableError } },
+    './client': {
+      connect() {},
+      async disconnect() {},
+      sendSyncStatus(status) { sentStatuses.push(status) },
+      sendSyncMessage() {},
+      getStatus: () => sentStatuses.at(-1),
+    },
+    './utils': { parseUrl: () => ({}) },
+    '../migrate': { __esModule: true, default: async() => {} },
+    '../log': { info() {}, error() {}, r_warn() {} },
+    '@common/constants_sync': {
+      SYNC_CODE: {
+        connecting: 'connecting',
+        connectServiceFailed: 'connect_failed',
+        missingAuthCode: 'missing_auth_code',
+      },
+    },
+  })
+  return { service, sentStatuses }
+}
+
+const createClientStatusState = () => loadTsModule(path.join(sourceRoot, 'main/modules/sync/client/client.ts'), {
+  ws: class {},
+  './utils': { encryptMsg() {}, decryptMsg() {} },
+  './sync': { callObj: {} },
+  '../log': { info() {}, error() {}, warn() {} },
+  '@common/utils/common': { arrRemove() {}, dateFormat: () => '' },
+  '@main/modules/winMain': { sendClientStatus() {} },
+  '@common/utils/syncRpc': { createSyncRpc: () => ({}) },
+  '@common/constants_sync': { SYNC_CLOSE_CODE: { failed: 4100 } },
+  '@common/utils/nodejs': { getAddress: () => [] },
+  '@common/syncProtocol': { getSyncProtocol: () => ({}) },
+})
+
 describe('sync credential cutover', () => {
   it('removes keys from server device data and JSON metadata', async() => {
     const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-credential-cutover-'))
@@ -216,6 +303,104 @@ describe('sync credential cutover', () => {
     assert.doesNotMatch(JSON.stringify(status), /SERVER_KEY_SENTINEL/)
     assert.doesNotMatch(JSON.stringify(devices), /SERVER_KEY_SENTINEL/)
     assert.equal(Object.hasOwn(devices[0], 'key'), false)
+  })
+
+  it('projects an undecryptable sync client credential without affecting other destinations', async() => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-client-unavailable-'))
+    const vault = createVault()
+    global.lxDataPath = root
+    global.lx = { credentialVault: vault, appSetting: {} }
+    try {
+      const clientData = freshRequire('../../src/main/modules/sync/client/data.ts')
+      await clientData.setSyncAuthKey('server_unavailable', {
+        clientId: 'client_unavailable', key: 'CLIENT_KEY_UNAVAILABLE_SENTINEL', serverName: 'Unavailable',
+      })
+      await clientData.setSyncAuthKey('server_available', {
+        clientId: 'client_available', key: 'CLIENT_KEY_AVAILABLE_SENTINEL', serverName: 'Available',
+      })
+      const originalRead = vault.read
+      vault.read = ref => ref.kind == 'sync-client' && ref.serverId == 'server_unavailable'
+        ? { status: 'undecryptable' }
+        : originalRead.call(vault, ref)
+
+      await assert.rejects(
+        clientData.getSyncAuthKey('server_unavailable'),
+        error => error.unavailableReason == 'credential_undecryptable' &&
+          !JSON.stringify(error).includes('CLIENT_KEY_UNAVAILABLE_SENTINEL'),
+      )
+      assert.notEqual(await clientData.getSyncAuthKey('server_available'), null)
+
+      const unavailableError = Object.assign(new Error('credential unavailable'), {
+        unavailableReason: 'credential_undecryptable',
+      })
+      const { service, sentStatuses } = createClientStatusService(unavailableError)
+      await assert.rejects(service.connectServer('http://fixture'), /credential unavailable/)
+      assert.deepEqual(sentStatuses.at(-1), {
+        status: false,
+        message: 'credential unavailable',
+        unavailableReason: 'credential_undecryptable',
+      })
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('retains and clears the unavailable reason in the real sync client status state', () => {
+    const client = createClientStatusState()
+
+    client.sendSyncStatus({
+      status: false,
+      message: 'credential unavailable',
+      unavailableReason: 'credential_undecryptable',
+    })
+    assert.equal(client.getStatus().unavailableReason, 'credential_undecryptable')
+
+    client.sendSyncStatus({ status: false, message: '' })
+    assert.equal(Object.hasOwn(client.getStatus(), 'unavailableReason'), false)
+  })
+
+  it('projects undecryptable sync server devices without affecting available or missing destinations', async() => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-server-unavailable-'))
+    const vault = createVault()
+    global.lxDataPath = root
+    global.lx = {
+      credentialVault: vault,
+      appSetting: { 'sync.server.maxSsnapshotNum': 3, 'list.addMusicLocationType': 'add_start' },
+    }
+    try {
+      const serverData = freshRequire('../../src/main/modules/sync/server/user/data.ts')
+      const manager = new serverData.UserDataManage('default')
+      for (const [clientId, deviceName] of [
+        ['device_unavailable', 'Unavailable'],
+        ['device_available', 'Available'],
+        ['device_missing', 'Missing'],
+      ]) {
+        await manager.saveClientKeyInfo({
+          clientId,
+          key: `SERVER_KEY_${clientId.toUpperCase()}_SENTINEL`,
+          deviceName,
+          isMobile: false,
+        })
+      }
+      await vault.remove({ kind: 'sync-server-device', userName: 'default', clientId: 'device_missing' })
+      const originalRead = vault.read
+      vault.read = ref => ref.kind == 'sync-server-device' && ref.clientId == 'device_unavailable'
+        ? { status: 'undecryptable' }
+        : originalRead.call(vault, ref)
+      const service = createServerService({
+        getUserSpace: () => ({ getDecices: () => manager.getAllClientKeyInfo() }),
+        toPublicDevice: serverData.toPublicDevice,
+      })
+
+      const devices = await service.getDevices()
+      const byId = Object.fromEntries(devices.map(device => [device.clientId, device]))
+      assert.equal(byId.device_unavailable.unavailableReason, 'credential_undecryptable')
+      assert.equal(Object.hasOwn(byId.device_available, 'unavailableReason'), false)
+      assert.equal(Object.hasOwn(byId.device_missing, 'unavailableReason'), false)
+      assert.doesNotMatch(JSON.stringify(devices), /SERVER_KEY_/)
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true })
+    }
   })
 
   it('projects a connected keyed status device at the exported status boundary', async() => {
@@ -459,6 +644,128 @@ describe('sync credential cutover', () => {
     await fsp.rm(root, { recursive: true, force: true })
   })
 
+  it('writes only runtime-readable sync metadata after vaulting keys from invalid entries', async() => {
+    const cases = [
+      {
+        name: 'empty client id',
+        side: 'client',
+        id: 'server_empty_client',
+        value: { clientId: '', serverName: 'Server', key: 'CLIENT_KEY_EMPTY_ID_SENTINEL' },
+      },
+      {
+        name: 'empty server name',
+        side: 'client',
+        id: 'server_empty_name',
+        value: { clientId: 'client_empty_name', serverName: '', key: 'CLIENT_KEY_EMPTY_NAME_SENTINEL' },
+      },
+      {
+        name: 'empty device id',
+        side: 'server',
+        id: 'device_empty_id',
+        value: { clientId: '', deviceName: 'Desktop', isMobile: false, key: 'SERVER_KEY_EMPTY_ID_SENTINEL' },
+      },
+      {
+        name: 'empty device name',
+        side: 'server',
+        id: 'device_empty_name',
+        value: { clientId: 'device_empty_name', deviceName: '', isMobile: false, key: 'SERVER_KEY_EMPTY_NAME_SENTINEL' },
+      },
+      ...[-1, 1.5, Number.MAX_SAFE_INTEGER + 1, null].map((lastConnectDate, index) => ({
+        name: `invalid connection date ${index}`,
+        side: 'server',
+        id: `device_invalid_date_${index}`,
+        value: {
+          clientId: `device_invalid_date_${index}`,
+          deviceName: 'Desktop',
+          isMobile: false,
+          lastConnectDate,
+          key: `SERVER_KEY_INVALID_DATE_${index}_SENTINEL`,
+        },
+      })),
+      {
+        name: 'invalid legacy sync date',
+        side: 'server',
+        id: 'device_invalid_legacy_date',
+        value: {
+          clientId: 'device_invalid_legacy_date',
+          deviceName: 'Desktop',
+          isMobile: false,
+          lastSyncDate: -1,
+          key: 'SERVER_KEY_INVALID_LEGACY_DATE_SENTINEL',
+        },
+      },
+    ]
+
+    const { normalizeSyncServerDevice } = freshRequire('../../src/common/storage/syncMetadata.ts')
+    for (const lastConnectDate of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      assert.equal(normalizeSyncServerDevice({
+        clientId: 'device_non_finite',
+        deviceName: 'Desktop',
+        isMobile: false,
+        lastConnectDate,
+      }), null)
+    }
+
+    for (const testCase of cases) {
+      const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-validator-parity-'))
+      const vault = createVault()
+      global.lxDataPath = root
+      global.lx = {
+        credentialVault: vault,
+        appSetting: { 'sync.server.maxSsnapshotNum': 3, 'list.addMusicLocationType': 'add_start' },
+      }
+      try {
+        await writeJson(path.join(root, 'sync/client/servers.v1.json'), {
+          version: 1,
+          servers: {
+            server_valid: { clientId: 'client_valid', serverName: 'Server', forbidden: true },
+            ...(testCase.side == 'client' ? { [testCase.id]: testCase.value } : {}),
+          },
+          forbidden: true,
+        })
+        await writeJson(path.join(root, 'sync/server/devices.v2.json'), {
+          version: 2,
+          userName: 'default',
+          clients: {
+            device_valid: { clientId: 'device_valid', deviceName: 'Desktop', isMobile: false, forbidden: true },
+            ...(testCase.side == 'server' ? { [testCase.id]: testCase.value } : {}),
+          },
+          forbidden: true,
+        })
+
+        await freshRequire('../../src/main/modules/sync/migrate.ts').default(root)
+
+        const clientMetadata = JSON.parse(await fsp.readFile(path.join(root, 'sync/client/servers.v1.json'), 'utf8'))
+        const serverMetadata = JSON.parse(await fsp.readFile(path.join(root, 'sync/server/devices.v2.json'), 'utf8'))
+        assert.deepEqual(clientMetadata, {
+          version: 1,
+          servers: { server_valid: { clientId: 'client_valid', serverName: 'Server' } },
+        }, testCase.name)
+        assert.deepEqual(serverMetadata, {
+          version: 2,
+          userName: 'default',
+          clients: { device_valid: { clientId: 'device_valid', deviceName: 'Desktop', isMobile: false } },
+        }, testCase.name)
+
+        const ref = testCase.side == 'client'
+          ? { kind: 'sync-client', serverId: testCase.id }
+          : { kind: 'sync-server-device', userName: 'default', clientId: testCase.id }
+        assert.equal(vault.read(ref).status, 'available', testCase.name)
+
+        const clientData = freshRequire('../../src/main/modules/sync/client/data.ts')
+        assert.equal(await clientData.getSyncAuthKey('server_valid'), null, testCase.name)
+        const { UserDataManage } = freshRequire('../../src/main/modules/sync/server/user/data.ts')
+        assert.deepEqual(await new UserDataManage('default').getAllClientKeyInfo(), [{
+          clientId: 'device_valid',
+          deviceName: 'Desktop',
+          isMobile: false,
+        }], testCase.name)
+      } finally {
+        await fsp.rm(root, { recursive: true, force: true })
+      }
+    }
+  })
+
   it('resumes every root sync migration phase before verified source cleanup', async() => {
     const phases = [
       'after-directories',
@@ -648,6 +955,99 @@ describe('sync credential cutover', () => {
     } finally {
       await fsp.rm(root, { recursive: true, force: true })
     }
+  })
+
+  it('serializes client mutations across destinations at the shared metadata document', async() => {
+    const vault = createVault()
+    const metadata = createGatedMetadataFile({ version: 1, servers: {} })
+    const clientData = loadTsModule(path.join(sourceRoot, 'main/modules/sync/client/data.ts'), {
+      '@main/storage/atomicJsonFile': { createAtomicJsonFile: () => metadata.file },
+      '@main/storage/credentials': { getCredentialVault: () => vault },
+      '@main/storage/operationJournal': { createOperationJournal: createJournal },
+    })
+    global.lxDataPath = path.join(os.tmpdir(), 'lx-sync-client-gated-fixture')
+    global.lx = { credentialVault: vault, appSetting: {} }
+
+    const saveGate = metadata.gateNextReplace()
+    const saveA = clientData.setSyncAuthKey('server_a', {
+      clientId: 'client_a', key: 'CLIENT_KEY_A_SENTINEL', serverName: 'Server A',
+    })
+    await saveGate.started
+    const saveB = clientData.setSyncAuthKey('server_b', {
+      clientId: 'client_b', key: 'CLIENT_KEY_B_SENTINEL', serverName: 'Server B',
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    const saveReplacementsBeforeRelease = metadata.getReplaceCalls()
+    saveGate.release()
+    await Promise.all([saveA, saveB])
+
+    assert.equal(saveReplacementsBeforeRelease, 1)
+    assert.deepEqual(Object.keys(metadata.read().servers).sort(), ['server_a', 'server_b'])
+    assert.equal(vault.read({ kind: 'sync-client', serverId: 'server_a' }).status, 'available')
+    assert.equal(vault.read({ kind: 'sync-client', serverId: 'server_b' }).status, 'available')
+
+    const interleaveGate = metadata.gateNextReplace()
+    const saveC = clientData.setSyncAuthKey('server_c', {
+      clientId: 'client_c', key: 'CLIENT_KEY_C_SENTINEL', serverName: 'Server C',
+    })
+    await interleaveGate.started
+    const removeA = clientData.removeSyncAuthKey('server_a')
+    await new Promise(resolve => setImmediate(resolve))
+    const interleaveReplacementsBeforeRelease = metadata.getReplaceCalls()
+    interleaveGate.release()
+    await Promise.all([saveC, removeA])
+
+    assert.equal(interleaveReplacementsBeforeRelease, 3)
+    assert.deepEqual(Object.keys(metadata.read().servers).sort(), ['server_b', 'server_c'])
+  })
+
+  it('serializes server mutations across destinations at the shared metadata document', async() => {
+    const vault = createVault()
+    const metadata = createGatedMetadataFile({ version: 2, userName: 'default', clients: {} })
+    const serverData = loadTsModule(path.join(sourceRoot, 'main/modules/sync/server/user/data.ts'), {
+      '@main/storage/atomicJsonFile': { createAtomicJsonFile: () => metadata.file },
+      '@main/storage/credentials': { getCredentialVault: () => vault },
+      '@main/storage/operationJournal': { createOperationJournal: createJournal },
+    })
+    global.lxDataPath = path.join(os.tmpdir(), 'lx-sync-server-gated-fixture')
+    global.lx = {
+      credentialVault: vault,
+      appSetting: { 'sync.server.maxSsnapshotNum': 3, 'list.addMusicLocationType': 'add_start' },
+    }
+    const manager = new serverData.UserDataManage('default')
+    await manager.getAllClientKeyInfo()
+
+    const saveGate = metadata.gateNextReplace()
+    const saveA = manager.saveClientKeyInfo({
+      clientId: 'device_a', key: 'SERVER_KEY_A_SENTINEL', deviceName: 'Desktop A', isMobile: false,
+    })
+    await saveGate.started
+    const saveB = manager.saveClientKeyInfo({
+      clientId: 'device_b', key: 'SERVER_KEY_B_SENTINEL', deviceName: 'Desktop B', isMobile: false,
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    const saveReplacementsBeforeRelease = metadata.getReplaceCalls()
+    saveGate.release()
+    await Promise.all([saveA, saveB])
+
+    assert.equal(saveReplacementsBeforeRelease, 1)
+    assert.deepEqual(Object.keys(metadata.read().clients).sort(), ['device_a', 'device_b'])
+    assert.equal(vault.read({ kind: 'sync-server-device', userName: 'default', clientId: 'device_a' }).status, 'available')
+    assert.equal(vault.read({ kind: 'sync-server-device', userName: 'default', clientId: 'device_b' }).status, 'available')
+
+    const interleaveGate = metadata.gateNextReplace()
+    const saveC = manager.saveClientKeyInfo({
+      clientId: 'device_c', key: 'SERVER_KEY_C_SENTINEL', deviceName: 'Desktop C', isMobile: false,
+    })
+    await interleaveGate.started
+    const removeA = manager.removeClientKeyInfo('device_a')
+    await new Promise(resolve => setImmediate(resolve))
+    const interleaveReplacementsBeforeRelease = metadata.getReplaceCalls()
+    interleaveGate.release()
+    await Promise.all([saveC, removeA])
+
+    assert.equal(interleaveReplacementsBeforeRelease, 3)
+    assert.deepEqual(Object.keys(metadata.read().clients).sort(), ['device_b', 'device_c'])
   })
 
   it('registers client and server credential flushers with the storage coordinator', async() => {

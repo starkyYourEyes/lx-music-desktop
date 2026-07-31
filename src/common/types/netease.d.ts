@@ -11,6 +11,7 @@ declare namespace LX {
     interface AccountStatus {
       isLoggedIn: boolean
       profile: Profile | null
+      unavailableReason?: 'credential_undecryptable'
     }
 
     interface LoginQr {

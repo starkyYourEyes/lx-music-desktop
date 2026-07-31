@@ -50,6 +50,7 @@ export const createNeteaseAccountService = ({
       cookie: accounts.getCookie('netease') ?? '',
       profile: normalizeProfile(status.profile),
       updatedAt: status.updatedAtMs ?? 0,
+      unavailableReason: status.unavailableReason,
     }
   }
 
@@ -102,6 +103,9 @@ export const createNeteaseAccountService = ({
 
   const getAccountStatus = async(): Promise<LX.Netease.AccountStatus> => {
     const account = getAccountData()
+    if (account.unavailableReason != null) {
+      return { isLoggedIn: false, profile: null, unavailableReason: account.unavailableReason }
+    }
     if (!account.cookie) return { isLoggedIn: false, profile: null }
     if (account.profile && now() - account.updatedAt < 5 * 60 * 1000) {
       return { isLoggedIn: true, profile: account.profile }

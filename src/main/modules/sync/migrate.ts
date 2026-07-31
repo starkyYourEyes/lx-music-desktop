@@ -1,5 +1,13 @@
 import { File } from '../../../common/constants_sync'
 import { canonicalJson, type JsonValue } from '../../../common/storage/canonicalJson'
+import {
+  isSyncClientServersFileV1,
+  isSyncServerDevicesFileV2,
+  normalizeSyncClientProfile,
+  normalizeSyncServerDevice,
+  type SyncClientServersFileV1,
+  type SyncServerDevicesFileV2,
+} from '../../../common/storage/syncMetadata'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createAtomicJsonFile } from '@main/storage/atomicJsonFile'
@@ -18,9 +26,7 @@ interface LegacyServerKeyInfo {
   key?: string
 }
 
-type MetadataDocument =
-  | { version: 1, servers: Record<string, LX.Sync.SyncClientProfile> }
-  | { version: 2, userName: string, clients: Record<string, LX.Sync.SyncServerDevice> }
+type MetadataDocument = SyncClientServersFileV1 | SyncServerDevicesFileV2
 
 type RootMigrationPhase =
   | 'after-directories'
@@ -45,37 +51,10 @@ const isJsonValue = (value: unknown): value is JsonValue => {
   return isRecord(value) && Object.values(value).every(isJsonValue)
 }
 
-const toSyncProtocolId = (value: unknown): LX.Sync.SyncProtocolId | undefined =>
-  value == 'current' || value == 'legacy' ? value as LX.Sync.SyncProtocolId : undefined
-
-const toClientProfile = (value: unknown): LX.Sync.SyncClientProfile | null => {
-  if (!isRecord(value) || typeof value.clientId != 'string' || typeof value.serverName != 'string') return null
-  const syncProtocol = toSyncProtocolId(value.syncProtocol)
-  return {
-    clientId: value.clientId,
-    serverName: value.serverName,
-    ...(syncProtocol == null ? {} : { syncProtocol }),
-  }
-}
-
-const toServerDevice = (value: unknown): LX.Sync.SyncServerDevice | null => {
-  if (!isRecord(value) || typeof value.clientId != 'string' || typeof value.deviceName != 'string' || typeof value.isMobile != 'boolean') return null
-  const syncProtocol = toSyncProtocolId(value.syncProtocol)
-  return {
-    clientId: value.clientId,
-    deviceName: value.deviceName,
-    isMobile: value.isMobile,
-    ...(typeof value.lastConnectDate == 'number'
-      ? { lastConnectDate: value.lastConnectDate }
-      : typeof value.lastSyncDate == 'number' ? { lastConnectDate: value.lastSyncDate } : {}),
-    ...(syncProtocol == null ? {} : { syncProtocol }),
-  }
-}
-
 const toProfiles = (value: unknown): Record<string, LX.Sync.SyncClientProfile> => {
   if (!isRecord(value)) return {}
   return Object.fromEntries(Object.entries(value).flatMap(([serverId, info]) => {
-    const profile = toClientProfile(info)
+    const profile = normalizeSyncClientProfile(info)
     return profile == null ? [] : [[serverId, profile]]
   }))
 }
@@ -83,20 +62,20 @@ const toProfiles = (value: unknown): Record<string, LX.Sync.SyncClientProfile> =
 const toDevices = (value: unknown): Record<string, LX.Sync.SyncServerDevice> => {
   if (!isRecord(value)) return {}
   return Object.fromEntries(Object.entries(value).flatMap(([clientId, info]) => {
-    const device = toServerDevice(info)
+    const device = normalizeSyncServerDevice(info)
     return device == null ? [] : [[clientId, device]]
   }))
 }
 
-const isMetadataDocument = (value: unknown): value is MetadataDocument => isRecord(value) &&
-  ((value.version == 1 && isRecord(value.servers)) ||
-    (value.version == 2 && typeof value.userName == 'string' && isRecord(value.clients)))
+const isMetadataDocument = (value: unknown): value is MetadataDocument =>
+  isSyncClientServersFileV1(value) || isSyncServerDevicesFileV2(value)
 
 const replaceMetadata = async(filePath: string, value: MetadataDocument): Promise<void> => {
   await createAtomicJsonFile<MetadataDocument>({
     filePath,
     validate: isMetadataDocument,
     shouldPreservePrevious: () => false,
+    allowInvalidPrevious: true,
     mode: 0o600,
   }).replace(value)
 }
@@ -179,7 +158,8 @@ const canonicalizeExistingMetadata = async(dataPath: string, rootSource?: Record
     currentProfiles = toProfiles(legacyClients)
   }
   const expectedClients: MetadataDocument = { version: 1, servers: mergeMissing(currentProfiles, rootProfiles) }
-  if (hasClientMetadataSource && (!hasCurrentClients || canonicalJson(currentClientDocument as JsonValue) != canonicalJson(expectedClients))) {
+  if (hasClientMetadataSource && (!hasCurrentClients ||
+      canonicalJson(currentClientDocument as JsonValue) != canonicalJson(expectedClients as unknown as JsonValue))) {
     await replaceMetadata(currentClients, expectedClients)
   }
   if (hasClientMetadataSource) await verifyJson(currentClients, expectedClients as unknown as JsonValue)
@@ -212,7 +192,8 @@ const canonicalizeExistingMetadata = async(dataPath: string, rootSource?: Record
     userName: currentUserName,
     clients: mergeMissing(currentDeviceValues, rootDevices),
   }
-  if (hasDeviceMetadataSource && (!hasCurrentDevices || canonicalJson(currentDeviceDocument as JsonValue) != canonicalJson(expectedDevices))) {
+  if (hasDeviceMetadataSource && (!hasCurrentDevices ||
+      canonicalJson(currentDeviceDocument as JsonValue) != canonicalJson(expectedDevices as unknown as JsonValue))) {
     await replaceMetadata(currentDevices, expectedDevices)
   }
   if (hasDeviceMetadataSource) await verifyJson(currentDevices, expectedDevices as unknown as JsonValue)

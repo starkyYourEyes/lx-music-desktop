@@ -48,21 +48,25 @@ declare namespace LX {
 
     type SyncClientProfile = Omit<ClientKeyInfo, 'key'>
     type SyncServerDevice = Omit<ServerKeyInfo, 'key'>
+    interface SyncServerDeviceStatus extends SyncServerDevice {
+      unavailableReason?: 'credential_undecryptable'
+    }
 
-    type ServerDevices = SyncServerDevice[]
+    type ServerDevices = SyncServerDeviceStatus[]
 
     interface ServerStatus {
       status: boolean
       message: string
       address: string[]
       code: string
-      devices: SyncServerDevice[]
+      devices: SyncServerDeviceStatus[]
     }
 
     interface ClientStatus {
       status: boolean
       message: string
       address: string[]
+      unavailableReason?: 'credential_undecryptable'
     }
 
     type SyncProtocolId = 'current' | 'legacy'

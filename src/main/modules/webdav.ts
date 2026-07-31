@@ -118,6 +118,14 @@ export const createWebDAVCredentialService = (vault: CredentialVault) => ({
   async getCredentialStatus(): Promise<LX.Music.WebDAVCredentialStatus> {
     await waitForWebDAVCredentialMutations(vault)
     const credential = vault.read<WebDAVCredentialPayloadV1>(webDAVCredentialRef)
+    if (credential.status == 'undecryptable') {
+      return {
+        configured: false,
+        usernameHint: null,
+        persistence: 'missing',
+        unavailableReason: 'credential_undecryptable',
+      }
+    }
     if (credential.status != 'available' && credential.status != 'memory-only') {
       return { configured: false, usernameHint: null, persistence: 'missing' }
     }

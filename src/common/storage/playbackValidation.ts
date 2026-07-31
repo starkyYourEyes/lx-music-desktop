@@ -38,12 +38,17 @@ const invalidField = (field: string): never => {
 
 const isValidationError = (error: unknown): error is Error => error instanceof Error && validationErrors.has(error)
 
+const immutableError = (message: string): Error => Object.freeze(new Error(message))
+
 const fixedError = <T>(field: string, callback: () => T): T => {
   try {
     return callback()
   } catch (error) {
-    if (isValidationError(error)) throw error
-    return invalidField(field)
+    if (isValidationError(error)) {
+      validationErrors.delete(error)
+      throw immutableError(error.message)
+    }
+    throw immutableError(`Invalid ${field}`)
   }
 }
 

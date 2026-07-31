@@ -408,7 +408,7 @@ describe('playback activity contracts', () => {
     })))
   })
 
-  it('rejects forged fixed-error messages from objects and proxy traps', () => {
+  it('rejects forged and reused fixed-error messages from proxy traps', () => {
     const forged = 'Invalid secret'
     const fakeError = { message: forged }
     const object = new Proxy(start(), { get() { throw new Error(forged) } })
@@ -419,6 +419,29 @@ describe('playback activity contracts', () => {
       [() => parsePlaybackStartCommand(plainObject), 'start'],
       [() => sanitizePlayableTrack(proxy), 'playablePayload'],
     ]) assert.throws(parse, error => error.message == `Invalid ${field}` && error.message != forged)
+
+    let escapedError
+    try {
+      parsePlaybackFact({ version: 1, type: 'skip', reason: 'auto', automatic: true })
+    } catch (error) {
+      escapedError = error
+    }
+    assert.ok(escapedError instanceof Error)
+    assert.match(escapedError.message, /^Invalid [A-Za-z.]+$/)
+    const sentinel = 'REUSED_VALIDATION_ERROR_SENTINEL'
+    try {
+      escapedError.message = sentinel
+    } catch {}
+    assert.equal(Object.isFrozen(escapedError), true)
+    assert.match(escapedError.message, /^Invalid [A-Za-z.]+$/)
+    assert.equal(escapedError.message.includes(sentinel), false)
+
+    for (const [parse, field] of [
+      [() => parsePlaybackFact(new Proxy({ version: 1, type: 'pause', reason: 'user' }, { ownKeys() { throw escapedError } })), 'fact'],
+      [() => parsePlaybackStartCommand(new Proxy(start(), { ownKeys() { throw escapedError } })), 'start'],
+    ]) {
+      assert.throws(parse, error => error !== escapedError && error.message == `Invalid ${field}` && !error.message.includes(sentinel))
+    }
   })
 
   it('normalizes proxy failures from public boundaries without leaking sentinels', () => {

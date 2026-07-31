@@ -1,4 +1,10 @@
 import path from 'node:path'
+import fs from 'node:fs/promises'
+import {
+  parseLocalStateSnapshot,
+  parsePlaylistMetadataCommand,
+  parseSearchHistoryCommand,
+} from '../../common/storage/stateValidation'
 import type { DatabaseStartupResult } from '../worker/dbService/db'
 import type { AccountRepository } from '../storage/accounts/accountRepository'
 import type { CredentialVault } from '../storage/credentials/credentialVault'
@@ -67,6 +73,7 @@ export interface StorageCoordinatorDependencies {
     legacyData: LegacyDataSourceResult,
   ) => Promise<RecoveryOutcome | undefined>
   checkCredentials: () => Promise<CredentialStartupCheck>
+  verifyPhase2Storage?: () => Promise<void>
   initSettings: () => Promise<void>
   registerModules: () => void
   appInited: () => void
@@ -77,6 +84,7 @@ export interface StorageCoordinatorDependencies {
 }
 
 const SHUTDOWN_TIMEOUT_MS = 3_000
+const PHASE2_MARKER_NAME = 'legacy_data_v1.phase2_complete' as const
 
 const credentialSourceIdentifiers = {
   'netease-cookie': 'legacy.data.netease-cookie',
@@ -145,10 +153,10 @@ const failureCode = (error: unknown, fallback: string): string => {
   return fallback
 }
 
-const errorWithCode = (code: string): Error => {
+const errorWithCode = (code: string): Error & { code: string } => {
   const error = new Error(code)
   error.name = code
-  return error
+  return Object.assign(error, { code })
 }
 
 const startupCancelled = (): StorageStartupOutcome => ({
@@ -168,6 +176,55 @@ const databaseRecovery = (
     diagnostics: [...result.diagnostics],
   },
 })
+
+const assertPhase2Method = (value: unknown): void => {
+  if (typeof value != 'function') throw errorWithCode('phase2_storage_unavailable')
+}
+
+const verifyProductionPhase2Storage = async(): Promise<void> => {
+  // Direct coordinator tests inject the verifier and do not initialize the app global.
+  if (typeof globalThis.lx == 'undefined') return
+  const repository = globalThis.lx.worker?.dbService
+  if (repository == null) throw errorWithCode('phase2_storage_unavailable')
+
+  assertPhase2Method(repository.getNonActivityMigrationMarker)
+  assertPhase2Method(repository.getLocalState)
+  assertPhase2Method(repository.setLocalState)
+  assertPhase2Method(repository.getPlaylistMetadata)
+  assertPhase2Method(repository.applyPlaylistMetadata)
+  assertPhase2Method(repository.getSearchHistory)
+  assertPhase2Method(repository.applySearchHistory)
+
+  await repository.getNonActivityMigrationMarker(PHASE2_MARKER_NAME)
+  parseLocalStateSnapshot(await repository.getLocalState())
+  const playlistMetadata = await repository.getPlaylistMetadata()
+  for (const [playlistId, value] of Object.entries(playlistMetadata)) {
+    parsePlaylistMetadataCommand({ version: 1, action: 'upsert', playlistId, value, updatedAtMs: 0 })
+  }
+  const searchHistory = await repository.getSearchHistory()
+  for (const term of searchHistory) {
+    parseSearchHistoryCommand({ version: 1, action: 'record', term, usedAtMs: 0 })
+  }
+
+  try {
+    const settings = JSON.parse(await fs.readFile(path.join(globalThis.lxDataPath, 'config_v2.json'), 'utf8'))
+    const { parseSettingsDocument } = await import('../storage/settings/document')
+    parseSettingsDocument(settings)
+  } catch (error) {
+    if (error != null && typeof error == 'object' && 'code' in error && error.code == 'ENOENT') return
+    throw error
+  }
+}
+
+const verifyPhase2Storage = async(
+  verifier: StorageCoordinatorDependencies['verifyPhase2Storage'],
+): Promise<void> => {
+  try {
+    await (verifier ?? verifyProductionPhase2Storage)()
+  } catch (error) {
+    throw errorWithCode(failureCode(error, 'phase2_storage_unavailable'))
+  }
+}
 
 const legacyDataRecovery = (
   result: Extract<LegacyDataSourceResult, { status: 'recovery' }>,
@@ -255,6 +312,8 @@ export const createStorageCoordinator = (
           return credentialOutcome
         }
 
+        await verifyPhase2Storage(dependencies.verifyPhase2Storage)
+        if (shutdownRequested) return startupCancelled()
         await dependencies.initSettings()
         if (shutdownRequested) return startupCancelled()
         dependencies.registerModules()

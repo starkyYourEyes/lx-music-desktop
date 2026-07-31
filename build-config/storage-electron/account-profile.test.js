@@ -28,7 +28,7 @@ afterEach(() => {
 })
 
 describe('account profile storage', () => {
-  it('bootstraps schema 5 and accepts only public provider profiles', async() => {
+  it('bootstraps schema 6 and accepts only public provider profiles', async() => {
     const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-account-profile-'))
     tempDirs.push(profileRoot)
     const result = await dbService.init({
@@ -38,9 +38,9 @@ describe('account profile storage', () => {
     })
 
     assert.equal(result.status, 'ready')
-    assert.equal(result.schemaVersion, 5)
+    assert.equal(result.schemaVersion, 6)
     assert.deepEqual(result.migratedVersions, [])
-    assert.equal(getSchemaVersion(dbService.getDB()), 5)
+    assert.equal(getSchemaVersion(dbService.getDB()), 6)
 
     repo.upsertAccountProfile({
       provider: 'qq_music',

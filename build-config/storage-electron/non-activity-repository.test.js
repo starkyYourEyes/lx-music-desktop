@@ -81,10 +81,10 @@ const legacyImport = (overrides = {}) => ({
 })
 
 describe('authoritative non-activity storage', () => {
-  it('bootstraps schema 5 with constrained application-state tables', async() => {
+  it('bootstraps schema 6 with constrained application-state tables', async() => {
     const { result, db } = await createStore()
 
-    assert.equal(result.schemaVersion, 5)
+    assert.equal(result.schemaVersion, 6)
     assert.deepEqual(
       db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('local_state', 'playlist_metadata', 'search_history') ORDER BY name").all(),
       [{ name: 'local_state' }, { name: 'playlist_metadata' }, { name: 'search_history' }],
@@ -467,7 +467,7 @@ describe('authoritative non-activity storage', () => {
     )
   })
 
-  it('enforces non-negative safe-integer timestamps in schema 5', async() => {
+  it('enforces non-negative safe-integer timestamps in schema 6', async() => {
     const { db } = await createStore()
 
     for (const value of ['-1', '1.5', '9007199254740992']) {
@@ -523,7 +523,7 @@ describe('authoritative non-activity storage', () => {
     assert.throws(() => repository.getSearchHistory(), /search history row/i)
   })
 
-  it('detects structural damage to a schema 5 application-state table', async() => {
+  it('detects structural damage to a schema 6 application-state table', async() => {
     const { root } = await createStore('lx-non-activity-damage-')
     const databasePath = path.join(root, 'lx.data.db')
     dbService.close()

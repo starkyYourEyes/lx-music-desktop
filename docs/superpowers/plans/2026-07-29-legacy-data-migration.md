@@ -263,6 +263,7 @@ git commit -m "feat: add typed application state repository"
 - Create: `src/main/storage/settings/document.ts`
 - Modify: `src/main/utils/index.ts`
 - Create: `build-config/storage/settings-document.test.js`
+- Modify: `build-config/storage/webdav-credential-cutover.test.js`
 
 **Interfaces:**
 - Consumes: old `{version, setting}` and new `SettingsDocumentV1`.
@@ -345,7 +346,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add src/main/storage/settings/document.ts src/main/utils/index.ts build-config/storage/settings-document.test.js
+git add src/main/storage/settings/document.ts src/main/utils/index.ts build-config/storage/settings-document.test.js build-config/storage/webdav-credential-cutover.test.js
 git commit -m "feat: version the settings document"
 ```
 

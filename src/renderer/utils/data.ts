@@ -7,7 +7,7 @@ import {
   setCatalogPreference,
   setLocalState,
 } from '@renderer/utils/storageState'
-import { throttle } from '@common/utils'
+import { log, throttle } from '@common/utils'
 import { type DEFAULT_SETTING, LIST_IDS } from '@common/constants'
 import type { CatalogPreferencesV1, PlaylistMetadataCommandV1 } from '@common/storage/stateContracts'
 import { dateFormat } from './index'
@@ -16,6 +16,7 @@ import { setUpdateTime } from '@renderer/store/list/action'
 let listPosition: LX.List.ListPositionInfo
 let listPrevSelectId: string
 let listUpdateInfo: LX.List.ListUpdateInfo
+let listPositionInitPromise: Promise<void> | null = null
 let playlistMetadataInitPromise: Promise<void> | null = null
 let playlistMetadataMutationQueue: Promise<void> = Promise.resolve()
 
@@ -24,22 +25,26 @@ let songListSetting: CatalogPreferencesV1['songList']
 let leaderboardSetting: CatalogPreferencesV1['leaderboard']
 let catalogPreferencesInitPromise: Promise<void> | null = null
 
+const reportPersistenceFailure = () => {
+  log.error(new Error('Renderer persistence update failed'))
+}
+
 const saveListPositionThrottle = throttle(() => {
   void setLocalState({
     version: 1,
     key: 'list_scroll_positions',
     value: listPosition,
     updatedAtMs: Date.now(),
-  })
+  }).catch(reportPersistenceFailure)
 }, 1000)
 const saveSearchSettingThrottle = throttle(() => {
-  void setCatalogPreference('search', searchSetting)
+  void setCatalogPreference('search', searchSetting).catch(reportPersistenceFailure)
 }, 1000)
 const saveSongListSettingThrottle = throttle(() => {
-  void setCatalogPreference('songList', songListSetting)
+  void setCatalogPreference('songList', songListSetting).catch(reportPersistenceFailure)
 }, 1000)
 const saveLeaderboardSettingThrottle = throttle(() => {
-  void setCatalogPreference('leaderboard', leaderboardSetting)
+  void setCatalogPreference('leaderboard', leaderboardSetting).catch(reportPersistenceFailure)
 }, 1000)
 const saveViewPrevStateThrottle = throttle((state) => {
   void setLocalState({
@@ -47,7 +52,7 @@ const saveViewPrevStateThrottle = throttle((state) => {
     key: 'view_prev_state',
     value: state,
     updatedAtMs: Date.now(),
-  })
+  }).catch(reportPersistenceFailure)
 }, 1000)
 
 const applyCatalogPreferences = (preferences: Awaited<ReturnType<typeof getCatalogPreferences>>) => {
@@ -68,8 +73,16 @@ const initCatalogPreferences = async() => {
 }
 
 const initPosition = async() => {
-  // eslint-disable-next-line require-atomic-updates
-  listPosition ??= (await getLocalState()).listScrollPosition
+  if (listPosition != null) return
+  listPositionInitPromise ??= getLocalState()
+    .then(state => {
+      listPosition = state.listScrollPosition
+    })
+    .catch((error) => {
+      listPositionInitPromise = null
+      throw error
+    })
+  await listPositionInitPromise
 }
 export const getListPosition = async(id: string): Promise<number> => {
   await initPosition()
@@ -103,7 +116,7 @@ const saveListPrevSelectIdThrottle = throttle(() => {
     key: 'list_prev_select_id',
     value: listPrevSelectId,
     updatedAtMs: Date.now(),
-  })
+  }).catch(reportPersistenceFailure)
 }, 200)
 export const getListPrevSelectId = async() => {
   // eslint-disable-next-line require-atomic-updates

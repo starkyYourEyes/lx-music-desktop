@@ -1,6 +1,7 @@
 import { rendererSend, rendererInvoke, rendererOn, rendererOff } from '@common/rendererIpc'
 import { HOTKEY_RENDERER_EVENT_NAME, WIN_MAIN_RENDERER_EVENT_NAME, CMMON_EVENT_NAME } from '@common/ipcNames'
 import { markRaw, toRaw } from '@common/utils/vueTools'
+import { log } from '@common/utils'
 import * as hotKeys from '@common/hotKey'
 import { APP_EVENT_NAMES, DATA_KEYS } from '@common/constants'
 import type { ListeningTimeStats } from '@common/utils/listeningTime'
@@ -11,6 +12,10 @@ import { getLocalState, setLocalState } from './storageState'
 type RemoveListener = () => void
 
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
+
+const reportPersistenceFailure = () => {
+  log.error(new Error('Renderer persistence update failed'))
+}
 
 // Preserve the direct IPC Promise rather than adding an async adoption wrapper.
 // eslint-disable-next-line @typescript-eslint/promise-function-async
@@ -196,6 +201,7 @@ export const getListeningTimeStats = async() => {
 
 export const saveViewPrevState = (state: LocalStateSnapshotV1['viewPrevState']) => {
   void setLocalState({ version: 1, key: 'view_prev_state', value: state, updatedAtMs: Date.now() })
+    .catch(reportPersistenceFailure)
 }
 export const getViewPrevState = async() => {
   return (await getLocalState()).viewPrevState

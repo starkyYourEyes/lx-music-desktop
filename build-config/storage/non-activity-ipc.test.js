@@ -21,6 +21,7 @@ require.extensions['.ts'] = (module, filename) => {
 const storageStatePath = '../../src/main/modules/winMain/rendererEvent/storageState.ts'
 const dataHandlerPath = '../../src/main/modules/winMain/rendererEvent/data.ts'
 const rendererDataPath = '../../src/renderer/utils/data.ts'
+const rendererIpcPath = '../../src/renderer/utils/ipc.ts'
 const searchActionPath = '../../src/renderer/store/search/action.ts'
 const commonRoot = path.resolve(__dirname, '../../src/common')
 
@@ -43,7 +44,7 @@ const loadSourceModule = modulePath => {
 }
 
 afterEach(() => {
-  for (const modulePath of [storageStatePath, dataHandlerPath, rendererDataPath, searchActionPath]) {
+  for (const modulePath of [storageStatePath, dataHandlerPath, rendererDataPath, rendererIpcPath, searchActionPath]) {
     try { delete require.cache[require.resolve(modulePath)] } catch {}
   }
 })
@@ -271,6 +272,166 @@ describe('typed non-activity IPC', () => {
     assert.deepEqual(await data.getLeaderboardSetting(), { source: 'kg', boardId: 'kg__1' })
     assert.deepEqual(await data.getSearchSetting(), { temp_source: 'kw', source: 'tx', type: 'songlist' })
     assert.equal(reads.length, 1)
+  })
+
+  it('retries rejected list-position initialization and preserves concurrent recovered setters', async() => {
+    const initial = {
+      version: 1,
+      viewPrevState: { url: '/', query: {} },
+      listScrollPosition: { existing: 1 },
+      listPrevSelectId: 'default',
+    }
+    let getLocalStateCount = 0
+    let resolveFirstRecoveryRead
+    let resolveSecondRecoveryRead
+    const firstRecoveryRead = new Promise(resolve => { resolveFirstRecoveryRead = resolve })
+    const secondRecoveryRead = new Promise(resolve => { resolveSecondRecoveryRead = resolve })
+    const originalLoad = Module._load
+    Module._load = function(request, parent, isMain) {
+      if (request == '@renderer/utils/storageState') {
+        return {
+          getCatalogPreferences: () => { throw new Error('unexpected catalog read') },
+          setCatalogPreference: () => { throw new Error('unexpected catalog write') },
+          getLocalState: () => {
+            getLocalStateCount++
+            if (getLocalStateCount == 1) return Promise.reject(new Error('injected local-state initialization failure'))
+            return getLocalStateCount == 2 ? firstRecoveryRead : secondRecoveryRead
+          },
+          getPlaylistMetadata: () => { throw new Error('unexpected playlist read') },
+          mutatePlaylistMetadata: () => { throw new Error('unexpected playlist write') },
+          setLocalState: async() => initial,
+        }
+      }
+      if (request == '@common/utils') return { throttle: fn => fn }
+      if (request == '@common/constants') return { DEFAULT_SETTING: {}, LIST_IDS: { DEFAULT: 'default' } }
+      if (request == '@renderer/store/list/action') return { setUpdateTime: () => {} }
+      if (request == './index' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { dateFormat: () => '' }
+      return originalLoad.call(this, request, parent, isMain)
+    }
+
+    let data
+    try {
+      data = require(rendererDataPath)
+    } finally {
+      Module._load = originalLoad
+    }
+
+    await assert.rejects(data.setListPosition('failed', 0), /injected local-state initialization failure/)
+    const left = data.setListPosition('left', 10)
+    const right = data.setListPosition('right', 20)
+    await new Promise(resolve => setImmediate(resolve))
+    resolveFirstRecoveryRead(structuredClone(initial))
+    await new Promise(resolve => setImmediate(resolve))
+    resolveSecondRecoveryRead(structuredClone(initial))
+    await Promise.all([left, right])
+
+    assert.equal(await data.getListPosition('left'), 10)
+    assert.equal(await data.getListPosition('right'), 20)
+    assert.equal(await data.getListPosition('existing'), 1)
+  })
+
+  it('reports rejected fire-and-forget view-state writes without exposing request data', async() => {
+    const calls = []
+    const reports = []
+    const secret = 'request-body-must-not-be-reported'
+    let unhandledReason = null
+    const onUnhandledRejection = reason => { unhandledReason = reason }
+    process.once('unhandledRejection', onUnhandledRejection)
+    const originalLoad = Module._load
+    Module._load = function(request, parent, isMain) {
+      if (request == './storageState' && parent?.filename.endsWith('renderer\\utils\\ipc.ts')) {
+        return {
+          getLocalState: () => { throw new Error('unexpected local-state read') },
+          setLocalState: update => {
+            calls.push(structuredClone(update))
+            return calls.length == 1 ? Promise.reject(new Error(secret)) : Promise.resolve({})
+          },
+        }
+      }
+      if (request == '@common/rendererIpc') return {
+        rendererSend: () => {},
+        rendererInvoke: () => { throw new Error('unexpected renderer invoke') },
+        rendererOn: () => {},
+        rendererOff: () => {},
+      }
+      if (request == '@common/utils') return { log: { error: error => reports.push(error) } }
+      if (request.startsWith('@common/')) {
+        return originalLoad.call(this, path.join(commonRoot, `${request.slice('@common/'.length)}.ts`), parent, isMain)
+      }
+      return originalLoad.call(this, request, parent, isMain)
+    }
+
+    let ipc
+    try {
+      ipc = require(rendererIpcPath)
+    } finally {
+      Module._load = originalLoad
+    }
+
+    ipc.saveViewPrevState({ url: `/secret/${secret}`, query: { secret } })
+    await new Promise(resolve => setImmediate(resolve))
+    ipc.saveViewPrevState({ url: '/retry', query: {} })
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.equal(unhandledReason, null)
+    assert.deepEqual(reports.map(error => error.message), ['Renderer persistence update failed'])
+    assert.equal(JSON.stringify(reports).includes(secret), false)
+    assert.equal(calls.length, 2)
+  })
+
+  it('reports rejected fire-and-forget list-position saves without exposing state', async() => {
+    const calls = []
+    const reports = []
+    const secret = 'position-value-must-not-be-reported'
+    let unhandledReason = null
+    const onUnhandledRejection = reason => { unhandledReason = reason }
+    process.once('unhandledRejection', onUnhandledRejection)
+    const originalLoad = Module._load
+    Module._load = function(request, parent, isMain) {
+      if (request == '@renderer/utils/storageState') {
+        return {
+          getCatalogPreferences: () => { throw new Error('unexpected catalog read') },
+          setCatalogPreference: () => { throw new Error('unexpected catalog write') },
+          getLocalState: async() => ({
+            version: 1,
+            viewPrevState: { url: '/', query: {} },
+            listScrollPosition: {},
+            listPrevSelectId: 'default',
+          }),
+          getPlaylistMetadata: () => { throw new Error('unexpected playlist read') },
+          mutatePlaylistMetadata: () => { throw new Error('unexpected playlist write') },
+          setLocalState: update => {
+            calls.push(structuredClone(update))
+            return calls.length == 1 ? Promise.reject(new Error(secret)) : Promise.resolve({})
+          },
+        }
+      }
+      if (request == '@common/utils') return {
+        throttle: fn => fn,
+        log: { error: error => reports.push(error) },
+      }
+      if (request == '@common/constants') return { DEFAULT_SETTING: {}, LIST_IDS: { DEFAULT: 'default' } }
+      if (request == '@renderer/store/list/action') return { setUpdateTime: () => {} }
+      if (request == './index' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { dateFormat: () => '' }
+      return originalLoad.call(this, request, parent, isMain)
+    }
+
+    let data
+    try {
+      data = require(rendererDataPath)
+    } finally {
+      Module._load = originalLoad
+    }
+
+    await data.setListPosition('first', 10)
+    await new Promise(resolve => setImmediate(resolve))
+    await data.setListPosition('second', 20)
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.equal(unhandledReason, null)
+    assert.deepEqual(reports.map(error => error.message), ['Renderer persistence update failed'])
+    assert.equal(JSON.stringify(reports).includes(secret), false)
+    assert.equal(calls.length, 2)
   })
 
   it('keeps existing playlist metadata when a legacy full update fails partway', async() => {

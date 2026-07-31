@@ -64,9 +64,7 @@ const isSqlQuote = (value: string): boolean => value == "'" || value == '"' || v
 const readQuotedEnd = (sql: string, start: number): number => {
   const delimiter = sql[start] == '[' ? ']' : sql[start]
   for (let index = start + 1; index < sql.length; index++) {
-    if (sql[index] == '\\' && delimiter != ']' && index + 1 < sql.length) {
-      index++
-    } else if (sql[index] == delimiter) {
+    if (sql[index] == delimiter) {
       if (sql[index + 1] == delimiter) {
         index++
       } else {

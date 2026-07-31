@@ -504,6 +504,37 @@ describe('playback activity schema migration', () => {
     })
   })
 
+  it('accepts a terminal backslash literal and resumes at the following check', () => {
+    const db = openDatabase()
+    db.exec(`
+      CREATE TABLE backslash_check (
+        value TEXT CHECK(value != '\\'),
+        sequence INTEGER CHECK(sequence > 0)
+      );
+    `)
+    const contract = {
+      tables: [{
+        name: 'backslash_check',
+        columns: [
+          { name: 'value', type: 'TEXT', notNull: false, primaryKeyPosition: 0 },
+          { name: 'sequence', type: 'INTEGER', notNull: false, primaryKeyPosition: 0 },
+        ],
+        indexes: [],
+        foreignKeys: [],
+        checks: [
+          { name: 'value.backslash', expression: "value != '\\'" },
+          { name: 'sequence.positive', expression: 'sequence > 0' },
+        ],
+      }],
+    }
+
+    assert.deepEqual(verifyDatabaseAgainstContract(
+      db,
+      contract,
+      { runQuickCheck: false, runForeignKeyCheck: false },
+    ), { ok: true, diagnostics: [] })
+  })
+
   it('rejects a playback table missing a critical integer check', () => {
     const { db } = bootstrap()
     db.exec(`

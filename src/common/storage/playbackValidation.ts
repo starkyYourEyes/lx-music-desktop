@@ -28,15 +28,21 @@ const QUALITY_VALUES = new Set(['128k', '320k', 'flac', 'flac24bit', '192k', 'ap
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 type PlaybackStartMode = 'activity' | 'resume-only' | 'private'
 
+const validationErrors = new WeakSet<Error>()
+
 const invalidField = (field: string): never => {
-  throw new Error(`Invalid ${field}`)
+  const error = new Error(`Invalid ${field}`)
+  validationErrors.add(error)
+  throw error
 }
+
+const isValidationError = (error: unknown): error is Error => error instanceof Error && validationErrors.has(error)
 
 const fixedError = <T>(field: string, callback: () => T): T => {
   try {
     return callback()
   } catch (error) {
-    if (error instanceof Error && /^Invalid [A-Za-z.]+$/.test(error.message)) throw error
+    if (isValidationError(error)) throw error
     return invalidField(field)
   }
 }
@@ -49,7 +55,7 @@ const assertRecord = (value: unknown, field: string): asserts value is Record<st
       if (typeof key != 'string' || descriptor == null || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) invalidField(field)
     }
   } catch (error) {
-    if (error instanceof Error && error.message == `Invalid ${field}`) throw error
+    if (isValidationError(error)) throw error
     invalidField(field)
   }
 }
@@ -59,7 +65,7 @@ const assertExactKeys = (value: Record<string, unknown>, field: string, keys: re
     const actualKeys = Object.keys(value)
     if (actualKeys.length != keys.length || actualKeys.some(key => !keys.includes(key))) invalidField(field)
   } catch (error) {
-    if (error instanceof Error && error.message == `Invalid ${field}`) throw error
+    if (isValidationError(error)) throw error
     invalidField(field)
   }
 }
@@ -110,7 +116,7 @@ const assertJsonValue = (value: unknown, field: string, ancestors = new Set<obje
         assertJsonValue(descriptor.value, field, ancestors, depth + 1)
       }
     } catch (error) {
-      if (error instanceof Error && error.message == `Invalid ${field}`) throw error
+      if (isValidationError(error)) throw error
       invalidField(field)
     }
   } else {
@@ -122,7 +128,7 @@ const assertJsonValue = (value: unknown, field: string, ancestors = new Set<obje
         assertJsonValue(descriptor.value, field, ancestors, depth + 1)
       }
     } catch (error) {
-      if (error instanceof Error && error.message == `Invalid ${field}`) throw error
+      if (isValidationError(error)) throw error
       invalidField(field)
     }
   }
@@ -174,7 +180,7 @@ const normalizeWebdavRoot = (value: unknown, field: string): string => {
     if (!url.pathname.endsWith('/')) url.pathname += '/'
     return url.toString()
   } catch (error) {
-    if (error instanceof Error && error.message == `Invalid ${field}`) throw error
+    if (isValidationError(error)) throw error
     invalidField(field)
   }
 }
@@ -187,7 +193,7 @@ const assertWebdavPath = (value: unknown, field: string): void => {
       return !decoded || decoded == '.' || decoded == '..' || decoded.includes('/') || decoded.includes('\\')
     })) invalidField(field)
   } catch (error) {
-    if (error instanceof Error && error.message == `Invalid ${field}`) throw error
+    if (isValidationError(error)) throw error
     invalidField(field)
   }
 }
@@ -295,14 +301,16 @@ const projectMusicInfo = (value: unknown, field: string): LX.Music.MusicInfo => 
       meta.path = value.meta.path as string
       meta.fileName = value.meta.fileName as string
       meta.ext = value.meta.ext as string
-      for (const key of ['title', 'artist', 'album', 'albumArtist', 'picPath', 'etag', 'lastModified']) projectOptionalString(value.meta, meta, key, field, true)
-      for (const key of ['year', 'size']) projectOptionalNumber(value.meta, meta, key, field, true)
+      for (const key of ['title', 'artist', 'album', 'albumArtist', 'picPath']) projectOptionalString(value.meta, meta, key, field, true)
+      for (const key of ['etag', 'lastModified']) projectOptionalString(value.meta, meta, key, field)
+      projectOptionalNumber(value.meta, meta, 'year', field, true)
+      projectOptionalNumber(value.meta, meta, 'size', field)
       if (Object.hasOwn(value.meta, 'genre')) {
         if (value.meta.genre === null) meta.genre = null
         else {
           if (!Array.isArray(value.meta.genre)) invalidField(field)
           for (const genre of value.meta.genre) assertString(genre, field)
-          meta.genre = value.meta.genre as string[]
+          meta.genre = [...value.meta.genre]
         }
       }
       if (Object.hasOwn(value.meta, 'hasEmbeddedPic')) {

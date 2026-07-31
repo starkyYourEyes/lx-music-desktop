@@ -367,6 +367,60 @@ describe('playback activity contracts', () => {
     assert.throws(() => sanitizePlayableTrack(onlinePayload('wy', { _qualitys: { bad: { size: null } } })))
   })
 
+  it('enforces declared WebDAV optional nullability and isolates genre arrays', () => {
+    const meta = {
+      songId: 'remote',
+      albumName: 'Album',
+      url: 'https://dav.example/music/',
+      path: 'music/a.flac',
+      fileName: 'a.flac',
+      ext: 'flac',
+      title: null,
+      artist: null,
+      album: null,
+      albumArtist: null,
+      year: null,
+      genre: ['Rock'],
+      picPath: null,
+      hasEmbeddedPic: false,
+      size: 1,
+      etag: 'etag',
+      lastModified: 'date',
+    }
+    const result = sanitizePlayableTrack(webdavPayload({ meta }))
+    meta.genre[0] = 'Changed'
+    meta.genre.push('Injected')
+    assert.deepEqual(result.meta.genre, ['Rock'])
+    for (const key of ['size', 'etag', 'lastModified']) {
+      assert.throws(() => sanitizePlayableTrack(webdavPayload({ meta: { ...meta, [key]: null } })))
+    }
+    assert.doesNotThrow(() => sanitizePlayableTrack(webdavPayload({
+      meta: {
+        ...meta,
+        title: null,
+        artist: null,
+        album: null,
+        albumArtist: null,
+        year: null,
+        genre: null,
+        picPath: null,
+      },
+    })))
+  })
+
+  it('rejects forged fixed-error messages from objects and proxy traps', () => {
+    const forged = 'Invalid secret'
+    const fakeError = { message: forged }
+    const object = new Proxy(start(), { get() { throw new Error(forged) } })
+    const plainObject = new Proxy(start(), { get() { throw fakeError } })
+    const proxy = new Proxy(webdavPayload(), { ownKeys() { throw new Error(forged) } })
+    for (const [parse, field] of [
+      [() => parsePlaybackStartCommand(object), 'start'],
+      [() => parsePlaybackStartCommand(plainObject), 'start'],
+      [() => sanitizePlayableTrack(proxy), 'playablePayload'],
+    ]) assert.throws(parse, error => error.message == `Invalid ${field}` && error.message != forged)
+  })
+
   it('normalizes proxy failures from public boundaries without leaking sentinels', () => {
     const secret = 'PROXY_SENTINEL_MUST_NOT_LEAK'
     const throwingObject = new Proxy(start(), { get() { throw new Error(secret) } })

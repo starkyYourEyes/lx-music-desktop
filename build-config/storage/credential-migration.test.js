@@ -144,6 +144,214 @@ describe('legacy credential migration', () => {
     })
   }
 
+  it('fails closed before writes for invalid versioned sync metadata', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const invalidVersionedCases = [
+      {
+        name: 'client invalid json',
+        relativePath: 'sync/client/servers.v1.json',
+        rawBytes: '{"version":1,"servers":',
+      },
+      {
+        name: 'client invalid version',
+        relativePath: 'sync/client/servers.v1.json',
+        document: { version: 2, servers: {} },
+      },
+      {
+        name: 'client missing servers',
+        relativePath: 'sync/client/servers.v1.json',
+        document: { version: 1 },
+      },
+      {
+        name: 'client empty id',
+        relativePath: 'sync/client/servers.v1.json',
+        document: {
+          version: 1,
+          servers: {
+            server_bad: { clientId: '', serverName: 'Bad', key: 'CLIENT_INVALID_SENTINEL' },
+          },
+        },
+      },
+      {
+        name: 'server invalid date',
+        relativePath: 'sync/server/devices.v2.json',
+        document: {
+          version: 2,
+          userName: 'default',
+          clients: {
+            device_bad: {
+              clientId: 'device_bad',
+              deviceName: 'Bad',
+              isMobile: false,
+              lastConnectDate: -1,
+              key: 'SERVER_INVALID_SENTINEL',
+            },
+          },
+        },
+      },
+      {
+        name: 'client forbidden field',
+        relativePath: 'sync/client/servers.v1.json',
+        document: {
+          version: 1,
+          servers: {
+            server_bad: { clientId: 'client_bad', serverName: 'Bad', key: 'CLIENT_FORBIDDEN_SENTINEL', forbidden: true },
+          },
+        },
+      },
+      {
+        name: 'client unexpected top-level key',
+        relativePath: 'sync/client/servers.v1.json',
+        document: { version: 1, servers: {}, key: 'TOP_LEVEL_KEY_SENTINEL' },
+      },
+      ...[1.5, Number.MAX_SAFE_INTEGER + 1, null].map((lastConnectDate, index) => ({
+        name: `server invalid date ${index}`,
+        relativePath: 'sync/server/devices.v2.json',
+        document: {
+          version: 2,
+          userName: 'default',
+          clients: {
+            [`device_bad_${index}`]: {
+              clientId: `device_bad_${index}`,
+              deviceName: 'Bad',
+              isMobile: false,
+              lastConnectDate,
+              key: `SERVER_DATE_${index}_SENTINEL`,
+            },
+          },
+        },
+      })),
+    ]
+
+    for (const testCase of invalidVersionedCases) {
+      const root = await makeRoot()
+      const target = path.join(root, testCase.relativePath)
+      const originalBytes = testCase.rawBytes ?? `${JSON.stringify(testCase.document, null, 2)}\n`
+      await fsp.mkdir(path.dirname(target), { recursive: true })
+      await fsp.writeFile(target, originalBytes)
+      let vaultWrites = 0
+      let profileWrites = 0
+      const vault = {
+        mode: 'encrypted',
+        async write() { vaultWrites++; return { persistence: 'encrypted' } },
+        async verify() { return true },
+        getMigrationMarker() { return null },
+        async putMigrationMarker() { throw new Error('marker write must not run') },
+      }
+
+      await assert.rejects(
+        migrateLegacyCredentials({
+          dataRoot: root,
+          vault,
+          profiles: { async migrateLegacyAccountProfiles() { profileWrites++ } },
+        }),
+        error => error.code == 'credentials.sync_metadata_invalid' && error.affectedPath == target,
+      )
+      assert.equal(await fsp.readFile(target, 'utf8'), originalBytes, testCase.name)
+      assert.equal(vaultWrites, 0, testCase.name)
+      assert.equal(profileWrites, 0, testCase.name)
+      assert.equal(fs.existsSync(path.join(root, 'credentials.v1.json')), false, testCase.name)
+    }
+  })
+
+  it('reports client metadata first', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const root = await makeRoot()
+    const clientPath = path.join(root, 'sync', 'client', 'servers.v1.json')
+    const serverPath = path.join(root, 'sync', 'server', 'devices.v2.json')
+    const clientDocument = {
+      version: 1,
+      servers: {
+        server_bad: { clientId: '', serverName: 'Bad', key: 'CLIENT_INVALID_SENTINEL' },
+      },
+    }
+    const serverDocument = {
+      version: 2,
+      userName: 'default',
+      clients: {
+        device_bad: {
+          clientId: 'device_bad',
+          deviceName: 'Bad',
+          isMobile: false,
+          lastConnectDate: -1,
+          key: 'SERVER_INVALID_SENTINEL',
+        },
+      },
+    }
+    const clientBytes = `${JSON.stringify(clientDocument, null, 2)}\n`
+    const serverBytes = `${JSON.stringify(serverDocument, null, 2)}\n`
+    await fsp.mkdir(path.dirname(clientPath), { recursive: true })
+    await fsp.mkdir(path.dirname(serverPath), { recursive: true })
+    await fsp.writeFile(clientPath, clientBytes)
+    await fsp.writeFile(serverPath, serverBytes)
+    let vaultWrites = 0
+    let profileWrites = 0
+    const vault = {
+      mode: 'encrypted',
+      async write() { vaultWrites++; return { persistence: 'encrypted' } },
+      async verify() { return true },
+      getMigrationMarker() { return null },
+      async putMigrationMarker() { throw new Error('marker write must not run') },
+    }
+
+    await assert.rejects(
+      migrateLegacyCredentials({
+        dataRoot: root,
+        vault,
+        profiles: { async migrateLegacyAccountProfiles() { profileWrites++ } },
+      }),
+      error => error.code == 'credentials.sync_metadata_invalid' && error.affectedPath == clientPath,
+    )
+    assert.equal(await fsp.readFile(clientPath, 'utf8'), clientBytes)
+    assert.equal(await fsp.readFile(serverPath, 'utf8'), serverBytes)
+    assert.equal(vaultWrites, 0)
+    assert.equal(profileWrites, 0)
+    assert.equal(fs.existsSync(path.join(root, 'credentials.v1.json')), false)
+  })
+
+  it('migrates a versioned sync metadata legacy key extension', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const { createCredentialVault } = require(vaultPath)
+    const { isSyncClientServersFileV1, isSyncServerDevicesFileV2 } = require('../../src/common/storage/syncMetadata.ts')
+    const root = await makeRoot()
+    const clientPath = path.join(root, 'sync', 'client', 'servers.v1.json')
+    const serverPath = path.join(root, 'sync', 'server', 'devices.v2.json')
+    await writeJson(clientPath, {
+      version: 1,
+      servers: {
+        server_valid: { clientId: 'client_valid', serverName: 'Valid', key: 'CLIENT_VALID_SENTINEL' },
+      },
+    })
+    await writeJson(serverPath, {
+      version: 2,
+      userName: 'default',
+      clients: {
+        device_valid: {
+          clientId: 'device_valid',
+          deviceName: 'Valid',
+          isMobile: false,
+          lastConnectDate: 1,
+          key: 'SERVER_VALID_SENTINEL',
+        },
+      },
+    })
+    const vault = await createCredentialVault({ profileRoot: root, cipher: encryptedCipher })
+
+    await migrateLegacyCredentials({
+      dataRoot: root,
+      vault,
+      profiles: { migrateLegacyAccountProfiles: async() => {} },
+      now: () => 100,
+    })
+
+    assert.equal(await vault.verify({ kind: 'sync-client', serverId: 'server_valid' }, { version: 1, key: 'CLIENT_VALID_SENTINEL' }), true)
+    assert.equal(await vault.verify({ kind: 'sync-server-device', userName: 'default', clientId: 'device_valid' }, { version: 1, key: 'SERVER_VALID_SENTINEL' }), true)
+    assert.equal(isSyncClientServersFileV1(await readJson(clientPath)), true)
+    assert.equal(isSyncServerDevicesFileV2(await readJson(serverPath)), true)
+    assert.doesNotMatch(await fsp.readFile(clientPath, 'utf8'), /CLIENT_VALID_SENTINEL/)
+    assert.doesNotMatch(await fsp.readFile(serverPath, 'utf8'), /SERVER_VALID_SENTINEL/)
+  })
+
   it('coalesces canonically identical mixed sync sources while accounting for and redacting every source', async() => {
     const { migrateLegacyCredentials } = require(migrationPath)
     const { createCredentialVault } = require(vaultPath)

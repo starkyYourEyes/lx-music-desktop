@@ -3,11 +3,14 @@ import path from 'node:path'
 import { canonicalJson, sha256Canonical, type JsonValue } from '../../../common/storage/canonicalJson'
 import { normalizePublicAccountProfile } from '../../../common/storage/accountProfile'
 import { assertCookieCredential, assertSyncKeyCredential, assertWebDAVCredential, toCredentialEntryId, type CredentialRef } from '../../storage/credentials/types'
+import { createSyncMetadataRecoveryError } from './recoveryError'
+import { preflightVersionedSyncMetadata, type VersionedSyncMetadataKind } from './syncMetadataPreflight'
 
 export interface LegacyCredentialSource {
   markerName: string
   ref: CredentialRef
   value: JsonValue
+  documentKind: 'generic' | 'sync-client-v1' | 'sync-server-v2'
   trustedRoot: string
   documentPath: string
   documentIdentity: SourceFileIdentity
@@ -38,6 +41,7 @@ export interface LegacyCredentialInventory {
 interface SourceDocument {
   path: string
   value: Record<string, unknown>
+  documentKind: 'generic' | 'sync-client-v1' | 'sync-server-v2'
   trustedRoot: string
   identity: SourceFileIdentity
 }
@@ -111,7 +115,24 @@ const readJsonDocument = async(trustedRoot: string, filePath: string): Promise<S
   if (stats.isSymbolicLink() || !stats.isFile()) throw new Error('Invalid legacy credential source path')
   const value: unknown = JSON.parse(await fs.readFile(filePath, 'utf8'))
   if (!isRecord(value)) throw new Error('Invalid legacy credential source document')
-  return { path: filePath, value, trustedRoot, identity: identityOf(stats) }
+  return { path: filePath, value, documentKind: 'generic', trustedRoot, identity: identityOf(stats) }
+}
+
+const readVersionedSyncDocument = async(
+  dataRoot: string,
+  filePath: string,
+  kind: VersionedSyncMetadataKind,
+): Promise<SourceDocument | null> => {
+  try {
+    const document = await readJsonDocument(dataRoot, filePath)
+    if (document == null) return null
+    if (preflightVersionedSyncMetadata(kind, document.value) == null) {
+      throw createSyncMetadataRecoveryError('credentials.sync_metadata_invalid', dataRoot, filePath)
+    }
+    return { ...document, documentKind: kind }
+  } catch {
+    throw createSyncMetadataRecoveryError('credentials.sync_metadata_invalid', dataRoot, filePath)
+  }
 }
 
 const append = (
@@ -126,6 +147,7 @@ const append = (
     markerName: sourceMarker(document.path, ref),
     ref,
     value,
+    documentKind: document.documentKind,
     trustedRoot: document.trustedRoot,
     documentPath: document.path,
     documentIdentity: document.identity,
@@ -267,6 +289,14 @@ export const collectLegacyCredentialInventory = async(dataRoot: string): Promise
       Reflect.deleteProperty(currentSetting, 'webdav.password')
     })
   }
+
+  const currentClientPath = path.join(dataRoot, 'sync', 'client', 'servers.v1.json')
+  const currentServerPath = path.join(dataRoot, 'sync', 'server', 'devices.v2.json')
+  const currentClient = await readVersionedSyncDocument(dataRoot, currentClientPath, 'sync-client-v1')
+  const currentServer = await readVersionedSyncDocument(dataRoot, currentServerPath, 'sync-server-v2')
+
+  if (currentClient != null) clientInventory(currentClient, credentials, 'servers')
+  if (currentServer != null) serverInventory(currentServer, credentials, currentServer.value.userName as string)
 
   const client = await readJsonDocument(dataRoot, path.join(dataRoot, 'sync', 'client', 'syncAuthKey.json'))
   if (client != null) clientInventory(client, credentials)

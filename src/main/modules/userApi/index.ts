@@ -65,10 +65,14 @@ const getChangedUserApiIds = (previous: UserApiState, next: UserApiState) => {
     .filter(id => nextIds.has(id) && !scriptsEqual(previous.scripts.get(id), next.scripts.get(id))))
 }
 
+const cloneUserApiList = (
+  apiList: readonly LX.UserApi.UserApiInfo[],
+): LX.UserApi.UserApiInfo[] => apiList.map(api => api.remote
+  ? { ...api, remote: { ...api.remote } }
+  : { ...api })
+
 const cloneUserApiState = (state: UserApiState): UserApiState => ({
-  apiList: state.apiList.map(api => api.remote
-    ? { ...api, remote: { ...api.remote } }
-    : { ...api }),
+  apiList: cloneUserApiList(state.apiList),
   scripts: new Map(state.scripts),
 })
 
@@ -106,6 +110,7 @@ export const replaceApisFromGitHub = async(
     const previousIds = new Set(previousState.apiList.map(api => api.id))
     const nextState = await prepareApisFromGitHub(items)
     const apiList = commitUserApiState(nextState)
+    const failureApiList = cloneUserApiList(apiList)
     const removedIds = getRemovedUserApiIds(previousIds, apiList)
     try {
       await applyRuntimeChanges(
@@ -119,7 +124,7 @@ export const replaceApisFromGitHub = async(
       } catch (rollbackErr) {
         log.error('rollback user APIs after GitHub runtime lifecycle error:', rollbackErr)
         if (err != null && (typeof err == 'object' || typeof err == 'function')) {
-          replacementFailureApiLists.set(err, apiList)
+          replacementFailureApiLists.set(err, failureApiList)
         }
         notifyUserApiChanged()
       }

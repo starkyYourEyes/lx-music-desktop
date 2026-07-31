@@ -820,7 +820,12 @@ const originalLx = global.lx
 
     const compensationError = new Error('simulated lifecycle compensation commit failure')
     const compensationLifecycleError = new Error('simulated lifecycle failure before compensation')
-    const forwardApiList = [{ id: 'stable-id', name: 'Forward committed source' }]
+    const forwardApiList = [{
+      id: 'stable-id',
+      name: 'Forward committed source',
+      remote: makeRemote(),
+    }]
+    const expectedFailureApiList = structuredClone(forwardApiList)
     const compensationFailureRuntime = createRuntimeHarness({
       replacementSteps: [forwardApiList],
       replacementScripts: [{ 'stable-id': 'script:stable-id:new' }],
@@ -838,10 +843,14 @@ const originalLx = global.lx
       apiList: forwardApiList,
       scripts: new Map([['stable-id', 'script:stable-id:new']]),
     })
+    const activeForwardList = compensationFailureRuntime.getCurrentApiList()
+    activeForwardList[0].name = 'Mutated active source'
+    activeForwardList[0].remote.group = 'mutated-active-group'
+    activeForwardList.push({ id: 'added-after-failure' })
     assert.deepStrictEqual(
       compensationFailureRuntime.runtime
         .takeReplacementFailureApiList(compensationLifecycleError),
-      forwardApiList,
+      expectedFailureApiList,
     )
     assert.strictEqual(
       compensationFailureRuntime.runtime

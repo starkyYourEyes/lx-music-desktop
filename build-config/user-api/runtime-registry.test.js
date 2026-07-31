@@ -3,7 +3,26 @@ const path = require('node:path')
 const test = require('node:test')
 const loadTsModule = require('../../scripts/test-utils/load-ts-module')
 
-const loadMain = () => {
+const createDeferred = () => {
+  let resolve
+  let reject
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+const createRuntime = options => {
+  const runtime = {
+    identity: { apiId: options.apiInfo.id, generation: options.generation },
+    window: { isDestroyed: () => false },
+  }
+  runtime.window.identity = runtime.identity
+  return runtime
+}
+
+const loadMain = (overrides = {}) => {
   const calls = []
   const listeners = new Map()
   const hooks = []
@@ -11,11 +30,7 @@ const loadMain = () => {
   const runtimeWindow = {
     createRuntimeWindow: async options => {
       hooks.push(options.hooks)
-      const runtime = {
-        identity: { apiId: options.apiInfo.id, generation: options.generation },
-        window: { isDestroyed: () => false },
-      }
-      runtime.window.identity = runtime.identity
+      const runtime = createRuntime(options)
       calls.push(['create', runtime.identity])
       return runtime
     },
@@ -28,6 +43,7 @@ const loadMain = () => {
     },
     clearRuntimeSession: async() => {},
     getRuntimePartition: () => 'partition',
+    ...overrides,
   }
   global.envParams = { cmdParams: {} }
   global.lx = {
@@ -76,4 +92,84 @@ test('a stale close callback cannot remove a replacement source runtime', async(
   assert.deepEqual(calls.filter(([, identity, name]) => name == 'userApi_request').map(([, identity]) => identity), [
     { apiId: 'user_api/a', generation: 2 },
   ])
+})
+
+test('concurrent creation for one source returns one published runtime', async() => {
+  const creation = createDeferred()
+  const created = []
+  const { main } = loadMain({
+    createRuntimeWindow: async options => {
+      const runtime = createRuntime(options)
+      created.push(runtime)
+      await creation.promise
+      return runtime
+    },
+  })
+  const apiInfo = { id: 'user_api/concurrent' }
+
+  const first = main.createSourceRuntime(apiInfo)
+  const second = main.createSourceRuntime(apiInfo)
+  await Promise.resolve()
+  creation.resolve()
+
+  const [firstRuntime, secondRuntime] = await Promise.all([first, second])
+  assert.strictEqual(firstRuntime, secondRuntime)
+  assert.strictEqual(main.getSourceRuntime(apiInfo.id), firstRuntime)
+  assert.equal(created.length, 1)
+})
+
+test('failed initialization is cleaned up and a later creation publishes a new runtime', async() => {
+  const initializeFailure = new Error('initialization failed')
+  const created = []
+  const disposed = []
+  let initializationAttempts = 0
+  const { main, listeners } = loadMain({
+    createRuntimeWindow: async options => {
+      const runtime = createRuntime(options)
+      created.push(runtime)
+      return runtime
+    },
+    initializeRuntimeWindow: async() => {
+      if (initializationAttempts++ == 0) throw initializeFailure
+      return true
+    },
+    disposeRuntimeWindow: async runtime => {
+      disposed.push(runtime)
+    },
+  })
+  const apiInfo = { id: 'user_api/retry' }
+
+  await assert.rejects(main.createSourceRuntime(apiInfo), error => error === initializeFailure)
+  assert.equal(main.getSourceRuntime(apiInfo.id), null)
+  assert.deepEqual(disposed, [created[0]])
+  assert.equal(listeners.has('updated_config'), false)
+
+  const runtime = await main.createSourceRuntime(apiInfo)
+  assert.notStrictEqual(runtime, created[0])
+  assert.strictEqual(main.getSourceRuntime(apiInfo.id), runtime)
+  assert.equal(created.length, 2)
+})
+
+test('disposal waits for a pending creation before releasing its runtime', async() => {
+  const creation = createDeferred()
+  const disposed = []
+  const { main, listeners } = loadMain({
+    createRuntimeWindow: async options => {
+      await creation.promise
+      return createRuntime(options)
+    },
+    disposeRuntimeWindow: async runtime => {
+      disposed.push(runtime)
+    },
+  })
+  const apiInfo = { id: 'user_api/closing' }
+
+  const creating = main.createSourceRuntime(apiInfo)
+  const disposing = main.disposeSourceRuntime(apiInfo.id)
+  creation.resolve()
+  const [runtime] = await Promise.all([creating, disposing])
+
+  assert.deepEqual(disposed, [runtime])
+  assert.equal(main.getSourceRuntime(apiInfo.id), null)
+  assert.equal(listeners.has('updated_config'), false)
 })

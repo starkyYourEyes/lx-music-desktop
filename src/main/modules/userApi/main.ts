@@ -10,6 +10,8 @@ import {
 } from './runtimeWindow'
 
 const sourceRuntimes = new Map<string, UserApiRuntimeWindow>()
+const sourceRuntimeCreations = new Map<string, Promise<UserApiRuntimeWindow>>()
+const sourceRuntimeDisposals = new Map<string, Promise<void>>()
 let legacyActiveApiId: string | null = null
 let runtimeGeneration = 0
 
@@ -63,30 +65,75 @@ export const getSourceRuntimeByWebContentsId = (webContentsId: number) => {
   return null
 }
 
-export const createSourceRuntime = async(apiInfo: LX.UserApi.UserApiInfo) => {
+export const createSourceRuntime = async(apiInfo: LX.UserApi.UserApiInfo): Promise<UserApiRuntimeWindow> => {
+  const pendingDisposal = sourceRuntimeDisposals.get(apiInfo.id)
+  if (pendingDisposal) {
+    await pendingDisposal
+    return createSourceRuntime(apiInfo)
+  }
   const existing = sourceRuntimes.get(apiInfo.id)
   if (existing) return existing
-  const runtime = await createRuntimeWindow({
-    apiInfo,
-    generation: ++runtimeGeneration,
-    hooks: {
-      onClosed: releaseSourceRuntime,
-      onRenderProcessGone: (identity, details) => {
-        log.error(`user API runtime process exited: ${identity.apiId}`, details)
-      },
-    },
+  const pendingCreation = sourceRuntimeCreations.get(apiInfo.id)
+  if (pendingCreation) return pendingCreation
+
+  const creation = Promise.resolve().then(async() => {
+    let runtime: UserApiRuntimeWindow | null = null
+    try {
+      runtime = await createRuntimeWindow({
+        apiInfo,
+        generation: ++runtimeGeneration,
+        hooks: {
+          onClosed: releaseSourceRuntime,
+          onRenderProcessGone: (identity, details) => {
+            log.error(`user API runtime process exited: ${identity.apiId}`, details)
+          },
+        },
+      })
+      await initializeRuntimeWindow(runtime, apiInfo)
+      sourceRuntimes.set(apiInfo.id, runtime)
+      if (sourceRuntimes.size == 1) global.lx.event_app.on('updated_config', handleUpdateProxy)
+      return runtime
+    } catch (err) {
+      if (runtime) {
+        try {
+          await disposeRuntimeWindow(runtime, { clearSession: true })
+        } catch (disposeErr) {
+          log.error(`failed to dispose user API runtime after initialization error: ${apiInfo.id}`, disposeErr)
+        }
+      }
+      throw err
+    }
   })
-  sourceRuntimes.set(apiInfo.id, runtime)
-  if (sourceRuntimes.size == 1) global.lx.event_app.on('updated_config', handleUpdateProxy)
-  await initializeRuntimeWindow(runtime, apiInfo)
-  return runtime
+  sourceRuntimeCreations.set(apiInfo.id, creation)
+  void creation.finally(() => {
+    if (sourceRuntimeCreations.get(apiInfo.id) == creation) sourceRuntimeCreations.delete(apiInfo.id)
+  }).catch(() => {})
+  return creation
 }
 
 export const disposeSourceRuntime = async(apiId: string) => {
-  const runtime = sourceRuntimes.get(apiId)
-  if (!runtime) return
-  await disposeRuntimeWindow(runtime, { clearSession: true })
-  releaseSourceRuntime(runtime.identity)
+  const pendingDisposal = sourceRuntimeDisposals.get(apiId)
+  if (pendingDisposal) return pendingDisposal
+  const disposal = Promise.resolve().then(async() => {
+    const pendingCreation = sourceRuntimeCreations.get(apiId)
+    if (pendingCreation) {
+      try {
+        await pendingCreation
+      } catch {
+        return
+      }
+    }
+    const runtime = sourceRuntimes.get(apiId)
+    if (!runtime) return
+    await disposeRuntimeWindow(runtime, { clearSession: true })
+    releaseSourceRuntime(runtime.identity)
+  })
+  sourceRuntimeDisposals.set(apiId, disposal)
+  try {
+    await disposal
+  } finally {
+    if (sourceRuntimeDisposals.get(apiId) == disposal) sourceRuntimeDisposals.delete(apiId)
+  }
 }
 
 export const sendSourceEvent = <T>(apiId: string, name: string, params?: T) => {

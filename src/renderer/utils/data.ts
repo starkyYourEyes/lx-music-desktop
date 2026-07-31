@@ -20,6 +20,7 @@ let listUpdateInfo: LX.List.ListUpdateInfo
 let searchSetting: CatalogPreferencesV1['search']
 let songListSetting: CatalogPreferencesV1['songList']
 let leaderboardSetting: CatalogPreferencesV1['leaderboard']
+let catalogPreferencesInitPromise: Promise<void> | null = null
 
 const saveListPositionThrottle = throttle(() => {
   void setLocalState({
@@ -55,7 +56,13 @@ const applyCatalogPreferences = (preferences: Awaited<ReturnType<typeof getCatal
 
 const initCatalogPreferences = async() => {
   if (leaderboardSetting && songListSetting && searchSetting) return
-  applyCatalogPreferences(await getCatalogPreferences())
+  catalogPreferencesInitPromise ??= getCatalogPreferences()
+    .then(applyCatalogPreferences)
+    .catch((error) => {
+      catalogPreferencesInitPromise = null
+      throw error
+    })
+  await catalogPreferencesInitPromise
 }
 
 const initPosition = async() => {

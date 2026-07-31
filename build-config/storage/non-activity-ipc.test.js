@@ -21,6 +21,7 @@ require.extensions['.ts'] = (module, filename) => {
 const storageStatePath = '../../src/main/modules/winMain/rendererEvent/storageState.ts'
 const dataHandlerPath = '../../src/main/modules/winMain/rendererEvent/data.ts'
 const rendererDataPath = '../../src/renderer/utils/data.ts'
+const searchActionPath = '../../src/renderer/store/search/action.ts'
 const commonRoot = path.resolve(__dirname, '../../src/common')
 
 const loadSourceModule = modulePath => {
@@ -42,7 +43,7 @@ const loadSourceModule = modulePath => {
 }
 
 afterEach(() => {
-  for (const modulePath of [storageStatePath, dataHandlerPath, rendererDataPath]) {
+  for (const modulePath of [storageStatePath, dataHandlerPath, rendererDataPath, searchActionPath]) {
     try { delete require.cache[require.resolve(modulePath)] } catch {}
   }
 })
@@ -212,6 +213,66 @@ describe('typed non-activity IPC', () => {
     ])
   })
 
+  it('shares first catalog initialization across concurrent section setters', async() => {
+    const initial = {
+      version: 1,
+      leaderboard: { source: 'kw', boardId: 'kw__16' },
+      songList: { source: 'kw', sortId: 'new', tagId: '' },
+      search: { temp_source: 'kw', source: 'kw', type: 'music' },
+    }
+    const reads = []
+    let resolveFirstRead
+    let resolveSecondRead
+    const firstRead = new Promise(resolve => { resolveFirstRead = resolve })
+    const secondRead = new Promise(resolve => { resolveSecondRead = resolve })
+    const originalLoad = Module._load
+    Module._load = function(request, parent, isMain) {
+      if (request == '@renderer/utils/storageState') {
+        return {
+          getCatalogPreferences: () => {
+            reads.push(reads.length + 1)
+            return reads.length == 1 ? firstRead : secondRead
+          },
+          setCatalogPreference: async(section, value) => {
+            if (section == 'leaderboard') resolveSecondRead(structuredClone(initial))
+            return { ...structuredClone(initial), [section]: structuredClone(value) }
+          },
+          getLocalState: () => { throw new Error('unexpected local-state read') },
+          getPlaylistMetadata: () => { throw new Error('unexpected playlist read') },
+          mutatePlaylistMetadata: () => { throw new Error('unexpected playlist write') },
+          setLocalState: () => { throw new Error('unexpected local-state write') },
+        }
+      }
+      if (request == '@common/utils') return { throttle: fn => fn }
+      if (request == '@common/constants') {
+        return {
+          DEFAULT_SETTING: initial,
+          LIST_IDS: { DEFAULT: 'default' },
+        }
+      }
+      if (request == '@renderer/store/list/action') return { setUpdateTime: () => {} }
+      if (request == './index' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { dateFormat: () => '' }
+      return originalLoad.call(this, request, parent, isMain)
+    }
+
+    let data
+    try {
+      data = require(rendererDataPath)
+    } finally {
+      Module._load = originalLoad
+    }
+
+    const leaderboardUpdate = data.setLeaderboardSetting({ source: 'kg', boardId: 'kg__1' })
+    const searchUpdate = data.setSearchSetting({ source: 'tx', type: 'songlist' })
+    await new Promise(resolve => setImmediate(resolve))
+    resolveFirstRead(structuredClone(initial))
+    await Promise.all([leaderboardUpdate, searchUpdate])
+
+    assert.deepEqual(await data.getLeaderboardSetting(), { source: 'kg', boardId: 'kg__1' })
+    assert.deepEqual(await data.getSearchSetting(), { temp_source: 'kw', source: 'tx', type: 'songlist' })
+    assert.equal(reads.length, 1)
+  })
+
   it('keeps existing playlist metadata when a legacy full update fails partway', async() => {
     let persisted = {
       existing: { updateTime: 1, isAutoUpdate: true },
@@ -262,5 +323,45 @@ describe('typed non-activity IPC', () => {
       second: { updateTime: 3, isAutoUpdate: false },
     }), /injected playlist failure/)
     assert.deepEqual(persisted.existing, { updateTime: 1, isAutoUpdate: true })
+  })
+
+  it('records an exact-case search term that is already first', async() => {
+    const historyList = ['Exact']
+    const commands = []
+    const originalLoad = Module._load
+    Module._load = function(request, parent, isMain) {
+      if (request == '@renderer/utils/storageState') {
+        return {
+          getSearchHistory: async() => historyList,
+          mutateSearchHistory: async command => {
+            commands.push(structuredClone(command))
+            return ['Exact', 'Other']
+          },
+        }
+      }
+      if (request == '../setting' && parent?.filename.endsWith('renderer\\store\\search\\action.ts')) {
+        return { appSetting: { 'search.isShowHistorySearch': true } }
+      }
+      if (request == './state' && parent?.filename.endsWith('renderer\\store\\search\\action.ts')) {
+        return { searchText: { value: '' }, historyList }
+      }
+      return originalLoad.call(this, request, parent, isMain)
+    }
+
+    let actions
+    try {
+      actions = require(searchActionPath)
+    } finally {
+      Module._load = originalLoad
+    }
+
+    await actions.addHistoryWord('Exact')
+
+    assert.deepEqual(historyList, ['Exact', 'Other'])
+    assert.equal(commands.length, 1)
+    assert.equal(commands[0].version, 1)
+    assert.equal(commands[0].action, 'record')
+    assert.equal(commands[0].term, 'Exact')
+    assert.equal(Number.isSafeInteger(commands[0].usedAtMs), true)
   })
 })

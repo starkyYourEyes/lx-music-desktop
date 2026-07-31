@@ -25,8 +25,6 @@ export const getHistoryList = async() => {
 export const addHistoryWord = async(word: string) => {
   if (!appSetting['search.isShowHistorySearch']) return
   if (!isInitedSearchHistory) await getHistoryList()
-  const index = historyList.indexOf(word)
-  if (index == 0) return
   replaceHistoryList(await mutateSearchHistory({ version: 1, action: 'record', term: word, usedAtMs: Date.now() }))
 }
 export const removeHistoryWord = async(index: number) => {

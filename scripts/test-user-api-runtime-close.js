@@ -7,15 +7,22 @@ const sessions = new Map()
 const windows = []
 const logErrors = []
 let nextWebContentsId = 0
+let remainingDestroyFailures = 0
 
 const getSession = partition => {
   let runtimeSession = sessions.get(partition)
   if (runtimeSession) return runtimeSession
   runtimeSession = {
     cleanupCalls: [],
-    clearAuthCache() { this.cleanupCalls.push('auth') },
-    clearStorageData() { this.cleanupCalls.push('storage') },
-    clearCache() { this.cleanupCalls.push('cache') },
+    cleanup(name) {
+      this.cleanupCalls.push(name)
+      if (this.cleanupFailure != name) return
+      if (this.cleanupFailureMode == 'throw') throw this.cleanupError
+      return Promise.reject(this.cleanupError)
+    },
+    clearAuthCache() { return this.cleanup('auth') },
+    clearStorageData() { return this.cleanup('storage') },
+    clearCache() { return this.cleanup('cache') },
     setPermissionRequestHandler(handler) { this.permissionHandler = handler },
   }
   sessions.set(partition, runtimeSession)
@@ -51,6 +58,10 @@ class FakeBrowserWindow {
     this.listeners.get(name)?.delete(listener)
   }
 
+  listenerCount(name) {
+    return this.listeners.get(name)?.size ?? 0
+  }
+
   emit(name, ...args) {
     for (const listener of [...(this.listeners.get(name) ?? [])]) listener(...args)
   }
@@ -62,6 +73,10 @@ class FakeBrowserWindow {
   }
 
   destroy() {
+    if (remainingDestroyFailures > 0) {
+      remainingDestroyFailures--
+      throw new Error('simulated destroy failure')
+    }
     this.destroyed = true
   }
 }
@@ -147,7 +162,45 @@ const sameIdentity = (first, second) => (
   )
 
   await runtimeWindow.disposeRuntimeWindow(newRuntime, { clearSession: false }, deps)
-  assert.equal(logErrors.length, 0)
+  const destroyFailureRuntime = await runtimeWindow.createRuntimeWindow({
+    apiInfo: { ...apiInfo, id: 'user_api/destroy-failure' },
+    generation: 1,
+    hooks,
+    deps,
+  })
+  remainingDestroyFailures = 1
+  await assert.rejects(
+    runtimeWindow.disposeRuntimeWindow(destroyFailureRuntime, { clearSession: true }, deps),
+    /simulated destroy failure/,
+  )
+  assert.equal(destroyFailureRuntime.window.destroyed, false)
+  assert.equal(destroyFailureRuntime.window.listenerCount('closed'), 1)
+  assert.deepEqual(destroyFailureRuntime.session.cleanupCalls, [])
+  await runtimeWindow.disposeRuntimeWindow(destroyFailureRuntime, { clearSession: true }, deps)
+  assert.equal(destroyFailureRuntime.window.destroyed, true)
+  assert.deepEqual(destroyFailureRuntime.session.cleanupCalls, ['auth', 'storage', 'cache'])
+
+  for (const [stage, mode] of [
+    ['auth', 'throw'],
+    ['storage', 'reject'],
+    ['cache', 'reject'],
+  ]) {
+    const cleanupRuntime = await runtimeWindow.createRuntimeWindow({
+      apiInfo: { ...apiInfo, id: 'user_api/cleanup-' + stage },
+      generation: 1,
+      hooks,
+      deps,
+    })
+    const cleanupError = new Error('simulated ' + stage + ' cleanup failure')
+    cleanupRuntime.session.cleanupFailure = stage
+    cleanupRuntime.session.cleanupFailureMode = mode
+    cleanupRuntime.session.cleanupError = cleanupError
+    await runtimeWindow.disposeRuntimeWindow(cleanupRuntime, { clearSession: true }, deps)
+    assert.equal(cleanupRuntime.window.destroyed, true)
+    assert.deepEqual(cleanupRuntime.session.cleanupCalls, ['auth', 'storage', 'cache'])
+    assert.equal(logErrors.some(args => args.includes(cleanupError)), true)
+  }
+
   console.log('User API runtime close transaction tests passed')
 })().catch(err => {
   console.error(err)

@@ -33,13 +33,22 @@ const song = onlineMusic
 const songA = onlineMusic
 const songB = { ...onlineMusic, id: 'song-b' }
 
-const createRuntimeWindowHarness = () => {
+const createRuntimeWindowHarness = ({
+  destroyFailures = 0,
+  loadFailures = 0,
+  readFailures = 0,
+  useDefaultReadRuntimeHtml = false,
+} = {}) => {
   const path = require('node:path')
   const loadTsModule = require('../../scripts/test-utils/load-ts-module')
   const sessions = new Map()
   const windows = []
   const initEnvelopes = []
   let webContentsId = 0
+  let remainingDestroyFailures = destroyFailures
+  let remainingLoadFailures = loadFailures
+  let remainingReadFailures = readFailures
+  process.env.NODE_ENV = 'production'
 
   const getSession = partition => {
     let runtimeSession = sessions.get(partition)
@@ -87,7 +96,15 @@ const createRuntimeWindowHarness = () => {
       this.listeners.get(name)?.delete(listener)
     }
 
+    listenerCount(name) {
+      return this.listeners.get(name)?.size ?? 0
+    }
+
     async loadURL() {
+      if (remainingLoadFailures > 0) {
+        remainingLoadFailures--
+        throw new Error('simulated load failure')
+      }
       this.webContents.emit('did-finish-load')
     }
 
@@ -96,6 +113,10 @@ const createRuntimeWindowHarness = () => {
     }
 
     destroy() {
+      if (remainingDestroyFailures > 0) {
+        remainingDestroyFailures--
+        throw new Error('simulated destroy failure')
+      }
       this.destroyed = true
       for (const listener of [...(this.listeners.get('closed') ?? [])]) listener()
     }
@@ -110,7 +131,17 @@ const createRuntimeWindowHarness = () => {
       '@common/utils': { log: { error() {} } },
       './main': { getProxy: () => ({ host: '127.0.0.1', port: '1080' }) },
       './utils': { getScript: async id => 'script:' + id },
-      fs: { promises: { readFile: async() => '<html></html>' } },
+      fs: {
+        promises: {
+          readFile: async() => {
+            if (remainingReadFailures > 0) {
+              remainingReadFailures--
+              throw new Error('simulated HTML read failure')
+            }
+            return '<html></html>'
+          },
+        },
+      },
       'node:path': { join: (...parts) => parts.join('/') },
     },
   )
@@ -118,7 +149,6 @@ const createRuntimeWindowHarness = () => {
   const deps = {
     createWindow: options => new FakeBrowserWindow(options),
     fromPartition: getSession,
-    readRuntimeHtml: async() => '<html></html>',
     getScript: async id => 'script:' + id,
     getProxy: () => ({ host: '127.0.0.1', port: '1080' }),
     send(runtime, name, payload) {
@@ -127,7 +157,11 @@ const createRuntimeWindowHarness = () => {
     },
     logError() {},
   }
-  const hooks = { onClosed() {}, onRenderProcessGone() {} }
+  if (!useDefaultReadRuntimeHtml) deps.readRuntimeHtml = async() => '<html></html>'
+  const hooks = {
+    onClosed() {},
+    onRenderProcessGone() {},
+  }
 
   return {
     create: (apiInfo, generation) => runtimeWindow.createRuntimeWindow({ apiInfo, generation, hooks, deps }),

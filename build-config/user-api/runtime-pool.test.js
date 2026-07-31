@@ -34,3 +34,41 @@ test('creating a runtime never sends init before the owner explicitly starts it'
   assert.equal(harness.initEnvelopes.length, 1)
   assert.deepEqual(harness.initEnvelopes[0].identity, { apiId: 'user_api/a', generation: 1 })
 })
+
+test('a destroy failure leaves the runtime owned and retryable', async() => {
+  const harness = createRuntimeWindowHarness({ destroyFailures: 1 })
+  const runtime = await harness.create({ id: 'user_api/a' }, 1)
+
+  await assert.rejects(harness.dispose(runtime, { clearSession: true }), /simulated destroy failure/)
+  assert.equal(runtime.window.destroyed, false)
+  assert.equal(runtime.window.listenerCount('closed'), 1)
+  assert.deepEqual(runtime.session.cleanupCalls, [])
+
+  await harness.dispose(runtime, { clearSession: true })
+  assert.equal(runtime.window.destroyed, true)
+  assert.deepEqual(runtime.session.cleanupCalls, ['auth', 'storage', 'cache'])
+})
+
+test('an HTML read failure constructs no window and permits retry', async() => {
+  const harness = createRuntimeWindowHarness({
+    readFailures: 1,
+    useDefaultReadRuntimeHtml: true,
+  })
+
+  await assert.rejects(harness.create({ id: 'user_api/a' }, 1), /simulated HTML read failure/)
+  assert.equal(harness.windows.length, 0)
+
+  const retry = await harness.create({ id: 'user_api/a' }, 2)
+  assert.equal(retry.window.destroyed, false)
+})
+
+test('a page load failure tears down its partial window and permits retry', async() => {
+  const harness = createRuntimeWindowHarness({ loadFailures: 1 })
+
+  await assert.rejects(harness.create({ id: 'user_api/a' }, 1), /simulated load failure/)
+  assert.equal(harness.windows[0].destroyed, true)
+  assert.equal(harness.windows[0].listenerCount('closed'), 0)
+
+  const retry = await harness.create({ id: 'user_api/a' }, 2)
+  assert.equal(retry.window.destroyed, false)
+})

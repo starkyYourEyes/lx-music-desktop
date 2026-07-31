@@ -63,8 +63,12 @@ const readRuntimeHtml = async() => {
   const dir = process.env.NODE_ENV !== 'production'
     ? webpackUserApiPath
     : path.join(__dirname, 'userApi')
-  runtimeHtml = fs.promises.readFile(path.join(dir, 'renderer/user-api.html'), 'utf8')
-  return runtimeHtml
+  const html = fs.promises.readFile(path.join(dir, 'renderer/user-api.html'), 'utf8')
+  runtimeHtml = html
+  void html.catch(() => {
+    if (runtimeHtml == html) runtimeHtml = null
+  })
+  return html
 }
 
 const getPreloadUrl = () => process.env.NODE_ENV !== 'production'
@@ -109,6 +113,20 @@ const clearSession = async(
   }
 }
 
+const detachRuntimeListeners = (runtime: UserApiRuntimeWindow) => {
+  const listeners = runtimeListeners.get(runtime)
+  if (!listeners) return
+  runtime.window.removeListener('closed', listeners.closed)
+  runtime.window.webContents.removeListener('render-process-gone', listeners.renderProcessGone)
+}
+
+const attachRuntimeListeners = (runtime: UserApiRuntimeWindow) => {
+  const listeners = runtimeListeners.get(runtime)
+  if (!listeners) return
+  runtime.window.on('closed', listeners.closed)
+  runtime.window.webContents.on('render-process-gone', listeners.renderProcessGone)
+}
+
 export const createRuntimeWindow = async({
   apiInfo,
   generation,
@@ -118,6 +136,7 @@ export const createRuntimeWindow = async({
   const deps = getDependencies(dependencies)
   const partition = getRuntimePartition(apiInfo.id)
   const runtimeSession = deps.fromPartition(partition)
+  const html = await deps.readRuntimeHtml()
   const window = deps.createWindow({
     resizable: false,
     minimizable: false,
@@ -171,7 +190,18 @@ export const createRuntimeWindow = async({
     renderProcessGone: handleRenderProcessGone,
   })
 
-  await window.loadURL('data:text/html;charset=UTF-8,' + encodeURIComponent(await deps.readRuntimeHtml()))
+  try {
+    await window.loadURL('data:text/html;charset=UTF-8,' + encodeURIComponent(html))
+  } catch (err) {
+    detachRuntimeListeners(runtime)
+    runtimeListeners.delete(runtime)
+    try {
+      if (!window.isDestroyed()) window.destroy()
+    } catch (destroyErr) {
+      deps.logError('destroy failed user API runtime after load failure:', destroyErr)
+    }
+    throw err
+  }
   return runtime
 }
 
@@ -200,15 +230,16 @@ export const disposeRuntimeWindow = async(
   dependencies?: UserApiRuntimeWindowDependencies,
 ): Promise<void> => {
   if (disposedRuntimes.has(runtime)) return
-  disposedRuntimes.add(runtime)
   const deps = getDependencies(dependencies)
-  const listeners = runtimeListeners.get(runtime)
-  if (listeners) {
-    runtime.window.removeListener('closed', listeners.closed)
-    runtime.window.webContents.removeListener('render-process-gone', listeners.renderProcessGone)
-    runtimeListeners.delete(runtime)
+  detachRuntimeListeners(runtime)
+  try {
+    if (!runtime.window.isDestroyed()) runtime.window.destroy()
+  } catch (err) {
+    attachRuntimeListeners(runtime)
+    throw err
   }
-  if (!runtime.window.isDestroyed()) runtime.window.destroy()
+  disposedRuntimes.add(runtime)
+  runtimeListeners.delete(runtime)
   if (shouldClearSession) await clearSession(runtime.session, deps)
 }
 

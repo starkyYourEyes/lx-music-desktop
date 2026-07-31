@@ -179,8 +179,9 @@ export const createRuntimeWindow = async({
     hooks.onRenderProcessGone(runtime.identity, details)
   }
 
+  const webContentsEvents: NodeJS.EventEmitter = window.webContents
   for (const eventName of denyEvents) {
-    window.webContents.on(eventName, (event: Electron.Event) => {
+    webContentsEvents.on(eventName, (event: Electron.Event) => {
       event.preventDefault()
     })
   }

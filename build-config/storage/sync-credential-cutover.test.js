@@ -819,6 +819,64 @@ describe('sync credential cutover', () => {
     }
   })
 
+  it('rejects invalid sync metadata changed after its hash check passes', async() => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-invalid-post-check-race-'))
+    const vault = createVault()
+    const destination = path.join(root, 'sync/client/servers.v1.json')
+    const inventoried = {
+      version: 1,
+      servers: {
+        server_checked: { clientId: '', serverName: 'Checked', key: 'CHECKED_KEY_1234567890' },
+      },
+    }
+    const replacement = {
+      version: 1,
+      servers: {
+        server_post_check: { clientId: '', serverName: 'Post check', key: 'POST_CHECK_KEY_1234567890' },
+      },
+    }
+    const cleanupGate = { started: deferred(), release: deferred() }
+    global.lxDataPath = root
+    global.lx = { credentialVault: vault, appSetting: {} }
+    try {
+      await writeJson(destination, inventoried)
+      const { createAtomicJsonFile } = freshRequire('../../src/main/storage/atomicJsonFile.ts')
+      const migrateData = loadTsModule(path.join(sourceRoot, 'main/modules/sync/migrate.ts'), {
+        '@main/storage/atomicJsonFile': {
+          createAtomicJsonFile(options) {
+            if (path.resolve(options.filePath) != path.resolve(destination)) return createAtomicJsonFile(options)
+            return createAtomicJsonFile({
+              ...options,
+              fs: {
+                ...fsp,
+                async unlink(filePath) {
+                  if (filePath == `${destination}.previous`) {
+                    cleanupGate.started.resolve()
+                    await cleanupGate.release.promise
+                  }
+                  return await fsp.unlink(filePath)
+                },
+              },
+            })
+          },
+        },
+      }).default
+
+      const migration = migrateData(root)
+      await cleanupGate.started.promise
+      await writeJson(destination, replacement)
+      cleanupGate.release.resolve()
+
+      await assert.rejects(migration, /Atomic JSON durable destination/)
+      assert.deepEqual(JSON.parse(await fsp.readFile(destination, 'utf8')), replacement)
+      assert.equal(vault.read({ kind: 'sync-client', serverId: 'server_checked' }).status, 'available')
+      assert.equal(vault.read({ kind: 'sync-client', serverId: 'server_post_check' }).status, 'missing')
+    } finally {
+      cleanupGate.release.resolve()
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('resumes every root sync migration phase before verified source cleanup', async() => {
     const phases = [
       'after-directories',

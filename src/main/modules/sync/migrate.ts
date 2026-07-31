@@ -78,13 +78,13 @@ const isMetadataDocument = (value: unknown): value is MetadataDocument =>
 const replaceMetadata = async(
   filePath: string,
   value: MetadataDocument,
-  invalidPreviousFileSha256?: string,
+  expectedPreviousFileSha256?: string,
 ): Promise<void> => {
   await createAtomicJsonFile<MetadataDocument>({
     filePath,
     validate: isMetadataDocument,
     shouldPreservePrevious: () => false,
-    allowInvalidPreviousFileSha256: invalidPreviousFileSha256,
+    expectedPreviousFileSha256,
     mode: 0o600,
   }).replace(value)
 }

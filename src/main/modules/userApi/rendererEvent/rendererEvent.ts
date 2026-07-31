@@ -121,7 +121,9 @@ export const cancelRequest = (requestKey: string) => {
   clearRequestTimeout(requestKey)
 }
 
-export const request = async({ requestKey, data }: LX.UserApi.UserApiRequestParams): Promise<any> => await new Promise((resolve, reject) => {
+export const request = async(params: LX.UserApi.UserApiRequestParams): Promise<any> => await new Promise((resolve, reject) => {
+  const requestKey = 'requestKey' in params ? params.requestKey : params.requestId
+  const { data } = params
   if (!userApi) {
     reject(new Error('user api is not load'))
   }

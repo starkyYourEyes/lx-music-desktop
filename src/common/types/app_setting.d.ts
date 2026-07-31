@@ -34,6 +34,10 @@ declare global {
        */
       'common.apiSource': string
 
+      'common.apiFallbackSources': string[]
+
+      'common.apiFallbackMode': 'serial' | 'parallel'
+
       /**
        * 音源名称类型，原名、别名
        */

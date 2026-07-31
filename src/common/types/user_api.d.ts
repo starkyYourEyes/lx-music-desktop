@@ -40,7 +40,7 @@ declare namespace LX {
       qualitys: LX.Quality[]
     }
 
-    type UserApiSources = Record<LX.Source, UserApiSourceInfo>
+    type UserApiSources = Partial<Record<LX.Source, UserApiSourceInfo>>
 
 
     interface UserApiInfoFull {
@@ -59,6 +59,7 @@ declare namespace LX {
     type UserApiInfo = Omit<UserApiInfoFull, 'script'>
 
     interface UserApiStatus {
+      apiId?: string
       status: boolean
       message?: string
       apiInfo?: UserApiInfo
@@ -71,11 +72,58 @@ declare namespace LX {
       updateUrl?: string
     }
 
-    interface UserApiRequestParams {
+    interface LegacyUserApiRequestParams {
       requestKey: string
       data: any
     }
-    type UserApiRequestCancelParams = string
+    interface SourceUserApiRequestParams {
+      apiId: string
+      requestId: string
+      data: any
+    }
+    type UserApiRequestParams = LegacyUserApiRequestParams | SourceUserApiRequestParams
+    interface SourceUserApiRequestCancelParams {
+      apiId: string
+      requestId: string
+      reason?: 'cancelled' | 'timeout'
+    }
+    type LegacyUserApiRequestCancelParams = string
+    type UserApiRequestCancelParams = LegacyUserApiRequestCancelParams | SourceUserApiRequestCancelParams
+    interface UserApiRuntimeIdentity {
+      apiId: string
+      generation: number
+    }
+    interface UserApiRuntimeLeaseParams {
+      apiIds: string[]
+      leaseId: string
+    }
+    type UserApiGetStatusParams = string
+    type UserApiEnsureParams = string
+    type UserApiRequestResult<T = any> =
+      | { ok: true, value: T }
+      | { ok: false, error: LX.Playback.SourceFailureData }
+    type UserApiEnsureResult =
+      | { ok: true, value: UserApiStatus }
+      | { ok: false, error: LX.Playback.SourceFailureData }
+
+    interface UserApiRuntimeEnvelope<T> {
+      identity: UserApiRuntimeIdentity
+      status: boolean
+      message?: string
+      data: T
+    }
+    type UserApiRuntimeInitEnvelope = UserApiRuntimeEnvelope<{
+      sources: UserApiSources
+    }>
+    type UserApiRuntimeResponseEnvelope<T = any> = UserApiRuntimeEnvelope<{
+      requestId: string
+      result?: T
+    }>
+    type UserApiRuntimeUpdateAlertEnvelope = UserApiRuntimeEnvelope<{
+      log: string
+      updateUrl?: string
+    }>
+    type UserApiRuntimeControlEnvelope = UserApiRuntimeEnvelope<undefined>
     type UserApiSetApiParams = string
 
     interface UserApiSetAllowUpdateAlertParams {

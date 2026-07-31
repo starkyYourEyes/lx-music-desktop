@@ -1,26 +1,16 @@
 import { mainSend } from '@common/mainIpc'
 import { log } from '@common/utils'
-import { BrowserWindow, session } from 'electron'
-import fs from 'fs'
-import path from 'node:path'
 import { openDevTools as handleOpenDevTools } from '@main/utils'
 import USER_API_RENDERER_EVENT_NAME from './rendererEvent/name'
-import { getScript } from './utils'
-import { PROJECT_IDENTITY } from '@common/projectIdentity'
+import {
+  createRuntimeWindow,
+  disposeRuntimeWindow,
+  initializeRuntimeWindow,
+  type UserApiRuntimeWindow,
+} from './runtimeWindow'
 
-let browserWindow: Electron.BrowserWindow | null = null
-
-let html: string | null = null
-let dir: string | null = null
-
-const denyEvents = [
-  'will-navigate',
-  'will-redirect',
-  'will-attach-webview',
-  'will-prevent-unload',
-  'media-started-playing',
-] as const
-
+let activeRuntime: UserApiRuntimeWindow | null = null
+let runtimeGeneration = 0
 
 export const getProxy = () => {
   if (global.lx.appSetting['network.proxy.enable'] && global.lx.appSetting['network.proxy.host']) {
@@ -30,150 +20,80 @@ export const getProxy = () => {
     }
   }
   const envProxy = envParams.cmdParams['proxy-server']
-  if (envProxy) {
-    if (envProxy && typeof envProxy == 'string') {
-      const [host, port = ''] = envProxy.split(':')
-      return {
-        host,
-        port,
-      }
-    }
+  if (typeof envProxy == 'string') {
+    const [host, port = ''] = envProxy.split(':')
+    return { host, port }
   }
-  return {
-    host: '',
-    port: '',
-  }
+  return { host: '', port: '' }
 }
+
+export const sendRuntimeEvent = <T>(
+  runtime: UserApiRuntimeWindow,
+  name: string,
+  payload?: T,
+) => {
+  if (runtime.window.isDestroyed()) return false
+  mainSend(runtime.window, name, payload)
+  return true
+}
+
 const handleUpdateProxy = (keys: Array<keyof LX.AppSetting>) => {
-  if (keys.includes('network.proxy.enable') || (global.lx.appSetting['network.proxy.enable'] && keys.some(k => k.startsWith('network.proxy.')))) {
+  if (keys.includes('network.proxy.enable') || (global.lx.appSetting['network.proxy.enable'] && keys.some(key => key.startsWith('network.proxy.')))) {
     sendEvent(USER_API_RENDERER_EVENT_NAME.proxyUpdate, getProxy())
   }
 }
 
-const winEvent = () => {
-  if (!browserWindow) return
-  const window = browserWindow
-  window.on('closed', () => {
-    if (browserWindow === window) {
-      global.lx.event_app.off('updated_config', handleUpdateProxy)
-      browserWindow = null
-    }
-  })
+const releaseActiveRuntime = (identity: LX.UserApi.UserApiRuntimeIdentity) => {
+  if (!activeRuntime || activeRuntime.identity.apiId != identity.apiId || activeRuntime.identity.generation != identity.generation) return
+  global.lx.event_app.off('updated_config', handleUpdateProxy)
+  activeRuntime = null
 }
 
-export const createWindow = async(userApi: LX.UserApi.UserApiInfo) => {
+export const createWindow = async(apiInfo: LX.UserApi.UserApiInfo) => {
   await closeWindow()
-  dir ??= process.env.NODE_ENV !== 'production' ? webpackUserApiPath : path.join(__dirname, 'userApi')
-
-  if (!html) {
-    // eslint-disable-next-line require-atomic-updates
-    html = await fs.promises.readFile(path.join(dir, 'renderer/user-api.html'), 'utf8')
-  }
-  const preloadUrl = process.env.NODE_ENV !== 'production'
-    ? `${path.join(__dirname, '../dist/user-api-preload.js')}`
-    : `${path.join(__dirname, 'user-api-preload.js')}`
-  // console.log(preloadUrl)
-
-  /**
-   * Initial window options
-   */
-  const userApiSession = session.fromPartition(PROJECT_IDENTITY.userApiPartition)
-  browserWindow = new BrowserWindow({
-    // enableRemoteModule: false,
-    resizable: false,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    roundedCorners: false,
-    hasShadow: false,
-    show: false,
-    webPreferences: {
-      session: userApiSession,
-      contextIsolation: true,
-      // worldSafeExecuteJavaScript: true,
-      nodeIntegration: false,
-      nodeIntegrationInWorker: false,
-      sandbox: false,
-
-      spellcheck: false,
-      autoplayPolicy: 'document-user-activation-required',
-      enableWebSQL: false,
-      disableDialogs: true,
-      // nativeWindowOpen: false,
-      webgl: false,
-      images: false,
-
-      preload: preloadUrl,
+  const runtime = await createRuntimeWindow({
+    apiInfo,
+    generation: ++runtimeGeneration,
+    hooks: {
+      onClosed: releaseActiveRuntime,
+      onRenderProcessGone: (identity, details) => {
+        log.error(`user API runtime process exited: ${identity.apiId}`, details)
+      },
     },
   })
-
-  for (const eventName of denyEvents) {
-    // @ts-expect-error
-    browserWindow.webContents.on(eventName, (event: Electron.Event) => {
-      event.preventDefault()
-    })
-  }
-  userApiSession.setPermissionRequestHandler((_webContents, _permission, resolve) => {
-    resolve(false)
-  })
-  browserWindow.webContents.setWindowOpenHandler(() => {
-    return { action: 'deny' }
-  })
-
-  winEvent()
-
-  // console.log(html.replace('</body>', `<script>${userApi.script}</script></body>`))
-  // const randomNum = Math.random().toString().substring(2, 10)
-  await browserWindow.loadURL('data:text/html;charset=UTF-8,' + encodeURIComponent(html))
-
-  browserWindow.on('ready-to-show', async() => {
-    global.lx.event_app.on('updated_config', handleUpdateProxy)
-    sendEvent(USER_API_RENDERER_EVENT_NAME.initEnv, { ...userApi, script: await getScript(userApi.id), proxy: getProxy() })
-  })
-
-  // global.modules.userApiWindow.loadFile(join(dir, 'renderer/user-api.html'))
-  // global.modules.userApiWindow.webContents.openDevTools()
+  activeRuntime = runtime
+  global.lx.event_app.on('updated_config', handleUpdateProxy)
+  await initializeRuntimeWindow(runtime, apiInfo)
 }
 
 export const closeWindow = async() => {
-  if (!browserWindow) return
-
-  const closingWindow = browserWindow
-  const userApiSession = closingWindow.webContents.session
-  closingWindow.destroy()
-  browserWindow = null
-  global.lx.event_app.off('updated_config', handleUpdateProxy)
-
-  const cleanupTasks = [
-    {
-      name: 'auth cache',
-      run: async() => userApiSession.clearAuthCache(),
-    },
-    {
-      name: 'storage data',
-      run: async() => userApiSession.clearStorageData(),
-    },
-    {
-      name: 'cache',
-      run: async() => userApiSession.clearCache(),
-    },
-  ]
-  const results = await Promise.allSettled(
-    cleanupTasks.map(async({ run }) => run()),
-  )
-  for (const [index, result] of results.entries()) {
-    if (result.status == 'rejected') {
-      log.error(`clear user API ${cleanupTasks[index].name} error:`, result.reason)
-    }
-  }
+  const runtime = activeRuntime
+  if (!runtime) return
+  await disposeRuntimeWindow(runtime, { clearSession: true })
+  releaseActiveRuntime(runtime.identity)
 }
 
-export const sendEvent = <T = any>(name: string, params?: T) => {
-  if (!browserWindow) return
-  mainSend(browserWindow, name, params)
+export const sendEvent = <T>(name: string, params?: T) => {
+  if (!activeRuntime) return false
+  return sendRuntimeEvent(activeRuntime, name, params)
 }
 
-export const openDevTools = () => {
-  if (!browserWindow) return
-  handleOpenDevTools(browserWindow.webContents)
+export const openDevTools = (runtime = activeRuntime) => {
+  if (!runtime) return
+  if (runtime.window.isDestroyed()) return
+  handleOpenDevTools(runtime.window.webContents)
 }
+
+export {
+  clearRuntimeSession,
+  createRuntimeWindow,
+  disposeRuntimeWindow,
+  getRuntimePartition,
+  initializeRuntimeWindow,
+} from './runtimeWindow'
+export type {
+  CreateUserApiRuntimeWindowOptions,
+  UserApiRuntimeWindow,
+  UserApiRuntimeWindowDependencies,
+  UserApiRuntimeWindowHooks,
+} from './runtimeWindow'

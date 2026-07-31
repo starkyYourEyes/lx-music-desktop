@@ -16,6 +16,7 @@ import {
   replaceOrdinarySettings,
   type SettingsDocumentV1,
 } from '@main/storage/settings/document'
+import { normalizePlaybackSourceSetting } from '@common/utils/playbackSourceSetting'
 
 export const parseEnvParams = (argv = process.argv): { cmdParams: LX.CmdParams, deeplink: string | null } => {
   const cmdParams: LX.CmdParams = {}
@@ -146,6 +147,19 @@ export const mergeSetting = (originSetting: LX.AppSetting, targetSetting?: Parti
   }
 }
 
+const normalizePlaybackSettingResult = (result: ReturnType<typeof mergeSetting>) => {
+  const normalized = normalizePlaybackSourceSetting(result.setting)
+  for (const [key, value] of Object.entries(normalized) as Array<
+  [keyof typeof normalized, (typeof normalized)[keyof typeof normalized]]
+  >) {
+    if (checkSameSettingValue(value, result.setting[key])) continue
+    result.setting[key] = value as never
+    result.updatedSetting[key] = value as never
+    if (!result.updatedSettingKeys.includes(key)) result.updatedSettingKeys.push(key)
+  }
+  return result
+}
+
 const applyInitSetting = (setting: LX.AppSetting) => {
   if (global.envParams.cmdParams.hidden && !setting['tray.enable']) {
     setting['tray.enable'] = true
@@ -203,7 +217,7 @@ const updateSettingWithStore = (
     }
   }
 
-  const result = mergeSetting(originSetting, setting)
+  const result = normalizePlaybackSettingResult(mergeSetting(originSetting, setting))
 
   result.setting.version = defaultSetting.version
 

@@ -545,3 +545,14 @@ export const importLegacyPlaybackActivity = (value: unknown): LegacyPlaybackActi
 
 export const getPlaybackActivityMigrationMarker = (): MigrationMarker | null =>
   getMigrationMarker(getDB(), ACTIVITY_MARKER_NAME)
+
+export {
+  playbackCommit,
+  playbackGetListeningStats,
+  playbackGetRecent,
+  playbackGetResume,
+  playbackMarkStaleSessionsInterrupted,
+  playbackRecordPreplayFailure,
+  playbackStart,
+  playbackUpdateResume,
+} from './repository'

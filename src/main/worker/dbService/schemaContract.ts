@@ -3,6 +3,7 @@ export interface SchemaColumnContract {
   type: string
   notNull: boolean
   primaryKeyPosition: number
+  defaultValue?: string | null
 }
 
 export interface SchemaIndexContract {
@@ -10,6 +11,19 @@ export interface SchemaIndexContract {
   columns: string[]
   unique: boolean
   partial: boolean
+  where?: string
+}
+
+export interface SchemaCheckContract {
+  name: string
+  expression: string
+}
+
+export type SchemaValue = string | number | null
+
+export interface SchemaRequiredRowContract {
+  name: string
+  values: Record<string, SchemaValue>
 }
 
 export interface SchemaForeignKeyContract {
@@ -26,6 +40,8 @@ export interface SchemaTableContract {
   columns: SchemaColumnContract[]
   indexes: SchemaIndexContract[]
   foreignKeys: SchemaForeignKeyContract[]
+  checks?: SchemaCheckContract[]
+  requiredRows?: SchemaRequiredRowContract[]
 }
 
 export interface SchemaContract {
@@ -37,7 +53,20 @@ const column = (
   type: string,
   notNull = false,
   primaryKeyPosition = 0,
-): SchemaColumnContract => ({ name, type, notNull, primaryKeyPosition })
+  defaultValue?: string | null,
+): SchemaColumnContract => ({ name, type, notNull, primaryKeyPosition, defaultValue })
+
+const MAX_SAFE_INTEGER = 9007199254740991
+
+const safeInteger = (name: string, minimum = 0, maximum = MAX_SAFE_INTEGER): SchemaCheckContract => ({
+  name: `${name}.integer`,
+  expression: `typeof(${name}) = 'integer' AND ${name} BETWEEN ${minimum} AND ${maximum}`,
+})
+
+const nullableSafeInteger = (name: string, minimum = 0, maximum = MAX_SAFE_INTEGER): SchemaCheckContract => ({
+  name: `${name}.integer`,
+  expression: `${name} IS NULL OR (typeof(${name}) = 'integer' AND ${name} BETWEEN ${minimum} AND ${maximum})`,
+})
 
 export const databaseSchemaContract: SchemaContract = {
   tables: [
@@ -226,6 +255,15 @@ export const databaseSchemaContract: SchemaContract = {
         partial: false,
       }],
       foreignKeys: [],
+      checks: [
+        safeInteger('track_id', -MAX_SAFE_INTEGER),
+        nullableSafeInteger('duration_ms'),
+        {
+          name: 'playable_payload_json.valid',
+          expression: 'playable_payload_json IS NULL OR json_valid(playable_payload_json)',
+        },
+        safeInteger('updated_at_ms'),
+      ],
     },
     {
       name: 'playback_sessions',
@@ -246,11 +284,11 @@ export const databaseSchemaContract: SchemaContract = {
         column('start_position_ms', 'INTEGER', true),
         column('last_position_ms', 'INTEGER', true),
         column('duration_ms', 'INTEGER'),
-        column('played_ms', 'INTEGER', true),
-        column('active_ms', 'INTEGER', true),
-        column('cumulative_played_ms', 'INTEGER', true),
-        column('cumulative_active_ms', 'INTEGER', true),
-        column('checkpoint_seq', 'INTEGER', true),
+        column('played_ms', 'INTEGER', true, 0, '0'),
+        column('active_ms', 'INTEGER', true, 0, '0'),
+        column('cumulative_played_ms', 'INTEGER', true, 0, '0'),
+        column('cumulative_active_ms', 'INTEGER', true, 0, '0'),
+        column('checkpoint_seq', 'INTEGER', true, 0, '0'),
         column('state', 'TEXT', true),
         column('recent_allowed', 'INTEGER', true),
         column('stats_allowed', 'INTEGER', true),
@@ -264,7 +302,13 @@ export const databaseSchemaContract: SchemaContract = {
           unique: true,
           partial: false,
         },
-        { name: 'playback_one_open_group', columns: ['playback_group_uuid'], unique: true, partial: true },
+        {
+          name: 'playback_one_open_group',
+          columns: ['playback_group_uuid'],
+          unique: true,
+          partial: true,
+          where: "state IN ('playing','paused')",
+        },
         { name: 'playback_retention', columns: ['state', 'ended_at_ms', 'session_id'], unique: false, partial: false },
       ],
       foreignKeys: [{
@@ -275,6 +319,59 @@ export const databaseSchemaContract: SchemaContract = {
         onUpdate: 'NO ACTION',
         onDelete: 'NO ACTION',
       }],
+      checks: [
+        safeInteger('session_id', -MAX_SAFE_INTEGER),
+        safeInteger('segment_no'),
+        safeInteger('track_id', -MAX_SAFE_INTEGER),
+        { name: 'local_day.length', expression: 'length(local_day) = 10' },
+        safeInteger('utc_offset_minutes', -840, 840),
+        {
+          name: 'start_reason.enum',
+          expression: `start_reason IN (
+            'select','next','previous','auto','restore','remote','day_boundary','statistics_clear'
+          )`,
+        },
+        {
+          name: 'end_reason.enum',
+          expression: `end_reason IS NULL OR end_reason IN (
+            'next','previous','select','dislike','stop','error','load_timeout','buffer_timeout',
+            'queue_removed','natural_end','day_boundary','statistics_clear'
+          )`,
+        },
+        safeInteger('started_at_ms'),
+        {
+          name: 'ended_at_ms.integer',
+          expression: `ended_at_ms IS NULL OR (
+            typeof(ended_at_ms) = 'integer' AND ended_at_ms BETWEEN started_at_ms AND ${MAX_SAFE_INTEGER}
+          )`,
+        },
+        safeInteger('start_position_ms'),
+        safeInteger('last_position_ms'),
+        nullableSafeInteger('duration_ms'),
+        safeInteger('played_ms'),
+        safeInteger('active_ms'),
+        safeInteger('cumulative_played_ms'),
+        safeInteger('cumulative_active_ms'),
+        safeInteger('checkpoint_seq'),
+        { name: 'state.enum', expression: "state IN ('playing','paused','closed','interrupted')" },
+        {
+          name: 'recent_allowed.boolean',
+          expression: "typeof(recent_allowed) = 'integer' AND recent_allowed IN (0,1)",
+        },
+        {
+          name: 'stats_allowed.boolean',
+          expression: "typeof(stats_allowed) = 'integer' AND stats_allowed IN (0,1)",
+        },
+        safeInteger('created_at_ms'),
+        { name: 'cumulative_played_ms.total', expression: 'cumulative_played_ms >= played_ms' },
+        { name: 'cumulative_active_ms.total', expression: 'cumulative_active_ms >= active_ms' },
+        {
+          name: 'state.terminal',
+          expression: `(state IN ('playing','paused') AND ended_at_ms IS NULL AND end_reason IS NULL)
+            OR (state = 'closed' AND ended_at_ms IS NOT NULL AND end_reason IS NOT NULL)
+            OR (state = 'interrupted' AND ended_at_ms IS NOT NULL AND end_reason IS NULL)`,
+        },
+      ],
     },
     {
       name: 'playback_events',
@@ -302,6 +399,35 @@ export const databaseSchemaContract: SchemaContract = {
         onUpdate: 'NO ACTION',
         onDelete: 'CASCADE',
       }],
+      checks: [
+        safeInteger('event_id', -MAX_SAFE_INTEGER),
+        safeInteger('session_id', -MAX_SAFE_INTEGER),
+        safeInteger('sequence_no'),
+        {
+          name: 'event_type.enum',
+          expression: "event_type IN ('play_start','pause','resume','seek','skip','play_end','error')",
+        },
+        safeInteger('occurred_at_ms'),
+        safeInteger('position_ms'),
+        { name: 'details_json.valid', expression: 'details_json IS NULL OR json_valid(details_json)' },
+        {
+          name: 'reason.matrix',
+          expression: `(event_type = 'error' AND reason IS NULL)
+            OR (reason IS NOT NULL AND (
+              (event_type = 'play_start' AND reason IN (
+                'select','next','previous','auto','restore','remote','day_boundary','statistics_clear'
+              ))
+              OR (event_type IN ('pause','resume') AND reason IN ('user','device','remote','recovery'))
+              OR (event_type = 'seek' AND reason IN (
+                'bar','hotkey','media_session','lyric','party','restore','buffer_recovery'
+              ))
+              OR (event_type = 'skip' AND reason IN (
+                'next','previous','select','dislike','stop','error','load_timeout','buffer_timeout','queue_removed'
+              ))
+              OR (event_type = 'play_end' AND reason = 'natural_end')
+            ))`,
+        },
+      ],
     },
     {
       name: 'recent_tracks',
@@ -335,28 +461,44 @@ export const databaseSchemaContract: SchemaContract = {
           onDelete: 'SET NULL',
         },
       ],
+      checks: [
+        safeInteger('track_id', -MAX_SAFE_INTEGER),
+        safeInteger('recency_seq'),
+        nullableSafeInteger('last_session_id', -MAX_SAFE_INTEGER),
+        nullableSafeInteger('last_played_at_ms'),
+        nullableSafeInteger('legacy_rank', 1, 520),
+        safeInteger('updated_at_ms'),
+      ],
     },
     {
       name: 'listening_daily',
       columns: [
         column('local_day', 'TEXT', false, 1),
-        column('baseline_played_ms', 'INTEGER', true),
-        column('live_played_ms', 'INTEGER', true),
-        column('baseline_active_ms', 'INTEGER', true),
-        column('live_active_ms', 'INTEGER', true),
+        column('baseline_played_ms', 'INTEGER', true, 0, '0'),
+        column('live_played_ms', 'INTEGER', true, 0, '0'),
+        column('baseline_active_ms', 'INTEGER', true, 0, '0'),
+        column('live_active_ms', 'INTEGER', true, 0, '0'),
         column('updated_at_ms', 'INTEGER', true),
       ],
       indexes: [{ name: 'listening_daily.local_day.primary', columns: ['local_day'], unique: true, partial: false }],
       foreignKeys: [],
+      checks: [
+        { name: 'local_day.length', expression: 'length(local_day) = 10' },
+        safeInteger('baseline_played_ms'),
+        safeInteger('live_played_ms'),
+        safeInteger('baseline_active_ms'),
+        safeInteger('live_active_ms'),
+        safeInteger('updated_at_ms'),
+      ],
     },
     {
       name: 'listening_tracks',
       columns: [
         column('track_id', 'INTEGER', false, 1),
-        column('baseline_played_ms', 'INTEGER', true),
-        column('live_played_ms', 'INTEGER', true),
-        column('baseline_active_ms', 'INTEGER', true),
-        column('live_active_ms', 'INTEGER', true),
+        column('baseline_played_ms', 'INTEGER', true, 0, '0'),
+        column('live_played_ms', 'INTEGER', true, 0, '0'),
+        column('baseline_active_ms', 'INTEGER', true, 0, '0'),
+        column('live_active_ms', 'INTEGER', true, 0, '0'),
         column('last_played_at_ms', 'INTEGER'),
         column('updated_at_ms', 'INTEGER', true),
       ],
@@ -369,19 +511,40 @@ export const databaseSchemaContract: SchemaContract = {
         onUpdate: 'NO ACTION',
         onDelete: 'CASCADE',
       }],
+      checks: [
+        safeInteger('track_id', -MAX_SAFE_INTEGER),
+        safeInteger('baseline_played_ms'),
+        safeInteger('live_played_ms'),
+        safeInteger('baseline_active_ms'),
+        safeInteger('live_active_ms'),
+        nullableSafeInteger('last_played_at_ms'),
+        safeInteger('updated_at_ms'),
+      ],
     },
     {
       name: 'activity_totals',
       columns: [
         column('id', 'INTEGER', false, 1),
-        column('baseline_played_ms', 'INTEGER', true),
-        column('live_played_ms', 'INTEGER', true),
-        column('baseline_active_ms', 'INTEGER', true),
-        column('live_active_ms', 'INTEGER', true),
+        column('baseline_played_ms', 'INTEGER', true, 0, '0'),
+        column('live_played_ms', 'INTEGER', true, 0, '0'),
+        column('baseline_active_ms', 'INTEGER', true, 0, '0'),
+        column('live_active_ms', 'INTEGER', true, 0, '0'),
         column('updated_at_ms', 'INTEGER', true),
       ],
       indexes: [],
       foreignKeys: [],
+      checks: [
+        { name: 'id.singleton', expression: 'id = 1' },
+        safeInteger('baseline_played_ms'),
+        safeInteger('live_played_ms'),
+        safeInteger('baseline_active_ms'),
+        safeInteger('live_active_ms'),
+        safeInteger('updated_at_ms'),
+      ],
+      requiredRows: [{
+        name: 'singleton',
+        values: { id: 1 },
+      }],
     },
     {
       name: 'projection_state',
@@ -401,6 +564,23 @@ export const databaseSchemaContract: SchemaContract = {
         onUpdate: 'NO ACTION',
         onDelete: 'SET NULL',
       }],
+      checks: [
+        { name: 'name.enum', expression: "name IN ('recent','statistics')" },
+        safeInteger('version', 1),
+        nullableSafeInteger('last_session_id', -MAX_SAFE_INTEGER),
+        nullableSafeInteger('visible_after_ms'),
+        safeInteger('updated_at_ms'),
+      ],
+      requiredRows: [
+        {
+          name: 'recent',
+          values: { name: 'recent' },
+        },
+        {
+          name: 'statistics',
+          values: { name: 'statistics' },
+        },
+      ],
     },
     {
       name: 'playback_resume_state',
@@ -418,6 +598,14 @@ export const databaseSchemaContract: SchemaContract = {
       ],
       indexes: [],
       foreignKeys: [],
+      checks: [
+        { name: 'id.singleton', expression: 'id = 1' },
+        safeInteger('checkpoint_seq'),
+        nullableSafeInteger('index_hint', 0, 1000000),
+        safeInteger('position_ms'),
+        nullableSafeInteger('duration_ms'),
+        safeInteger('updated_at_ms'),
+      ],
     },
   ],
 }

@@ -29,6 +29,7 @@ const PLAYBACK_TABLES = [
   'recent_tracks',
   'track_snapshots',
 ]
+const MAX_SAFE_INTEGER = 9007199254740991
 
 const EXPECTED_COLUMNS = {
   track_snapshots: [
@@ -353,6 +354,116 @@ describe('playback activity schema migration', () => {
     assert.deepEqual(verifyDatabase(db, { runQuickCheck: true, runForeignKeyCheck: true }), { ok: true, diagnostics: [] })
   })
 
+  it('rejects a playback open-group index with the wrong partial predicate', () => {
+    const { db } = bootstrap()
+    db.exec(`
+      DROP INDEX playback_one_open_group;
+      CREATE UNIQUE INDEX playback_one_open_group
+      ON playback_sessions(playback_group_uuid)
+      WHERE state = 'playing';
+    `)
+
+    assert.deepEqual(verifyDatabase(db, { runQuickCheck: false, runForeignKeyCheck: false }), {
+      ok: false,
+      reason: 'schema_invalid',
+      diagnostics: ['schema.index_where:playback_sessions.playback_one_open_group'],
+    })
+  })
+
+  it('preserves quoted literal case when verifying partial predicates', () => {
+    const { db } = bootstrap()
+    db.exec(`
+      DROP INDEX playback_one_open_group;
+      CREATE UNIQUE INDEX playback_one_open_group
+      ON playback_sessions(playback_group_uuid)
+      WHERE state IN ('PLAYING','paused');
+    `)
+
+    assert.deepEqual(verifyDatabase(db, { runQuickCheck: false, runForeignKeyCheck: false }), {
+      ok: false,
+      reason: 'schema_invalid',
+      diagnostics: ['schema.index_where:playback_sessions.playback_one_open_group'],
+    })
+  })
+
+  it('rejects a playback table missing a critical integer check', () => {
+    const { db } = bootstrap()
+    db.exec(`
+      DROP TABLE playback_resume_state;
+      CREATE TABLE playback_resume_state (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        playback_group_uuid TEXT NOT NULL,
+        checkpoint_seq INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        source_track_id TEXT NOT NULL,
+        list_id TEXT,
+        index_hint INTEGER CHECK(index_hint IS NULL OR (
+          typeof(index_hint) = 'integer' AND index_hint BETWEEN 0 AND 1000000
+        )),
+        position_ms INTEGER NOT NULL CHECK(
+          typeof(position_ms) = 'integer' AND position_ms BETWEEN 0 AND 9007199254740991
+        ),
+        duration_ms INTEGER CHECK(duration_ms IS NULL OR (
+          typeof(duration_ms) = 'integer' AND duration_ms BETWEEN 0 AND 9007199254740991
+        )),
+        updated_at_ms INTEGER NOT NULL CHECK(
+          typeof(updated_at_ms) = 'integer' AND updated_at_ms BETWEEN 0 AND 9007199254740991
+        )
+      );
+    `)
+
+    assert.deepEqual(verifyDatabase(db, { runQuickCheck: false, runForeignKeyCheck: false }), {
+      ok: false,
+      reason: 'schema_invalid',
+      diagnostics: ['schema.check_missing:playback_resume_state.checkpoint_seq.integer'],
+    })
+  })
+
+  it('rejects a playback column missing its canonical default', () => {
+    const { db } = bootstrap()
+    db.exec(`
+      DROP TABLE activity_totals;
+      CREATE TABLE activity_totals (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        baseline_played_ms INTEGER NOT NULL DEFAULT 0 CHECK(
+          typeof(baseline_played_ms) = 'integer' AND baseline_played_ms BETWEEN 0 AND 9007199254740991
+        ),
+        live_played_ms INTEGER NOT NULL CHECK(
+          typeof(live_played_ms) = 'integer' AND live_played_ms BETWEEN 0 AND 9007199254740991
+        ),
+        baseline_active_ms INTEGER NOT NULL DEFAULT 0 CHECK(
+          typeof(baseline_active_ms) = 'integer' AND baseline_active_ms BETWEEN 0 AND 9007199254740991
+        ),
+        live_active_ms INTEGER NOT NULL DEFAULT 0 CHECK(
+          typeof(live_active_ms) = 'integer' AND live_active_ms BETWEEN 0 AND 9007199254740991
+        ),
+        updated_at_ms INTEGER NOT NULL CHECK(
+          typeof(updated_at_ms) = 'integer' AND updated_at_ms BETWEEN 0 AND 9007199254740991
+        )
+      );
+      INSERT INTO activity_totals(
+        id, baseline_played_ms, live_played_ms, baseline_active_ms, live_active_ms, updated_at_ms
+      ) VALUES(1, 0, 0, 0, 0, 0);
+    `)
+
+    assert.deepEqual(verifyDatabase(db, { runQuickCheck: false, runForeignKeyCheck: false }), {
+      ok: false,
+      reason: 'schema_invalid',
+      diagnostics: ['schema.column_default:activity_totals.live_played_ms'],
+    })
+  })
+
+  it('rejects a playback schema missing a required projection seed', () => {
+    const { db } = bootstrap()
+    db.prepare("DELETE FROM projection_state WHERE name = 'recent'").run()
+
+    assert.deepEqual(verifyDatabase(db, { runQuickCheck: false, runForeignKeyCheck: false }), {
+      ok: false,
+      reason: 'schema_invalid',
+      diagnostics: ['schema.seed_missing:projection_state.recent'],
+    })
+  })
+
   it('enforces one open session per group and unique group segments', () => {
     const { db } = bootstrap()
     const trackId = insertTrack(db)
@@ -414,12 +525,12 @@ describe('playback activity schema migration', () => {
     const trackId = insertTrack(db)
     const sessionId = insertSession(db, trackId)
     const accepted = {
-      play_start: ['select', 'next', 'previous', 'auto', 'restore', 'remote', 'day_boundary', 'statistics_clear', null],
-      pause: ['user', 'device', 'remote', 'recovery', null],
-      resume: ['user', 'device', 'remote', 'recovery', null],
-      seek: ['bar', 'hotkey', 'media_session', 'lyric', 'party', 'restore', 'buffer_recovery', null],
-      skip: ['next', 'previous', 'select', 'dislike', 'stop', 'error', 'load_timeout', 'buffer_timeout', 'queue_removed', null],
-      play_end: ['natural_end', null],
+      play_start: ['select', 'next', 'previous', 'auto', 'restore', 'remote', 'day_boundary', 'statistics_clear'],
+      pause: ['user', 'device', 'remote', 'recovery'],
+      resume: ['user', 'device', 'remote', 'recovery'],
+      seek: ['bar', 'hotkey', 'media_session', 'lyric', 'party', 'restore', 'buffer_recovery'],
+      skip: ['next', 'previous', 'select', 'dislike', 'stop', 'error', 'load_timeout', 'buffer_timeout', 'queue_removed'],
+      play_end: ['natural_end'],
       error: [null],
     }
     let sequenceNo = 0
@@ -437,6 +548,9 @@ describe('playback activity schema migration', () => {
       ['play_end', 'stop'],
       ['error', 'error'],
     ]) assertConstraint(() => insertEvent(db, sessionId, sequenceNo++, eventType, reason))
+    for (const eventType of ['play_start', 'pause', 'resume', 'seek', 'skip', 'play_end']) {
+      assertConstraint(() => insertEvent(db, sessionId, sequenceNo++, eventType, null))
+    }
     assert.throws(() => insertEvent(db, sessionId, 0, 'error', null), /unique/i)
   })
 
@@ -545,6 +659,158 @@ describe('playback activity schema migration', () => {
       id, playback_group_uuid, checkpoint_seq, source, source_track_id,
       position_ms, updated_at_ms
     ) VALUES(1, 'other', 0, 'test', 'other', 0, 0)`).run())
+  })
+
+  it('rejects fractional values from every integer-semantic column category', () => {
+    const { db } = bootstrap()
+    const trackId = insertTrack(db)
+    const sessionId = insertSession(db, trackId, {
+      cumulativePlayedMs: 10,
+      cumulativeActiveMs: 10,
+    })
+    const closedSessionId = insertSession(db, trackId, {
+      state: 'closed',
+      endedAtMs: 2000,
+      endReason: 'stop',
+    })
+    insertEvent(db, sessionId, 0, 'error', null)
+    db.prepare(`
+      INSERT INTO recent_tracks(track_id, recency_seq, last_session_id, updated_at_ms)
+      VALUES(?, 1, ?, 0)
+    `).run(trackId, sessionId)
+    db.prepare("INSERT INTO listening_daily(local_day, updated_at_ms) VALUES('2026-08-01', 0)").run()
+    db.prepare('INSERT INTO listening_tracks(track_id, updated_at_ms) VALUES(?, 0)').run(trackId)
+    db.prepare(`INSERT INTO playback_resume_state(
+      id, playback_group_uuid, checkpoint_seq, source, source_track_id,
+      index_hint, position_ms, duration_ms, updated_at_ms
+    ) VALUES(1, 'group', 0, 'test', 'track', 0, 0, 0, 0)`).run()
+
+    const updates = [
+      ['track_snapshots.track_id', 'UPDATE track_snapshots SET track_id = 1.5 WHERE track_id = ?', [trackId]],
+      ['track_snapshots.duration_ms', 'UPDATE track_snapshots SET duration_ms = 1.5 WHERE track_id = ?', [trackId]],
+      ['track_snapshots.updated_at_ms', 'UPDATE track_snapshots SET updated_at_ms = 1.5 WHERE track_id = ?', [trackId]],
+      ['playback_sessions.session_id', 'UPDATE playback_sessions SET session_id = 1.5 WHERE session_id = ?', [closedSessionId]],
+      ['playback_sessions.segment_no', 'UPDATE playback_sessions SET segment_no = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_sessions.track_id', 'UPDATE playback_sessions SET track_id = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_sessions.utc_offset_minutes', 'UPDATE playback_sessions SET utc_offset_minutes = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_sessions.started_at_ms', 'UPDATE playback_sessions SET started_at_ms = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_sessions.ended_at_ms', 'UPDATE playback_sessions SET ended_at_ms = 1500.5 WHERE session_id = ?', [closedSessionId]],
+      ['playback_sessions.start_position_ms', 'UPDATE playback_sessions SET start_position_ms = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_sessions.last_position_ms', 'UPDATE playback_sessions SET last_position_ms = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_sessions.duration_ms', 'UPDATE playback_sessions SET duration_ms = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_sessions.played_ms', 'UPDATE playback_sessions SET played_ms = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_sessions.active_ms', 'UPDATE playback_sessions SET active_ms = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_sessions.cumulative_played_ms', 'UPDATE playback_sessions SET cumulative_played_ms = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_sessions.cumulative_active_ms', 'UPDATE playback_sessions SET cumulative_active_ms = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_sessions.checkpoint_seq', 'UPDATE playback_sessions SET checkpoint_seq = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_sessions.recent_allowed', 'UPDATE playback_sessions SET recent_allowed = 0.5 WHERE session_id = ?', [sessionId]],
+      ['playback_sessions.stats_allowed', 'UPDATE playback_sessions SET stats_allowed = 0.5 WHERE session_id = ?', [sessionId]],
+      ['playback_sessions.created_at_ms', 'UPDATE playback_sessions SET created_at_ms = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_events.event_id', 'UPDATE playback_events SET event_id = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_events.session_id', 'UPDATE playback_events SET session_id = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_events.sequence_no', 'UPDATE playback_events SET sequence_no = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_events.occurred_at_ms', 'UPDATE playback_events SET occurred_at_ms = 1.5 WHERE session_id = ?', [sessionId]],
+      ['playback_events.position_ms', 'UPDATE playback_events SET position_ms = 1.5 WHERE session_id = ?', [sessionId]],
+      ['recent_tracks.track_id', 'UPDATE recent_tracks SET track_id = 1.5 WHERE track_id = ?', [trackId]],
+      ['recent_tracks.recency_seq', 'UPDATE recent_tracks SET recency_seq = 1.5 WHERE track_id = ?', [trackId]],
+      ['recent_tracks.last_session_id', 'UPDATE recent_tracks SET last_session_id = 1.5 WHERE track_id = ?', [trackId]],
+      ['recent_tracks.last_played_at_ms', 'UPDATE recent_tracks SET last_played_at_ms = 1.5 WHERE track_id = ?', [trackId]],
+      ['recent_tracks.legacy_rank', 'UPDATE recent_tracks SET legacy_rank = 1.5 WHERE track_id = ?', [trackId]],
+      ['recent_tracks.updated_at_ms', 'UPDATE recent_tracks SET updated_at_ms = 1.5 WHERE track_id = ?', [trackId]],
+      ['listening_daily.baseline_played_ms', "UPDATE listening_daily SET baseline_played_ms = 1.5 WHERE local_day = '2026-08-01'", []],
+      ['listening_daily.live_played_ms', "UPDATE listening_daily SET live_played_ms = 1.5 WHERE local_day = '2026-08-01'", []],
+      ['listening_daily.baseline_active_ms', "UPDATE listening_daily SET baseline_active_ms = 1.5 WHERE local_day = '2026-08-01'", []],
+      ['listening_daily.live_active_ms', "UPDATE listening_daily SET live_active_ms = 1.5 WHERE local_day = '2026-08-01'", []],
+      ['listening_daily.updated_at_ms', "UPDATE listening_daily SET updated_at_ms = 1.5 WHERE local_day = '2026-08-01'", []],
+      ['listening_tracks.track_id', 'UPDATE listening_tracks SET track_id = 1.5 WHERE track_id = ?', [trackId]],
+      ['listening_tracks.baseline_played_ms', 'UPDATE listening_tracks SET baseline_played_ms = 1.5 WHERE track_id = ?', [trackId]],
+      ['listening_tracks.live_played_ms', 'UPDATE listening_tracks SET live_played_ms = 1.5 WHERE track_id = ?', [trackId]],
+      ['listening_tracks.baseline_active_ms', 'UPDATE listening_tracks SET baseline_active_ms = 1.5 WHERE track_id = ?', [trackId]],
+      ['listening_tracks.live_active_ms', 'UPDATE listening_tracks SET live_active_ms = 1.5 WHERE track_id = ?', [trackId]],
+      ['listening_tracks.last_played_at_ms', 'UPDATE listening_tracks SET last_played_at_ms = 1.5 WHERE track_id = ?', [trackId]],
+      ['listening_tracks.updated_at_ms', 'UPDATE listening_tracks SET updated_at_ms = 1.5 WHERE track_id = ?', [trackId]],
+      ['activity_totals.id', 'UPDATE activity_totals SET id = 1.5 WHERE id = 1', []],
+      ['activity_totals.baseline_played_ms', 'UPDATE activity_totals SET baseline_played_ms = 1.5 WHERE id = 1', []],
+      ['activity_totals.live_played_ms', 'UPDATE activity_totals SET live_played_ms = 1.5 WHERE id = 1', []],
+      ['activity_totals.baseline_active_ms', 'UPDATE activity_totals SET baseline_active_ms = 1.5 WHERE id = 1', []],
+      ['activity_totals.live_active_ms', 'UPDATE activity_totals SET live_active_ms = 1.5 WHERE id = 1', []],
+      ['activity_totals.updated_at_ms', 'UPDATE activity_totals SET updated_at_ms = 1.5 WHERE id = 1', []],
+      ['projection_state.version', "UPDATE projection_state SET version = 1.5 WHERE name = 'recent'", []],
+      ['projection_state.last_session_id', "UPDATE projection_state SET last_session_id = 1.5 WHERE name = 'recent'", []],
+      ['projection_state.visible_after_ms', "UPDATE projection_state SET visible_after_ms = 1.5 WHERE name = 'recent'", []],
+      ['projection_state.updated_at_ms', "UPDATE projection_state SET updated_at_ms = 1.5 WHERE name = 'recent'", []],
+      ['playback_resume_state.id', 'UPDATE playback_resume_state SET id = 1.5 WHERE id = 1', []],
+      ['playback_resume_state.checkpoint_seq', 'UPDATE playback_resume_state SET checkpoint_seq = 1.5 WHERE id = 1', []],
+      ['playback_resume_state.index_hint', 'UPDATE playback_resume_state SET index_hint = 1.5 WHERE id = 1', []],
+      ['playback_resume_state.position_ms', 'UPDATE playback_resume_state SET position_ms = 1.5 WHERE id = 1', []],
+      ['playback_resume_state.duration_ms', 'UPDATE playback_resume_state SET duration_ms = 1.5 WHERE id = 1', []],
+      ['playback_resume_state.updated_at_ms', 'UPDATE playback_resume_state SET updated_at_ms = 1.5 WHERE id = 1', []],
+    ]
+    for (const [name, sql, params] of updates) {
+      assert.throws(() => db.prepare(sql).run(...params), /constraint|datatype mismatch/i, name)
+    }
+  })
+
+  it('accepts safe integer boundaries and nullable integer fields', () => {
+    const { db } = bootstrap()
+    const trackId = insertTrack(db, { durationMs: null, updatedAtMs: MAX_SAFE_INTEGER })
+    const sessionId = insertSession(db, trackId, {
+      segmentNo: MAX_SAFE_INTEGER,
+      utcOffsetMinutes: -840,
+      startedAtMs: 0,
+      endedAtMs: MAX_SAFE_INTEGER,
+      startPositionMs: MAX_SAFE_INTEGER,
+      lastPositionMs: MAX_SAFE_INTEGER,
+      durationMs: null,
+      playedMs: MAX_SAFE_INTEGER,
+      activeMs: MAX_SAFE_INTEGER,
+      cumulativePlayedMs: MAX_SAFE_INTEGER,
+      cumulativeActiveMs: MAX_SAFE_INTEGER,
+      checkpointSeq: MAX_SAFE_INTEGER,
+      state: 'closed',
+      endReason: 'stop',
+      createdAtMs: MAX_SAFE_INTEGER,
+    })
+    insertEvent(db, sessionId, MAX_SAFE_INTEGER, 'error', null, {
+      occurredAtMs: MAX_SAFE_INTEGER,
+      positionMs: MAX_SAFE_INTEGER,
+    })
+    db.prepare(`
+      INSERT INTO recent_tracks(
+        track_id, recency_seq, last_session_id, last_played_at_ms, legacy_rank, updated_at_ms
+      ) VALUES(?, 0, NULL, NULL, NULL, ?)
+    `).run(trackId, MAX_SAFE_INTEGER)
+    db.prepare(`
+      INSERT INTO listening_daily(
+        local_day, baseline_played_ms, live_played_ms, baseline_active_ms, live_active_ms, updated_at_ms
+      ) VALUES('2026-08-01', 0, ?, 0, ?, ?)
+    `).run(MAX_SAFE_INTEGER, MAX_SAFE_INTEGER, MAX_SAFE_INTEGER)
+    db.prepare(`
+      INSERT INTO listening_tracks(
+        track_id, baseline_played_ms, live_played_ms, baseline_active_ms,
+        live_active_ms, last_played_at_ms, updated_at_ms
+      ) VALUES(?, 0, ?, 0, ?, NULL, ?)
+    `).run(trackId, MAX_SAFE_INTEGER, MAX_SAFE_INTEGER, MAX_SAFE_INTEGER)
+    db.prepare(`
+      UPDATE activity_totals SET baseline_played_ms = 0, live_played_ms = ?,
+        baseline_active_ms = 0, live_active_ms = ?, updated_at_ms = ? WHERE id = 1
+    `).run(MAX_SAFE_INTEGER, MAX_SAFE_INTEGER, MAX_SAFE_INTEGER)
+    db.prepare(`
+      UPDATE projection_state SET version = ?, last_session_id = NULL,
+        visible_after_ms = NULL, updated_at_ms = ? WHERE name = 'recent'
+    `).run(MAX_SAFE_INTEGER, MAX_SAFE_INTEGER)
+    db.prepare(`INSERT INTO playback_resume_state(
+      id, playback_group_uuid, checkpoint_seq, source, source_track_id,
+      index_hint, position_ms, duration_ms, updated_at_ms
+    ) VALUES(1, 'group', ?, 'test', 'track', NULL, ?, NULL, ?)`).run(
+      MAX_SAFE_INTEGER,
+      MAX_SAFE_INTEGER,
+      MAX_SAFE_INTEGER,
+    )
+    db.prepare('UPDATE playback_resume_state SET index_hint = 0 WHERE id = 1').run()
+    db.prepare('UPDATE playback_resume_state SET index_hint = 1000000 WHERE id = 1').run()
+
+    assert.deepEqual(db.pragma('foreign_key_check'), [])
   })
 
   it('applies cascade, set-null, and restrictive foreign key actions', () => {

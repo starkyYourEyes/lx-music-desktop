@@ -22,6 +22,7 @@ interface TableInfoRow {
   name: string
   type: string
   notnull: number
+  dflt_value: string | null
   pk: number
 }
 
@@ -46,16 +47,62 @@ interface ForeignKeyRow {
   on_delete: string
 }
 
+interface SchemaSqlRow {
+  sql: string | null
+}
+
 const quoteIdentifier = (value: string): string => `"${value.replace(/"/g, '""')}"`
 
 const sameColumns = (actual: readonly unknown[], expected: readonly string[]): boolean =>
   actual.length == expected.length && actual.every((value, index) => value == expected[index])
+
+const lowercaseSqlSyntax = (value: string): string => {
+  let result = ''
+  let quoted = false
+  for (let index = 0; index < value.length; index++) {
+    const character = value[index]
+    if (character == "'") {
+      result += character
+      if (quoted && value[index + 1] == "'") {
+        result += value[++index]
+      } else {
+        quoted = !quoted
+      }
+    } else {
+      result += quoted ? character : character.toLowerCase()
+    }
+  }
+  return result
+}
+
+const normalizeSql = (value: string): string => lowercaseSqlSyntax(value)
+  .replace(/\s+/g, ' ')
+  .replace(/\s*(>=|<=|=)\s*/g, '$1')
+  .replace(/\s*([(),])\s*/g, '$1')
+  .trim()
+
+const readSchemaSql = (db: Database.Database, type: 'table' | 'index', name: string): string | null =>
+  (db.prepare<[string, string]>('SELECT sql FROM sqlite_master WHERE type = ? AND name = ?')
+    .get(type, name) as SchemaSqlRow | undefined)?.sql ?? null
+
+const readWhere = (sql: string | null): string | null => {
+  if (sql == null) return null
+  const match = /\bwhere\b([\s\S]*)$/i.exec(sql)
+  return match ? normalizeSql(match[1]) : null
+}
+
+const sameDefault = (actual: string | null, expected: string | null): boolean => {
+  if (actual == null || expected == null) return actual == expected
+  const unwrap = (value: string): string => normalizeSql(value).replace(/^\((.*)\)$/, '$1')
+  return unwrap(actual) == unwrap(expected)
+}
 
 const readIndexes = (db: Database.Database, table: string): Array<{
   name: string
   unique: boolean
   partial: boolean
   columns: Array<string | null>
+  sql: string | null
 }> =>
   (db.pragma(`index_list(${quoteIdentifier(table)})`) as IndexListRow[]).map(index => ({
     name: index.name,
@@ -64,12 +111,13 @@ const readIndexes = (db: Database.Database, table: string): Array<{
     columns: (db.pragma(`index_info(${quoteIdentifier(index.name)})`) as IndexInfoRow[])
       .sort((a, b) => a.seqno - b.seqno)
       .map(columnInfo => columnInfo.name),
+    sql: readSchemaSql(db, 'index', index.name),
   }))
 
-const hasIndex = (
+const matchingIndexes = (
   actual: ReturnType<typeof readIndexes>,
   expected: SchemaIndexContract,
-): boolean => actual.some(index =>
+): ReturnType<typeof readIndexes> => actual.filter(index =>
   index.unique == expected.unique &&
   index.partial == expected.partial &&
   sameColumns(index.columns, expected.columns))
@@ -117,16 +165,40 @@ const verifyStructure = (db: Database.Database, contract: SchemaContract): strin
       if (actual.pk != expected.primaryKeyPosition) {
         diagnostics.push(`schema.column_primary_key:${table.name}.${expected.name}`)
       }
+      if (expected.defaultValue !== undefined && !sameDefault(actual.dflt_value, expected.defaultValue)) {
+        diagnostics.push(`schema.column_default:${table.name}.${expected.name}`)
+      }
     }
     const indexes = readIndexes(db, table.name)
     for (const expected of table.indexes) {
-      if (!hasIndex(indexes, expected)) diagnostics.push(`schema.index_invalid:${table.name}.${expected.name}`)
+      const matching = matchingIndexes(indexes, expected)
+      if (matching.length == 0) {
+        diagnostics.push(`schema.index_invalid:${table.name}.${expected.name}`)
+      } else if (expected.where !== undefined &&
+        !matching.some(index => readWhere(index.sql) == normalizeSql(expected.where!))) {
+        diagnostics.push(`schema.index_where:${table.name}.${expected.name}`)
+      }
     }
     const foreignKeys = readForeignKeys(db, table.name)
     for (const expected of table.foreignKeys) {
       if (!hasForeignKey(foreignKeys, expected)) {
         diagnostics.push(`schema.foreign_key_invalid:${table.name}.${expected.name}`)
       }
+    }
+    const tableSql = readSchemaSql(db, 'table', table.name)
+    const normalizedTableSql = tableSql == null ? '' : normalizeSql(tableSql)
+    for (const expected of table.checks ?? []) {
+      if (!normalizedTableSql.includes(normalizeSql(expected.expression))) {
+        diagnostics.push(`schema.check_missing:${table.name}.${expected.name}`)
+      }
+    }
+    for (const expected of table.requiredRows ?? []) {
+      const values = Object.entries(expected.values)
+      const where = values.map(([name]) => `${quoteIdentifier(name)} IS ?`).join(' AND ')
+      const exists = values.length > 0 && db.prepare(`
+        SELECT 1 FROM ${quoteIdentifier(table.name)} WHERE ${where} LIMIT 1
+      `).get(...values.map(([, value]) => value)) != null
+      if (!exists) diagnostics.push(`schema.seed_missing:${table.name}.${expected.name}`)
     }
   }
   return diagnostics

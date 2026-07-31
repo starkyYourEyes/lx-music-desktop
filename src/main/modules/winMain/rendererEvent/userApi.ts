@@ -1,5 +1,6 @@
 import { WIN_MAIN_RENDERER_EVENT_NAME } from '@common/ipcNames'
-import { mainHandle } from '@common/mainIpc'
+import { mainHandle, mainOn } from '@common/mainIpc'
+import { log } from '@common/utils'
 import {
   getApiList,
   takeReplacementFailureApiList,
@@ -7,11 +8,10 @@ import {
   replaceApisFromGitHub,
   removeApi,
   setApi,
-  getStatus,
-  request,
-  cancelRequest,
   setAllowShowUpdateAlert,
 } from '@main/modules/userApi'
+import { normalizeRuntimeFailure } from '@main/modules/userApi/runtimeError'
+import { getUserApiRuntimePool } from '@main/modules/userApi/runtimePool'
 import { sendEvent } from '@main/modules/winMain/main'
 
 const REPLACE_ERROR_LIMITS = {
@@ -44,6 +44,18 @@ const serializeReplaceError = (err: unknown): LX.UserApi.GitHubReplaceError => {
 }
 
 export default () => {
+  const runtimePool = getUserApiRuntimePool()
+  const registeredOwners = new Set<number>()
+  const registerOwner = (sender: Electron.WebContents) => {
+    if (registeredOwners.has(sender.id)) return
+    registeredOwners.add(sender.id)
+    sender.once('destroyed', () => {
+      registeredOwners.delete(sender.id)
+      void getUserApiRuntimePool().releaseOwner(sender.id).catch(error => {
+        log.error('release user API runtime owner failed', error)
+      })
+    })
+  }
   mainHandle<string, LX.UserApi.ImportUserApi>(WIN_MAIN_RENDERER_EVENT_NAME.import_user_api, async({ params: script }) => {
     return importApi(script)
   })
@@ -76,19 +88,39 @@ export default () => {
     return getApiList()
   })
 
-  mainHandle<LX.UserApi.UserApiStatus>(WIN_MAIN_RENDERER_EVENT_NAME.get_user_api_status, async() => {
-    return getStatus()
+  mainHandle<LX.UserApi.UserApiGetStatusParams, LX.UserApi.UserApiStatus>(WIN_MAIN_RENDERER_EVENT_NAME.get_user_api_status, async({ params: apiId }) => {
+    return runtimePool.getStatus(apiId)
   })
 
   mainHandle<LX.UserApi.UserApiSetAllowUpdateAlertParams>(WIN_MAIN_RENDERER_EVENT_NAME.user_api_set_allow_update_alert, async({ params: { id, enable } }) => {
     await setAllowShowUpdateAlert(id, enable)
   })
 
-  mainHandle<LX.UserApi.UserApiRequestParams>(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api, async({ params }) => {
-    return request(params)
+  mainHandle<LX.UserApi.UserApiRequestParams, LX.UserApi.UserApiRequestResult>(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api, async({ event, params }) => {
+    registerOwner(event.sender)
+    return runtimePool.request(params, event.sender.id)
   })
-  mainHandle<LX.UserApi.UserApiRequestCancelParams>(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api_cancel, async({ params: requestKey }) => {
-    cancelRequest(requestKey)
+  mainHandle<LX.UserApi.UserApiEnsureParams, LX.UserApi.UserApiEnsureResult>(WIN_MAIN_RENDERER_EVENT_NAME.ensure_user_api, async({ params: apiId }) => {
+    try {
+      await runtimePool.ensure(apiId)
+      return { ok: true, value: runtimePool.getStatus(apiId) }
+    } catch (error) {
+      return { ok: false, error: normalizeRuntimeFailure(error, { apiId, kind: 'initialization' }) }
+    }
+  })
+  mainOn<LX.UserApi.UserApiRequestCancelParams>(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api_cancel, ({ event, params }) => {
+    registerOwner(event.sender)
+    runtimePool.cancel(params, event.sender.id)
+  })
+  mainOn<LX.UserApi.UserApiRuntimeLeaseParams>(WIN_MAIN_RENDERER_EVENT_NAME.acquire_user_api_runtime, ({ event, params }) => {
+    registerOwner(event.sender)
+    runtimePool.acquireLease(params, event.sender.id)
+  })
+  mainOn<LX.UserApi.UserApiRuntimeLeaseParams>(WIN_MAIN_RENDERER_EVENT_NAME.release_user_api_runtime, ({ event, params }) => {
+    registerOwner(event.sender)
+    void getUserApiRuntimePool().releaseLease(params, event.sender.id).catch(error => {
+      log.error('release user API runtime lease failed', error)
+    })
   })
 }
 

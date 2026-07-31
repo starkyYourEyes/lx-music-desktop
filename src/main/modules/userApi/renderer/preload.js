@@ -6,8 +6,9 @@ import USER_API_RENDERER_EVENT_NAME from '../rendererEvent/name'
 import { httpOverHttp, httpsOverHttp } from 'tunnel'
 
 
+let runtimeIdentity = null
 const sendMessage = (action, data, status, message) => {
-  ipcRenderer.send(action, { data, status, message })
+  ipcRenderer.send(action, { identity: runtimeIdentity, data, status, message })
 }
 
 let isInitedApi = false
@@ -65,13 +66,15 @@ const verifyLyricInfo = (info) => {
   }
 }
 
-const handleRequest = (context, { requestKey, data }) => {
+const boundedMessage = error => String(error?.message ?? error ?? '').substring(0, 1024)
+
+const handleRequest = (context, { requestId, data }) => {
   // console.log(data)
-  if (!events.request) return sendMessage(USER_API_RENDERER_EVENT_NAME.response, { requestKey }, false, 'Request event is not defined')
+  if (!events.request) return sendMessage(USER_API_RENDERER_EVENT_NAME.response, { requestId }, false, 'Request event is not defined')
   try {
     events.request.call(context, { source: data.source, action: data.action, info: data.info }).then(response => {
       let sendData = {
-        requestKey,
+        requestId,
       }
       switch (data.action) {
         case 'musicUrl':
@@ -103,10 +106,10 @@ const handleRequest = (context, { requestKey, data }) => {
       }
       sendMessage(USER_API_RENDERER_EVENT_NAME.response, sendData, true)
     }).catch(err => {
-      sendMessage(USER_API_RENDERER_EVENT_NAME.response, { requestKey }, false, err.message)
+      sendMessage(USER_API_RENDERER_EVENT_NAME.response, { requestId }, false, boundedMessage(err))
     })
   } catch (err) {
-    sendMessage(USER_API_RENDERER_EVENT_NAME.response, { requestKey }, false, err.message)
+    sendMessage(USER_API_RENDERER_EVENT_NAME.response, { requestId }, false, boundedMessage(err))
   }
 }
 
@@ -127,12 +130,12 @@ const handleRequest = (context, { requestKey, data }) => {
  */
 const handleInit = (context, info) => {
   if (!info) {
-    sendMessage(USER_API_RENDERER_EVENT_NAME.init, null, false, 'Missing required parameter init info')
+    sendMessage(USER_API_RENDERER_EVENT_NAME.init, { sources: {} }, false, 'Missing required parameter init info')
     // sendMessage(USER_API_RENDERER_EVENT_NAME.init, false, null, typeof info.message === 'string' ? info.message.substring(0, 100) : '')
     return
   }
   if (info.openDevTools === true) {
-    sendMessage(USER_API_RENDERER_EVENT_NAME.openDevTools)
+    sendMessage(USER_API_RENDERER_EVENT_NAME.openDevTools, undefined, true)
   }
   // if (!info.status) {
   //   sendMessage(USER_API_RENDERER_EVENT_NAME.init, null, false, 'Missing required parameter init info')
@@ -156,10 +159,10 @@ const handleInit = (context, info) => {
     }
   } catch (error) {
     console.log(error)
-    sendMessage(USER_API_RENDERER_EVENT_NAME.init, null, false, error.message)
+    sendMessage(USER_API_RENDERER_EVENT_NAME.init, { sources: {} }, false, boundedMessage(error))
     return
   }
-  sendMessage(USER_API_RENDERER_EVENT_NAME.init, sourceInfo, true)
+  sendMessage(USER_API_RENDERER_EVENT_NAME.init, { sources: sourceInfo.sources }, true)
 
   ipcRenderer.on(USER_API_RENDERER_EVENT_NAME.request, (event, data) => {
     handleRequest(context, data)
@@ -174,20 +177,20 @@ const handleShowUpdateAlert = (data, resolve, reject) => {
   sendMessage(USER_API_RENDERER_EVENT_NAME.showUpdateAlert, {
     log: data.log,
     updateUrl: data.updateUrl,
-  })
+  }, true)
   resolve()
 }
 
 const onError = (errorMessage) => {
   if (isInitedApi) return
   isInitedApi = true
-  if (errorMessage.length > 1024) errorMessage = errorMessage.substring(0, 1024) + '...'
-  sendMessage(USER_API_RENDERER_EVENT_NAME.init, null, false, errorMessage)
+  sendMessage(USER_API_RENDERER_EVENT_NAME.init, { sources: {} }, false, boundedMessage(errorMessage))
 }
 
-const initEnv = (userApi) => {
-  proxy.host = userApi.proxy.host
-  proxy.port = userApi.proxy.port
+const initEnv = ({ identity, apiInfo: userApi, proxy: nextProxy }) => {
+  runtimeIdentity = identity
+  proxy.host = nextProxy.host
+  proxy.port = nextProxy.port
 
   contextBridge.exposeInMainWorld('lx', {
     EVENT_NAMES,

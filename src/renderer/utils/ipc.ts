@@ -128,14 +128,28 @@ export const onUserApiStatus = (listener: LX.IpcRendererEventListenerParams<LX.U
 export const getUserApiList = async() => {
   return rendererInvoke<LX.UserApi.UserApiInfo[]>(WIN_MAIN_RENDERER_EVENT_NAME.get_user_api_list)
 }
-export const sendUserApiRequest = async({ requestKey, data }: LX.UserApi.UserApiRequestParams): Promise<any> => {
-  return rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api, {
-    requestKey,
-    data,
-  })
+export const sendUserApiRequest = async(
+  params: LX.UserApi.UserApiRequestParams,
+): Promise<LX.UserApi.UserApiRequestResult> => {
+  return rendererInvoke<LX.UserApi.UserApiRequestParams, LX.UserApi.UserApiRequestResult>(
+    WIN_MAIN_RENDERER_EVENT_NAME.request_user_api,
+    params,
+  )
 }
-export const userApiRequestCancel = (requestKey: LX.UserApi.UserApiRequestCancelParams) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api_cancel, requestKey)
+export const userApiRequestCancel = (params: LX.UserApi.UserApiRequestCancelParams) => {
+  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api_cancel, params)
+}
+export const ensureUserApi = async(apiId: string): Promise<LX.UserApi.UserApiEnsureResult> => {
+  return rendererInvoke<LX.UserApi.UserApiEnsureParams, LX.UserApi.UserApiEnsureResult>(
+    WIN_MAIN_RENDERER_EVENT_NAME.ensure_user_api,
+    apiId,
+  )
+}
+export const acquireUserApiRuntime = (params: LX.UserApi.UserApiRuntimeLeaseParams) => {
+  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.acquire_user_api_runtime, params)
+}
+export const releaseUserApiRuntime = (params: LX.UserApi.UserApiRuntimeLeaseParams) => {
+  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.release_user_api_runtime, params)
 }
 
 // export const setDesktopLyricInfo = (type, data, info) => {

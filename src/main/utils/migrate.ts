@@ -88,34 +88,6 @@ const migrateFile = async(name: string, targetName: string) => {
   }
 }
 
-/**
- * 迁移 v2.0.0 之前的 data.json
- * @returns
- */
-export const migrateDataJson = async() => {
-  const path = joinPath(global.lxDataPath, 'data.json')
-  if (await checkPath(path)) return
-  const oldDataFile = await parseDataFile<{
-    searchHistoryList?: string[]
-    playInfo?: any
-    listPrevSelectId?: any
-    listPosition?: any
-    listUpdateInfo?: any
-  }>('data.json')
-  if (!oldDataFile) return
-  const newData: any = {}
-  if (oldDataFile.searchHistoryList) newData.searchHistoryList = oldDataFile.searchHistoryList
-  if (oldDataFile.playInfo) newData.playInfo = oldDataFile.playInfo
-  if (oldDataFile.listPrevSelectId) newData.listPrevSelectId = oldDataFile.listPrevSelectId
-  if (oldDataFile.listPosition) newData.listScrollPosition = oldDataFile.listPosition
-  if (oldDataFile.listUpdateInfo) newData.listUpdateInfo = oldDataFile.listUpdateInfo
-
-  await fs.promises.writeFile(path, JSON.stringify(newData)).catch(err => {
-    log.error(err)
-  })
-}
-
-
 const hotKeyNameMap = {
   mainWindow: APP_EVENT_NAMES.winMainName,
   winLyric: APP_EVENT_NAMES.winLyricName,

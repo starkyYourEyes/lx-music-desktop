@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { canonicalJson, sha256Canonical, type JsonValue } from '../../../common/storage/canonicalJson'
@@ -5,6 +6,7 @@ import { normalizePublicAccountProfile } from '../../../common/storage/accountPr
 import { assertCookieCredential, assertSyncKeyCredential, assertWebDAVCredential, toCredentialEntryId, type CredentialRef } from '../../storage/credentials/types'
 import { createSyncMetadataRecoveryError } from './recoveryError'
 import { preflightVersionedSyncMetadata, type VersionedSyncMetadataKind } from './syncMetadataPreflight'
+import type { LegacyDataSnapshotV1 } from '../legacyData/source'
 
 export interface LegacyCredentialSource {
   markerName: string
@@ -126,6 +128,29 @@ const readJsonDocument = async(trustedRoot: string, filePath: string): Promise<S
   return { path: filePath, value, documentKind: 'generic', trustedRoot, identity: identityOf(stats) }
 }
 
+const selectedLegacyDataSource = new AsyncLocalStorage<LegacyDataSnapshotV1>()
+
+export const withSelectedLegacyDataSource = <T>(
+  snapshot: LegacyDataSnapshotV1,
+  operation: () => T,
+): T => selectedLegacyDataSource.run(snapshot, operation)
+
+const sourceDocumentFromSnapshot = async(snapshot: LegacyDataSnapshotV1): Promise<SourceDocument> => {
+  const trustedRoot = await resolveTrustedDataRoot(path.dirname(snapshot.sourcePath))
+  const sourcePath = path.resolve(snapshot.sourcePath)
+  if (sourcePath != path.join(trustedRoot, 'data.json')) throw new Error('Invalid legacy credential source path')
+  await assertPathWithoutReparsePoints(trustedRoot, sourcePath)
+  const stats = await fs.lstat(sourcePath)
+  if (stats.isSymbolicLink() || !stats.isFile()) throw new Error('Invalid legacy credential source path')
+  return {
+    path: sourcePath,
+    value: structuredClone(snapshot.parsed),
+    documentKind: 'generic',
+    trustedRoot,
+    identity: identityOf(stats),
+  }
+}
+
 const readVersionedSyncDocument = async(
   dataRoot: string,
   filePath: string,
@@ -190,7 +215,7 @@ const accountInventory = (document: SourceDocument, credentials: LegacyCredentia
     if (!isRecord(account)) continue
     if (account.profile != null) {
       const profile = normalizePublicAccountProfile(entry.provider, account.profile)
-      const updatedAtMs = account.updatedAt
+      const updatedAtMs = account.updatedAt ?? 0
       if (typeof updatedAtMs != 'number' || !Number.isSafeInteger(updatedAtMs) || updatedAtMs < 0) {
         throw new Error('Invalid legacy account timestamp')
       }
@@ -285,7 +310,10 @@ export const collectLegacyCredentialInventory = async(dataRoot: string): Promise
       documentIdentity: document.identity,
     }))
 
-  const data = await readJsonDocument(dataRoot, path.join(dataRoot, 'data.json'))
+  const snapshot = selectedLegacyDataSource.getStore()
+  const data = snapshot == null
+    ? await readJsonDocument(dataRoot, path.join(dataRoot, 'data.json'))
+    : await sourceDocumentFromSnapshot(snapshot)
   if (data != null) accountInventory(data, credentials, profiles)
 
   const config = await readJsonDocument(dataRoot, path.join(dataRoot, 'config_v2.json'))

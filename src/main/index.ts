@@ -17,6 +17,7 @@ import { flushStores } from '@main/utils/store'
 import { createRunState } from '@main/startup/runState'
 import { checkCredentialStartup, createStorageCoordinator } from '@main/startup/storageCoordinator'
 import { showStorageRecovery } from '@main/startup/recovery'
+import { readLegacyDataSource } from '@main/migration/legacyData/source'
 
 // 初始化应用
 let isFinishingStorageShutdown = false
@@ -24,6 +25,10 @@ let isFinishingStorageShutdown = false
 const getStorageCoordinator = () => {
   global.lx.storage ??= createStorageCoordinator({
     runState: createRunState({ runtimeRoot: global.lxDataPath }),
+    preflightLegacyData: () => readLegacyDataSource({
+      profileRoot: global.lxDataPath,
+      legacyRoot: global.lxOldDataPath,
+    }),
     initDatabase: previousShutdownWasClean => global.lx.worker.dbService.init({
       dataPath: global.lxDataPath,
       backupDir: path.join(global.lxDataPath, 'backups'),

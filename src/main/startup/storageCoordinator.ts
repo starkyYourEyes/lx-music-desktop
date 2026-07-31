@@ -3,6 +3,7 @@ import type { DatabaseStartupResult } from '../worker/dbService/db'
 import type { AccountRepository } from '../storage/accounts/accountRepository'
 import type { CredentialVault } from '../storage/credentials/credentialVault'
 import { collectLegacyCredentialInventory } from '../migration/credentials/legacySources'
+import type { LegacyDataSourceResult } from '../migration/legacyData/source'
 import type { RunStateStore } from './runState'
 
 export type StorageRecoveryTarget =
@@ -58,9 +59,13 @@ interface ShutdownDiagnostic {
 
 export interface StorageCoordinatorDependencies {
   runState: RunStateStore
+  preflightLegacyData?: () => Promise<LegacyDataSourceResult>
   initDatabase: (previousShutdownWasClean: boolean) => Promise<DatabaseStartupResult>
   closeDatabase: () => Promise<void> | void
-  runMigrationHooks: (result: DatabaseReadyResult) => Promise<RecoveryOutcome | undefined>
+  runMigrationHooks: (
+    result: DatabaseReadyResult,
+    legacyData: LegacyDataSourceResult,
+  ) => Promise<RecoveryOutcome | undefined>
   checkCredentials: () => Promise<CredentialStartupCheck>
   initSettings: () => Promise<void>
   registerModules: () => void
@@ -164,6 +169,18 @@ const databaseRecovery = (
   },
 })
 
+const legacyDataRecovery = (
+  result: Extract<LegacyDataSourceResult, { status: 'recovery' }>,
+): RecoveryOutcome => ({
+  status: 'recovery',
+  reason: result.reason,
+  target: {
+    kind: 'legacy-json',
+    sourcePath: result.sourcePath,
+    candidatePreviousPath: result.candidatePreviousPath,
+  },
+})
+
 const credentialRecovery = (check: CredentialStartupCheck): RecoveryOutcome | undefined => {
   if (check.vaultReadable && check.profileRepositoryReadable && check.activePlaintextSources.length == 0) return
   const diagnostics: string[] = []
@@ -209,6 +226,13 @@ export const createStorageCoordinator = (
         const previousShutdownWasClean = await dependencies.runState.begin()
         runHasStarted = true
         if (shutdownRequested) return startupCancelled()
+        const legacyData = await dependencies.preflightLegacyData?.() ?? { status: 'absent' as const }
+        if (shutdownRequested) return startupCancelled()
+        if (legacyData.status == 'recovery') {
+          const outcome = legacyDataRecovery(legacyData)
+          await dependencies.showRecovery(outcome)
+          return outcome
+        }
         const database = await dependencies.initDatabase(previousShutdownWasClean)
         if (shutdownRequested) return startupCancelled()
         if (database.status == 'recovery') {
@@ -217,7 +241,7 @@ export const createStorageCoordinator = (
           return outcome
         }
 
-        const migrationOutcome = await dependencies.runMigrationHooks(database)
+        const migrationOutcome = await dependencies.runMigrationHooks(database, legacyData)
         if (shutdownRequested) return startupCancelled()
         if (migrationOutcome?.status == 'recovery') {
           await dependencies.showRecovery(migrationOutcome)

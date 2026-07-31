@@ -13,7 +13,12 @@ import { migrateDBData } from './utils/migrate'
 import { initializeCredentialVault } from './storage/credentials'
 import { createAccountRepository } from './storage/accounts/accountRepository'
 import { migrateLegacyCredentials } from './migration/credentials/credentialMigration'
+import { withSelectedLegacyDataSource } from './migration/credentials/legacySources'
 import { isCredentialMigrationRecoveryError } from './migration/credentials/recoveryError'
+import { migrateLegacyNonActivity } from './migration/legacyData/nonActivity'
+import type { LegacyDataSourceResult } from './migration/legacyData/source'
+import { createAtomicJsonFile } from './storage/atomicJsonFile'
+import { parseSettingsDocument, type SettingsDocumentV1 } from './storage/settings/document'
 import { setProxyByHost } from '@common/utils/request'
 import { getWebContentsNavigationDecision } from '@main/utils/webContentsNavigationGuard'
 import { getPortableUserDataPaths, migrateLegacyUserData } from './migration/legacyUserData'
@@ -333,7 +338,10 @@ const credentialVaultReadable = (vault: Awaited<ReturnType<typeof initializeCred
   }
 }
 
-export const runStorageMigrationHooks = async(result: { existed: boolean }): Promise<CredentialRecoveryOutcome | undefined> => {
+export const runStorageMigrationHooks = async(
+  result: { existed: boolean },
+  legacyData: LegacyDataSourceResult = { status: 'absent' },
+): Promise<CredentialRecoveryOutcome | undefined> => {
   if (!result.existed) await migrateDBData()
   let vault: Awaited<ReturnType<typeof initializeCredentialVault>>
   try {
@@ -344,13 +352,16 @@ export const runStorageMigrationHooks = async(result: { existed: boolean }): Pro
     return credentialMigrationRecovery('credentials.vault_unreadable')
   }
   try {
-    global.lx.credentialMigration = await migrateLegacyCredentials({
+    const migrateCredentials = () => migrateLegacyCredentials({
       dataRoot: global.lxDataPath,
       vault,
       profiles: {
         migrateLegacyAccountProfiles: input => global.lx.worker.dbService.migrateLegacyAccountProfiles(input),
       },
     })
+    global.lx.credentialMigration = legacyData.status == 'available'
+      ? await withSelectedLegacyDataSource(legacyData.snapshot, migrateCredentials)
+      : await migrateCredentials()
     if (global.lx.credentialMigration.status == 'secure-storage-unavailable' &&
       global.lx.credentialMigration.volatileEntries == 0) {
       return credentialMigrationRecovery('credentials.memory_only_entries_unavailable')
@@ -373,6 +384,38 @@ export const runStorageMigrationHooks = async(result: { existed: boolean }): Pro
   } catch {
     return credentialMigrationRecovery('credentials.profile_repository_unreadable')
   }
+  if (legacyData.status == 'absent') return undefined
+
+  const settingsPath = path.join(global.lxDataPath, 'config_v2.json')
+  const settingsFile = createAtomicJsonFile<SettingsDocumentV1>({
+    filePath: settingsPath,
+    validate: (value): value is SettingsDocumentV1 => {
+      try {
+        parseSettingsDocument(value)
+        return true
+      } catch {
+        return false
+      }
+    },
+  })
+  const storedSettings = await settingsFile.read()
+  const settingsDocument = storedSettings == null
+    ? parseSettingsDocument({ version: defaultSetting.version, setting: defaultSetting })
+    : parseSettingsDocument(storedSettings)
+  await migrateLegacyNonActivity({
+    source: legacyData.status == 'available' ? legacyData.snapshot : null,
+    settingsPath,
+    settingsDocument,
+    settingsFile,
+    repository: {
+      importLegacyNonActivity: input => global.lx.worker.dbService.importLegacyNonActivity(input),
+      getLocalState: () => global.lx.worker.dbService.getLocalState(),
+      getPlaylistMetadata: () => global.lx.worker.dbService.getPlaylistMetadata(),
+      getSearchHistory: () => global.lx.worker.dbService.getSearchHistory(),
+      getNonActivityMigrationMarker: name => global.lx.worker.dbService.getNonActivityMigrationMarker(name),
+      completeNonActivityMigrationMarker: input => global.lx.worker.dbService.completeNonActivityMigrationMarker(input),
+    },
+  })
   return undefined
 }
 

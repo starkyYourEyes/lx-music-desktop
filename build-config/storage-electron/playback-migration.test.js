@@ -240,6 +240,106 @@ describe('legacy playback activity migration', () => {
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM migration_markers WHERE name = 'legacy_data_v1.cross_artifact_complete'").get().count, 0)
   })
 
+  it('exact-upserts listening-only snapshots without downgrading overlapping recent snapshots', async() => {
+    const recent = onlineTrack('overlap', { name: 'Rich recent', singer: 'Recent singer' })
+    const fixture = await createFixture({
+      recentPlayList: [recent],
+      listeningTimeStats: {
+        totalSeconds: 3,
+        songs: {
+          statsOnly: {
+            id: 'stats-only', source: 'kw', name: 'Declared stats', singer: 'Declared singer', seconds: 1,
+          },
+          overlap: {
+            id: 'overlap', source: 'kw', name: 'Older overlap', singer: 'Older singer', seconds: 2,
+          },
+        },
+      },
+    })
+    const insertSnapshot = fixture.db().prepare(`
+      INSERT INTO track_snapshots(
+        source, source_track_id, name, singer, duration_ms, playable_payload_json, updated_at_ms
+      ) VALUES(?, ?, ?, ?, ?, ?, ?)
+    `)
+    insertSnapshot.run('kw', 'stats-only', 'Stale name', 'Stale singer', 999, '{"stale":true}', 777)
+    insertSnapshot.run('kw', 'overlap', 'Stale overlap', 'Stale singer', 888, '{"stale":true}', 777)
+
+    const result = await fixture.run()
+
+    assert.equal(result.status, 'complete')
+    assert.deepEqual(fixture.db().prepare(`
+      SELECT source_track_id AS sourceTrackId, name, singer, duration_ms AS durationMs,
+        playable_payload_json AS playablePayloadJson, updated_at_ms AS updatedAtMs
+      FROM track_snapshots ORDER BY source_track_id
+    `).all(), [
+      {
+        sourceTrackId: 'overlap',
+        name: 'Rich recent',
+        singer: 'Recent singer',
+        durationMs: null,
+        playablePayloadJson: JSON.stringify({
+          id: 'overlap',
+          interval: null,
+          meta: { _qualitys: {}, albumName: '', qualitys: [], songId: 'overlap' },
+          name: 'Rich recent',
+          singer: 'Recent singer',
+          source: 'kw',
+        }),
+        updatedAtMs: 0,
+      },
+      {
+        sourceTrackId: 'stats-only',
+        name: 'Declared stats',
+        singer: 'Declared singer',
+        durationMs: null,
+        playablePayloadJson: null,
+        updatedAtMs: 0,
+      },
+    ])
+    assert.ok(marker(fixture.db()))
+  })
+
+  it('rolls back before the marker when listening snapshot readback is not exact', async() => {
+    const fixture = await createFixture({
+      listeningTimeStats: {
+        totalSeconds: 1,
+        songs: {
+          statsOnly: {
+            id: 'stats-only', source: 'kw', name: 'Declared stats', singer: 'Declared singer', seconds: 1,
+          },
+        },
+      },
+    })
+    fixture.db().prepare(`
+      INSERT INTO track_snapshots(
+        source, source_track_id, name, singer, duration_ms, playable_payload_json, updated_at_ms
+      ) VALUES('kw', 'stats-only', 'Stale name', 'Stale singer', 999, '{"stale":true}', 777)
+    `).run()
+    fixture.db().exec(`
+      CREATE TRIGGER corrupt_listening_snapshot_after_update
+      AFTER UPDATE OF name, singer, duration_ms, playable_payload_json, updated_at_ms ON track_snapshots
+      WHEN NEW.source = 'kw' AND NEW.source_track_id = 'stats-only'
+      BEGIN
+        UPDATE track_snapshots SET name = 'Tampered after upsert' WHERE track_id = NEW.track_id;
+      END;
+    `)
+
+    await assert.rejects(fixture.run(), /tracks.*readback|readback.*tracks/i)
+
+    assert.equal(marker(fixture.db()), null)
+    assert.equal(count(fixture.db(), 'listening_tracks'), 0)
+    assert.deepEqual(fixture.db().prepare(`
+      SELECT name, singer, duration_ms AS durationMs, playable_payload_json AS playablePayloadJson,
+        updated_at_ms AS updatedAtMs FROM track_snapshots WHERE source = 'kw' AND source_track_id = 'stats-only'
+    `).get(), {
+      name: 'Stale name',
+      singer: 'Stale singer',
+      durationMs: 999,
+      playablePayloadJson: '{"stale":true}',
+      updatedAtMs: 777,
+    })
+  })
+
   it('deduplicates recent identity by first rank and caps the projection at 520', async() => {
     const tracks = Array.from({ length: 523 }, (_, index) => onlineTrack(`track-${index}`))
     tracks.splice(2, 0, tracks[0])
@@ -254,6 +354,63 @@ describe('legacy playback activity migration', () => {
     assert.equal(rows[2].sourceTrackId, 'track-2')
     assert.equal(rows.at(-1).sourceTrackId, 'track-519')
     assert.deepEqual(rows.map(row => row.recencySeq), Array.from({ length: 520 }, (_, index) => -(index + 1)))
+  })
+
+  it('uses collision-free tuple keys and locale-independent canonical activity ordering', async() => {
+    const parsed = () => ({
+      listeningTimeStats: {
+        totalSeconds: 10,
+        songs: {
+          z: { id: 'id', source: 'z', name: 'Z', singer: 'Singer', seconds: 1 },
+          umlaut: { id: 'id', source: '\u00e4', name: 'Umlaut', singer: 'Singer', seconds: 2 },
+          nulLeft: { id: 'c', source: 'a\0b', name: 'Nul left', singer: 'Singer', seconds: 3 },
+          nulRight: { id: 'b\0c', source: 'a', name: 'Nul right', singer: 'Singer', seconds: 4 },
+        },
+      },
+    })
+    const ordinalCompare = (left, right) => left < right ? -1 : left > right ? 1 : 0
+    const runWithLocaleDirection = async direction => {
+      const originalLocaleCompare = String.prototype.localeCompare
+      // eslint-disable-next-line no-extend-native
+      String.prototype.localeCompare = function(other) {
+        return direction * ordinalCompare(String(this), String(other))
+      }
+      try {
+        const fixture = await createFixture(parsed())
+        const result = await fixture.run()
+        return {
+          result,
+          marker: marker(fixture.db()),
+          tuples: fixture.db().prepare(`
+            SELECT source, source_track_id AS sourceTrackId FROM track_snapshots ORDER BY rowid
+          `).all(),
+        }
+      } finally {
+        // eslint-disable-next-line no-extend-native
+        String.prototype.localeCompare = originalLocaleCompare
+        dbService.close()
+      }
+    }
+
+    const ascending = await runWithLocaleDirection(1)
+    const descending = await runWithLocaleDirection(-1)
+
+    assert.equal(ascending.result.status, 'complete')
+    assert.equal(descending.result.status, 'complete')
+    assert.equal(ascending.result.sourceSha256, descending.result.sourceSha256)
+    assert.ok(ascending.marker)
+    assert.ok(descending.marker)
+    assert.equal(ascending.tuples.length, 4)
+    assert.equal(descending.tuples.length, 4)
+    assert.deepEqual(
+      new Set(ascending.tuples.map(row => JSON.stringify([row.source, row.sourceTrackId]))),
+      new Set([
+        JSON.stringify(['z', 'id']),
+        JSON.stringify(['\u00e4', 'id']),
+        JSON.stringify(['a\0b', 'c']),
+        JSON.stringify(['a', 'b\0c']),
+      ]),
+    )
   })
 
   it('imports resume only when list identity, index, and positions validate', async() => {
@@ -304,6 +461,43 @@ describe('legacy playback activity migration', () => {
     }
   })
 
+  it('rejects an unrelated caller activity hash before the worker transaction', async() => {
+    const fixture = await createFixture({})
+    const command = {
+      sourceSha256: 'f'.repeat(64),
+      completedAtMs: 1234,
+      recent: [{
+        legacyRank: 1,
+        track: {
+          source: 'kw',
+          sourceTrackId: 'direct-worker',
+          name: 'Direct worker',
+          singer: 'Singer',
+          durationMs: null,
+          playablePayload: null,
+        },
+      }],
+      listening: {
+        totalPlayedMs: 1000,
+        daily: [],
+        tracks: [],
+        mismatch: { totalVsDailyMs: 1000, totalVsTracksMs: 1000 },
+        baselineActiveTimeKnown: false,
+      },
+      resume: null,
+    }
+
+    assert.throws(
+      () => playbackRepository.importLegacyPlaybackActivity(command),
+      /activity hash|hash mismatch/i,
+    )
+
+    assert.equal(marker(fixture.db()), null)
+    assert.equal(count(fixture.db(), 'recent_tracks'), 0)
+    assert.equal(count(fixture.db(), 'track_snapshots'), 0)
+    assert.equal(fixture.db().prepare('SELECT baseline_played_ms FROM activity_totals WHERE id = 1').get().baseline_played_ms, 0)
+  })
+
   it('quarantines only sorted unknown keys in the persistent encrypted vault', async() => {
     const known = Object.fromEntries(Object.values(DATA_KEYS).map(key => [key, null]))
     const fixture = await createFixture({
@@ -347,7 +541,7 @@ describe('legacy playback activity migration', () => {
     }
   })
 
-  it('reuses only a matching marker whose exact target and quarantine verify', async() => {
+  it('reuses only a matching marker whose attestation and quarantine verify', async() => {
     const fixture = await createFixture({ recentPlayList: [onlineTrack('one')], future: 'UNKNOWN' })
     await fixture.run()
     const before = {
@@ -378,9 +572,14 @@ describe('legacy playback activity migration', () => {
       payload: { future: 'UNKNOWN' },
     })
 
-    fixture.db().prepare('UPDATE activity_totals SET baseline_played_ms = 1 WHERE id = 1').run()
-    await assert.rejects(fixture.run(), /readback|target|verification/i)
-    fixture.db().prepare('UPDATE activity_totals SET baseline_played_ms = 0 WHERE id = 1').run()
+    const validDetails = marker(fixture.db()).detailsJson
+    fixture.db().prepare(`
+      UPDATE migration_markers SET details_json = ? WHERE name = 'legacy_data_v1.playback_activity'
+    `).run('{"version":1,"recentCount":999}')
+    await assert.rejects(fixture.run(), /marker|attestation|verification/i)
+    fixture.db().prepare(`
+      UPDATE migration_markers SET details_json = ? WHERE name = 'legacy_data_v1.playback_activity'
+    `).run(validDetails)
 
     const changed = {
       ...fixture.snapshot,
@@ -388,6 +587,53 @@ describe('legacy playback activity migration', () => {
       fileSha256: sha256({ recentPlayList: [onlineTrack('two')] }),
     }
     await assert.rejects(fixture.run({ source: changed }), /source conflict/i)
+  })
+
+  it('treats the marker as the initial transaction attestation after legal activity evolves', async() => {
+    const first = onlineTrack('one')
+    const second = onlineTrack('two')
+    const fixture = await createFixture({
+      recentPlayList: [first, second],
+      listeningTimeStats: {
+        totalSeconds: 3,
+        daily: { '2026-07-29': 2 },
+        songs: { first: { ...first, seconds: 2 } },
+      },
+      playInfo: { listId: 'list', index: 0, time: 1, maxTime: 5 },
+    })
+    insertPlaylistTrack(fixture.db(), 'list', 0, first)
+    insertPlaylistTrack(fixture.db(), 'list', 1, second)
+    await fixture.run()
+
+    fixture.db().prepare("DELETE FROM recent_tracks WHERE track_id = (SELECT track_id FROM track_snapshots WHERE source = 'kw' AND source_track_id = 'two')").run()
+    fixture.db().prepare('UPDATE recent_tracks SET recency_seq = 42, updated_at_ms = 222').run()
+    fixture.db().prepare('UPDATE listening_daily SET live_played_ms = 11, live_active_ms = 7, updated_at_ms = 333').run()
+    fixture.db().prepare('UPDATE listening_tracks SET live_played_ms = 13, live_active_ms = 5, last_played_at_ms = 444, updated_at_ms = 444').run()
+    fixture.db().prepare('UPDATE activity_totals SET live_played_ms = 17, live_active_ms = 9, updated_at_ms = 555 WHERE id = 1').run()
+    fixture.db().prepare('UPDATE playback_resume_state SET checkpoint_seq = 8, position_ms = 2345, updated_at_ms = 666 WHERE id = 1').run()
+    fixture.db().prepare("DELETE FROM my_list_music_info_order WHERE listId = 'list'").run()
+    fixture.db().prepare('INSERT INTO my_list_music_info_order(listId, musicInfoId, "order") VALUES(?, ?, ?)').run('list', second.id, 0)
+    fixture.db().prepare('INSERT INTO my_list_music_info_order(listId, musicInfoId, "order") VALUES(?, ?, ?)').run('list', first.id, 1)
+
+    const evolved = Object.fromEntries([
+      'recent_tracks',
+      'listening_daily',
+      'listening_tracks',
+      'activity_totals',
+      'playback_resume_state',
+      'my_list_music_info_order',
+    ].map(table => [table, fixture.db().prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]))
+    const markerBefore = marker(fixture.db())
+
+    await fixture.restart()
+    const result = await fixture.run()
+
+    assert.equal(result.status, 'already-complete')
+    assert.equal(result.resumeImported, true)
+    for (const [table, rows] of Object.entries(evolved)) {
+      assert.deepEqual(fixture.db().prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(), rows, table)
+    }
+    assert.deepEqual(marker(fixture.db()), markerBefore)
   })
 
   it('recovers every database and vault failure boundary across a real restart', async() => {

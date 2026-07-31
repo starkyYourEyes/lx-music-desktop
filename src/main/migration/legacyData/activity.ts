@@ -1,5 +1,11 @@
 import { DATA_KEYS } from '../../../common/constants'
-import { sha256Canonical, type JsonValue } from '../../../common/storage/canonicalJson'
+import type { JsonValue } from '../../../common/storage/canonicalJson'
+import {
+  compareCanonicalText,
+  compareLegacyPlaybackTrack,
+  legacyPlaybackActivitySha256,
+  legacyPlaybackTrackKey,
+} from '../../../common/storage/legacyPlaybackActivity'
 import { convertLegacyListeningStats, type LegacyListeningImportV1 } from '../../../common/storage/legacyListening'
 import type { PlaybackTrackV1 } from '../../../common/storage/playback'
 import { parsePlaybackTrack, sanitizePlayableTrack } from '../../../common/storage/playbackValidation'
@@ -106,7 +112,7 @@ const normalizeRecent = (value: unknown): LegacyPlaybackActivityImportV1['recent
     } catch {
       continue
     }
-    const identity = `${track.source}\0${track.sourceTrackId}`
+    const identity = legacyPlaybackTrackKey(track.source, track.sourceTrackId)
     if (identities.has(identity)) continue
     identities.add(identity)
     result.push({ track, legacyRank: result.length + 1 })
@@ -117,16 +123,16 @@ const normalizeRecent = (value: unknown): LegacyPlaybackActivityImportV1['recent
 
 const normalizeListening = (value: unknown): LegacyListeningImportV1 => {
   const converted = convertLegacyListeningStats(value)
-  const daily = [...converted.daily].sort((left, right) => left.localDay.localeCompare(right.localDay))
+  const daily = [...converted.daily].sort((left, right) => compareCanonicalText(left.localDay, right.localDay))
   const tracks: LegacyListeningImportV1['tracks'] = []
   const identities = new Set<string>()
   for (const track of converted.tracks) {
-    const identity = `${track.source}\0${track.sourceTrackId}`
+    const identity = legacyPlaybackTrackKey(track.source, track.sourceTrackId)
     if (identities.has(identity)) continue
     identities.add(identity)
     tracks.push(track)
   }
-  tracks.sort((left, right) => left.source.localeCompare(right.source) || left.sourceTrackId.localeCompare(right.sourceTrackId))
+  tracks.sort(compareLegacyPlaybackTrack)
   return {
     totalPlayedMs: converted.totalPlayedMs,
     daily,
@@ -158,7 +164,7 @@ const normalizeActivity = (source: LegacyDataSnapshotV1): NormalizedActivity => 
   const listening = normalizeListening(source.parsed.listeningTimeStats)
   const resume = normalizeResume(source.parsed.playInfo)
   return {
-    sourceSha256: sha256Canonical({ version: 1, recent, listening, resume } as unknown as JsonValue),
+    sourceSha256: legacyPlaybackActivitySha256({ recent, listening, resume }),
     recent,
     listening,
     resume,

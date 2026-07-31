@@ -1,5 +1,6 @@
 import { reactive, computed } from '@common/utils/vueTools'
 import defaultSetting from '@common/defaultSetting'
+import { changePrimaryPlaybackSource } from '@common/utils/playbackSourceSetting'
 import { updateSetting as saveSetting } from '@renderer/utils/ipc'
 
 export const appSetting = window.lxData.appSetting = reactive<LX.AppSetting>({ ...defaultSetting })
@@ -95,7 +96,7 @@ export const setTogglePlayMode = (mode: LX.AppSetting['player.togglePlayMethod']
  * @param sourceId
  */
 export const setApiSource = (sourceId: string) => {
-  updateSetting({ 'common.apiSource': sourceId })
+  updateSetting(changePrimaryPlaybackSource(appSetting, sourceId))
 }
 
 /**

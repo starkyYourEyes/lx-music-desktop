@@ -140,6 +140,12 @@ export default (setting: any): Partial<LX.AppSetting> => {
     setting.version = '2.1.0'
   }
 
+  if (compareVer(setting.version, '2.2.0') < 0) {
+    setting['common.apiFallbackSources'] = []
+    setting['common.apiFallbackMode'] = 'serial'
+    setting.version = '2.2.0'
+  }
+
   if (setting['desktopLyric.style.paddingY'] != null) {
     setting['desktopLyric.style.paddingTop'] ??= setting['desktopLyric.style.paddingY']
     setting['desktopLyric.style.paddingBottom'] ??= setting['desktopLyric.style.paddingY']

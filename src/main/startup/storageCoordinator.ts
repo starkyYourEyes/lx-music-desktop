@@ -73,6 +73,10 @@ export interface StorageCoordinatorDependencies {
     result: DatabaseReadyResult,
     legacyData: LegacyDataSourceResult,
   ) => Promise<RecoveryOutcome | undefined>
+  runPlaybackActivityMigration?: (
+    result: DatabaseReadyResult,
+    legacyData: Phase2LegacyDataSourceResult,
+  ) => Promise<RecoveryOutcome | undefined>
   checkCredentials: () => Promise<CredentialStartupCheck>
   verifyPhase2Storage?: (legacyData: Phase2LegacyDataSourceResult) => Promise<void>
   initSettings: () => Promise<void>
@@ -337,6 +341,13 @@ export const createStorageCoordinator = (
         if (migrationOutcome?.status == 'recovery') {
           await dependencies.showRecovery(migrationOutcome)
           return migrationOutcome
+        }
+
+        const playbackMigrationOutcome = await dependencies.runPlaybackActivityMigration?.(database, legacyData)
+        if (shutdownRequested) return startupCancelled()
+        if (playbackMigrationOutcome?.status == 'recovery') {
+          await dependencies.showRecovery(playbackMigrationOutcome)
+          return playbackMigrationOutcome
         }
 
         const credentialOutcome = credentialRecovery(await dependencies.checkCredentials())

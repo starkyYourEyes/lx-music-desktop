@@ -3,6 +3,7 @@ import { canonicalJson, type JsonValue } from '../../../common/storage/canonical
 import { createAtomicJsonFile, type AtomicJsonFile } from '../atomicJsonFile'
 import {
   assertCookieCredential,
+  assertLegacyQuarantinePayload,
   assertSyncKeyCredential,
   assertWebDAVCredential,
   toCredentialEntryId,
@@ -184,8 +185,7 @@ const normalizePayload = (ref: CredentialRef, value: unknown): JsonValue => {
       if (!recordIsValid(value) || value.version != 1) throw new Error('Invalid sync credential')
       return { version: 1, key: assertSyncKeyCredential(value.key) }
     case 'legacy-quarantine':
-      if (!isJsonValue(value)) throw new Error('Invalid quarantined credential')
-      return value
+      return assertLegacyQuarantinePayload(value) as unknown as JsonValue
   }
 }
 

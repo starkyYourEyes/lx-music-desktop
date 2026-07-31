@@ -30,7 +30,7 @@ type PlaybackStartMode = 'activity' | 'resume-only' | 'private'
 
 const validationErrors = new WeakSet<Error>()
 
-const invalidField = (field: string): never => {
+const invalidField: (field: string) => never = field => {
   const error = new Error(`Invalid ${field}`)
   validationErrors.add(error)
   throw error
@@ -52,7 +52,7 @@ const fixedError = <T>(field: string, callback: () => T): T => {
   }
 }
 
-const assertRecord = (value: unknown, field: string): asserts value is Record<string, unknown> => {
+const assertRecord: (value: unknown, field: string) => asserts value is Record<string, unknown> = (value, field) => {
   try {
     if (value == null || typeof value != 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) invalidField(field)
     for (const key of Reflect.ownKeys(value)) {
@@ -75,27 +75,32 @@ const assertExactKeys = (value: Record<string, unknown>, field: string, keys: re
   }
 }
 
-const assertString = (value: unknown, field: string): asserts value is string => {
+const assertString: (value: unknown, field: string) => asserts value is string = (value, field) => {
   if (typeof value != 'string') invalidField(field)
 }
 
-const assertNullableString = (value: unknown, field: string): asserts value is string | null => {
+const assertNullableString: (value: unknown, field: string) => asserts value is string | null = (value, field) => {
   if (value !== null) assertString(value, field)
 }
 
-const assertContextString = (value: unknown, field: string): asserts value is string => {
+const assertContextString: (value: unknown, field: string) => asserts value is string = (value, field) => {
   if (typeof value != 'string' || value.length > MAX_CONTEXT_LENGTH) invalidField(field)
 }
 
-const assertInteger = (value: unknown, field: string, minimum: number, maximum = MAX_SAFE_INTEGER): asserts value is number => {
+const assertInteger: (
+  value: unknown,
+  field: string,
+  minimum: number,
+  maximum?: number,
+) => asserts value is number = (value, field, minimum, maximum = MAX_SAFE_INTEGER) => {
   if (typeof value != 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < minimum || value > maximum) invalidField(field)
 }
 
-const assertDuration = (value: unknown, field: string): asserts value is number | null => {
+const assertDuration: (value: unknown, field: string) => asserts value is number | null = (value, field) => {
   if (value !== null) assertInteger(value, field, 0, MAX_DURATION_MS)
 }
 
-const assertUuid = (value: unknown, field: string): asserts value is string => {
+const assertUuid: (value: unknown, field: string) => asserts value is string = (value, field) => {
   if (typeof value != 'string' || !UUID_V4.test(value)) invalidField(field)
 }
 
@@ -103,7 +108,12 @@ const assertOneOf = (value: unknown, field: string, values: readonly string[]): 
   if (typeof value != 'string' || !values.includes(value)) invalidField(field)
 }
 
-const assertJsonValue = (value: unknown, field: string, ancestors = new Set<object>(), depth = 0): asserts value is JsonValue => {
+const assertJsonValue: (
+  value: unknown,
+  field: string,
+  ancestors?: Set<object>,
+  depth?: number,
+) => asserts value is JsonValue = (value, field, ancestors = new Set<object>(), depth = 0) => {
   if (value === null || typeof value == 'string' || typeof value == 'boolean') return
   if (typeof value == 'number') {
     if (!Number.isFinite(value)) invalidField(field)
@@ -151,25 +161,28 @@ const cloneJson = <T extends JsonValue>(value: T): T => {
   return value
 }
 
-const assertVersion = (value: unknown): asserts value is 1 => {
+const assertVersion: (value: unknown) => asserts value is 1 = value => {
   if (value !== 1) invalidField('version')
 }
 
-const assertContext = (value: unknown): asserts value is PlaybackStartCommandV1['context'] => {
+const assertContext: (value: unknown) => asserts value is PlaybackStartCommandV1['context'] = value => {
   assertRecord(value, 'context')
   assertExactKeys(value, 'context', ['type', 'id'])
   if (value.type !== null) assertContextString(value.type, 'context.type')
   if (value.id !== null) assertContextString(value.id, 'context.id')
 }
 
-const assertResumeHint = (value: unknown, field = 'resume'): asserts value is PlaybackStartCommandV1['resume'] => {
+const assertResumeHint: (
+  value: unknown,
+  field?: string,
+) => asserts value is PlaybackStartCommandV1['resume'] = (value, field = 'resume') => {
   assertRecord(value, field)
   assertExactKeys(value, field, ['listId', 'indexHint'])
   assertNullableString(value.listId, `${field}.listId`)
   if (value.indexHint !== null) assertInteger(value.indexHint, `${field}.indexHint`, 0, 1_000_000)
 }
 
-const assertConsent = (value: unknown): asserts value is PlaybackStartCommandV1['consent'] => {
+const assertConsent: (value: unknown) => asserts value is PlaybackStartCommandV1['consent'] = value => {
   assertRecord(value, 'consent')
   assertExactKeys(value, 'consent', ['recentAllowed', 'statsAllowed', 'privateMode'])
   for (const key of ['recentAllowed', 'statsAllowed', 'privateMode'] as const) {
@@ -253,16 +266,16 @@ const projectOptionalNumber = (source: Record<string, unknown>, target: Record<s
 
 const projectQualitys = (value: unknown, field: string, kg = false): JsonValue[] => {
   assertQualitys(value, field, kg)
-  return (value as Array<Record<string, unknown>>).map(quality => kg
+  return (value as Array<Record<string, unknown>>).map(quality => (kg
     ? { type: quality.type as string, size: quality.size as string | null, hash: quality.hash as string }
-    : { type: quality.type as string, size: quality.size as string | null })
+    : { type: quality.type as string, size: quality.size as string | null }) as Record<string, JsonValue>)
 }
 
 const projectQualityMap = (value: unknown, field: string, kg = false): Record<string, JsonValue> => {
   assertQualityMap(value, field, kg)
-  return Object.fromEntries(Object.entries(value as Record<string, Record<string, unknown>>).map(([quality, entry]) => [quality, kg
+  return Object.fromEntries(Object.entries(value as Record<string, Record<string, unknown>>).map(([quality, entry]) => [quality, (kg
     ? { size: entry.size as string | null, hash: entry.hash as string }
-    : { size: entry.size as string | null }]))
+    : { size: entry.size as string | null }) as Record<string, JsonValue>]))
 }
 
 const projectMusicInfo = (value: unknown, field: string): LX.Music.MusicInfo => {
@@ -304,8 +317,8 @@ const projectMusicInfo = (value: unknown, field: string): LX.Music.MusicInfo => 
       assertString(value.meta.fileName, field)
       assertString(value.meta.ext, field)
       meta.path = value.meta.path as string
-      meta.fileName = value.meta.fileName as string
-      meta.ext = value.meta.ext as string
+      meta.fileName = value.meta.fileName
+      meta.ext = value.meta.ext
       for (const key of ['title', 'artist', 'album', 'albumArtist', 'picPath']) projectOptionalString(value.meta, meta, key, field, true)
       for (const key of ['etag', 'lastModified']) projectOptionalString(value.meta, meta, key, field)
       projectOptionalNumber(value.meta, meta, 'year', field, true)
@@ -371,7 +384,10 @@ const projectMusicInfo = (value: unknown, field: string): LX.Music.MusicInfo => 
   return result as unknown as LX.Music.MusicInfo
 }
 
-const assertTrackScalars = (value: Record<string, unknown>, field: string): void => {
+const assertTrackScalars: (
+  value: Record<string, unknown>,
+  field: string,
+) => asserts value is Record<string, unknown> & Omit<PlaybackTrackV1, 'playablePayload'> = (value, field) => {
   assertString(value.source, `${field}.source`)
   assertString(value.sourceTrackId, `${field}.sourceTrackId`)
   assertString(value.name, `${field}.name`)
@@ -424,7 +440,7 @@ export const parsePlaybackCheckpoint = (value: unknown): PlaybackCheckpointV1 =>
     assertInteger(value.positionMs, 'positionMs', 0, MAX_DURATION_MS)
     assertDuration(value.durationMs, 'durationMs')
     assertInteger(value.occurredAtMs, 'occurredAtMs', 0)
-    return cloneJson(value as JsonValue) as PlaybackCheckpointV1
+    return cloneJson(value as JsonValue) as unknown as PlaybackCheckpointV1
   })
 }
 
@@ -558,7 +574,7 @@ export const parsePlaybackResumeUpdate = (value: unknown): PlaybackResumeUpdateV
     assertInteger(value.positionMs, 'positionMs', 0, MAX_DURATION_MS)
     assertDuration(value.durationMs, 'durationMs')
     assertInteger(value.updatedAtMs, 'updatedAtMs', 0)
-    return cloneJson(value as JsonValue) as PlaybackResumeUpdateV1
+    return cloneJson(value as JsonValue) as unknown as PlaybackResumeUpdateV1
   })
 }
 
@@ -612,7 +628,7 @@ export const parsePlaybackCheckpointAck = (value: unknown): PlaybackCheckpointAc
     assertInteger(value.checkpointSeq, 'checkpointSeq', 0)
     assertInteger(value.cumulativePlayedMs, 'cumulativePlayedMs', 0)
     assertInteger(value.cumulativeActiveMs, 'cumulativeActiveMs', 0)
-    return cloneJson(value as JsonValue) as PlaybackCheckpointAckV1
+    return cloneJson(value as JsonValue) as unknown as PlaybackCheckpointAckV1
   })
 }
 
@@ -623,7 +639,7 @@ export const parsePlaybackResumeAck = (value: unknown): PlaybackResumeAckV1 => {
     assertUuid(value.playbackGroupUuid, 'playbackGroupUuid')
     assertInteger(value.checkpointSeq, 'checkpointSeq', 0)
     assertInteger(value.positionMs, 'positionMs', 0, MAX_DURATION_MS)
-    return cloneJson(value as JsonValue) as PlaybackResumeAckV1
+    return cloneJson(value as JsonValue) as unknown as PlaybackResumeAckV1
   })
 }
 
@@ -662,7 +678,7 @@ export const parsePlaybackRecorderCommand = (value: unknown): PlaybackRecorderCo
   })
 }
 
-const assertBucket = (value: unknown, field: string): asserts value is ListeningBucketV1 => {
+const assertBucket: (value: unknown, field: string) => asserts value is ListeningBucketV1 = (value, field) => {
   assertRecord(value, field)
   for (const key of ['baselinePlayedMs', 'livePlayedMs', 'baselineActiveMs', 'liveActiveMs', 'playedMs', 'activeMs'] as const) assertInteger(value[key], `${field}.${key}`, 0)
 }
@@ -710,7 +726,7 @@ export const parseListeningStats = (value: unknown): ListeningStatsV1 => {
       assertTrackScalars({ ...entry, playablePayload: null }, 'tracks')
     }
     assertInteger(value.updatedAtMs, 'updatedAtMs', 0)
-    return cloneJson(value as JsonValue) as ListeningStatsV1
+    return cloneJson(value as JsonValue) as unknown as ListeningStatsV1
   })
 }
 
@@ -726,6 +742,6 @@ export const parsePlaybackResume = (value: unknown): PlaybackResumeV1 => {
     assertInteger(value.positionMs, 'positionMs', 0, MAX_DURATION_MS)
     assertDuration(value.durationMs, 'durationMs')
     assertInteger(value.updatedAtMs, 'updatedAtMs', 0)
-    return cloneJson(value as JsonValue) as PlaybackResumeV1
+    return cloneJson(value as JsonValue) as unknown as PlaybackResumeV1
   })
 }

@@ -16,6 +16,7 @@ import { migrateLegacyCredentials } from './migration/credentials/credentialMigr
 import { withSelectedLegacyDataSource } from './migration/credentials/legacySources'
 import { isCredentialMigrationRecoveryError } from './migration/credentials/recoveryError'
 import { migrateLegacyNonActivity } from './migration/legacyData/nonActivity'
+import { migrateLegacyPlaybackActivity } from './migration/legacyData/activity'
 import type { LegacyDataSourceResult } from './migration/legacyData/source'
 import { createAtomicJsonFile } from './storage/atomicJsonFile'
 import { parseSettingsDocument, type SettingsDocumentV1 } from './storage/settings/document'
@@ -414,6 +415,23 @@ export const runStorageMigrationHooks = async(
       getSearchHistory: () => global.lx.worker.dbService.getSearchHistory(),
       getNonActivityMigrationMarker: name => global.lx.worker.dbService.getNonActivityMigrationMarker(name),
       completeNonActivityMigrationMarker: input => global.lx.worker.dbService.completeNonActivityMigrationMarker(input),
+    },
+  })
+  return undefined
+}
+
+export const runPlaybackActivityMigration = async(
+  _result: { existed: boolean },
+  legacyData: Exclude<LegacyDataSourceResult, { status: 'recovery' }>,
+): Promise<undefined> => {
+  const vault = global.lx.credentialVault
+  if (vault == null) throw new Error('Playback activity quarantine vault is unavailable')
+  await migrateLegacyPlaybackActivity({
+    source: legacyData.status == 'available' ? legacyData.snapshot : null,
+    vault,
+    repository: {
+      importLegacyPlaybackActivity: input => global.lx.worker.dbService.importLegacyPlaybackActivity(input),
+      getPlaybackActivityMigrationMarker: () => global.lx.worker.dbService.getPlaybackActivityMigrationMarker(),
     },
   })
   return undefined

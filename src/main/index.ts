@@ -11,7 +11,7 @@ import {
   listenerAppEvent,
 } from './app'
 import { isLinux } from '@common/utils'
-import { initAppSetting, runStorageMigrationHooks } from '@main/app'
+import { initAppSetting, runPlaybackActivityMigration, runStorageMigrationHooks } from '@main/app'
 import registerModules from '@main/modules'
 import { flushStores } from '@main/utils/store'
 import { createRunState } from '@main/startup/runState'
@@ -36,6 +36,7 @@ const getStorageCoordinator = () => {
     }),
     closeDatabase: () => global.lx.worker.dbService.close(),
     runMigrationHooks: runStorageMigrationHooks,
+    runPlaybackActivityMigration,
     checkCredentials: () => checkCredentialStartup({
       dataRoot: global.lxDataPath,
       vault: global.lx.credentialVault,

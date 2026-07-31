@@ -810,6 +810,41 @@ describe('playback activity schema migration', () => {
     ) VALUES(1, 'other', 0, 'test', 'other', 0, 0)`).run())
   })
 
+  it('supports signed recent sequences while retaining safe-integer bounds', () => {
+    const { db } = bootstrap()
+    const firstLegacyTrack = insertTrack(db)
+    const lastLegacyTrack = insertTrack(db)
+    const liveTrack = insertTrack(db)
+
+    const insertRecent = db.prepare(`
+      INSERT INTO recent_tracks(track_id, recency_seq, legacy_rank, updated_at_ms)
+      VALUES(?, ?, ?, 0)
+    `)
+    insertRecent.run(firstLegacyTrack, -1, 1)
+    insertRecent.run(lastLegacyTrack, -520, 520)
+    insertRecent.run(liveTrack, 1, null)
+
+    assert.deepEqual(
+      db.prepare('SELECT recency_seq AS recencySeq, legacy_rank AS legacyRank FROM recent_tracks ORDER BY recency_seq DESC').all(),
+      [
+        { recencySeq: 1, legacyRank: null },
+        { recencySeq: -1, legacyRank: 1 },
+        { recencySeq: -520, legacyRank: 520 },
+      ],
+    )
+
+    const belowSafeTrack = insertTrack(db)
+    const aboveSafeTrack = insertTrack(db)
+    assertConstraint(() => db.prepare(`
+      INSERT INTO recent_tracks(track_id, recency_seq, updated_at_ms)
+      VALUES(?, -9007199254740992, 0)
+    `).run(belowSafeTrack))
+    assertConstraint(() => db.prepare(`
+      INSERT INTO recent_tracks(track_id, recency_seq, updated_at_ms)
+      VALUES(?, 9007199254740992, 0)
+    `).run(aboveSafeTrack))
+  })
+
   it('rejects fractional values from every integer-semantic column category', () => {
     const { db } = bootstrap()
     const trackId = insertTrack(db)

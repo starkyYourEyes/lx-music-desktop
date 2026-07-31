@@ -1,3 +1,5 @@
+import type { JsonValue } from '../../../common/storage/canonicalJson'
+
 export type CredentialRef =
   | { kind: 'netease-cookie' }
   | { kind: 'qq-music-cookie' }
@@ -17,6 +19,13 @@ export interface SyncKeyPayloadV1 {
   key: string
 }
 
+export interface LegacyQuarantinePayloadV1 {
+  version: 1
+  sourceSha256: string
+  keys: string[]
+  payload: Record<string, JsonValue>
+}
+
 export interface CredentialCipher {
   readonly mode: 'encrypted' | 'memory-only'
   encrypt: (plaintext: string) => Buffer
@@ -27,6 +36,17 @@ const identifierSegmentPattern = /^[A-Za-z0-9._@-]{1,256}$/
 const standardBase64Pattern = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
 const maxCookieOrSyncKeyLength = 64 * 1024
 const maxWebDAVFieldLength = 4 * 1024
+const sha256Pattern = /^[0-9a-f]{64}$/
+
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  value != null && typeof value == 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) == Object.prototype
+
+const isJsonValue = (value: unknown): value is JsonValue => {
+  if (value == null || ['string', 'boolean'].includes(typeof value)) return true
+  if (typeof value == 'number') return Number.isFinite(value)
+  if (Array.isArray(value)) return value.every(isJsonValue)
+  return isPlainRecord(value) && Object.values(value).every(isJsonValue)
+}
 
 const assertString = (value: unknown, maximumLength: number, field: string): string => {
   if (typeof value != 'string' || value.length == 0 || Buffer.byteLength(value, 'utf8') > maximumLength) {
@@ -80,5 +100,28 @@ export const assertWebDAVCredential = (value: unknown): WebDAVCredentialPayloadV
     version: 1,
     username: assertString(payload.username, maxWebDAVFieldLength, 'WebDAV username'),
     password: assertString(payload.password, maxWebDAVFieldLength, 'WebDAV password'),
+  }
+}
+
+export const assertLegacyQuarantinePayload = (value: unknown): LegacyQuarantinePayloadV1 => {
+  if (!isPlainRecord(value) || Object.keys(value).length != 4 ||
+    !['version', 'sourceSha256', 'keys', 'payload'].every(key => Object.hasOwn(value, key)) ||
+    value.version !== 1 || typeof value.sourceSha256 != 'string' || !sha256Pattern.test(value.sourceSha256) ||
+    !Array.isArray(value.keys) || !isPlainRecord(value.payload)) {
+    throw new Error('Invalid legacy quarantine payload')
+  }
+  const keys = value.keys as unknown[]
+  const payload = value.payload
+  if (!keys.every((key): key is string => typeof key == 'string') || new Set(keys).size != keys.length ||
+    keys.some((key, index) => index > 0 && keys[index - 1] >= key) ||
+    keys.length != Object.keys(payload).length || keys.some(key => !Object.hasOwn(payload, key)) ||
+    !isJsonValue(payload)) {
+    throw new Error('Invalid legacy quarantine payload')
+  }
+  return {
+    version: 1,
+    sourceSha256: value.sourceSha256,
+    keys: [...keys],
+    payload: Object.fromEntries(keys.map(key => [key, payload[key] as JsonValue])),
   }
 }

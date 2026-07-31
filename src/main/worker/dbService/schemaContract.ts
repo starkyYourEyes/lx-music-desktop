@@ -463,7 +463,7 @@ export const databaseSchemaContract: SchemaContract = {
       ],
       checks: [
         safeInteger('track_id', -MAX_SAFE_INTEGER),
-        safeInteger('recency_seq'),
+        safeInteger('recency_seq', -MAX_SAFE_INTEGER),
         nullableSafeInteger('last_session_id', -MAX_SAFE_INTEGER),
         nullableSafeInteger('last_played_at_ms'),
         nullableSafeInteger('legacy_rank', 1, 520),

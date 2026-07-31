@@ -4,7 +4,7 @@ import {
   init,
 } from './db'
 import { exposeWorker } from '../utils/worker'
-import { list, lyric, music_url, music_other_source, download, dislike_list, account_profile, app_state } from './modules/index'
+import { list, lyric, music_url, music_other_source, download, dislike_list, account_profile, app_state, playback } from './modules/index'
 
 export { init }
 
@@ -14,7 +14,7 @@ const common = {
   getDatabaseHealth,
 }
 
-exposeWorker(Object.assign(common, list, lyric, music_url, music_other_source, download, dislike_list, account_profile, app_state))
+exposeWorker(Object.assign(common, list, lyric, music_url, music_other_source, download, dislike_list, account_profile, app_state, playback))
 
 export type workerDBSeriveTypes = typeof common
   & typeof list
@@ -25,3 +25,4 @@ export type workerDBSeriveTypes = typeof common
   & typeof dislike_list
   & typeof account_profile
   & typeof app_state
+  & typeof playback

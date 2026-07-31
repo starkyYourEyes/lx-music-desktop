@@ -153,7 +153,7 @@ CREATE TABLE recent_tracks (
     typeof(track_id) = 'integer' AND track_id BETWEEN -9007199254740991 AND 9007199254740991
   ) REFERENCES track_snapshots(track_id) ON DELETE CASCADE,
   recency_seq INTEGER NOT NULL UNIQUE CHECK(
-    typeof(recency_seq) = 'integer' AND recency_seq BETWEEN 0 AND 9007199254740991
+    typeof(recency_seq) = 'integer' AND recency_seq BETWEEN -9007199254740991 AND 9007199254740991
   ),
   last_session_id INTEGER CHECK(last_session_id IS NULL OR (
     typeof(last_session_id) = 'integer'

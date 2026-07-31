@@ -127,7 +127,12 @@ describe('credential vault', () => {
       {
         source: { kind: 'legacy-quarantine', sourceSha256: 'a'.repeat(64) },
         target: { kind: 'legacy-quarantine', sourceSha256: 'b'.repeat(64) },
-        payload: { version: 1, secret: 'quarantined' },
+        payload: {
+          version: 1,
+          sourceSha256: 'a'.repeat(64),
+          keys: ['secret'],
+          payload: { secret: 'quarantined' },
+        },
       },
     ]
     const statuses = []

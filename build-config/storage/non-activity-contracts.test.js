@@ -86,6 +86,27 @@ describe('non-activity storage contracts', () => {
     assert.throws(() => parseLocalStateSnapshot({ ...base, extra: true }))
   })
 
+  it('rejects nested query members that are not JSON values', () => {
+    class QueryValue {}
+
+    const invalidQueries = [
+      { nested: { value: undefined } },
+      { nested: [() => true] },
+      { nested: { value: Number.NaN } },
+      { nested: [Number.POSITIVE_INFINITY] },
+      { nested: new QueryValue() },
+    ]
+
+    for (const query of invalidQueries) {
+      assert.throws(() => parseLocalStateUpdate({
+        version: 1,
+        key: 'view_prev_state',
+        value: { url: '/search', query },
+        updatedAtMs: 1,
+      }), /query/)
+    }
+  })
+
   it('accepts only the three registered local-state keys', () => {
     assert.equal(parseLocalStateUpdate({
       version: 1,
@@ -168,6 +189,80 @@ describe('non-activity storage contracts', () => {
     assert.equal(parseSearchHistoryCommand({ version: 1, action: 'record', term: 'x'.repeat(200), usedAtMs: MAX_SAFE_INTEGER }).term.length, 200)
     assert.equal(parseSearchHistoryCommand({ version: 1, action: 'remove', term: 'x' }).action, 'remove')
     assert.equal(parseSearchHistoryCommand({ version: 1, action: 'clear' }).action, 'clear')
+  })
+
+  it('returns deeply isolated validated values without changing strings or list order', () => {
+    const preferencesInput = makePreferences()
+    const preferences = parseCatalogPreferences(preferencesInput)
+    assert.notStrictEqual(preferences, preferencesInput)
+    assert.notStrictEqual(preferences.leaderboard, preferencesInput.leaderboard)
+    assert.notStrictEqual(preferences.songList, preferencesInput.songList)
+    assert.notStrictEqual(preferences.search, preferencesInput.search)
+
+    const snapshotInput = {
+      version: 1,
+      viewPrevState: { url: '/search', query: { nested: ['exact'] } },
+      listScrollPosition: { first: 1 },
+      listPrevSelectId: 'first',
+    }
+    const snapshot = parseLocalStateSnapshot(snapshotInput)
+    assert.notStrictEqual(snapshot, snapshotInput)
+    assert.notStrictEqual(snapshot.viewPrevState, snapshotInput.viewPrevState)
+    assert.notStrictEqual(snapshot.viewPrevState.query, snapshotInput.viewPrevState.query)
+    assert.notStrictEqual(snapshot.viewPrevState.query.nested, snapshotInput.viewPrevState.query.nested)
+    assert.notStrictEqual(snapshot.listScrollPosition, snapshotInput.listScrollPosition)
+
+    const updateInput = {
+      version: 1,
+      key: 'view_prev_state',
+      value: { url: '/search', query: { term: 'exact' } },
+      updatedAtMs: 1,
+    }
+    const update = parseLocalStateUpdate(updateInput)
+    assert.notStrictEqual(update, updateInput)
+    assert.notStrictEqual(update.value, updateInput.value)
+    assert.notStrictEqual(update.value.query, updateInput.value.query)
+
+    const upsertInput = {
+      version: 1,
+      action: 'upsert',
+      playlistId: 'first',
+      value: {
+        updateTime: 1,
+        isAutoUpdate: true,
+        profile: { description: 'exact', coverUrl: '/cover' },
+      },
+      updatedAtMs: 1,
+    }
+    const upsert = parsePlaylistMetadataCommand(upsertInput)
+    assert.notStrictEqual(upsert, upsertInput)
+    assert.notStrictEqual(upsert.value, upsertInput.value)
+    assert.notStrictEqual(upsert.value.profile, upsertInput.value.profile)
+
+    const retainInput = { version: 1, action: 'retain', playlistIds: ['second', 'first'] }
+    const retain = parsePlaylistMetadataCommand(retainInput)
+    assert.notStrictEqual(retain, retainInput)
+    assert.notStrictEqual(retain.playlistIds, retainInput.playlistIds)
+    assert.deepEqual(retain.playlistIds, ['second', 'first'])
+    assert.strictEqual(retain.playlistIds[0], retainInput.playlistIds[0])
+
+    const searchInput = { version: 1, action: 'record', term: 'exact', usedAtMs: 1 }
+    const search = parseSearchHistoryCommand(searchInput)
+    assert.notStrictEqual(search, searchInput)
+
+    snapshotInput.viewPrevState.url = 'u'.repeat(4097)
+    snapshotInput.viewPrevState.query.nested[0] = undefined
+    snapshotInput.listScrollPosition.first = -1
+    upsertInput.value.updateTime = Number.MAX_SAFE_INTEGER + 1
+    upsertInput.value.profile.coverUrl = 'u'.repeat(4097)
+    retainInput.playlistIds.reverse()
+
+    assert.equal(snapshot.viewPrevState.url, '/search')
+    assert.deepEqual(snapshot.viewPrevState.query, { nested: ['exact'] })
+    assert.deepEqual(snapshot.listScrollPosition, { first: 1 })
+    assert.equal(upsert.value.updateTime, 1)
+    assert.equal(upsert.value.profile.coverUrl, '/cover')
+    assert.deepEqual(retain.playlistIds, ['second', 'first'])
   })
 
   it('rejects invalid search history payloads and extra properties', () => {

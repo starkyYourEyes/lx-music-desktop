@@ -27,7 +27,41 @@ const invalidField: (field: string) => never = field => {
   throw new Error(`Invalid ${field}`)
 }
 
-const asValidated = <T>(value: unknown): T => value as T
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
+
+const assertJsonValue: (value: unknown, field: string, ancestors?: Set<object>) => asserts value is JsonValue = (value, field, ancestors = new Set()) => {
+  if (value === null || typeof value == 'string' || typeof value == 'boolean') return
+  if (typeof value == 'number') {
+    if (!Number.isFinite(value)) invalidField(field)
+    return
+  }
+  if (typeof value != 'object' || ancestors.has(value)) invalidField(field)
+
+  ancestors.add(value)
+  if (Array.isArray(value)) {
+    if (Reflect.ownKeys(value).length != value.length + 1) invalidField(field)
+    for (let index = 0; index < value.length; index++) {
+      if (!Object.hasOwn(value, index)) invalidField(field)
+      assertJsonValue(value[index], field, ancestors)
+    }
+  } else {
+    if (Object.getPrototypeOf(value) !== Object.prototype) invalidField(field)
+    for (const key of Reflect.ownKeys(value)) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      if (typeof key != 'string' || descriptor == null || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) invalidField(field)
+      assertJsonValue(descriptor.value, field, ancestors)
+    }
+  }
+  ancestors.delete(value)
+}
+
+const cloneValidated = <T>(value: unknown): T => {
+  if (Array.isArray(value)) return value.map(item => cloneValidated(item)) as T
+  if (value != null && typeof value == 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneValidated(item)])) as T
+  }
+  return value as T
+}
 
 const assertExactKeys = (value: Record<string, unknown>, field: string, keys: readonly string[]): void => {
   const allowed = new Set(keys)
@@ -55,6 +89,7 @@ const assertViewPrevState: (value: unknown) => asserts value is LocalStateSnapsh
   assertExactKeys(value, 'viewPrevState', ['url', 'query'])
   assertStorageString(value.url, 'url', 1, MAX_URL_LENGTH)
   assertStorageRecord(value.query, 'query')
+  assertJsonValue(value.query, 'query')
   assertJsonByteSize(value.query, 'query', MAX_JSON_BYTES)
 }
 
@@ -106,7 +141,7 @@ export const parseCatalogPreferences = (value: unknown): CatalogPreferencesV1 =>
   assertOnlineSource(value.search.temp_source, 'temp_source')
   if (value.search.source != 'all') assertOnlineSource(value.search.source, 'source')
   if (value.search.type != 'music' && value.search.type != 'songlist') invalidField('type')
-  return asValidated<CatalogPreferencesV1>(value)
+  return cloneValidated<CatalogPreferencesV1>(value)
 }
 
 export const parseLocalStateSnapshot = (value: unknown): LocalStateSnapshotV1 => {
@@ -116,7 +151,7 @@ export const parseLocalStateSnapshot = (value: unknown): LocalStateSnapshotV1 =>
   assertViewPrevState(value.viewPrevState)
   assertListScrollPosition(value.listScrollPosition)
   assertId(value.listPrevSelectId, 'listPrevSelectId')
-  return asValidated<LocalStateSnapshotV1>(value)
+  return cloneValidated<LocalStateSnapshotV1>(value)
 }
 
 export const parseLocalStateUpdate = (value: unknown): LocalStateUpdateV1 => {
@@ -137,7 +172,7 @@ export const parseLocalStateUpdate = (value: unknown): LocalStateUpdateV1 => {
     default:
       invalidField('key')
   }
-  return asValidated<LocalStateUpdateV1>(value)
+  return cloneValidated<LocalStateUpdateV1>(value)
 }
 
 export const parsePlaylistMetadataCommand = (value: unknown): PlaylistMetadataCommandV1 => {
@@ -166,7 +201,7 @@ export const parsePlaylistMetadataCommand = (value: unknown): PlaylistMetadataCo
     default:
       invalidField('action')
   }
-  return asValidated<PlaylistMetadataCommandV1>(value)
+  return cloneValidated<PlaylistMetadataCommandV1>(value)
 }
 
 export const parseSearchHistoryCommand = (value: unknown): SearchHistoryCommandV1 => {
@@ -188,5 +223,5 @@ export const parseSearchHistoryCommand = (value: unknown): SearchHistoryCommandV
     default:
       invalidField('action')
   }
-  return asValidated<SearchHistoryCommandV1>(value)
+  return cloneValidated<SearchHistoryCommandV1>(value)
 }

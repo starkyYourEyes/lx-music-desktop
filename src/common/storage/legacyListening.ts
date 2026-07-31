@@ -14,7 +14,13 @@ export interface LegacyListeningImportV1 {
 
 const maxTrackStringLength = 256
 
-const secondsToMs = (seconds: unknown): number => Math.max(0, Math.round((Number(seconds) || 0) * 1000))
+const secondsToMs = (seconds: unknown): number => {
+  const numericSeconds = Number(seconds)
+  if (!Number.isFinite(numericSeconds)) return 0
+  const roundedMilliseconds = Math.round(numericSeconds * 1000)
+  if (!Number.isFinite(roundedMilliseconds) || roundedMilliseconds > Number.MAX_SAFE_INTEGER) return Number.MAX_SAFE_INTEGER
+  return Math.max(0, roundedMilliseconds)
+}
 
 const asRecord = (value: unknown): Record<string, unknown> | null => (
   value != null && typeof value == 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
@@ -26,8 +32,9 @@ const isCalendarDay = (value: string): boolean => {
   const year = Number(match[1])
   const month = Number(match[2])
   const day = Number(match[3])
-  const date = new Date(Date.UTC(year, month - 1, day))
-  return date.getUTCFullYear() == year && date.getUTCMonth() == month - 1 && date.getUTCDate() == day
+  const isLeapYear = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+  const daysInMonth = [31, isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth[month - 1]
 }
 
 const isTrackString = (value: unknown): value is string => (

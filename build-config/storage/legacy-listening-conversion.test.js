@@ -45,6 +45,74 @@ describe('legacy listening conversion', async() => {
     assert.deepEqual(result.daily, [{ localDay: '2024-02-29', baselinePlayedMs: 2000 }])
   })
 
+  it('accepts calendar dates in zero-padded years below 100', () => {
+    const result = convertLegacyListeningStats({
+      totalSeconds: 0,
+      daily: {
+        '0000-02-29': 1,
+        '0000-02-30': 2,
+        '0099-02-28': 3,
+        '0099-02-29': 4,
+      },
+      songs: {},
+    })
+
+    assert.deepEqual(result.daily, [
+      { localDay: '0000-02-29', baselinePlayedMs: 1000 },
+      { localDay: '0099-02-28', baselinePlayedMs: 3000 },
+    ])
+  })
+
+  it('converts non-finite seconds to zero across every legacy baseline', () => {
+    const result = convertLegacyListeningStats({
+      totalSeconds: Infinity,
+      daily: { '2026-07-29': 'Infinity' },
+      songs: {
+        infinite: { id: 'track-1', source: 'test', name: 'One', singer: 'Singer', seconds: Infinity },
+      },
+    })
+
+    assert.equal(result.totalPlayedMs, 0)
+    assert.equal(result.daily[0].baselinePlayedMs, 0)
+    assert.equal(result.tracks[0].baselinePlayedMs, 0)
+  })
+
+  it('caps finite millisecond overflow at the largest safe integer across every legacy baseline', () => {
+    const result = convertLegacyListeningStats({
+      totalSeconds: Number.MAX_VALUE,
+      daily: { '2026-07-29': Number.MAX_VALUE },
+      songs: {
+        overflow: { id: 'track-1', source: 'test', name: 'One', singer: 'Singer', seconds: Number.MAX_VALUE },
+      },
+    })
+
+    assert.equal(result.totalPlayedMs, 9007199254740991)
+    assert.equal(result.daily[0].baselinePlayedMs, 9007199254740991)
+    assert.equal(result.tracks[0].baselinePlayedMs, 9007199254740991)
+  })
+
+  it('converts numeric strings while clamping negative and missing seconds to zero', () => {
+    const result = convertLegacyListeningStats({
+      totalSeconds: '-2.5',
+      daily: {
+        '2026-07-29': '1.2346',
+        '2026-07-30': undefined,
+      },
+      songs: {
+        numeric: { id: 'track-1', source: 'test', name: 'One', singer: 'Singer', seconds: '0.3335' },
+        negative: { id: 'track-2', source: 'test', name: 'Two', singer: 'Singer', seconds: -1 },
+        missing: { id: 'track-3', source: 'test', name: 'Three', singer: 'Singer' },
+      },
+    })
+
+    assert.equal(result.totalPlayedMs, 0)
+    assert.deepEqual(result.daily, [
+      { localDay: '2026-07-29', baselinePlayedMs: 1235 },
+      { localDay: '2026-07-30', baselinePlayedMs: 0 },
+    ])
+    assert.deepEqual(result.tracks.map(track => track.baselinePlayedMs), [334, 0, 0])
+  })
+
   it('skips tracks with invalid or out-of-bounds fields', () => {
     const result = convertLegacyListeningStats({
       totalSeconds: 1,

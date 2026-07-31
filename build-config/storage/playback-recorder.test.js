@@ -280,6 +280,14 @@ describe('pure playback recorder', () => {
     assert.equal(activity.cumulativePlayedMs, 1000)
   })
 
+  it('records recent-only playback as activity while keeping statistics counters at zero', () => {
+    let state = playingState(undefined, { recentAllowed: true, statsAllowed: false, privateMode: false })
+    state = reduce(state, { type: 'periodic-checkpoint', monotonicMs: 1000, positionMs: 1000, occurredAtMs: 1700000001000 })
+    assert.equal(lastCommand(state).kind, 'commit')
+    assert.equal(state.cumulativePlayedMs, 0)
+    assert.equal(state.cumulativeActiveMs, 0)
+  })
+
   it('uses civil midnight across 23-hour and 25-hour DST days', () => {
     const spring = nextLocalDayBoundary({
       afterMs: Date.parse('2026-03-08T05:00:00.000Z'),

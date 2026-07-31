@@ -25,7 +25,7 @@ export const createPlaybackRecorderState = (): PlaybackSessionState => ({
 
 const modeFor = (request: PlaybackStartCommandV1): PlaybackSessionState['deliveryMode'] => {
   if (request.consent.privateMode) return 'private'
-  return request.consent.statsAllowed ? 'activity' : 'resume-only'
+  return !request.consent.recentAllowed && !request.consent.statsAllowed ? 'resume-only' : 'activity'
 }
 
 const occurredAt = (action: { occurredAtMs?: number }): number => {

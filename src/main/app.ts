@@ -352,7 +352,7 @@ export const runStorageMigrationHooks = async(
     return credentialMigrationRecovery('credentials.vault_unreadable')
   }
   try {
-    const migrateCredentials = () => migrateLegacyCredentials({
+    const migrateCredentials = async() => migrateLegacyCredentials({
       dataRoot: global.lxDataPath,
       vault,
       profiles: {

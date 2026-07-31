@@ -93,7 +93,7 @@ type StorageCatalogPreferenceSetRequest = Extract<StorageStateRequest, { type: '
 
 export const createStorageStateDispatcher = (deps: StorageStateHandlerDependencies) => {
   let catalogWriteQueue = Promise.resolve()
-  const setCatalogPreference = (parsed: StorageCatalogPreferenceSetRequest): Promise<CatalogPreferencesV1> => {
+  const setCatalogPreference = async(parsed: StorageCatalogPreferenceSetRequest): Promise<CatalogPreferencesV1> => {
     const write = catalogWriteQueue.then(async() => {
       const current = parseCatalogPreferences(await deps.getCatalogPreferences())
       const next = parseCatalogPreferences({ ...current, [parsed.section]: parsed.value })

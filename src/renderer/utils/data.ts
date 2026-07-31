@@ -9,13 +9,15 @@ import {
 } from '@renderer/utils/storageState'
 import { throttle } from '@common/utils'
 import { type DEFAULT_SETTING, LIST_IDS } from '@common/constants'
-import type { CatalogPreferencesV1 } from '@common/storage/stateContracts'
+import type { CatalogPreferencesV1, PlaylistMetadataCommandV1 } from '@common/storage/stateContracts'
 import { dateFormat } from './index'
 import { setUpdateTime } from '@renderer/store/list/action'
 
 let listPosition: LX.List.ListPositionInfo
 let listPrevSelectId: string
 let listUpdateInfo: LX.List.ListUpdateInfo
+let playlistMetadataInitPromise: Promise<void> | null = null
+let playlistMetadataMutationQueue: Promise<void> = Promise.resolve()
 
 let searchSetting: CatalogPreferencesV1['search']
 let songListSetting: CatalogPreferencesV1['songList']
@@ -114,14 +116,34 @@ export const saveListPrevSelectId = (id: string) => {
 }
 
 const initListUpdateInfo = async() => {
-  if (listUpdateInfo == null) {
-    // eslint-disable-next-line require-atomic-updates
-    listUpdateInfo = await getPlaylistMetadata()
-    for (const [id, info] of Object.entries(listUpdateInfo)) {
-      setUpdateTime(id, info.updateTime ? dateFormat(info.updateTime) : '')
-    }
-  }
+  if (listUpdateInfo != null) return
+  playlistMetadataInitPromise ??= getPlaylistMetadata()
+    .then(info => {
+      listUpdateInfo = info
+      for (const [id, info] of Object.entries(listUpdateInfo)) {
+        setUpdateTime(id, info.updateTime ? dateFormat(info.updateTime) : '')
+      }
+    })
+    .catch((error) => {
+      playlistMetadataInitPromise = null
+      throw error
+    })
+  await playlistMetadataInitPromise
 }
+
+const queuePlaylistMetadataMutation = async<T>(operation: () => Promise<T>): Promise<T> => {
+  const result = playlistMetadataMutationQueue.then(operation)
+  playlistMetadataMutationQueue = result.then(
+    () => undefined,
+    () => undefined,
+  )
+  return result
+}
+
+const applyPlaylistMetadataMutation = async(command: PlaylistMetadataCommandV1): Promise<void> => {
+  listUpdateInfo = await mutatePlaylistMetadata(command)
+}
+
 export const getListUpdateInfo = async() => {
   await initListUpdateInfo()
   return listUpdateInfo
@@ -129,54 +151,63 @@ export const getListUpdateInfo = async() => {
 export const setListUpdateInfo = async(info: LX.List.ListUpdateInfo) => {
   await initListUpdateInfo()
   const playlistIds = Object.keys(info)
-  for (const [playlistId, value] of Object.entries(info)) {
-    listUpdateInfo = await mutatePlaylistMetadata({
-      version: 1,
-      action: 'upsert',
-      playlistId,
-      value,
-      updatedAtMs: Date.now(),
-    })
-  }
-  listUpdateInfo = await mutatePlaylistMetadata({ version: 1, action: 'retain', playlistIds })
+  await queuePlaylistMetadataMutation(async() => {
+    for (const [playlistId, value] of Object.entries(info)) {
+      await applyPlaylistMetadataMutation({
+        version: 1,
+        action: 'upsert',
+        playlistId,
+        value,
+        updatedAtMs: Date.now(),
+      })
+    }
+    await applyPlaylistMetadataMutation({ version: 1, action: 'retain', playlistIds })
+  })
 }
 export const setListAutoUpdate = async(id: string, enable: boolean) => {
   await initListUpdateInfo()
-  const targetInfo = listUpdateInfo[id] ?? { updateTime: 0, isAutoUpdate: false }
-  targetInfo.isAutoUpdate = enable
-  listUpdateInfo = await mutatePlaylistMetadata({
-    version: 1,
-    action: 'upsert',
-    playlistId: id,
-    value: targetInfo,
-    updatedAtMs: Date.now(),
+  await queuePlaylistMetadataMutation(async() => {
+    const targetInfo = { ...(listUpdateInfo[id] ?? { updateTime: 0, isAutoUpdate: false }), isAutoUpdate: enable }
+    await applyPlaylistMetadataMutation({
+      version: 1,
+      action: 'upsert',
+      playlistId: id,
+      value: targetInfo,
+      updatedAtMs: Date.now(),
+    })
   })
 }
 export const setListUpdateTime = async(id: string, time: number) => {
   await initListUpdateInfo()
-  const targetInfo = listUpdateInfo[id] ?? { updateTime: 0, isAutoUpdate: false }
-  targetInfo.updateTime = time
-  listUpdateInfo = await mutatePlaylistMetadata({
-    version: 1,
-    action: 'upsert',
-    playlistId: id,
-    value: targetInfo,
-    updatedAtMs: Date.now(),
+  await queuePlaylistMetadataMutation(async() => {
+    const targetInfo = { ...(listUpdateInfo[id] ?? { updateTime: 0, isAutoUpdate: false }), updateTime: time }
+    await applyPlaylistMetadataMutation({
+      version: 1,
+      action: 'upsert',
+      playlistId: id,
+      value: targetInfo,
+      updatedAtMs: Date.now(),
+    })
   })
 }
 export const setUserListProfile = async(id: string, profile: LX.List.UserListProfile) => {
   await initListUpdateInfo()
-  const targetInfo = listUpdateInfo[id] ?? { updateTime: 0, isAutoUpdate: false }
-  targetInfo.profile = {
-    ...targetInfo.profile,
-    ...profile,
-  }
-  listUpdateInfo = await mutatePlaylistMetadata({
-    version: 1,
-    action: 'upsert',
-    playlistId: id,
-    value: targetInfo,
-    updatedAtMs: Date.now(),
+  await queuePlaylistMetadataMutation(async() => {
+    const currentInfo = listUpdateInfo[id] ?? { updateTime: 0, isAutoUpdate: false }
+    const targetInfo = {
+      ...currentInfo,
+      profile: {
+        ...currentInfo.profile,
+        ...profile,
+      },
+    }
+    await applyPlaylistMetadataMutation({
+      version: 1,
+      action: 'upsert',
+      playlistId: id,
+      value: targetInfo,
+      updatedAtMs: Date.now(),
+    })
   })
 }
 // export const setListUpdateInfo = (id, { updateTime, isAutoUpdate }) => {
@@ -185,12 +216,16 @@ export const setUserListProfile = async(id: string, profile: LX.List.UserListPro
 // }
 export const removeListUpdateInfo = async(id: string) => {
   await initListUpdateInfo()
-  if (listUpdateInfo[id] == null) return
-  listUpdateInfo = await mutatePlaylistMetadata({ version: 1, action: 'remove', playlistId: id })
+  await queuePlaylistMetadataMutation(async() => {
+    if (listUpdateInfo[id] == null) return
+    await applyPlaylistMetadataMutation({ version: 1, action: 'remove', playlistId: id })
+  })
 }
 export const overwriteListUpdateInfo = async(ids: string[]) => {
   await initListUpdateInfo()
-  listUpdateInfo = await mutatePlaylistMetadata({ version: 1, action: 'retain', playlistIds: ids })
+  await queuePlaylistMetadataMutation(async() => {
+    await applyPlaylistMetadataMutation({ version: 1, action: 'retain', playlistIds: ids })
+  })
 }
 
 

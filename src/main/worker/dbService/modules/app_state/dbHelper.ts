@@ -417,5 +417,7 @@ export const queryNonActivityMarker = (name: unknown): MigrationMarker | null =>
 
 export const completeNonActivityMarker = (input: unknown): void => {
   const marker = validateMarker(input)
-  getDB().transaction(() => putMigrationMarker(getDB(), marker))()
+  getDB().transaction(() => {
+    putMigrationMarker(getDB(), marker)
+  })()
 }

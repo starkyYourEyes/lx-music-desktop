@@ -33,5 +33,7 @@ export default () => {
   const handlers = createDataHandlers(getStore(STORE_NAMES.DATA))
   mainHandle<unknown, unknown>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, async({ params }) => handlers.get(params))
 
-  mainOn<unknown>(WIN_MAIN_RENDERER_EVENT_NAME.save_data, ({ params }) => handlers.set(params))
+  mainOn<unknown>(WIN_MAIN_RENDERER_EVENT_NAME.save_data, ({ params }) => {
+    handlers.set(params)
+  })
 }

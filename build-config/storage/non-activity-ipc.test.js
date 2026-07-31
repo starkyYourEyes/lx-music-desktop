@@ -325,6 +325,79 @@ describe('typed non-activity IPC', () => {
     assert.deepEqual(persisted.existing, { updateTime: 1, isAutoUpdate: true })
   })
 
+  it('serializes playlist metadata mutations without letting stale responses replace the cache', async() => {
+    let persisted = {}
+    let resolveFirstMutation
+    const firstMutation = new Promise(resolve => { resolveFirstMutation = resolve })
+    let mutationCount = 0
+    const originalLoad = Module._load
+    Module._load = function(request, parent, isMain) {
+      if (request == '@renderer/utils/storageState') {
+        return {
+          getCatalogPreferences: () => { throw new Error('unexpected catalog read') },
+          setCatalogPreference: () => { throw new Error('unexpected catalog write') },
+          getLocalState: () => { throw new Error('unexpected local-state read') },
+          getPlaylistMetadata: async() => structuredClone(persisted),
+          mutatePlaylistMetadata: command => {
+            mutationCount++
+            if (mutationCount == 1) {
+              persisted.first = { updateTime: 0, isAutoUpdate: true }
+              return firstMutation
+            }
+            if (mutationCount == 3) return Promise.reject(new Error('injected playlist failure'))
+            if (command.action == 'upsert') persisted[command.playlistId] = structuredClone(command.value)
+            return Promise.resolve(structuredClone(persisted))
+          },
+          setLocalState: () => { throw new Error('unexpected local-state write') },
+        }
+      }
+      if (request == '@common/utils') return { throttle: fn => fn }
+      if (request == '@common/constants') {
+        return {
+          DEFAULT_SETTING: {},
+          LIST_IDS: { DEFAULT: 'default' },
+        }
+      }
+      if (request == '@renderer/store/list/action') return { setUpdateTime: () => {} }
+      if (request == './index' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { dateFormat: () => '' }
+      return originalLoad.call(this, request, parent, isMain)
+    }
+
+    let data
+    try {
+      data = require(rendererDataPath)
+    } finally {
+      Module._load = originalLoad
+    }
+
+    await data.getListUpdateInfo()
+    const first = data.setListAutoUpdate('first', true)
+    const second = data.setListUpdateTime('second', 2)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(mutationCount, 1)
+
+    resolveFirstMutation({ first: { updateTime: 0, isAutoUpdate: true } })
+    await Promise.all([first, second])
+
+    assert.deepEqual(await data.getListUpdateInfo(), {
+      first: { updateTime: 0, isAutoUpdate: true },
+      second: { updateTime: 2, isAutoUpdate: false },
+    })
+    assert.deepEqual(persisted, {
+      first: { updateTime: 0, isAutoUpdate: true },
+      second: { updateTime: 2, isAutoUpdate: false },
+    })
+
+    await assert.rejects(data.setListAutoUpdate('rejected', true), /injected playlist failure/)
+    await data.setListUpdateTime('after-rejection', 3)
+
+    assert.deepEqual(await data.getListUpdateInfo(), {
+      first: { updateTime: 0, isAutoUpdate: true },
+      second: { updateTime: 2, isAutoUpdate: false },
+      'after-rejection': { updateTime: 3, isAutoUpdate: false },
+    })
+  })
+
   it('records an exact-case search term that is already first', async() => {
     const historyList = ['Exact']
     const commands = []

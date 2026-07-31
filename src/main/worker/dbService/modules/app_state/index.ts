@@ -69,16 +69,16 @@ export interface LegacyNonActivityImportResultV1 {
 }
 
 export interface AppStateRepository {
-  getLocalState(): LocalStateSnapshotV1
-  setLocalState(update: LocalStateUpdateV1): LocalStateSnapshotV1
-  clearLocalState(): void
-  getPlaylistMetadata(): LX.List.ListUpdateInfo
-  applyPlaylistMetadata(command: PlaylistMetadataCommandV1): LX.List.ListUpdateInfo
-  getSearchHistory(): string[]
-  applySearchHistory(command: SearchHistoryCommandV1): string[]
-  importLegacyNonActivity(input: LegacyNonActivityImportV1): LegacyNonActivityImportResultV1
-  getNonActivityMigrationMarker(name: NonActivityMarkerNameV1): MigrationMarker | null
-  completeNonActivityMigrationMarker(input: NonActivityMarkerCommandV1): void
+  getLocalState: () => LocalStateSnapshotV1
+  setLocalState: (update: LocalStateUpdateV1) => LocalStateSnapshotV1
+  clearLocalState: () => void
+  getPlaylistMetadata: () => LX.List.ListUpdateInfo
+  applyPlaylistMetadata: (command: PlaylistMetadataCommandV1) => LX.List.ListUpdateInfo
+  getSearchHistory: () => string[]
+  applySearchHistory: (command: SearchHistoryCommandV1) => string[]
+  importLegacyNonActivity: (input: LegacyNonActivityImportV1) => LegacyNonActivityImportResultV1
+  getNonActivityMigrationMarker: (name: NonActivityMarkerNameV1) => MigrationMarker | null
+  completeNonActivityMigrationMarker: (input: NonActivityMarkerCommandV1) => void
 }
 
 export type { MigrationMarker }

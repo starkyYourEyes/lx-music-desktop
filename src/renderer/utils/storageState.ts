@@ -1,6 +1,5 @@
 import {
   WIN_MAIN_RENDERER_EVENT_NAME,
-  type StorageCatalogPreferenceSetRequest,
 } from '@common/ipcNames'
 import { rendererInvoke } from '@common/rendererIpc'
 import type {
@@ -14,18 +13,37 @@ import { toRaw } from '@common/utils/vueTools'
 
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
 
+interface CatalogPreferenceValues {
+  leaderboard: CatalogPreferencesV1['leaderboard']
+  songList: CatalogPreferencesV1['songList']
+  search: CatalogPreferencesV1['search']
+}
+
+interface StorageCatalogPreferenceSetRequestFor<Section extends keyof CatalogPreferenceValues> {
+  type: 'catalog_preference.set'
+  section: Section
+  value: CatalogPreferenceValues[Section]
+}
+
 export const getCatalogPreferences = () => rendererInvoke<{ type: 'catalog_preferences.get' }, CatalogPreferencesV1>(
   WIN_MAIN_RENDERER_EVENT_NAME.storage_catalog_preferences_get,
   { type: 'catalog_preferences.get' },
 )
 
-export const setCatalogPreference = <Section extends StorageCatalogPreferenceSetRequest['section']>(
+export const setCatalogPreference = <Section extends keyof CatalogPreferenceValues>(
   section: Section,
-  value: Extract<StorageCatalogPreferenceSetRequest, { section: Section }>['value'],
-) => rendererInvoke<StorageCatalogPreferenceSetRequest, CatalogPreferencesV1>(
-  WIN_MAIN_RENDERER_EVENT_NAME.storage_catalog_preference_set,
-  toCloneable({ type: 'catalog_preference.set', section, value } as StorageCatalogPreferenceSetRequest),
-)
+  value: CatalogPreferenceValues[Section],
+) => {
+  const request: StorageCatalogPreferenceSetRequestFor<Section> = {
+    type: 'catalog_preference.set',
+    section,
+    value,
+  }
+  return rendererInvoke<StorageCatalogPreferenceSetRequestFor<Section>, CatalogPreferencesV1>(
+    WIN_MAIN_RENDERER_EVENT_NAME.storage_catalog_preference_set,
+    toCloneable(request),
+  )
+}
 
 export const getLocalState = () => rendererInvoke<{ type: 'local_state.get' }, LocalStateSnapshotV1>(
   WIN_MAIN_RENDERER_EVENT_NAME.storage_local_state_get,

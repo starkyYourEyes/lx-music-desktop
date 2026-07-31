@@ -15,6 +15,16 @@ export interface LegacyDataSnapshotV1 {
   sourcePath: string
   parsed: Record<string, unknown>
   fileSha256: string
+  fileIdentity: LegacyDataFileIdentityV1
+}
+
+export interface LegacyDataFileIdentityV1 {
+  dev: number | bigint
+  ino: number | bigint
+  size: number | bigint
+  mtimeMs: number | bigint
+  ctimeMs: number | bigint
+  birthtimeMs: number | bigint
 }
 
 export type LegacyDataSourceResult =
@@ -49,6 +59,19 @@ const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
 
 const sha256Bytes = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex')
 
+const identityOf = (stats: LegacyDataFileIdentityV1): LegacyDataFileIdentityV1 => ({
+  dev: stats.dev,
+  ino: stats.ino,
+  size: stats.size,
+  mtimeMs: stats.mtimeMs,
+  ctimeMs: stats.ctimeMs,
+  birthtimeMs: stats.birthtimeMs,
+})
+
+const sameIdentity = (left: LegacyDataFileIdentityV1, right: LegacyDataFileIdentityV1): boolean =>
+  left.dev == right.dev && left.ino == right.ino && left.size == right.size &&
+  left.mtimeMs == right.mtimeMs && left.ctimeMs == right.ctimeMs && left.birthtimeMs == right.birthtimeMs
+
 const deepFreeze = <T>(value: T): T => {
   if (value != null && typeof value == 'object' && !Object.isFrozen(value)) {
     Object.freeze(value)
@@ -74,7 +97,23 @@ const validatedPreviousPath = async(sourcePath: string): Promise<string | null> 
 }
 
 const readSelectedSource = async(sourcePath: string): Promise<LegacyDataSourceResult> => {
-  const bytes = await fs.readFile(sourcePath)
+  const handle = await fs.open(sourcePath, 'r')
+  let bytes: Buffer
+  let fileIdentity: LegacyDataFileIdentityV1
+  try {
+    const openedIdentity = identityOf(await handle.stat())
+    bytes = await handle.readFile()
+    const afterReadIdentity = identityOf(await handle.stat())
+    const pathStats = await fs.lstat(sourcePath)
+    const pathIdentity = identityOf(pathStats)
+    if (pathStats.isSymbolicLink() || !pathStats.isFile() ||
+        !sameIdentity(openedIdentity, afterReadIdentity) || !sameIdentity(openedIdentity, pathIdentity)) {
+      throw new Error('Legacy data source changed during preflight')
+    }
+    fileIdentity = openedIdentity
+  } finally {
+    await handle.close()
+  }
   const fileSha256 = sha256Bytes(bytes)
   let parsed: unknown
   try {
@@ -103,6 +142,7 @@ const readSelectedSource = async(sourcePath: string): Promise<LegacyDataSourceRe
       sourcePath,
       parsed: deepFreeze(parsed),
       fileSha256,
+      fileIdentity: Object.freeze(fileIdentity),
     }),
   }
 }

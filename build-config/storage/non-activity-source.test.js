@@ -19,6 +19,8 @@ const {
   normalizeNonActivitySource,
   readLegacyDataSource,
 } = require('../../src/main/migration/legacyData/source.ts')
+const { migrateLegacyCredentials } = require('../../src/main/migration/credentials/credentialMigration.ts')
+const { withSelectedLegacyDataSource } = require('../../src/main/migration/credentials/legacySources.ts')
 const { createStorageCoordinator } = require('../../src/main/startup/storageCoordinator.ts')
 
 const tempDirs = []
@@ -50,6 +52,26 @@ const legacy = {
   searchSetting: { temp_source: 'wy', source: 'mg', type: 'songlist' },
 }
 
+const runCredentialMigration = async(snapshot, writes) => withSelectedLegacyDataSource(snapshot, () =>
+  migrateLegacyCredentials({
+    dataRoot: path.dirname(snapshot.sourcePath),
+    vault: {
+      mode: 'encrypted',
+      async write() {
+        writes.count++
+        return { persistence: 'encrypted' }
+      },
+      async verify() { return true },
+      getMigrationMarker() { return null },
+      async putMigrationMarker() {},
+    },
+    profiles: {
+      async migrateLegacyAccountProfiles() {
+        throw new Error('profile target write must not run')
+      },
+    },
+  }))
+
 describe('legacy non-activity source', () => {
   it('selects the profile source once and freezes the byte-identical snapshot', async() => {
     const { profileRoot, legacyRoot } = makeRoots()
@@ -76,6 +98,51 @@ describe('legacy non-activity source', () => {
 
     assert.equal(result.status, 'available')
     assert.equal(result.snapshot.sourcePath, sourcePath)
+  })
+
+  it('rejects selected-file replacement after preflight before credential target writes', async() => {
+    const { profileRoot, legacyRoot } = makeRoots()
+    const sourcePath = path.join(profileRoot, 'data.json')
+    fs.writeFileSync(sourcePath, JSON.stringify({
+      neteaseAccount: { cookie: 'same-cookie' },
+      listPrevSelectId: 'old-list',
+    }))
+    const source = await readLegacyDataSource({ profileRoot, legacyRoot })
+    assert.equal(source.status, 'available')
+    fs.rmSync(sourcePath)
+    const replacement = JSON.stringify({
+      neteaseAccount: { cookie: 'same-cookie' },
+      listPrevSelectId: 'new-list',
+    })
+    fs.writeFileSync(sourcePath, replacement)
+    const writes = { count: 0 }
+
+    await assert.rejects(
+      runCredentialMigration(source.snapshot, writes),
+      /Legacy data source changed after preflight/,
+    )
+    assert.equal(writes.count, 0)
+    assert.equal(fs.readFileSync(sourcePath, 'utf8'), replacement)
+  })
+
+  it('rejects selected-file byte mutation after preflight before credential target writes', async() => {
+    const { profileRoot, legacyRoot } = makeRoots()
+    const sourcePath = path.join(profileRoot, 'data.json')
+    const original = JSON.stringify({ neteaseAccount: { cookie: 'same-cookie' }, state: 'old' })
+    const mutated = JSON.stringify({ neteaseAccount: { cookie: 'same-cookie' }, state: 'new' })
+    assert.equal(Buffer.byteLength(original), Buffer.byteLength(mutated))
+    fs.writeFileSync(sourcePath, original)
+    const source = await readLegacyDataSource({ profileRoot, legacyRoot })
+    assert.equal(source.status, 'available')
+    fs.writeFileSync(sourcePath, mutated)
+    const writes = { count: 0 }
+
+    await assert.rejects(
+      runCredentialMigration(source.snapshot, writes),
+      /Legacy data source changed after preflight/,
+    )
+    assert.equal(writes.count, 0)
+    assert.equal(fs.readFileSync(sourcePath, 'utf8'), mutated)
   })
 
   it('preserves corrupt selected bytes and reports only a valid exact sibling recovery candidate', async() => {

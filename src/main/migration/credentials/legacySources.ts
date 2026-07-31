@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { canonicalJson, sha256Canonical, type JsonValue } from '../../../common/storage/canonicalJson'
@@ -6,7 +7,7 @@ import { normalizePublicAccountProfile } from '../../../common/storage/accountPr
 import { assertCookieCredential, assertSyncKeyCredential, assertWebDAVCredential, toCredentialEntryId, type CredentialRef } from '../../storage/credentials/types'
 import { createSyncMetadataRecoveryError } from './recoveryError'
 import { preflightVersionedSyncMetadata, type VersionedSyncMetadataKind } from './syncMetadataPreflight'
-import type { LegacyDataSnapshotV1 } from '../legacyData/source'
+import type { LegacyDataFileIdentityV1, LegacyDataSnapshotV1 } from '../legacyData/source'
 
 export interface LegacyCredentialSource {
   markerName: string
@@ -27,14 +28,7 @@ export interface VersionedSyncMetadataSource {
   documentIdentity: SourceFileIdentity
 }
 
-export interface SourceFileIdentity {
-  dev: number | bigint
-  ino: number | bigint
-  size: number | bigint
-  mtimeMs: number | bigint
-  ctimeMs: number | bigint
-  birthtimeMs: number | bigint
-}
+export type SourceFileIdentity = LegacyDataFileIdentityV1
 
 export interface LegacyAccountProfile {
   provider: 'netease' | 'qq_music'
@@ -73,6 +67,10 @@ const identityOf = (stats: Awaited<ReturnType<typeof fs.lstat>>): SourceFileIden
   ctimeMs: stats.ctimeMs,
   birthtimeMs: stats.birthtimeMs,
 })
+
+const sameIdentity = (left: SourceFileIdentity, right: SourceFileIdentity): boolean =>
+  left.dev == right.dev && left.ino == right.ino && left.size == right.size &&
+  left.mtimeMs == right.mtimeMs && left.ctimeMs == right.ctimeMs && left.birthtimeMs == right.birthtimeMs
 
 const isContained = (root: string, candidate: string): boolean => {
   const relative = path.relative(root, candidate)
@@ -140,14 +138,29 @@ const sourceDocumentFromSnapshot = async(snapshot: LegacyDataSnapshotV1): Promis
   const sourcePath = path.resolve(snapshot.sourcePath)
   if (sourcePath != path.join(trustedRoot, 'data.json')) throw new Error('Invalid legacy credential source path')
   await assertPathWithoutReparsePoints(trustedRoot, sourcePath)
-  const stats = await fs.lstat(sourcePath)
-  if (stats.isSymbolicLink() || !stats.isFile()) throw new Error('Invalid legacy credential source path')
+  const handle = await fs.open(sourcePath, 'r')
+  try {
+    const openedIdentity = identityOf(await handle.stat())
+    const bytes = await handle.readFile()
+    const afterReadIdentity = identityOf(await handle.stat())
+    const pathStats = await fs.lstat(sourcePath)
+    const pathIdentity = identityOf(pathStats)
+    if (pathStats.isSymbolicLink() || !pathStats.isFile() ||
+        !sameIdentity(openedIdentity, snapshot.fileIdentity) ||
+        !sameIdentity(openedIdentity, afterReadIdentity) ||
+        !sameIdentity(openedIdentity, pathIdentity) ||
+        createHash('sha256').update(bytes).digest('hex') != snapshot.fileSha256) {
+      throw new Error('Legacy data source changed after preflight')
+    }
+  } finally {
+    await handle.close()
+  }
   return {
     path: sourcePath,
     value: structuredClone(snapshot.parsed),
     documentKind: 'generic',
     trustedRoot,
-    identity: identityOf(stats),
+    identity: { ...snapshot.fileIdentity },
   }
 }
 

@@ -170,6 +170,43 @@ export const databaseSchemaContract: SchemaContract = {
       indexes: [{ name: 'account_profiles.provider.primary', columns: ['provider'], unique: true, partial: false }],
       foreignKeys: [],
     },
+    {
+      name: 'local_state',
+      columns: [
+        column('key', 'TEXT', false, 1),
+        column('version', 'INTEGER', true),
+        column('value_json', 'TEXT', true),
+        column('updated_at_ms', 'INTEGER', true),
+      ],
+      indexes: [{ name: 'local_state.key.primary', columns: ['key'], unique: true, partial: false }],
+      foreignKeys: [],
+    },
+    {
+      name: 'playlist_metadata',
+      columns: [
+        column('playlist_id', 'TEXT', false, 1),
+        column('is_auto_update', 'INTEGER', true),
+        column('update_time_ms', 'INTEGER', true),
+        column('profile_json', 'TEXT'),
+        column('updated_at_ms', 'INTEGER', true),
+      ],
+      indexes: [{ name: 'playlist_metadata.playlist_id.primary', columns: ['playlist_id'], unique: true, partial: false }],
+      foreignKeys: [],
+    },
+    {
+      name: 'search_history',
+      columns: [
+        column('term', 'TEXT', false, 1),
+        column('recency_seq', 'INTEGER', true),
+        column('last_used_at_ms', 'INTEGER'),
+        column('use_count', 'INTEGER', true),
+      ],
+      indexes: [
+        { name: 'search_history.term.primary', columns: ['term'], unique: true, partial: false },
+        { name: 'search_history.recency_seq.unique', columns: ['recency_seq'], unique: true, partial: false },
+      ],
+      foreignKeys: [],
+    },
   ],
 }
 

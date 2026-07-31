@@ -347,6 +347,26 @@ test('re-adding a source during window creation cancels only idle disposal', asy
   assert.equal(harness.disposedIds.includes('a'), false)
 })
 
+test('source invalidation during idle creation cannot be cancelled by reconfiguration', async() => {
+  const gate = deferred()
+  const harness = createPoolHarness({ autoInit: true, createGate: gate.promise })
+  const first = harness.pool.ensure('a')
+  await harness.waitForCreateCall('a')
+  await harness.pool.markConfigured(new Set())
+  await harness.pool.invalidate('a', 'sourceChanged')
+  await harness.pool.markConfigured(new Set(['a']))
+  gate.resolve()
+
+  await assert.rejects(first, error => error.kind == 'sourceChanged')
+  await harness.waitForDisposed('a', 1)
+  assert.deepEqual(harness.statusEvents, [])
+
+  const second = harness.pool.ensure('a')
+  await harness.waitForRuntimeCreated('a', 2)
+  assert.equal((await second).id, 'a')
+  assert.deepEqual(harness.createdGenerations('a'), [1, 2])
+})
+
 test('script update releases only the invalidated source lease ownership', async() => {
   const harness = createPoolHarness({ autoInit: true })
   await Promise.all([harness.pool.ensure('a'), harness.pool.ensure('b')])

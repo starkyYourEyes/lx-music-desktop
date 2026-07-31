@@ -290,7 +290,9 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   const invalidate = async(apiId: string, kind: 'sourceChanged' | 'runtimeCrash') => {
     if (kind == 'sourceChanged') leasesByApiId.delete(apiId)
     const creating = creatingByApiId.get(apiId)
-    if (creating && creating.disposeReason == null) creating.disposeReason = 'invalidate'
+    if (creating && (creating.disposeReason == null || creating.disposeReason == 'idle')) {
+      creating.disposeReason = 'invalidate'
+    }
     const record = recordsByApiId.get(apiId)
     const failure = messageFailure(
       apiId,

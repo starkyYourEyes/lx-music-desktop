@@ -1,3 +1,28 @@
+import type {
+  CatalogPreferencesV1,
+  LocalStateSnapshotV1,
+  LocalStateUpdateV1,
+  PlaylistMetadataCommandV1,
+  SearchHistoryCommandV1,
+} from './storage/stateContracts'
+
+export type StorageCatalogPreferenceSetRequest =
+  | { type: 'catalog_preference.set', section: 'leaderboard', value: CatalogPreferencesV1['leaderboard'] }
+  | { type: 'catalog_preference.set', section: 'songList', value: CatalogPreferencesV1['songList'] }
+  | { type: 'catalog_preference.set', section: 'search', value: CatalogPreferencesV1['search'] }
+
+export type StorageStateRequest =
+  | { type: 'catalog_preferences.get' }
+  | StorageCatalogPreferenceSetRequest
+  | { type: 'local_state.get' }
+  | { type: 'local_state.set', update: LocalStateUpdateV1 }
+  | { type: 'playlist_metadata.get' }
+  | { type: 'playlist_metadata.mutate', command: PlaylistMetadataCommandV1 }
+  | { type: 'search_history.get' }
+  | { type: 'search_history.mutate', command: SearchHistoryCommandV1 }
+
+export type StorageStateResponse = CatalogPreferencesV1 | LocalStateSnapshotV1 | LX.List.ListUpdateInfo | string[]
+
 const modules = {
   common: {
     get_env_params: 'get_env_params',
@@ -91,6 +116,14 @@ const modules = {
     get_data: 'get_data',
     save_data: 'save_data',
     storage_capabilities_get: 'storage_capabilities_get',
+    storage_catalog_preferences_get: 'storage_catalog_preferences_get',
+    storage_catalog_preference_set: 'storage_catalog_preference_set',
+    storage_local_state_get: 'storage_local_state_get',
+    storage_local_state_set: 'storage_local_state_set',
+    storage_playlist_metadata_get: 'storage_playlist_metadata_get',
+    storage_playlist_metadata_mutate: 'storage_playlist_metadata_mutate',
+    storage_search_history_get: 'storage_search_history_get',
+    storage_search_history_mutate: 'storage_search_history_mutate',
     get_sound_effect_eq_preset: 'get_sound_effect_eq_preset',
     save_sound_effect_eq_preset: 'save_sound_effect_eq_preset',
     get_sound_effect_convolution_preset: 'get_sound_effect_convolution_preset',

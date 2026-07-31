@@ -1,10 +1,8 @@
 
-import { throttle } from '@common/utils/common'
-import { toRaw } from '@common/utils/vueTools'
 import {
-  getSearchHistoryList,
-  saveSearchHistoryList,
-} from '@renderer/utils/ipc'
+  getSearchHistory,
+  mutateSearchHistory,
+} from '@renderer/utils/storageState'
 import { appSetting } from '../setting'
 import { searchText, historyList } from './state'
 
@@ -14,31 +12,28 @@ export const setSearchText = (text: string) => {
 }
 
 let isInitedSearchHistory = false
-const saveSearchHistoryListThrottle = throttle((list: LX.List.SearchHistoryList) => {
-  saveSearchHistoryList(list)
-}, 500)
 
+const replaceHistoryList = (list: string[]) => {
+  historyList.splice(0, historyList.length, ...list)
+}
 
 export const getHistoryList = async() => {
   if (isInitedSearchHistory || historyList.length) return
-  historyList.push(...(await getSearchHistoryList() ?? []))
+  replaceHistoryList(await getSearchHistory())
   isInitedSearchHistory ||= true
 }
 export const addHistoryWord = async(word: string) => {
   if (!appSetting['search.isShowHistorySearch']) return
   if (!isInitedSearchHistory) await getHistoryList()
-  let index = historyList.indexOf(word)
+  const index = historyList.indexOf(word)
   if (index == 0) return
-  if (index > -1) historyList.splice(index, 1)
-  if (historyList.length >= 15) historyList.splice(14, historyList.length - 14)
-  historyList.unshift(word)
-  saveSearchHistoryListThrottle(toRaw(historyList))
+  replaceHistoryList(await mutateSearchHistory({ version: 1, action: 'record', term: word, usedAtMs: Date.now() }))
 }
-export const removeHistoryWord = (index: number) => {
-  historyList.splice(index, 1)
-  saveSearchHistoryListThrottle(toRaw(historyList))
+export const removeHistoryWord = async(index: number) => {
+  const term = historyList[index]
+  if (term == null) return
+  replaceHistoryList(await mutateSearchHistory({ version: 1, action: 'remove', term }))
 }
-export const clearHistoryList = (id: string) => {
-  historyList.splice(0, historyList.length)
-  saveSearchHistoryList([])
+export const clearHistoryList = async() => {
+  replaceHistoryList(await mutateSearchHistory({ version: 1, action: 'clear' }))
 }

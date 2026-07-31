@@ -2,9 +2,11 @@ import { rendererSend, rendererInvoke, rendererOn, rendererOff } from '@common/r
 import { HOTKEY_RENDERER_EVENT_NAME, WIN_MAIN_RENDERER_EVENT_NAME, CMMON_EVENT_NAME } from '@common/ipcNames'
 import { markRaw, toRaw } from '@common/utils/vueTools'
 import * as hotKeys from '@common/hotKey'
-import { APP_EVENT_NAMES, DATA_KEYS, DEFAULT_SETTING } from '@common/constants'
+import { APP_EVENT_NAMES, DATA_KEYS } from '@common/constants'
 import type { ListeningTimeStats } from '@common/utils/listeningTime'
 import type { StorageCapabilitiesV1, StorageRequestV1 } from '@common/storage/contracts'
+import type { LocalStateSnapshotV1 } from '@common/storage/stateContracts'
+import { getLocalState, setLocalState } from './storageState'
 
 type RemoveListener = () => void
 
@@ -192,88 +194,12 @@ export const getListeningTimeStats = async() => {
   return rendererInvoke<string, ListeningTimeStats | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.listeningTimeStats)
 }
 
-export const saveSearchHistoryList = (list: LX.List.SearchHistoryList) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.searchHistoryList,
-    data: list,
-  })
-}
-// 获取搜索历史列表
-export const getSearchHistoryList = async() => {
-  return rendererInvoke<string, string[] | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.searchHistoryList)
-}
-
-export const saveListPositionInfo = (listPosition: LX.List.ListPositionInfo) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.listScrollPosition,
-    data: listPosition,
-  })
-}
-// 获取搜索历史列表
-export const getListPositionInfo = async() => {
-  return rendererInvoke<string, LX.List.ListPositionInfo | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.listScrollPosition)
-}
-
-export const saveListPrevSelectId = (listPosition: string | null) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.listPrevSelectId,
-    data: listPosition,
-  })
-}
-// 获取上一次选中的列表id
-export const getListPrevSelectId = async() => {
-  return rendererInvoke<string, string | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.listPrevSelectId)
-}
-
-export const saveListUpdateInfo = (listPosition: LX.List.ListUpdateInfo) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.listUpdateInfo,
-    data: listPosition,
-  })
-}
-// 获取列表更新记录
-export const getListUpdateInfo = async() => {
-  return rendererInvoke<string, LX.List.ListUpdateInfo | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.listUpdateInfo)
-}
-
-export const saveLeaderboardSetting = (source: typeof DEFAULT_SETTING['leaderboard']) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.leaderboardSetting,
-    data: source,
-  })
-}
-export const getLeaderboardSetting = async() => {
-  return (await rendererInvoke<string, typeof DEFAULT_SETTING['leaderboard']>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.leaderboardSetting)) ?? { ...DEFAULT_SETTING.leaderboard }
-}
-export const saveSongListSetting = (setting: typeof DEFAULT_SETTING['songList']) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.songListSetting,
-    data: setting,
-  })
-}
-export const getSongListSetting = async() => {
-  return (await rendererInvoke<string, typeof DEFAULT_SETTING['songList']>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.songListSetting)) ?? { ...DEFAULT_SETTING.songList }
-}
-export const saveSearchSetting = (setting: typeof DEFAULT_SETTING['search']) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.searchSetting,
-    data: setting,
-  })
-}
-export const getSearchSetting = async() => {
-  return (await rendererInvoke<string, typeof DEFAULT_SETTING['search']>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.searchSetting)) ?? { ...DEFAULT_SETTING.search }
-}
-export const saveViewPrevState = (state: typeof DEFAULT_SETTING['viewPrevState']) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.viewPrevState,
-    data: state,
-  })
+export const saveViewPrevState = (state: LocalStateSnapshotV1['viewPrevState']) => {
+  void setLocalState({ version: 1, key: 'view_prev_state', value: state, updatedAtMs: Date.now() })
 }
 export const getViewPrevState = async() => {
-  return (await rendererInvoke<string, typeof DEFAULT_SETTING['viewPrevState']>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.viewPrevState)) ?? { ...DEFAULT_SETTING.viewPrevState }
+  return (await getLocalState()).viewPrevState
 }
-
-
 export const getSystemFonts = async() => {
   return rendererInvoke<string[]>(CMMON_EVENT_NAME.get_system_fonts).catch(() => {
     return []

@@ -599,280 +599,90 @@ describe('sync credential cutover', () => {
     await fsp.rm(root, { recursive: true, force: true })
   })
 
-  it('canonicalizes same-count versioned metadata only after vaulting discovered keys', async() => {
-    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-canonical-metadata-'))
-    const vault = createVault()
-    global.lxDataPath = root
-    global.lx = { credentialVault: vault, appSetting: {} }
-    await writeJson(path.join(root, 'sync/client/servers.v1.json'), {
-      version: 1,
-      servers: {
-        server_a: {
-          clientId: 'client_a',
-          serverName: 'Server',
-          key: 'CLIENT_KEY_SENTINEL',
-          forbidden: 'remove-me',
-        },
-      },
-      forbidden: true,
-    })
-    await writeJson(path.join(root, 'sync/server/devices.v2.json'), {
-      version: 2,
-      userName: 'default',
-      clients: {
-        device_a: {
-          clientId: 'device_a',
-          deviceName: 'Desktop',
-          isMobile: false,
-          key: 'SERVER_KEY_SENTINEL',
-          forbidden: 'remove-me',
-        },
-      },
-      forbidden: true,
-    })
-
-    await freshRequire('../../src/main/modules/sync/migrate.ts').default(root)
-
-    assert.deepEqual(JSON.parse(await fsp.readFile(path.join(root, 'sync/client/servers.v1.json'), 'utf8')), {
-      version: 1,
-      servers: { server_a: { clientId: 'client_a', serverName: 'Server' } },
-    })
-    assert.deepEqual(JSON.parse(await fsp.readFile(path.join(root, 'sync/server/devices.v2.json'), 'utf8')), {
-      version: 2,
-      userName: 'default',
-      clients: { device_a: { clientId: 'device_a', deviceName: 'Desktop', isMobile: false } },
-    })
-    assert.equal(vault.read({ kind: 'sync-client', serverId: 'server_a' }).status, 'available')
-    assert.equal(vault.read({ kind: 'sync-server-device', userName: 'default', clientId: 'device_a' }).status, 'available')
-    await fsp.rm(root, { recursive: true, force: true })
-  })
-
-  it('writes only runtime-readable sync metadata after vaulting keys from invalid entries', async() => {
+  it('rejects and preserves invalid current versioned metadata', async() => {
     const cases = [
       {
-        name: 'empty client id',
-        side: 'client',
-        id: 'server_empty_client',
-        value: { clientId: '', serverName: 'Server', key: 'CLIENT_KEY_EMPTY_ID_SENTINEL' },
+        name: 'client metadata',
+        relativePath: 'sync/client/servers.v1.json',
+        bytes: '{\n  "version": 1,\n  "servers": {\n    "server_invalid": { "clientId": "", "serverName": "Server", "key": "CLIENT_INVALID_SENTINEL" }\n  }\n}\n',
+        ref: { kind: 'sync-client', serverId: 'server_invalid' },
       },
       {
-        name: 'empty server name',
-        side: 'client',
-        id: 'server_empty_name',
-        value: { clientId: 'client_empty_name', serverName: '', key: 'CLIENT_KEY_EMPTY_NAME_SENTINEL' },
-      },
-      {
-        name: 'empty device id',
-        side: 'server',
-        id: 'device_empty_id',
-        value: { clientId: '', deviceName: 'Desktop', isMobile: false, key: 'SERVER_KEY_EMPTY_ID_SENTINEL' },
-      },
-      {
-        name: 'empty device name',
-        side: 'server',
-        id: 'device_empty_name',
-        value: { clientId: 'device_empty_name', deviceName: '', isMobile: false, key: 'SERVER_KEY_EMPTY_NAME_SENTINEL' },
-      },
-      ...[-1, 1.5, Number.MAX_SAFE_INTEGER + 1, null].map((lastConnectDate, index) => ({
-        name: `invalid connection date ${index}`,
-        side: 'server',
-        id: `device_invalid_date_${index}`,
-        value: {
-          clientId: `device_invalid_date_${index}`,
-          deviceName: 'Desktop',
-          isMobile: false,
-          lastConnectDate,
-          key: `SERVER_KEY_INVALID_DATE_${index}_SENTINEL`,
-        },
-      })),
-      {
-        name: 'invalid legacy sync date',
-        side: 'server',
-        id: 'device_invalid_legacy_date',
-        value: {
-          clientId: 'device_invalid_legacy_date',
-          deviceName: 'Desktop',
-          isMobile: false,
-          lastSyncDate: -1,
-          key: 'SERVER_KEY_INVALID_LEGACY_DATE_SENTINEL',
-        },
+        name: 'server metadata',
+        relativePath: 'sync/server/devices.v2.json',
+        bytes: '{\n  "version": 2,\n  "userName": "default",\n  "clients": {\n    "device_invalid": { "clientId": "", "deviceName": "Desktop", "isMobile": false, "key": "SERVER_INVALID_SENTINEL" }\n  }\n}\n',
+        ref: { kind: 'sync-server-device', userName: 'default', clientId: 'device_invalid' },
       },
     ]
-
-    const { normalizeSyncServerDevice } = freshRequire('../../src/common/storage/syncMetadata.ts')
-    for (const lastConnectDate of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
-      assert.equal(normalizeSyncServerDevice({
-        clientId: 'device_non_finite',
-        deviceName: 'Desktop',
-        isMobile: false,
-        lastConnectDate,
-      }), null)
-    }
-
     for (const testCase of cases) {
-      const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-validator-parity-'))
+      const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-invalid-current-'))
       const vault = createVault()
       global.lxDataPath = root
-      global.lx = {
-        credentialVault: vault,
-        appSetting: { 'sync.server.maxSsnapshotNum': 3, 'list.addMusicLocationType': 'add_start' },
-      }
+      global.lx = { credentialVault: vault, appSetting: {} }
+      const affectedPath = path.join(root, testCase.relativePath)
       try {
-        await writeJson(path.join(root, 'sync/client/servers.v1.json'), {
-          version: 1,
-          servers: {
-            server_valid: { clientId: 'client_valid', serverName: 'Server', forbidden: true },
-            ...(testCase.side == 'client' ? { [testCase.id]: testCase.value } : {}),
-          },
-          forbidden: true,
-        })
-        await writeJson(path.join(root, 'sync/server/devices.v2.json'), {
-          version: 2,
-          userName: 'default',
-          clients: {
-            device_valid: { clientId: 'device_valid', deviceName: 'Desktop', isMobile: false, forbidden: true },
-            ...(testCase.side == 'server' ? { [testCase.id]: testCase.value } : {}),
-          },
-          forbidden: true,
-        })
+        await fsp.mkdir(path.dirname(affectedPath), { recursive: true })
+        await fsp.writeFile(affectedPath, testCase.bytes)
 
-        await freshRequire('../../src/main/modules/sync/migrate.ts').default(root)
-
-        const clientMetadata = JSON.parse(await fsp.readFile(path.join(root, 'sync/client/servers.v1.json'), 'utf8'))
-        const serverMetadata = JSON.parse(await fsp.readFile(path.join(root, 'sync/server/devices.v2.json'), 'utf8'))
-        assert.deepEqual(clientMetadata, {
-          version: 1,
-          servers: { server_valid: { clientId: 'client_valid', serverName: 'Server' } },
-        }, testCase.name)
-        assert.deepEqual(serverMetadata, {
-          version: 2,
-          userName: 'default',
-          clients: { device_valid: { clientId: 'device_valid', deviceName: 'Desktop', isMobile: false } },
-        }, testCase.name)
-
-        const ref = testCase.side == 'client'
-          ? { kind: 'sync-client', serverId: testCase.id }
-          : { kind: 'sync-server-device', userName: 'default', clientId: testCase.id }
-        assert.equal(vault.read(ref).status, 'available', testCase.name)
-
-        const clientData = freshRequire('../../src/main/modules/sync/client/data.ts')
-        assert.equal(await clientData.getSyncAuthKey('server_valid'), null, testCase.name)
-        const { UserDataManage } = freshRequire('../../src/main/modules/sync/server/user/data.ts')
-        assert.deepEqual(await new UserDataManage('default').getAllClientKeyInfo(), [{
-          clientId: 'device_valid',
-          deviceName: 'Desktop',
-          isMobile: false,
-        }], testCase.name)
+        await assert.rejects(
+          freshRequire('../../src/main/modules/sync/migrate.ts').default(root),
+          error => error?.code == 'credentials.sync_metadata_invalid' && error.affectedPath == affectedPath,
+          testCase.name,
+        )
+        assert.equal(await fsp.readFile(affectedPath, 'utf8'), testCase.bytes, testCase.name)
+        assert.equal(vault.read(testCase.ref).status, 'missing', testCase.name)
       } finally {
         await fsp.rm(root, { recursive: true, force: true })
       }
     }
   })
 
-  it('rejects invalid sync metadata changed after credential inventory', async() => {
-    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-invalid-destination-race-'))
+  it('merges a legal root source into strict current metadata and cleans up the source', async() => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-legal-mixed-'))
     const vault = createVault()
-    const destination = path.join(root, 'sync/client/servers.v1.json')
-    const inventoried = {
-      version: 1,
-      servers: {
-        server_inventoried: { clientId: '', serverName: 'Inventoried', key: 'INVENTORIED_KEY_1234567890' },
-      },
-    }
-    const replacement = {
-      version: 1,
-      servers: {
-        server_replacement: { clientId: '', serverName: 'Replacement', key: 'REPLACEMENT_KEY_1234567890' },
-      },
-    }
+    const sourcePath = path.join(root, 'sync.json')
+    const clientPath = path.join(root, 'sync/client/servers.v1.json')
+    const devicePath = path.join(root, 'sync/server/devices.v2.json')
     global.lxDataPath = root
     global.lx = { credentialVault: vault, appSetting: {} }
     try {
-      await writeJson(destination, inventoried)
-      const { createAtomicJsonFile } = freshRequire('../../src/main/storage/atomicJsonFile.ts')
-      let destinationChanged = false
-      const migrateData = loadTsModule(path.join(sourceRoot, 'main/modules/sync/migrate.ts'), {
-        '@main/storage/atomicJsonFile': {
-          createAtomicJsonFile(options) {
-            const file = createAtomicJsonFile(options)
-            if (path.resolve(options.filePath) != path.resolve(destination)) return file
-            return {
-              ...file,
-              async replace(value) {
-                if (!destinationChanged) {
-                  destinationChanged = true
-                  await writeJson(destination, replacement)
-                }
-                return await file.replace(value)
-              },
-            }
-          },
+      await writeJson(clientPath, {
+        version: 1,
+        servers: { server_current: { clientId: 'client_current', serverName: 'Current' } },
+      })
+      await writeJson(devicePath, {
+        version: 2,
+        userName: 'default',
+        clients: { device_current: { clientId: 'device_current', deviceName: 'Current', isMobile: false } },
+      })
+      await writeJson(sourcePath, {
+        syncAuthKey: {
+          server_legacy: { clientId: 'client_legacy', serverName: 'Legacy', key: 'CLIENT_LEGACY_SENTINEL' },
         },
-      }).default
-
-      await assert.rejects(migrateData(root), /Atomic JSON durable destination/)
-      assert.deepEqual(JSON.parse(await fsp.readFile(destination, 'utf8')), replacement)
-      assert.equal(vault.read({ kind: 'sync-client', serverId: 'server_inventoried' }).status, 'available')
-      assert.equal(vault.read({ kind: 'sync-client', serverId: 'server_replacement' }).status, 'missing')
-    } finally {
-      await fsp.rm(root, { recursive: true, force: true })
-    }
-  })
-
-  it('rejects invalid sync metadata changed after its hash check passes', async() => {
-    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-invalid-post-check-race-'))
-    const vault = createVault()
-    const destination = path.join(root, 'sync/client/servers.v1.json')
-    const inventoried = {
-      version: 1,
-      servers: {
-        server_checked: { clientId: '', serverName: 'Checked', key: 'CHECKED_KEY_1234567890' },
-      },
-    }
-    const replacement = {
-      version: 1,
-      servers: {
-        server_post_check: { clientId: '', serverName: 'Post check', key: 'POST_CHECK_KEY_1234567890' },
-      },
-    }
-    const cleanupGate = { started: deferred(), release: deferred() }
-    global.lxDataPath = root
-    global.lx = { credentialVault: vault, appSetting: {} }
-    try {
-      await writeJson(destination, inventoried)
-      const { createAtomicJsonFile } = freshRequire('../../src/main/storage/atomicJsonFile.ts')
-      const migrateData = loadTsModule(path.join(sourceRoot, 'main/modules/sync/migrate.ts'), {
-        '@main/storage/atomicJsonFile': {
-          createAtomicJsonFile(options) {
-            if (path.resolve(options.filePath) != path.resolve(destination)) return createAtomicJsonFile(options)
-            return createAtomicJsonFile({
-              ...options,
-              fs: {
-                ...fsp,
-                async unlink(filePath) {
-                  if (filePath == `${destination}.previous`) {
-                    cleanupGate.started.resolve()
-                    await cleanupGate.release.promise
-                  }
-                  return await fsp.unlink(filePath)
-                },
-              },
-            })
-          },
+        clients: {
+          device_legacy: { clientId: 'device_legacy', deviceName: 'Legacy', isMobile: true, key: 'SERVER_LEGACY_SENTINEL' },
         },
-      }).default
+      })
 
-      const migration = migrateData(root)
-      await cleanupGate.started.promise
-      await writeJson(destination, replacement)
-      cleanupGate.release.resolve()
+      await freshRequire('../../src/main/modules/sync/migrate.ts').default(root)
 
-      await assert.rejects(migration, /Atomic JSON durable destination/)
-      assert.deepEqual(JSON.parse(await fsp.readFile(destination, 'utf8')), replacement)
-      assert.equal(vault.read({ kind: 'sync-client', serverId: 'server_checked' }).status, 'available')
-      assert.equal(vault.read({ kind: 'sync-client', serverId: 'server_post_check' }).status, 'missing')
+      assert.deepEqual(JSON.parse(await fsp.readFile(clientPath, 'utf8')), {
+        version: 1,
+        servers: {
+          server_current: { clientId: 'client_current', serverName: 'Current' },
+          server_legacy: { clientId: 'client_legacy', serverName: 'Legacy' },
+        },
+      })
+      assert.deepEqual(JSON.parse(await fsp.readFile(devicePath, 'utf8')), {
+        version: 2,
+        userName: 'default',
+        clients: {
+          device_current: { clientId: 'device_current', deviceName: 'Current', isMobile: false },
+          device_legacy: { clientId: 'device_legacy', deviceName: 'Legacy', isMobile: true },
+        },
+      })
+      assert.equal(fs.existsSync(sourcePath), false)
     } finally {
-      cleanupGate.release.resolve()
       await fsp.rm(root, { recursive: true, force: true })
     }
   })

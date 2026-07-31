@@ -4,7 +4,7 @@ import syncFs from 'node:fs'
 import fs from 'node:fs/promises'
 import { canonicalJson, type JsonValue } from '../../common/storage/canonicalJson'
 
-export type AtomicFileSystem = Pick<typeof fs, 'link' | 'mkdir' | 'open' | 'readFile' | 'readdir' | 'rename' | 'stat' | 'unlink'>
+export type AtomicFileSystem = Pick<typeof fs, 'mkdir' | 'open' | 'readFile' | 'readdir' | 'rename' | 'stat' | 'unlink'>
 
 export interface AtomicJsonStage {
   readonly filePath: string
@@ -38,10 +38,6 @@ const isMissing = (error: unknown): error is NodeJS.ErrnoException => {
   return error instanceof Error && 'code' in error && error.code == 'ENOENT'
 }
 
-const isAlreadyExists = (error: unknown): error is NodeJS.ErrnoException => {
-  return error instanceof Error && 'code' in error && error.code == 'EEXIST'
-}
-
 const sha256 = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex')
 
 const identityOf = (stats: Awaited<ReturnType<typeof fs.stat>>): FileIdentity => ({
@@ -63,15 +59,11 @@ const sameIdentity = (left: FileIdentity, right: FileIdentity): boolean => {
 let tempCounter = 0
 const cleanupInFlightByFile = new Map<string, Promise<void>>()
 const activeOwnedTempsByFile = new Map<string, Set<string>>()
-const activeExpectedPreviousGuardsByFile = new Map<string, Set<string>>()
 
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 const ownedTempPattern = (basename: string): RegExp =>
   new RegExp(`^${escapeRegExp(basename)}\\.owned-tmp-\\d+-\\d+$`)
-
-const expectedPreviousGuardPattern = (basename: string): RegExp =>
-  new RegExp(`^${escapeRegExp(basename)}\\.expected-previous-([a-f0-9]{64})-\\d+-\\d+$`)
 
 const isActiveOwnedTemp = (filePath: string, ownedPath: string): boolean =>
   activeOwnedTempsByFile.get(filePath)?.has(ownedPath) == true
@@ -87,22 +79,6 @@ const markOwnedTempInactive = (filePath: string, ownedPath: string): void => {
   if (active == null) return
   active.delete(ownedPath)
   if (!active.size) activeOwnedTempsByFile.delete(filePath)
-}
-
-const isActiveExpectedPreviousGuard = (filePath: string, guardPath: string): boolean =>
-  activeExpectedPreviousGuardsByFile.get(filePath)?.has(guardPath) == true
-
-const markExpectedPreviousGuardActive = (filePath: string, guardPath: string): void => {
-  let active = activeExpectedPreviousGuardsByFile.get(filePath)
-  if (active == null) activeExpectedPreviousGuardsByFile.set(filePath, active = new Set())
-  active.add(guardPath)
-}
-
-const markExpectedPreviousGuardInactive = (filePath: string, guardPath: string): void => {
-  const active = activeExpectedPreviousGuardsByFile.get(filePath)
-  if (active == null) return
-  active.delete(guardPath)
-  if (!active.size) activeExpectedPreviousGuardsByFile.delete(filePath)
 }
 
 export const cleanupAtomicJsonOwnedTempsSync = (targetPath: string): void => {
@@ -130,7 +106,6 @@ export function createAtomicJsonFile<T>(options: {
   filePath: string
   validate: (value: unknown) => value is T
   shouldPreservePrevious?: (current: T) => boolean
-  expectedPreviousFileSha256?: string
   mode?: number
   fs?: AtomicFileSystem
   initialCleanupComplete?: boolean
@@ -140,7 +115,6 @@ export function createAtomicJsonFile<T>(options: {
   const basename = path.basename(filePath)
   const ownedPrefix = `${basename}.owned-tmp-`
   const ownedPattern = ownedTempPattern(basename)
-  const guardPattern = expectedPreviousGuardPattern(basename)
   const fileSystem = options.fs ?? fs
   const mode = options.mode ?? 0o600
   const stageRecords = new WeakMap<AtomicJsonStage, StageRecord>()
@@ -171,11 +145,6 @@ export function createAtomicJsonFile<T>(options: {
   const nextOwnedTempPath = (): string => {
     tempCounter++
     return path.join(directoryPath, `${ownedPrefix}${process.pid}-${tempCounter}`)
-  }
-
-  const nextExpectedPreviousGuardPath = (expectedSha256: string): string => {
-    tempCounter++
-    return path.join(directoryPath, `${basename}.expected-previous-${expectedSha256}-${process.pid}-${tempCounter}`)
   }
 
   const writeDurableBytes = async(destination: string, bytes: string, exclusive: boolean): Promise<FileIdentity> => {
@@ -223,54 +192,6 @@ export function createAtomicJsonFile<T>(options: {
     }
   }
 
-  const restoreExpectedPreviousGuard = async(guardPath: string): Promise<void> => {
-    try {
-      await fileSystem.link(guardPath, filePath)
-    } catch (error) {
-      if (isAlreadyExists(error) || isMissing(error)) return
-      throw error
-    }
-    try {
-      await fileSystem.unlink(guardPath)
-    } catch (error) {
-      if (!isMissing(error)) throw error
-    }
-    await syncDirectoryBestEffort()
-  }
-
-  const cleanupExpectedPreviousGuards = async(entries: string[]): Promise<void> => {
-    const guards = entries.flatMap(entry => {
-      const match = guardPattern.exec(entry)
-      if (match == null) return []
-      const guardPath = path.join(directoryPath, entry)
-      return isActiveExpectedPreviousGuard(filePath, guardPath)
-        ? []
-        : [{ guardPath, expectedSha256: match[1] }]
-    })
-    if (guards.length > 1) throw new Error('Atomic JSON recovery guards are ambiguous')
-    const guard = guards[0]
-    if (guard == null) return
-
-    try {
-      await fileSystem.link(guard.guardPath, filePath)
-      await fileSystem.unlink(guard.guardPath)
-      await syncDirectoryBestEffort()
-      return
-    } catch (error) {
-      if (isMissing(error)) return
-      if (!isAlreadyExists(error)) throw error
-    }
-
-    const guardBytes = await fileSystem.readFile(guard.guardPath, 'utf8')
-    if (sha256(guardBytes) != guard.expectedSha256) throw new Error('Atomic JSON recovery guard changed')
-    try {
-      await fileSystem.unlink(guard.guardPath)
-    } catch (error) {
-      if (!isMissing(error)) throw error
-    }
-    await syncDirectoryBestEffort()
-  }
-
   const cleanupOwnedTempsOnce = async(): Promise<void> => {
     if (initialCleanupPromise == null) {
       let sharedCleanup = cleanupInFlightByFile.get(filePath)
@@ -283,7 +204,6 @@ export function createAtomicJsonFile<T>(options: {
             if (isMissing(error)) return
             throw error
           }
-          await cleanupExpectedPreviousGuards(entries)
           await Promise.all(entries.map(async entry => {
             if (!ownedPattern.test(entry)) return
             const ownedPath = path.join(directoryPath, entry)
@@ -385,62 +305,6 @@ export function createAtomicJsonFile<T>(options: {
 
   const commit = async(candidate: AtomicJsonStage): Promise<{ fileSha256: string }> => {
     const { record } = await verifyStage(candidate)
-    const expectedPreviousFileSha256 = options.expectedPreviousFileSha256
-    if (expectedPreviousFileSha256 != null) {
-      const guardPath = nextExpectedPreviousGuardPath(expectedPreviousFileSha256)
-      markExpectedPreviousGuardActive(filePath, guardPath)
-      let guarded = false
-      let published = false
-      try {
-        try {
-          await fileSystem.rename(filePath, guardPath)
-          guarded = true
-        } catch (error) {
-          if (isMissing(error)) throw new Error('Atomic JSON durable destination changed')
-          throw error
-        }
-        await syncDirectoryBestEffort()
-        const destinationBytes = await fileSystem.readFile(guardPath, 'utf8')
-        if (sha256(destinationBytes) != expectedPreviousFileSha256) {
-          throw new Error('Atomic JSON durable destination changed')
-        }
-
-        let destination: T | null = null
-        try {
-          destination = parseAndValidate(destinationBytes, 'durable destination')
-        } catch {}
-        if (destination != null && (options.shouldPreservePrevious?.(destination) ?? true)) {
-          await preservePrevious(destinationBytes)
-        } else {
-          await removePrevious()
-        }
-
-        try {
-          await fileSystem.link(record.filePath, filePath)
-          published = true
-        } catch (error) {
-          if (isAlreadyExists(error)) throw new Error('Atomic JSON durable destination changed')
-          throw error
-        }
-        const readBack = await fileSystem.readFile(filePath, 'utf8')
-        parseAndValidate(readBack, 'destination read-back')
-        if (sha256(readBack) != record.fileSha256) throw new Error('Atomic JSON destination read-back hash changed')
-        await syncDirectoryBestEffort()
-        await fileSystem.unlink(record.filePath)
-        markOwnedTempInactive(filePath, record.filePath)
-        await fileSystem.unlink(guardPath)
-        guarded = false
-        await syncDirectoryBestEffort()
-        return { fileSha256: record.fileSha256 }
-      } catch (error) {
-        if (guarded) await restoreExpectedPreviousGuard(guardPath)
-        throw error
-      } finally {
-        markExpectedPreviousGuardInactive(filePath, guardPath)
-        if (published) stageRecords.delete(candidate)
-      }
-    }
-
     let destinationBytes: string | null = null
     try {
       destinationBytes = await fileSystem.readFile(filePath, 'utf8')
@@ -448,13 +312,9 @@ export function createAtomicJsonFile<T>(options: {
       if (!isMissing(error)) throw error
     }
     if (destinationBytes != null) {
-      let destination: T | null = null
-      destination = parseAndValidate(destinationBytes, 'durable destination')
-      if (destination != null && (options.shouldPreservePrevious?.(destination) ?? true)) {
-        await preservePrevious(destinationBytes)
-      } else {
-        await removePrevious()
-      }
+      const destination = parseAndValidate(destinationBytes, 'durable destination')
+      if (options.shouldPreservePrevious?.(destination) ?? true) await preservePrevious(destinationBytes)
+      else await removePrevious()
     }
 
     let replaced = false

@@ -2,6 +2,7 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 const test = require('node:test')
 const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+const { createRuntimeWindowHarness } = require('../test-utils/playback-fallback-harness')
 
 const createDeferred = () => {
   let resolve
@@ -172,4 +173,41 @@ test('disposal waits for a pending creation before releasing its runtime', async
   assert.deepEqual(disposed, [runtime])
   assert.equal(main.getSourceRuntime(apiInfo.id), null)
   assert.equal(listeners.has('updated_config'), false)
+})
+
+test('initialization failure retains a cleanup-failed runtime until the next same-source creation retries it', async() => {
+  const initializationFailure = new Error('initialization failed')
+  const harness = createRuntimeWindowHarness({ destroyFailures: 1 })
+  let initializationAttempts = 0
+  global.envParams = { cmdParams: {} }
+  global.lx = {
+    appSetting: { 'network.proxy.enable': false, 'network.proxy.host': '' },
+    event_app: { on() {}, off() {} },
+  }
+  const main = loadTsModule(path.join(__dirname, '../../src/main/modules/userApi/main.ts'), {
+    '@common/mainIpc': { mainSend() {} },
+    '@common/utils': { log: { error() {} } },
+    '@main/utils': { openDevTools() {} },
+    './runtimeWindow': {
+      createRuntimeWindow: options => harness.runtimeWindow.createRuntimeWindow({ ...options, deps: harness.deps }),
+      initializeRuntimeWindow: async(runtime, apiInfo) => {
+        if (initializationAttempts++ == 0) throw initializationFailure
+        return harness.runtimeWindow.initializeRuntimeWindow(runtime, apiInfo, harness.deps)
+      },
+      disposeRuntimeWindow: (runtime, options) => harness.runtimeWindow.disposeRuntimeWindow(runtime, options, harness.deps),
+      clearRuntimeSession: async() => {},
+      getRuntimePartition: () => 'partition',
+    },
+  })
+  const apiInfo = { id: 'user_api/retry-cleanup', name: 'Retry', description: '', sources: {} }
+
+  await assert.rejects(main.createSourceRuntime(apiInfo), error => error === initializationFailure)
+  const failedWindow = harness.windows[0]
+  assert.equal(failedWindow.destroyed, false)
+  assert.equal(failedWindow.listenerCount('closed'), 1)
+
+  const replacement = await main.createSourceRuntime(apiInfo)
+  assert.equal(failedWindow.destroyed, true)
+  assert.equal(harness.windows.length, 2)
+  assert.strictEqual(main.getSourceRuntime(apiInfo.id), replacement)
 })

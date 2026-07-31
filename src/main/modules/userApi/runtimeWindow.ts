@@ -245,6 +245,7 @@ export const disposeRuntimeWindow = async(
     if (!runtime.window.isDestroyed()) runtime.window.destroy()
   } catch (err) {
     attachRuntimeListeners(runtime)
+    pendingRuntimes.set(runtime.identity.apiId, runtime)
     throw err
   }
   disposedRuntimes.add(runtime)

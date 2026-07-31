@@ -170,6 +170,8 @@ const createRuntimeWindowHarness = ({
     initEnvelopes,
     sessions,
     windows,
+    runtimeWindow,
+    deps,
   }
 }
 

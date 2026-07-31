@@ -49,6 +49,18 @@ test('a destroy failure leaves the runtime owned and retryable', async() => {
   assert.deepEqual(runtime.session.cleanupCalls, ['auth', 'storage', 'cache'])
 })
 
+test('a failed destroy is retried before a same-source runtime is replaced', async() => {
+  const harness = createRuntimeWindowHarness({ destroyFailures: 1 })
+  const original = await harness.create({ id: 'user_api/a' }, 1)
+
+  await assert.rejects(harness.dispose(original, { clearSession: true }), /simulated destroy failure/)
+  const replacement = await harness.create({ id: 'user_api/a' }, 2)
+
+  assert.equal(original.window.destroyed, true)
+  assert.equal(harness.windows.length, 2)
+  assert.equal(replacement.window.destroyed, false)
+})
+
 test('an HTML read failure constructs no window and permits retry', async() => {
   const harness = createRuntimeWindowHarness({
     readFailures: 1,

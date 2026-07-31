@@ -23,12 +23,22 @@ const MAX_PLAYABLE_PAYLOAD_BYTES = 128 * 1024
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER
 const MAX_JSON_DEPTH = 64
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const QUALITY_VALUES = new Set(['128k', '320k', 'flac', 'flac24bit', '192k', 'ape', 'wav'])
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 type PlaybackStartMode = 'activity' | 'resume-only' | 'private'
 
 const invalidField = (field: string): never => {
   throw new Error(`Invalid ${field}`)
+}
+
+const fixedError = <T>(field: string, callback: () => T): T => {
+  try {
+    return callback()
+  } catch (error) {
+    if (error instanceof Error && /^Invalid [A-Za-z.]+$/.test(error.message)) throw error
+    return invalidField(field)
+  }
 }
 
 const assertRecord = (value: unknown, field: string): asserts value is Record<string, unknown> => {
@@ -156,32 +166,11 @@ const assertConsent = (value: unknown): asserts value is PlaybackStartCommandV1[
   }
 }
 
-const isSensitiveKey = (key: string): boolean => {
-  const normalized = key.toLowerCase().replace(/[_-]/g, '')
-  return normalized.endsWith('url') || normalized.includes('cookie') || normalized.includes('token') ||
-    normalized.includes('credential') || normalized == 'auth' || normalized.includes('authorization') ||
-    normalized.includes('password') || normalized == 'username' || normalized.includes('lyric') || normalized.includes('lrc') ||
-    normalized.includes('roomid') || normalized == 'room' || normalized.includes('playerstate') ||
-    normalized == 'isplaying' || normalized == 'currenttime' || normalized == 'playbackstate' ||
-    normalized == 'playinfo' || normalized == 'transient' || normalized.includes('player') || normalized.includes('playback')
-}
-
-const sanitizeJson = (value: JsonValue, preserveWebdavRoot = false): JsonValue => {
-  if (Array.isArray(value)) return value.map(item => sanitizeJson(item))
-  if (value == null || typeof value != 'object') return value
-  const source = Object.getOwnPropertyDescriptor(value, 'source')?.value
-  return Object.fromEntries(Object.entries(value)
-    .filter(([key]) => (preserveWebdavRoot && key == 'url') || !isSensitiveKey(key))
-    .map(([key, item]) => [key, sanitizeJson(item, source == 'webdav' && key == 'meta')]))
-}
-
 const normalizeWebdavRoot = (value: unknown, field: string): string => {
   if (typeof value != 'string') invalidField(field)
   try {
     const url = new URL(value)
-    if ((url.protocol != 'http:' && url.protocol != 'https:') || url.username || url.password) invalidField(field)
-    url.search = ''
-    url.hash = ''
+    if ((url.protocol != 'http:' && url.protocol != 'https:') || url.username || url.password || url.search || url.hash) invalidField(field)
     if (!url.pathname.endsWith('/')) url.pathname += '/'
     return url.toString()
   } catch (error) {
@@ -212,7 +201,7 @@ const assertQualitys = (value: unknown, field: string, kg = false): void => {
   for (const quality of value) {
     assertRecord(quality, field)
     assertExactKeys(quality, field, kg ? ['type', 'size', 'hash'] : ['type', 'size'])
-    assertString(quality.type, field)
+    assertOneOf(quality.type, field, Array.from(QUALITY_VALUES))
     if (quality.size !== null) assertString(quality.size, field)
     if (kg) assertString(quality.hash, field)
   }
@@ -220,7 +209,8 @@ const assertQualitys = (value: unknown, field: string, kg = false): void => {
 
 const assertQualityMap = (value: unknown, field: string, kg = false): void => {
   assertRecord(value, field)
-  for (const entry of Object.values(value)) {
+  for (const [quality, entry] of Object.entries(value)) {
+    assertOneOf(quality, field, Array.from(QUALITY_VALUES))
     assertRecord(entry, field)
     assertExactKeys(entry, field, kg ? ['size', 'hash'] : ['size'])
     if (entry.size !== null) assertString(entry.size, field)
@@ -228,11 +218,43 @@ const assertQualityMap = (value: unknown, field: string, kg = false): void => {
   }
 }
 
-const assertOptionalString = (value: Record<string, unknown>, key: string, field: string): void => {
-  if (Object.hasOwn(value, key) && value[key] !== null) assertString(value[key], field)
+const projectOptionalString = (source: Record<string, unknown>, target: Record<string, JsonValue>, key: string, field: string, nullable = false): void => {
+  if (!Object.hasOwn(source, key)) return
+  const value = source[key]
+  if (nullable && value === null) {
+    target[key] = null
+    return
+  }
+  assertString(value, field)
+  target[key] = value
 }
 
-const assertMusicInfo = (value: unknown, field: string): asserts value is LX.Music.MusicInfo => {
+const projectOptionalNumber = (source: Record<string, unknown>, target: Record<string, JsonValue>, key: string, field: string, nullable = false): void => {
+  if (!Object.hasOwn(source, key)) return
+  const value = source[key]
+  if (nullable && value === null) {
+    target[key] = null
+    return
+  }
+  if (typeof value != 'number' || !Number.isFinite(value)) invalidField(field)
+  target[key] = value
+}
+
+const projectQualitys = (value: unknown, field: string, kg = false): JsonValue[] => {
+  assertQualitys(value, field, kg)
+  return (value as Array<Record<string, unknown>>).map(quality => kg
+    ? { type: quality.type as string, size: quality.size as string | null, hash: quality.hash as string }
+    : { type: quality.type as string, size: quality.size as string | null })
+}
+
+const projectQualityMap = (value: unknown, field: string, kg = false): Record<string, JsonValue> => {
+  assertQualityMap(value, field, kg)
+  return Object.fromEntries(Object.entries(value as Record<string, Record<string, unknown>>).map(([quality, entry]) => [quality, kg
+    ? { size: entry.size as string | null, hash: entry.hash as string }
+    : { size: entry.size as string | null }]))
+}
+
+const projectMusicInfo = (value: unknown, field: string): LX.Music.MusicInfo => {
   assertRecord(value, field)
   for (const key of ['id', 'source', 'name', 'singer', 'interval', 'meta']) if (!Object.hasOwn(value, key)) invalidField(field)
   assertString(value.id, field)
@@ -244,10 +266,16 @@ const assertMusicInfo = (value: unknown, field: string): asserts value is LX.Mus
   for (const key of ['songId', 'albumName']) if (!Object.hasOwn(value.meta, key)) invalidField(field)
   assertSongId(value.meta.songId, field)
   assertString(value.meta.albumName, field)
-  assertOptionalString(value.meta, 'recommendTag', field)
-  if (Object.hasOwn(value.meta, 'toggleMusicInfo') && value.meta.toggleMusicInfo !== null) {
-    assertMusicInfo(value.meta.toggleMusicInfo, field)
-    if (value.meta.toggleMusicInfo.source == 'local' || value.meta.toggleMusicInfo.source == 'webdav') invalidField(field)
+
+  const meta: Record<string, JsonValue> = { songId: value.meta.songId as string | number, albumName: value.meta.albumName }
+  projectOptionalString(value.meta, meta, 'recommendTag', field, true)
+  if (Object.hasOwn(value.meta, 'toggleMusicInfo')) {
+    if (value.meta.toggleMusicInfo === null) meta.toggleMusicInfo = null
+    else {
+      const toggle = projectMusicInfo(value.meta.toggleMusicInfo, field)
+      if (toggle.source == 'local' || toggle.source == 'webdav') invalidField(field)
+      meta.toggleMusicInfo = toggle as unknown as JsonValue
+    }
   }
 
   switch (value.source) {
@@ -255,38 +283,79 @@ const assertMusicInfo = (value: unknown, field: string): asserts value is LX.Mus
       for (const key of ['filePath', 'ext']) if (!Object.hasOwn(value.meta, key)) invalidField(field)
       if (typeof value.meta.filePath != 'string' || !value.meta.filePath) invalidField(field)
       assertString(value.meta.ext, field)
+      meta.filePath = value.meta.filePath
+      meta.ext = value.meta.ext
       break
     case 'webdav':
       for (const key of ['url', 'path', 'fileName', 'ext']) if (!Object.hasOwn(value.meta, key)) invalidField(field)
-      normalizeWebdavRoot(value.meta.url, field)
+      meta.url = normalizeWebdavRoot(value.meta.url, field)
       assertWebdavPath(value.meta.path, field)
       assertString(value.meta.fileName, field)
       assertString(value.meta.ext, field)
+      meta.path = value.meta.path as string
+      meta.fileName = value.meta.fileName as string
+      meta.ext = value.meta.ext as string
+      for (const key of ['title', 'artist', 'album', 'albumArtist', 'picPath', 'etag', 'lastModified']) projectOptionalString(value.meta, meta, key, field, true)
+      for (const key of ['year', 'size']) projectOptionalNumber(value.meta, meta, key, field, true)
+      if (Object.hasOwn(value.meta, 'genre')) {
+        if (value.meta.genre === null) meta.genre = null
+        else {
+          if (!Array.isArray(value.meta.genre)) invalidField(field)
+          for (const genre of value.meta.genre) assertString(genre, field)
+          meta.genre = value.meta.genre as string[]
+        }
+      }
+      if (Object.hasOwn(value.meta, 'hasEmbeddedPic')) {
+        if (typeof value.meta.hasEmbeddedPic != 'boolean') invalidField(field)
+        meta.hasEmbeddedPic = value.meta.hasEmbeddedPic
+      }
       break
     case 'kw':
     case 'wy':
-      assertQualitys(value.meta.qualitys, field)
-      assertQualityMap(value.meta._qualitys, field)
+      meta.qualitys = projectQualitys(value.meta.qualitys, field)
+      meta._qualitys = projectQualityMap(value.meta._qualitys, field)
+      if (Object.hasOwn(value.meta, 'albumId')) {
+        assertSongId(value.meta.albumId, field)
+        meta.albumId = value.meta.albumId as string | number
+      }
       break
     case 'kg':
-      assertQualitys(value.meta.qualitys, field, true)
-      assertQualityMap(value.meta._qualitys, field, true)
+      meta.qualitys = projectQualitys(value.meta.qualitys, field, true)
+      meta._qualitys = projectQualityMap(value.meta._qualitys, field, true)
       assertString(value.meta.hash, field)
+      meta.hash = value.meta.hash
+      if (Object.hasOwn(value.meta, 'albumId')) {
+        assertSongId(value.meta.albumId, field)
+        meta.albumId = value.meta.albumId as string | number
+      }
       break
     case 'tx':
-      assertQualitys(value.meta.qualitys, field)
-      assertQualityMap(value.meta._qualitys, field)
+      meta.qualitys = projectQualitys(value.meta.qualitys, field)
+      meta._qualitys = projectQualityMap(value.meta._qualitys, field)
       assertString(value.meta.strMediaMid, field)
-      if (Object.hasOwn(value.meta, 'id') && (typeof value.meta.id != 'number' || !Number.isFinite(value.meta.id))) invalidField(field)
-      assertOptionalString(value.meta, 'albumMid', field)
-      if (Object.hasOwn(value.meta, 'songType') && (typeof value.meta.songType != 'number' || !Number.isFinite(value.meta.songType))) invalidField(field)
+      meta.strMediaMid = value.meta.strMediaMid
+      projectOptionalNumber(value.meta, meta, 'id', field)
+      projectOptionalString(value.meta, meta, 'albumMid', field)
+      projectOptionalNumber(value.meta, meta, 'songType', field)
+      if (Object.hasOwn(value.meta, 'albumId')) {
+        assertSongId(value.meta.albumId, field)
+        meta.albumId = value.meta.albumId as string | number
+      }
       break
     case 'mg':
-      assertQualitys(value.meta.qualitys, field)
-      assertQualityMap(value.meta._qualitys, field)
+      meta.qualitys = projectQualitys(value.meta.qualitys, field)
+      meta._qualitys = projectQualityMap(value.meta._qualitys, field)
       assertString(value.meta.copyrightId, field)
+      meta.copyrightId = value.meta.copyrightId
+      if (Object.hasOwn(value.meta, 'albumId')) {
+        assertSongId(value.meta.albumId, field)
+        meta.albumId = value.meta.albumId as string | number
+      }
       break
   }
+
+  const result = { id: value.id, source: value.source, name: value.name, singer: value.singer, interval: value.interval, meta }
+  return result as unknown as LX.Music.MusicInfo
 }
 
 const assertTrackScalars = (value: Record<string, unknown>, field: string): void => {
@@ -298,172 +367,186 @@ const assertTrackScalars = (value: Record<string, unknown>, field: string): void
 }
 
 export const parsePlaybackEventDetails = (value: unknown): JsonValue => {
-  assertJsonValue(value, 'details')
-  jsonByteLength(value, 'details', MAX_EVENT_DETAILS_BYTES)
-  return cloneJson(value)
+  return fixedError('details', () => {
+    assertJsonValue(value, 'details')
+    jsonByteLength(value, 'details', MAX_EVENT_DETAILS_BYTES)
+    return cloneJson(value)
+  })
 }
 
 export const sanitizePlayableTrack = (value: unknown): LX.Music.MusicInfo => {
-  assertJsonValue(value, 'playablePayload')
-  jsonByteLength(value, 'playablePayload', MAX_PLAYABLE_PAYLOAD_BYTES)
-  assertRecord(value, 'playablePayload')
-  const sanitized = sanitizeJson(value) as Record<string, unknown>
-  if (sanitized.source == 'webdav') {
-    assertRecord(sanitized.meta, 'playablePayload')
-    sanitized.meta.url = normalizeWebdavRoot(sanitized.meta.url, 'playablePayload')
-  }
-  assertMusicInfo(sanitized, 'playablePayload')
-  jsonByteLength(sanitized as JsonValue, 'playablePayload', MAX_PLAYABLE_PAYLOAD_BYTES)
-  return sanitized
+  return fixedError('playablePayload', () => {
+    assertJsonValue(value, 'playablePayload')
+    jsonByteLength(value, 'playablePayload', MAX_PLAYABLE_PAYLOAD_BYTES)
+    const sanitized = projectMusicInfo(value, 'playablePayload')
+    jsonByteLength(sanitized as unknown as JsonValue, 'playablePayload', MAX_PLAYABLE_PAYLOAD_BYTES)
+    return sanitized
+  })
 }
 
 export const parsePlaybackTrack = (value: unknown): PlaybackTrackV1 => {
-  assertRecord(value, 'track')
-  assertExactKeys(value, 'track', ['source', 'sourceTrackId', 'name', 'singer', 'durationMs', 'playablePayload'])
-  assertTrackScalars(value, 'track')
-  return {
-    source: value.source,
-    sourceTrackId: value.sourceTrackId,
-    name: value.name,
-    singer: value.singer,
-    durationMs: value.durationMs,
-    playablePayload: value.playablePayload === null ? null : sanitizePlayableTrack(value.playablePayload),
-  }
+  return fixedError('track', () => {
+    assertRecord(value, 'track')
+    assertExactKeys(value, 'track', ['source', 'sourceTrackId', 'name', 'singer', 'durationMs', 'playablePayload'])
+    assertTrackScalars(value, 'track')
+    return {
+      source: value.source,
+      sourceTrackId: value.sourceTrackId,
+      name: value.name,
+      singer: value.singer,
+      durationMs: value.durationMs,
+      playablePayload: value.playablePayload === null ? null : sanitizePlayableTrack(value.playablePayload),
+    }
+  })
 }
 
 export const parsePlaybackCheckpoint = (value: unknown): PlaybackCheckpointV1 => {
-  assertRecord(value, 'checkpoint')
-  assertExactKeys(value, 'checkpoint', ['playbackGroupUuid', 'checkpointSeq', 'cumulativePlayedMs', 'cumulativeActiveMs', 'positionMs', 'durationMs', 'occurredAtMs'])
-  assertUuid(value.playbackGroupUuid, 'playbackGroupUuid')
-  assertInteger(value.checkpointSeq, 'checkpointSeq', 0)
-  assertInteger(value.cumulativePlayedMs, 'cumulativePlayedMs', 0)
-  assertInteger(value.cumulativeActiveMs, 'cumulativeActiveMs', 0)
-  assertInteger(value.positionMs, 'positionMs', 0, MAX_DURATION_MS)
-  assertDuration(value.durationMs, 'durationMs')
-  assertInteger(value.occurredAtMs, 'occurredAtMs', 0)
-  return cloneJson(value as JsonValue) as PlaybackCheckpointV1
+  return fixedError('checkpoint', () => {
+    assertRecord(value, 'checkpoint')
+    assertExactKeys(value, 'checkpoint', ['playbackGroupUuid', 'checkpointSeq', 'cumulativePlayedMs', 'cumulativeActiveMs', 'positionMs', 'durationMs', 'occurredAtMs'])
+    assertUuid(value.playbackGroupUuid, 'playbackGroupUuid')
+    assertInteger(value.checkpointSeq, 'checkpointSeq', 0)
+    assertInteger(value.cumulativePlayedMs, 'cumulativePlayedMs', 0)
+    assertInteger(value.cumulativeActiveMs, 'cumulativeActiveMs', 0)
+    assertInteger(value.positionMs, 'positionMs', 0, MAX_DURATION_MS)
+    assertDuration(value.durationMs, 'durationMs')
+    assertInteger(value.occurredAtMs, 'occurredAtMs', 0)
+    return cloneJson(value as JsonValue) as PlaybackCheckpointV1
+  })
 }
 
 export const validateCheckpointAfter = (previous: unknown, next: unknown): void => {
-  const prior = parsePlaybackCheckpoint(previous)
-  const current = parsePlaybackCheckpoint(next)
-  if (prior.playbackGroupUuid != current.playbackGroupUuid) invalidField('playbackGroupUuid')
-  if (current.checkpointSeq <= prior.checkpointSeq) invalidField('checkpointSeq')
-  if (current.cumulativePlayedMs < prior.cumulativePlayedMs) invalidField('cumulativePlayedMs')
-  if (current.cumulativeActiveMs < prior.cumulativeActiveMs) invalidField('cumulativeActiveMs')
+  fixedError('checkpoint', () => {
+    const prior = parsePlaybackCheckpoint(previous)
+    const current = parsePlaybackCheckpoint(next)
+    if (prior.playbackGroupUuid != current.playbackGroupUuid) invalidField('playbackGroupUuid')
+    if (current.checkpointSeq <= prior.checkpointSeq) invalidField('checkpointSeq')
+    if (current.cumulativePlayedMs < prior.cumulativePlayedMs) invalidField('cumulativePlayedMs')
+    if (current.cumulativeActiveMs < prior.cumulativeActiveMs) invalidField('cumulativeActiveMs')
+  })
 }
 
 export const parsePlaybackFact = (value: unknown): PlaybackFactV1 => {
-  assertRecord(value, 'fact')
-  assertVersion(value.version)
-  switch (value.type) {
-    case 'play_start':
-      assertExactKeys(value, 'fact', ['version', 'type', 'reason'])
-      assertOneOf(value.reason, 'reason', ['select', 'next', 'previous', 'auto', 'restore', 'remote', 'day_boundary', 'statistics_clear'])
-      break
-    case 'pause':
-    case 'resume':
-      assertExactKeys(value, 'fact', ['version', 'type', 'reason'])
-      assertOneOf(value.reason, 'reason', ['user', 'device', 'remote', 'recovery'])
-      break
-    case 'seek':
-      assertExactKeys(value, 'fact', ['version', 'type', 'origin', 'fromMs', 'toMs'])
-      assertOneOf(value.origin, 'origin', ['bar', 'hotkey', 'media_session', 'lyric', 'party', 'restore', 'buffer_recovery'])
-      assertInteger(value.fromMs, 'fromMs', 0, MAX_DURATION_MS)
-      assertInteger(value.toMs, 'toMs', 0, MAX_DURATION_MS)
-      break
-    case 'skip':
-      assertExactKeys(value, 'fact', ['version', 'type', 'reason', 'automatic'])
-      assertOneOf(value.reason, 'reason', ['next', 'previous', 'select', 'dislike', 'stop', 'error', 'load_timeout', 'buffer_timeout', 'queue_removed'])
-      if (typeof value.automatic != 'boolean') invalidField('automatic')
-      break
-    case 'play_end':
-      assertExactKeys(value, 'fact', ['version', 'type', 'reason'])
-      if (value.reason != 'natural_end') invalidField('reason')
-      break
-    case 'error':
-      assertExactKeys(value, 'fact', ['version', 'type', 'stage', 'code', 'recoverable', 'attempt'])
-      assertOneOf(value.stage, 'stage', ['url', 'load', 'decode', 'buffer', 'output', 'unknown'])
-      if (value.code !== null) assertInteger(value.code, 'code', -MAX_SAFE_INTEGER)
-      if (typeof value.recoverable != 'boolean') invalidField('recoverable')
-      assertInteger(value.attempt, 'attempt', 0)
-      break
-    default:
-      invalidField('type')
-  }
-  return cloneJson(value as JsonValue) as PlaybackFactV1
+  return fixedError('fact', () => {
+    assertRecord(value, 'fact')
+    assertVersion(value.version)
+    switch (value.type) {
+      case 'play_start':
+        assertExactKeys(value, 'fact', ['version', 'type', 'reason'])
+        assertOneOf(value.reason, 'reason', ['select', 'next', 'previous', 'auto', 'restore', 'remote', 'day_boundary', 'statistics_clear'])
+        break
+      case 'pause':
+      case 'resume':
+        assertExactKeys(value, 'fact', ['version', 'type', 'reason'])
+        assertOneOf(value.reason, 'reason', ['user', 'device', 'remote', 'recovery'])
+        break
+      case 'seek':
+        assertExactKeys(value, 'fact', ['version', 'type', 'origin', 'fromMs', 'toMs'])
+        assertOneOf(value.origin, 'origin', ['bar', 'hotkey', 'media_session', 'lyric', 'party', 'restore', 'buffer_recovery'])
+        assertInteger(value.fromMs, 'fromMs', 0, MAX_DURATION_MS)
+        assertInteger(value.toMs, 'toMs', 0, MAX_DURATION_MS)
+        break
+      case 'skip':
+        assertExactKeys(value, 'fact', ['version', 'type', 'reason', 'automatic'])
+        assertOneOf(value.reason, 'reason', ['next', 'previous', 'select', 'dislike', 'stop', 'error', 'load_timeout', 'buffer_timeout', 'queue_removed'])
+        if (typeof value.automatic != 'boolean') invalidField('automatic')
+        break
+      case 'play_end':
+        assertExactKeys(value, 'fact', ['version', 'type', 'reason'])
+        if (value.reason != 'natural_end') invalidField('reason')
+        break
+      case 'error':
+        assertExactKeys(value, 'fact', ['version', 'type', 'stage', 'code', 'recoverable', 'attempt'])
+        assertOneOf(value.stage, 'stage', ['url', 'load', 'decode', 'buffer', 'output', 'unknown'])
+        if (value.code !== null) assertInteger(value.code, 'code', -MAX_SAFE_INTEGER)
+        if (typeof value.recoverable != 'boolean') invalidField('recoverable')
+        assertInteger(value.attempt, 'attempt', 0)
+        break
+      default:
+        invalidField('type')
+    }
+    return cloneJson(value as JsonValue) as PlaybackFactV1
+  })
 }
 
 export const parsePlaybackStartCommand = (value: unknown): PlaybackStartCommandV1 => {
-  assertRecord(value, 'start')
-  assertExactKeys(value, 'start', ['version', 'playbackGroupUuid', 'track', 'context', 'resume', 'startReason', 'startPositionMs', 'occurredAtMs', 'consent'])
-  assertVersion(value.version)
-  assertUuid(value.playbackGroupUuid, 'playbackGroupUuid')
-  const track = parsePlaybackTrack(value.track)
-  assertContext(value.context)
-  assertResumeHint(value.resume)
-  assertOneOf(value.startReason, 'startReason', ['select', 'next', 'previous', 'auto', 'restore', 'remote', 'day_boundary', 'statistics_clear'])
-  assertInteger(value.startPositionMs, 'startPositionMs', 0, MAX_DURATION_MS)
-  assertInteger(value.occurredAtMs, 'occurredAtMs', 0)
-  assertConsent(value.consent)
-  return {
-    version: 1,
-    playbackGroupUuid: value.playbackGroupUuid,
-    track,
-    context: cloneJson(value.context as unknown as JsonValue) as PlaybackStartCommandV1['context'],
-    resume: cloneJson(value.resume as unknown as JsonValue) as PlaybackStartCommandV1['resume'],
-    startReason: value.startReason as PlaybackStartCommandV1['startReason'],
-    startPositionMs: value.startPositionMs,
-    occurredAtMs: value.occurredAtMs,
-    consent: cloneJson(value.consent as unknown as JsonValue) as PlaybackStartCommandV1['consent'],
-  }
+  return fixedError('start', () => {
+    assertRecord(value, 'start')
+    assertExactKeys(value, 'start', ['version', 'playbackGroupUuid', 'track', 'context', 'resume', 'startReason', 'startPositionMs', 'occurredAtMs', 'consent'])
+    assertVersion(value.version)
+    assertUuid(value.playbackGroupUuid, 'playbackGroupUuid')
+    const track = parsePlaybackTrack(value.track)
+    assertContext(value.context)
+    assertResumeHint(value.resume)
+    assertOneOf(value.startReason, 'startReason', ['select', 'next', 'previous', 'auto', 'restore', 'remote', 'day_boundary', 'statistics_clear'])
+    assertInteger(value.startPositionMs, 'startPositionMs', 0, MAX_DURATION_MS)
+    assertInteger(value.occurredAtMs, 'occurredAtMs', 0)
+    assertConsent(value.consent)
+    return {
+      version: 1,
+      playbackGroupUuid: value.playbackGroupUuid,
+      track,
+      context: cloneJson(value.context as unknown as JsonValue) as PlaybackStartCommandV1['context'],
+      resume: cloneJson(value.resume as unknown as JsonValue) as PlaybackStartCommandV1['resume'],
+      startReason: value.startReason as PlaybackStartCommandV1['startReason'],
+      startPositionMs: value.startPositionMs,
+      occurredAtMs: value.occurredAtMs,
+      consent: cloneJson(value.consent as unknown as JsonValue) as PlaybackStartCommandV1['consent'],
+    }
+  })
 }
 
 export const classifyPlaybackMode = (consent: unknown): PlaybackStartMode => {
-  assertConsent(consent)
-  if (consent.privateMode) return 'private'
-  if (!consent.recentAllowed && !consent.statsAllowed) return 'resume-only'
-  return 'activity'
+  return fixedError('consent', () => {
+    assertConsent(consent)
+    if (consent.privateMode) return 'private'
+    if (!consent.recentAllowed && !consent.statsAllowed) return 'resume-only'
+    return 'activity'
+  })
 }
 
 export const getPlaybackStartMode = classifyPlaybackMode
 
 export const parsePlaybackPreplayFailure = (value: unknown): PlaybackPreplayFailureV1 => {
-  assertRecord(value, 'preplayFailure')
-  assertExactKeys(value, 'preplayFailure', ['version', 'playbackGroupUuid', 'track', 'context', 'resume', 'startReason', 'startPositionMs', 'occurredAtMs', 'error', 'consent'])
-  const start = parsePlaybackStartCommand({
-    version: value.version,
-    playbackGroupUuid: value.playbackGroupUuid,
-    track: value.track,
-    context: value.context,
-    resume: value.resume,
-    startReason: value.startReason,
-    startPositionMs: value.startPositionMs,
-    occurredAtMs: value.occurredAtMs,
-    consent: value.consent,
+  return fixedError('preplayFailure', () => {
+    assertRecord(value, 'preplayFailure')
+    assertExactKeys(value, 'preplayFailure', ['version', 'playbackGroupUuid', 'track', 'context', 'resume', 'startReason', 'startPositionMs', 'occurredAtMs', 'error', 'consent'])
+    const start = parsePlaybackStartCommand({
+      version: value.version,
+      playbackGroupUuid: value.playbackGroupUuid,
+      track: value.track,
+      context: value.context,
+      resume: value.resume,
+      startReason: value.startReason,
+      startPositionMs: value.startPositionMs,
+      occurredAtMs: value.occurredAtMs,
+      consent: value.consent,
+    })
+    const error = parsePlaybackFact(value.error)
+    if (error.type != 'error') invalidField('error')
+    const result: PlaybackPreplayFailureV1 = { ...start, error }
+    return result
   })
-  const error = parsePlaybackFact(value.error)
-  if (error.type != 'error') invalidField('error')
-  const result: PlaybackPreplayFailureV1 = { ...start, error }
-  return result
 }
 
 export const parsePlaybackResumeUpdate = (value: unknown): PlaybackResumeUpdateV1 => {
-  assertRecord(value, 'resumeUpdate')
-  assertExactKeys(value, 'resumeUpdate', ['version', 'playbackGroupUuid', 'checkpointSeq', 'track', 'listId', 'indexHint', 'positionMs', 'durationMs', 'updatedAtMs'])
-  assertVersion(value.version)
-  assertUuid(value.playbackGroupUuid, 'playbackGroupUuid')
-  assertInteger(value.checkpointSeq, 'checkpointSeq', 0)
-  assertRecord(value.track, 'track')
-  assertExactKeys(value.track, 'track', ['source', 'sourceTrackId'])
-  assertString(value.track.source, 'track.source')
-  assertString(value.track.sourceTrackId, 'track.sourceTrackId')
-  assertNullableString(value.listId, 'listId')
-  if (value.indexHint !== null) assertInteger(value.indexHint, 'indexHint', 0, 1_000_000)
-  assertInteger(value.positionMs, 'positionMs', 0, MAX_DURATION_MS)
-  assertDuration(value.durationMs, 'durationMs')
-  assertInteger(value.updatedAtMs, 'updatedAtMs', 0)
-  return cloneJson(value as JsonValue) as PlaybackResumeUpdateV1
+  return fixedError('resumeUpdate', () => {
+    assertRecord(value, 'resumeUpdate')
+    assertExactKeys(value, 'resumeUpdate', ['version', 'playbackGroupUuid', 'checkpointSeq', 'track', 'listId', 'indexHint', 'positionMs', 'durationMs', 'updatedAtMs'])
+    assertVersion(value.version)
+    assertUuid(value.playbackGroupUuid, 'playbackGroupUuid')
+    assertInteger(value.checkpointSeq, 'checkpointSeq', 0)
+    assertRecord(value.track, 'track')
+    assertExactKeys(value.track, 'track', ['source', 'sourceTrackId'])
+    assertString(value.track.source, 'track.source')
+    assertString(value.track.sourceTrackId, 'track.sourceTrackId')
+    assertNullableString(value.listId, 'listId')
+    if (value.indexHint !== null) assertInteger(value.indexHint, 'indexHint', 0, 1_000_000)
+    assertInteger(value.positionMs, 'positionMs', 0, MAX_DURATION_MS)
+    assertDuration(value.durationMs, 'durationMs')
+    assertInteger(value.updatedAtMs, 'updatedAtMs', 0)
+    return cloneJson(value as JsonValue) as PlaybackResumeUpdateV1
+  })
 }
 
 const isCalendarDay = (value: unknown): value is string => {
@@ -474,86 +557,96 @@ const isCalendarDay = (value: unknown): value is string => {
 }
 
 export const parsePlaybackCommitRequest = (value: unknown): PlaybackCommitRequestV1 => {
-  assertRecord(value, 'commit')
-  assertVersion(value.version)
-  const hasFact = Object.hasOwn(value, 'fact')
-  const hasBoundary = Object.hasOwn(value, 'boundary')
-  if (hasFact && hasBoundary) invalidField('commit')
-  if (hasFact) {
-    assertExactKeys(value, 'commit', ['version', 'checkpoint', 'fact'])
-    return { version: 1, checkpoint: parsePlaybackCheckpoint(value.checkpoint), fact: parsePlaybackFact(value.fact) }
-  } else if (hasBoundary) {
-    assertExactKeys(value, 'commit', ['version', 'checkpoint', 'boundary'])
-    assertRecord(value.boundary, 'boundary')
-    assertExactKeys(value.boundary, 'boundary', ['type', 'nextLocalDay', 'utcOffsetMinutes'])
-    if (value.boundary.type != 'day_boundary') invalidField('boundary.type')
-    if (!isCalendarDay(value.boundary.nextLocalDay)) invalidField('boundary.nextLocalDay')
-    assertInteger(value.boundary.utcOffsetMinutes, 'boundary.utcOffsetMinutes', -1440, 1440)
-    return {
-      version: 1,
-      checkpoint: parsePlaybackCheckpoint(value.checkpoint),
-      boundary: {
-        type: 'day_boundary',
-        nextLocalDay: value.boundary.nextLocalDay,
-        utcOffsetMinutes: value.boundary.utcOffsetMinutes,
-      },
+  return fixedError('commit', () => {
+    assertRecord(value, 'commit')
+    assertVersion(value.version)
+    const hasFact = Object.hasOwn(value, 'fact')
+    const hasBoundary = Object.hasOwn(value, 'boundary')
+    if (hasFact && hasBoundary) invalidField('commit')
+    if (hasFact) {
+      assertExactKeys(value, 'commit', ['version', 'checkpoint', 'fact'])
+      return { version: 1, checkpoint: parsePlaybackCheckpoint(value.checkpoint), fact: parsePlaybackFact(value.fact) }
+    } else if (hasBoundary) {
+      assertExactKeys(value, 'commit', ['version', 'checkpoint', 'boundary'])
+      assertRecord(value.boundary, 'boundary')
+      assertExactKeys(value.boundary, 'boundary', ['type', 'nextLocalDay', 'utcOffsetMinutes'])
+      if (value.boundary.type != 'day_boundary') invalidField('boundary.type')
+      if (!isCalendarDay(value.boundary.nextLocalDay)) invalidField('boundary.nextLocalDay')
+      assertInteger(value.boundary.utcOffsetMinutes, 'boundary.utcOffsetMinutes', -1440, 1440)
+      return {
+        version: 1,
+        checkpoint: parsePlaybackCheckpoint(value.checkpoint),
+        boundary: {
+          type: 'day_boundary',
+          nextLocalDay: value.boundary.nextLocalDay,
+          utcOffsetMinutes: value.boundary.utcOffsetMinutes,
+        },
+      }
+    } else {
+      assertExactKeys(value, 'commit', ['version', 'checkpoint'])
+      return { version: 1, checkpoint: parsePlaybackCheckpoint(value.checkpoint) }
     }
-  } else {
-    assertExactKeys(value, 'commit', ['version', 'checkpoint'])
-    return { version: 1, checkpoint: parsePlaybackCheckpoint(value.checkpoint) }
-  }
+  })
 }
 
 export const parsePlaybackCheckpointAck = (value: unknown): PlaybackCheckpointAckV1 => {
-  assertRecord(value, 'checkpointAck')
-  assertExactKeys(value, 'checkpointAck', ['playbackGroupUuid', 'sessionUuid', 'segmentNo', 'checkpointSeq', 'cumulativePlayedMs', 'cumulativeActiveMs'])
-  assertUuid(value.playbackGroupUuid, 'playbackGroupUuid')
-  assertUuid(value.sessionUuid, 'sessionUuid')
-  assertInteger(value.segmentNo, 'segmentNo', 0)
-  assertInteger(value.checkpointSeq, 'checkpointSeq', 0)
-  assertInteger(value.cumulativePlayedMs, 'cumulativePlayedMs', 0)
-  assertInteger(value.cumulativeActiveMs, 'cumulativeActiveMs', 0)
-  return cloneJson(value as JsonValue) as PlaybackCheckpointAckV1
+  return fixedError('checkpointAck', () => {
+    assertRecord(value, 'checkpointAck')
+    assertExactKeys(value, 'checkpointAck', ['playbackGroupUuid', 'sessionUuid', 'segmentNo', 'checkpointSeq', 'cumulativePlayedMs', 'cumulativeActiveMs'])
+    assertUuid(value.playbackGroupUuid, 'playbackGroupUuid')
+    assertUuid(value.sessionUuid, 'sessionUuid')
+    assertInteger(value.segmentNo, 'segmentNo', 0)
+    assertInteger(value.checkpointSeq, 'checkpointSeq', 0)
+    assertInteger(value.cumulativePlayedMs, 'cumulativePlayedMs', 0)
+    assertInteger(value.cumulativeActiveMs, 'cumulativeActiveMs', 0)
+    return cloneJson(value as JsonValue) as PlaybackCheckpointAckV1
+  })
 }
 
 export const parsePlaybackResumeAck = (value: unknown): PlaybackResumeAckV1 => {
-  assertRecord(value, 'resumeAck')
-  assertExactKeys(value, 'resumeAck', ['playbackGroupUuid', 'checkpointSeq', 'positionMs'])
-  assertUuid(value.playbackGroupUuid, 'playbackGroupUuid')
-  assertInteger(value.checkpointSeq, 'checkpointSeq', 0)
-  assertInteger(value.positionMs, 'positionMs', 0, MAX_DURATION_MS)
-  return cloneJson(value as JsonValue) as PlaybackResumeAckV1
+  return fixedError('resumeAck', () => {
+    assertRecord(value, 'resumeAck')
+    assertExactKeys(value, 'resumeAck', ['playbackGroupUuid', 'checkpointSeq', 'positionMs'])
+    assertUuid(value.playbackGroupUuid, 'playbackGroupUuid')
+    assertInteger(value.checkpointSeq, 'checkpointSeq', 0)
+    assertInteger(value.positionMs, 'positionMs', 0, MAX_DURATION_MS)
+    return cloneJson(value as JsonValue) as PlaybackResumeAckV1
+  })
 }
 
 export const parsePlaybackStartResult = (value: unknown): PlaybackStartResultV1 => {
-  assertRecord(value, 'startResult')
-  switch (value.mode) {
-    case 'activity':
-      assertExactKeys(value, 'startResult', ['mode', 'ack'])
-      return { mode: 'activity', ack: parsePlaybackCheckpointAck(value.ack) }
-    case 'resume-only':
-      assertExactKeys(value, 'startResult', ['mode', 'ack'])
-      return { mode: 'resume-only', ack: parsePlaybackResumeAck(value.ack) }
-    case 'private':
-      assertExactKeys(value, 'startResult', ['mode', 'playbackGroupUuid', 'checkpointSeq'])
-      assertUuid(value.playbackGroupUuid, 'playbackGroupUuid')
-      assertInteger(value.checkpointSeq, 'checkpointSeq', 0)
-      return { mode: 'private', playbackGroupUuid: value.playbackGroupUuid, checkpointSeq: value.checkpointSeq }
-    default:
-      invalidField('mode')
-  }
+  return fixedError('startResult', () => {
+    assertRecord(value, 'startResult')
+    switch (value.mode) {
+      case 'activity':
+        assertExactKeys(value, 'startResult', ['mode', 'ack'])
+        return { mode: 'activity', ack: parsePlaybackCheckpointAck(value.ack) }
+      case 'resume-only':
+        assertExactKeys(value, 'startResult', ['mode', 'ack'])
+        return { mode: 'resume-only', ack: parsePlaybackResumeAck(value.ack) }
+      case 'private':
+        assertExactKeys(value, 'startResult', ['mode', 'playbackGroupUuid', 'checkpointSeq'])
+        assertUuid(value.playbackGroupUuid, 'playbackGroupUuid')
+        assertInteger(value.checkpointSeq, 'checkpointSeq', 0)
+        return { mode: 'private', playbackGroupUuid: value.playbackGroupUuid, checkpointSeq: value.checkpointSeq }
+      default:
+        invalidField('mode')
+    }
+  })
 }
 
 export const parsePlaybackRecorderCommand = (value: unknown): PlaybackRecorderCommandV1 => {
-  assertRecord(value, 'recorderCommand')
-  assertExactKeys(value, 'recorderCommand', ['kind', 'request'])
-  switch (value.kind) {
-    case 'start': return { kind: 'start', request: parsePlaybackStartCommand(value.request) }
-    case 'commit': return { kind: 'commit', request: parsePlaybackCommitRequest(value.request) }
-    case 'resume': return { kind: 'resume', request: parsePlaybackResumeUpdate(value.request) }
-    case 'preplay_failure': return { kind: 'preplay_failure', request: parsePlaybackPreplayFailure(value.request) }
-    default: invalidField('kind')
-  }
+  return fixedError('recorderCommand', () => {
+    assertRecord(value, 'recorderCommand')
+    assertExactKeys(value, 'recorderCommand', ['kind', 'request'])
+    switch (value.kind) {
+      case 'start': return { kind: 'start', request: parsePlaybackStartCommand(value.request) }
+      case 'commit': return { kind: 'commit', request: parsePlaybackCommitRequest(value.request) }
+      case 'resume': return { kind: 'resume', request: parsePlaybackResumeUpdate(value.request) }
+      case 'preplay_failure': return { kind: 'preplay_failure', request: parsePlaybackPreplayFailure(value.request) }
+      default: invalidField('kind')
+    }
+  })
 }
 
 const assertBucket = (value: unknown, field: string): asserts value is ListeningBucketV1 => {
@@ -562,58 +655,64 @@ const assertBucket = (value: unknown, field: string): asserts value is Listening
 }
 
 export const parseRecentTrack = (value: unknown): RecentTrackV1 => {
-  assertRecord(value, 'recentTrack')
-  assertExactKeys(value, 'recentTrack', ['version', 'source', 'sourceTrackId', 'name', 'singer', 'durationMs', 'playablePayload', 'lastPlayedAtMs', 'legacyRank'])
-  assertVersion(value.version)
-  const track = parsePlaybackTrack({
-    source: value.source,
-    sourceTrackId: value.sourceTrackId,
-    name: value.name,
-    singer: value.singer,
-    durationMs: value.durationMs,
-    playablePayload: value.playablePayload,
+  return fixedError('recentTrack', () => {
+    assertRecord(value, 'recentTrack')
+    assertExactKeys(value, 'recentTrack', ['version', 'source', 'sourceTrackId', 'name', 'singer', 'durationMs', 'playablePayload', 'lastPlayedAtMs', 'legacyRank'])
+    assertVersion(value.version)
+    const track = parsePlaybackTrack({
+      source: value.source,
+      sourceTrackId: value.sourceTrackId,
+      name: value.name,
+      singer: value.singer,
+      durationMs: value.durationMs,
+      playablePayload: value.playablePayload,
+    })
+    if (value.lastPlayedAtMs !== null) assertInteger(value.lastPlayedAtMs, 'lastPlayedAtMs', 0)
+    if (value.legacyRank !== null) assertInteger(value.legacyRank, 'legacyRank', 0)
+    return { version: 1, ...track, lastPlayedAtMs: value.lastPlayedAtMs, legacyRank: value.legacyRank }
   })
-  if (value.lastPlayedAtMs !== null) assertInteger(value.lastPlayedAtMs, 'lastPlayedAtMs', 0)
-  if (value.legacyRank !== null) assertInteger(value.legacyRank, 'legacyRank', 0)
-  return { version: 1, ...track, lastPlayedAtMs: value.lastPlayedAtMs, legacyRank: value.legacyRank }
 }
 
 export const parseListeningStats = (value: unknown): ListeningStatsV1 => {
-  assertRecord(value, 'listeningStats')
-  assertExactKeys(value, 'listeningStats', ['version', 'total', 'daily', 'tracks', 'updatedAtMs'])
-  assertVersion(value.version)
-  assertRecord(value.total, 'total')
-  assertExactKeys(value.total, 'total', ['baselinePlayedMs', 'livePlayedMs', 'baselineActiveMs', 'liveActiveMs', 'playedMs', 'activeMs'])
-  assertBucket(value.total, 'total')
-  if (!Array.isArray(value.daily) || !Array.isArray(value.tracks)) invalidField('listeningStats')
-  assertJsonValue(value.daily, 'daily')
-  assertJsonValue(value.tracks, 'tracks')
-  for (const entry of value.daily) {
-    assertRecord(entry, 'daily')
-    assertExactKeys(entry, 'daily', ['baselinePlayedMs', 'livePlayedMs', 'baselineActiveMs', 'liveActiveMs', 'playedMs', 'activeMs', 'localDay'])
-    assertBucket(entry, 'daily')
-    if (!isCalendarDay(entry.localDay)) invalidField('localDay')
-  }
-  for (const entry of value.tracks) {
-    assertRecord(entry, 'tracks')
-    assertExactKeys(entry, 'tracks', ['baselinePlayedMs', 'livePlayedMs', 'baselineActiveMs', 'liveActiveMs', 'playedMs', 'activeMs', 'source', 'sourceTrackId', 'name', 'singer', 'durationMs'])
-    assertBucket(entry, 'tracks')
-    assertTrackScalars({ ...entry, playablePayload: null }, 'tracks')
-  }
-  assertInteger(value.updatedAtMs, 'updatedAtMs', 0)
-  return cloneJson(value as JsonValue) as ListeningStatsV1
+  return fixedError('listeningStats', () => {
+    assertRecord(value, 'listeningStats')
+    assertExactKeys(value, 'listeningStats', ['version', 'total', 'daily', 'tracks', 'updatedAtMs'])
+    assertVersion(value.version)
+    assertRecord(value.total, 'total')
+    assertExactKeys(value.total, 'total', ['baselinePlayedMs', 'livePlayedMs', 'baselineActiveMs', 'liveActiveMs', 'playedMs', 'activeMs'])
+    assertBucket(value.total, 'total')
+    if (!Array.isArray(value.daily) || !Array.isArray(value.tracks)) invalidField('listeningStats')
+    assertJsonValue(value.daily, 'daily')
+    assertJsonValue(value.tracks, 'tracks')
+    for (const entry of value.daily) {
+      assertRecord(entry, 'daily')
+      assertExactKeys(entry, 'daily', ['baselinePlayedMs', 'livePlayedMs', 'baselineActiveMs', 'liveActiveMs', 'playedMs', 'activeMs', 'localDay'])
+      assertBucket(entry, 'daily')
+      if (!isCalendarDay(entry.localDay)) invalidField('localDay')
+    }
+    for (const entry of value.tracks) {
+      assertRecord(entry, 'tracks')
+      assertExactKeys(entry, 'tracks', ['baselinePlayedMs', 'livePlayedMs', 'baselineActiveMs', 'liveActiveMs', 'playedMs', 'activeMs', 'source', 'sourceTrackId', 'name', 'singer', 'durationMs'])
+      assertBucket(entry, 'tracks')
+      assertTrackScalars({ ...entry, playablePayload: null }, 'tracks')
+    }
+    assertInteger(value.updatedAtMs, 'updatedAtMs', 0)
+    return cloneJson(value as JsonValue) as ListeningStatsV1
+  })
 }
 
 export const parsePlaybackResume = (value: unknown): PlaybackResumeV1 => {
-  assertRecord(value, 'resume')
-  assertExactKeys(value, 'resume', ['version', 'source', 'sourceTrackId', 'listId', 'indexHint', 'positionMs', 'durationMs', 'updatedAtMs'])
-  assertVersion(value.version)
-  assertString(value.source, 'source')
-  assertString(value.sourceTrackId, 'sourceTrackId')
-  assertNullableString(value.listId, 'listId')
-  if (value.indexHint !== null) assertInteger(value.indexHint, 'indexHint', 0, 1_000_000)
-  assertInteger(value.positionMs, 'positionMs', 0, MAX_DURATION_MS)
-  assertDuration(value.durationMs, 'durationMs')
-  assertInteger(value.updatedAtMs, 'updatedAtMs', 0)
-  return cloneJson(value as JsonValue) as PlaybackResumeV1
+  return fixedError('resume', () => {
+    assertRecord(value, 'resume')
+    assertExactKeys(value, 'resume', ['version', 'source', 'sourceTrackId', 'listId', 'indexHint', 'positionMs', 'durationMs', 'updatedAtMs'])
+    assertVersion(value.version)
+    assertString(value.source, 'source')
+    assertString(value.sourceTrackId, 'sourceTrackId')
+    assertNullableString(value.listId, 'listId')
+    if (value.indexHint !== null) assertInteger(value.indexHint, 'indexHint', 0, 1_000_000)
+    assertInteger(value.positionMs, 'positionMs', 0, MAX_DURATION_MS)
+    assertDuration(value.durationMs, 'durationMs')
+    assertInteger(value.updatedAtMs, 'updatedAtMs', 0)
+    return cloneJson(value as JsonValue) as PlaybackResumeV1
+  })
 }

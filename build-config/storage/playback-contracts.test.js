@@ -220,7 +220,7 @@ describe('playback activity contracts', () => {
         songId: 'track',
         albumName: 'Album',
         path: 'music/a.flac',
-        url: 'https://dav.example/music?token=SECRET#fragment',
+        url: 'https://dav.example/music/',
         fileName: 'a.flac',
         ext: 'flac',
         cookie: 'SECRET',
@@ -263,6 +263,10 @@ describe('playback activity contracts', () => {
     assert.throws(() => sanitizePlayableTrack(webdavPayload({ meta: { songId: 'x', albumName: '', path: 'a.flac', fileName: 'a.flac', ext: 'flac' } })))
     assert.throws(() => sanitizePlayableTrack(webdavPayload({ meta: { songId: 'x', albumName: '', path: '../a.flac', url: 'https://dav.example/music/', fileName: 'a.flac', ext: 'flac' } })))
     assert.throws(() => sanitizePlayableTrack(webdavPayload({ meta: { songId: 'x', albumName: '', path: 'a.flac', url: 'https://user:SECRET@dav.example/music/', fileName: 'a.flac', ext: 'flac' } })))
+    const queryRoot = webdavPayload({ meta: { songId: 'x', albumName: '', path: 'a.flac', url: 'https://dav.example/music/?token=SECRET', fileName: 'a.flac', ext: 'flac' } })
+    assert.throws(() => sanitizePlayableTrack(queryRoot))
+    assert.equal(queryRoot.meta.url, 'https://dav.example/music/?token=SECRET')
+    assert.throws(() => sanitizePlayableTrack(webdavPayload({ meta: { songId: 'x', albumName: '', path: 'a.flac', url: 'https://dav.example/music/#fragment', fileName: 'a.flac', ext: 'flac' } })))
   })
 
   it('accepts every documented online MusicInfo discriminant and removes provider URLs', () => {
@@ -281,6 +285,102 @@ describe('playback activity contracts', () => {
     assert.throws(() => sanitizePlayableTrack(onlinePayload('tx')))
     assert.throws(() => sanitizePlayableTrack(onlinePayload('mg')))
     assert.throws(() => sanitizePlayableTrack(onlinePayload('unsupported')))
+  })
+
+  it('projects only declared durable MusicInfo fields and validates exact quality values', () => {
+    const local = sanitizePlayableTrack(localPayload({
+      meta: {
+        songId: 'local',
+        albumName: 'Album',
+        filePath: 'C:/music/a.flac',
+        ext: 'flac',
+        recommendTag: 'tag',
+        apiKey: 'SECRET',
+        secret: 'SECRET',
+        sessionSecret: 'SECRET',
+        nested: { apiKey: 'SECRET' },
+      },
+    }))
+    assert.deepEqual(local.meta, { songId: 'local', albumName: 'Album', filePath: 'C:/music/a.flac', ext: 'flac', recommendTag: 'tag' })
+
+    const webdav = sanitizePlayableTrack(webdavPayload({
+      meta: {
+        songId: 'remote',
+        albumName: 'Album',
+        url: 'https://dav.example/music/',
+        path: 'music/a.flac',
+        fileName: 'a.flac',
+        ext: 'flac',
+        title: 'Title',
+        artist: 'Artist',
+        album: null,
+        albumArtist: null,
+        year: 2026,
+        genre: ['Rock'],
+        hasEmbeddedPic: true,
+        size: 1,
+        etag: 'etag',
+        lastModified: 'date',
+        picPath: 'covers/a.jpg',
+        apiKey: 'SECRET',
+        secret: 'SECRET',
+        sessionSecret: 'SECRET',
+        nested: { secret: 'SECRET' },
+      },
+    }))
+    assert.deepEqual(webdav.meta, {
+      songId: 'remote',
+      albumName: 'Album',
+      url: 'https://dav.example/music/',
+      path: 'music/a.flac',
+      fileName: 'a.flac',
+      ext: 'flac',
+      title: 'Title',
+      artist: 'Artist',
+      album: null,
+      albumArtist: null,
+      year: 2026,
+      genre: ['Rock'],
+      hasEmbeddedPic: true,
+      size: 1,
+      etag: 'etag',
+      lastModified: 'date',
+      picPath: 'covers/a.jpg',
+    })
+    assert.equal(JSON.stringify(webdav).includes('SECRET'), false)
+
+    const variants = [
+      onlinePayload('kw', { albumId: 1, qualitys: [{ type: '128k', size: null }], _qualitys: { '128k': { size: null } } }),
+      onlinePayload('wy', { albumId: 'album', qualitys: [{ type: '320k', size: '1M' }], _qualitys: { '320k': { size: '1M' } } }),
+      onlinePayload('kg', { hash: 'hash', qualitys: [{ type: 'flac', size: null, hash: 'h' }], _qualitys: { flac: { size: null, hash: 'h' } } }),
+      onlinePayload('tx', { strMediaMid: 'media', id: 1, albumMid: 'album', songType: 1 }),
+      onlinePayload('mg', { copyrightId: 'copyright' }),
+    ]
+    for (const variant of variants) {
+      variant.meta.apiKey = 'SECRET'
+      variant.meta.secret = 'SECRET'
+      variant.meta.sessionSecret = 'SECRET'
+      assert.equal(JSON.stringify(sanitizePlayableTrack(variant)).includes('SECRET'), false)
+    }
+    assert.throws(() => sanitizePlayableTrack(onlinePayload('kw', { qualitys: [{ type: 'invalid', size: null }] })))
+    assert.throws(() => sanitizePlayableTrack(onlinePayload('kg', { hash: 'hash', qualitys: [{ type: 'flac', size: null, hash: 'h', extra: true }] })))
+    assert.throws(() => sanitizePlayableTrack(onlinePayload('wy', { _qualitys: { bad: { size: null } } })))
+  })
+
+  it('normalizes proxy failures from public boundaries without leaking sentinels', () => {
+    const secret = 'PROXY_SENTINEL_MUST_NOT_LEAK'
+    const throwingObject = new Proxy(start(), { get() { throw new Error(secret) } })
+    const throwingPayload = new Proxy(webdavPayload(), { ownKeys() { throw new Error(secret) } })
+    const throwingArray = new Proxy([], { getOwnPropertyDescriptor() { throw new Error(secret) } })
+    const cases = [
+      [() => parsePlaybackStartCommand(throwingObject), 'start'],
+      [() => sanitizePlayableTrack(throwingPayload), 'playablePayload'],
+      [() => parsePlaybackEventDetails(throwingArray), 'details'],
+      [() => parseListeningStats(new Proxy({ version: 1, total: {}, daily: [], tracks: [], updatedAtMs: 0 }, { ownKeys() { throw new Error(secret) } })), 'listeningStats'],
+    ]
+    for (const [parse, field] of cases) {
+      assert.throws(parse, error => error.message == `Invalid ${field}` && !error.message.includes(secret))
+    }
   })
 
   it('accepts empty DTO strings except capped context and does not execute accessor values', () => {

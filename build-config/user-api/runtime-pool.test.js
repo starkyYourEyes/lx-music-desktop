@@ -72,3 +72,17 @@ test('a page load failure tears down its partial window and permits retry', asyn
   const retry = await harness.create({ id: 'user_api/a' }, 2)
   assert.equal(retry.window.destroyed, false)
 })
+
+test('a load teardown failure remains owned until a retry destroys it', async() => {
+  const harness = createRuntimeWindowHarness({ loadFailures: 1, destroyFailures: 1 })
+
+  await assert.rejects(harness.create({ id: 'user_api/a' }, 1), /simulated load failure/)
+  const partialWindow = harness.windows[0]
+  assert.equal(partialWindow.destroyed, false)
+  assert.equal(partialWindow.listenerCount('closed'), 1)
+
+  const retry = await harness.create({ id: 'user_api/a' }, 2)
+  assert.equal(partialWindow.destroyed, true)
+  assert.equal(harness.windows.length, 2)
+  assert.equal(retry.window.destroyed, false)
+})

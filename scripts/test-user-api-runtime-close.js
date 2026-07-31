@@ -180,25 +180,23 @@ const sameIdentity = (first, second) => (
   assert.equal(destroyFailureRuntime.window.destroyed, true)
   assert.deepEqual(destroyFailureRuntime.session.cleanupCalls, ['auth', 'storage', 'cache'])
 
-  for (const [stage, mode] of [
-    ['auth', 'throw'],
-    ['storage', 'reject'],
-    ['cache', 'reject'],
-  ]) {
-    const cleanupRuntime = await runtimeWindow.createRuntimeWindow({
-      apiInfo: { ...apiInfo, id: 'user_api/cleanup-' + stage },
-      generation: 1,
-      hooks,
-      deps,
-    })
-    const cleanupError = new Error('simulated ' + stage + ' cleanup failure')
-    cleanupRuntime.session.cleanupFailure = stage
-    cleanupRuntime.session.cleanupFailureMode = mode
-    cleanupRuntime.session.cleanupError = cleanupError
-    await runtimeWindow.disposeRuntimeWindow(cleanupRuntime, { clearSession: true }, deps)
-    assert.equal(cleanupRuntime.window.destroyed, true)
-    assert.deepEqual(cleanupRuntime.session.cleanupCalls, ['auth', 'storage', 'cache'])
-    assert.equal(logErrors.some(args => args.includes(cleanupError)), true)
+  for (const stage of ['auth', 'storage', 'cache']) {
+    for (const mode of ['throw', 'reject']) {
+      const cleanupRuntime = await runtimeWindow.createRuntimeWindow({
+        apiInfo: { ...apiInfo, id: 'user_api/cleanup-' + stage + '-' + mode },
+        generation: 1,
+        hooks,
+        deps,
+      })
+      const cleanupError = new Error('simulated ' + stage + ' ' + mode + ' cleanup failure')
+      cleanupRuntime.session.cleanupFailure = stage
+      cleanupRuntime.session.cleanupFailureMode = mode
+      cleanupRuntime.session.cleanupError = cleanupError
+      await runtimeWindow.disposeRuntimeWindow(cleanupRuntime, { clearSession: true }, deps)
+      assert.equal(cleanupRuntime.window.destroyed, true)
+      assert.deepEqual(cleanupRuntime.session.cleanupCalls, ['auth', 'storage', 'cache'])
+      assert.equal(logErrors.some(args => args.includes(cleanupError)), true)
+    }
   }
 
   console.log('User API runtime close transaction tests passed')

@@ -53,6 +53,7 @@ const denyEvents = [
 let runtimeHtml: Promise<string> | null = null
 const initializedRuntimes = new WeakSet<UserApiRuntimeWindow>()
 const disposedRuntimes = new WeakSet<UserApiRuntimeWindow>()
+const pendingRuntimes = new Map<string, UserApiRuntimeWindow>()
 const runtimeListeners = new WeakMap<UserApiRuntimeWindow, {
   closed: () => void
   renderProcessGone: (_event: Electron.Event, details: Electron.RenderProcessGoneDetails) => void
@@ -135,6 +136,10 @@ export const createRuntimeWindow = async({
 }: CreateUserApiRuntimeWindowOptions): Promise<UserApiRuntimeWindow> => {
   const deps = getDependencies(dependencies)
   const partition = getRuntimePartition(apiInfo.id)
+  const pendingRuntime = pendingRuntimes.get(apiInfo.id)
+  if (pendingRuntime) {
+    await disposeRuntimeWindow(pendingRuntime, { clearSession: false }, deps)
+  }
   const runtimeSession = deps.fromPartition(partition)
   const html = await deps.readRuntimeHtml()
   const window = deps.createWindow({
@@ -194,12 +199,15 @@ export const createRuntimeWindow = async({
     await window.loadURL('data:text/html;charset=UTF-8,' + encodeURIComponent(html))
   } catch (err) {
     detachRuntimeListeners(runtime)
-    runtimeListeners.delete(runtime)
     try {
       if (!window.isDestroyed()) window.destroy()
     } catch (destroyErr) {
+      attachRuntimeListeners(runtime)
+      pendingRuntimes.set(runtime.identity.apiId, runtime)
       deps.logError('destroy failed user API runtime after load failure:', destroyErr)
+      throw err
     }
+    runtimeListeners.delete(runtime)
     throw err
   }
   return runtime
@@ -240,6 +248,9 @@ export const disposeRuntimeWindow = async(
   }
   disposedRuntimes.add(runtime)
   runtimeListeners.delete(runtime)
+  if (pendingRuntimes.get(runtime.identity.apiId) == runtime) {
+    pendingRuntimes.delete(runtime.identity.apiId)
+  }
   if (shouldClearSession) await clearSession(runtime.session, deps)
 }
 

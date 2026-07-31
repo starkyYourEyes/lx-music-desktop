@@ -46,7 +46,7 @@ import { readFile } from '@common/utils/nodejs'
 import { openUrl } from '@common/utils/electron'
 import apiSourceInfo from '@renderer/utils/musicSdk/api-source-info'
 import { userApi } from '@renderer/store'
-import { appSetting, updateSetting } from '@renderer/store/setting'
+import { appSetting, setApiSource } from '@renderer/store/setting'
 import { computed, ref } from '@common/utils/vueTools'
 import { dialog } from '@renderer/plugins/Dialog'
 import { PROJECT_IDENTITY } from '@common/projectIdentity'
@@ -195,7 +195,7 @@ export default {
         const selectedId = appSetting['common.apiSource']
         if (oldCustomIds.has(selectedId) && !apiList.some(api => api.id == selectedId)) {
           const fallback = apiSourceInfo.find(api => !api.disabled) ?? apiList[0]
-          updateSetting({ 'common.apiSource': fallback?.id ?? '' })
+          setApiSource(fallback?.id ?? '')
         }
         if (!this.isGitHubViewCurrent(viewGeneration)) return
         this.githubStatus = this.$t('user_api__github_import_success', {
@@ -237,7 +237,7 @@ export default {
       if (appSetting['common.apiSource'] == api.id) {
         let backApi = apiSourceInfo.find(api => !api.disabled)
         if (!backApi) backApi = userApi.list.find(item => item.id != api.id)
-        updateSetting({ 'common.apiSource': backApi?.id ?? '' })
+        setApiSource(backApi?.id ?? '')
       }
       userApi.list = await removeUserApi([api.id])
     },

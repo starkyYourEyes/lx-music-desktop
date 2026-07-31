@@ -3,9 +3,11 @@ import { useI18n } from '@renderer/plugins/i18n'
 import { onUserApiStatus, getUserApiList, sendUserApiRequest as sendUserApiRequestRemote, userApiRequestCancel, onShowUserApiUpdateAlert } from '@renderer/utils/ipc'
 import { openUrl } from '@common/utils/electron'
 import { qualityList, userApi } from '@renderer/store'
-import { appSetting } from '@renderer/store/setting'
+import { appSetting, updateSetting } from '@renderer/store/setting'
 import { dialog } from '@renderer/plugins/Dialog'
 import { setUserApi } from '@renderer/core/apiSource'
+import apiSourceInfo from '@renderer/utils/musicSdk/api-source-info'
+import { reconcilePlaybackSourceRegistry } from '@common/utils/playbackSourceSetting'
 
 const sendUserApiRequest: typeof sendUserApiRequestRemote = async(data) => {
   let stop: () => void
@@ -21,6 +23,32 @@ const sendUserApiRequest: typeof sendUserApiRequestRemote = async(data) => {
 
 export default () => {
   const t = useI18n()
+
+  const reconcileInstalledPlaybackSources = (list: LX.UserApi.UserApiInfo[]) => {
+    const normalized = reconcilePlaybackSourceRegistry(
+      appSetting,
+      apiSourceInfo.filter(source => !source.disabled).map(source => source.id),
+      list.map(source => source.id),
+      userApi.listLoaded,
+    )
+    if (
+      normalized['common.apiFallbackMode'] == appSetting['common.apiFallbackMode'] &&
+      normalized['common.apiFallbackSources'].join('\u0000') == appSetting['common.apiFallbackSources'].join('\u0000')
+    ) return
+    updateSetting(normalized)
+  }
+
+  const stopRegistryReconcile = watch(
+    () => [
+      userApi.listLoaded,
+      appSetting['common.apiSource'],
+      appSetting['common.apiFallbackMode'],
+      appSetting['common.apiFallbackSources'].join('\u0000'),
+      userApi.list.map(({ id }) => id).join('\u0000'),
+    ] as const,
+    () => reconcileInstalledPlaybackSources(userApi.list),
+    { immediate: true },
+  )
 
   const rUserApiStatus = onUserApiStatus(({ params: { status, message, apiInfo } }) => {
     // console.log({ status, message, apiInfo })
@@ -166,6 +194,7 @@ export default () => {
   })
 
   onBeforeUnmount(() => {
+    stopRegistryReconcile()
     rUserApiStatus()
     rUserApiShowUpdateAlert()
   })
@@ -180,6 +209,7 @@ export default () => {
       //   if (api) apiSource.value = api.id
       // }
       userApi.list = list
+      userApi.listLoaded = true
     }).catch(err => {
       console.log(err)
     })

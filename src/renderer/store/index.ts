@@ -109,11 +109,13 @@ export const isShowPact = ref(false)
 
 export const userApi = reactive<{
   list: LX.UserApi.UserApiInfo[]
+  listLoaded: boolean
   status: boolean
   message?: string
   apis: Partial<LX.UserApi.UserApiSources>
 }>({
   list: [],
+  listLoaded: false,
   status: false,
   message: 'initing',
   apis: {},

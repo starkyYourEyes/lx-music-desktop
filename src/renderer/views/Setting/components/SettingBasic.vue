@@ -36,16 +36,27 @@ dd
         svg-icon(name="angle-right-solid" :class="$style.activeIcon")
 
 dd
-  h3#basic_source {{ $t('setting__basic_source') }}
+  h3#basic_source {{ $t('setting__basic_source_primary') }}
   div
     .gap-top(v-for="item in apiSources" :key="item.id")
       base-checkbox(
         :id="`setting_api_source_${item.id}`" name="setting_api_source"
-        need :model-value="appSetting['common.apiSource']" :disabled="item.disabled" :value="item.id" :aria-label="item.label" @update:model-value="updateSetting({'common.apiSource': $event})")
+        need :model-value="appSetting['common.apiSource']" :disabled="item.disabled" :value="item.id" :aria-label="item.label" @update:model-value="setApiSource($event)")
         span(:class="$style.sourceLabel")
           | {{ item.name }}
           span(v-if="item.desc" :class="$style.desc") {{ item.desc }}
           span(v-if="item.statusLabel" :class="$style.status") {{ item.statusLabel }}
+dd
+  h3#basic_source_fallback {{ $t('setting__basic_source_fallback') }}
+  ApiFallbackSources(
+    :sources="apiSources"
+    :primary-id="appSetting['common.apiSource']"
+    :fallback-ids="appSetting['common.apiFallbackSources']"
+    @update:fallback-ids="updateSetting({ 'common.apiFallbackSources': $event })"
+  )
+dd
+  h3#basic_source_user_api {{ $t('setting__basic_source') }}
+  div
     .p.gap-top
       base-btn.btn(min @click="isShowUserApiModal = true") {{ $t('setting__basic_source_user_api_btn') }}
     .p.gap-top(:class="$style.userApiSync")
@@ -130,7 +141,8 @@ import ThemeSelectorModal from './ThemeSelectorModal.vue'
 import ThemeEditModal from './ThemeEditModal/index.vue'
 import PlayTimeoutModal from './PlayTimeoutModal.vue'
 import UserApiModal from './UserApiModal.vue'
-import { appSetting, updateSetting } from '@renderer/store/setting'
+import ApiFallbackSources from './ApiFallbackSources.vue'
+import { appSetting, updateSetting, setApiSource } from '@renderer/store/setting'
 import { getThemes, applyTheme, findTheme, buildBgUrl } from '@renderer/store/utils'
 
 export default {
@@ -140,6 +152,7 @@ export default {
     ThemeEditModal,
     PlayTimeoutModal,
     UserApiModal,
+    ApiFallbackSources,
   },
   setup() {
     const t = useI18n()
@@ -374,6 +387,7 @@ export default {
     return {
       appSetting,
       updateSetting,
+      setApiSource,
       userThemes,
       autoTheme,
       showAllTheme,

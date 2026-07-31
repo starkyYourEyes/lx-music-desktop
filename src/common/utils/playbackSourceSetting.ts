@@ -50,3 +50,29 @@ export const movePlaybackFallback = (ids: readonly string[], apiId: string, offs
 export const removePlaybackFallback = (ids: readonly string[], apiId: string): string[] => (
   ids.filter(id => id != apiId)
 )
+
+export const reconcilePlaybackSourceRegistry = (
+  setting: PlaybackSourceSetting,
+  builtinIds: readonly string[],
+  customIds: readonly string[],
+  authoritative: boolean,
+) => normalizePlaybackSourceSetting(
+  setting,
+  authoritative ? new Set([...builtinIds, ...customIds]) : undefined,
+)
+
+export interface PlaybackSourceChoice {
+  id: string
+  disabled: boolean
+}
+
+export const getAddablePlaybackSources = <T extends PlaybackSourceChoice>(
+  sources: readonly T[],
+  primaryId: string,
+  fallbackIds: readonly string[],
+): T[] => {
+  const selected = new Set(fallbackIds)
+  return sources.filter(source => (
+    !source.disabled && source.id != primaryId && !selected.has(source.id)
+  ))
+}

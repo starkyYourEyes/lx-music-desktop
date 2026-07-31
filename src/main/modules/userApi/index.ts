@@ -32,6 +32,19 @@ const setUserApiId = (id: string | null) => {
   userApiId = id
 }
 
+const removeUnavailablePlaybackSources = (removedIds: ReadonlySet<string>) => {
+  if (!removedIds.size) return
+  const nextFallbacks = global.lx.appSetting['common.apiFallbackSources']
+    .filter(id => !removedIds.has(id))
+  if (nextFallbacks.length == global.lx.appSetting['common.apiFallbackSources'].length) return
+  global.lx.event_app.update_config({ 'common.apiFallbackSources': nextFallbacks })
+}
+
+const getRemovedUserApiIds = (
+  previousIds: ReadonlySet<string>,
+  nextList: readonly LX.UserApi.UserApiInfo[],
+) => new Set([...previousIds].filter(id => !nextList.some(api => api.id == id)))
+
 const restoreActiveRuntime = async(activeId: string, message: string) => {
   try {
     await loadApi(activeId)
@@ -65,6 +78,7 @@ export const replaceApisFromGitHub = async(
   items: LX.UserApi.GitHubImportItem[],
 ): Promise<LX.UserApi.UserApiInfo[]> => {
   return runUserApiTask(async() => {
+    const previousIds = new Set(getUserApis().map(api => api.id))
     const nextState = await prepareApisFromGitHub(items)
     const activeId = userApiId
     const previousState = activeId ? getUserApiState() : null
@@ -128,6 +142,7 @@ export const replaceApisFromGitHub = async(
       }
     }
 
+    removeUnavailablePlaybackSources(getRemovedUserApiIds(previousIds, apiList))
     notifyUserApiChanged()
     return apiList
   })
@@ -135,19 +150,24 @@ export const replaceApisFromGitHub = async(
 
 export const overwriteUserApisFromSync = async(data: LX.Sync.UserApi.Data): Promise<void> => {
   return runUserApiTask(async() => {
+    const previousIds = new Set(getUserApis().map(api => api.id))
     const nextState = await prepareUserApisFromSync(data)
-    commitUserApiState(nextState)
+    const apiList = commitUserApiState(nextState)
+    removeUnavailablePlaybackSources(getRemovedUserApiIds(previousIds, apiList))
   })
 }
 
 export const removeApi = async(ids: string[]): Promise<LX.UserApi.UserApiInfo[]> => {
   return runUserApiTask(async() => {
+    const previousIds = new Set(getUserApis().map(api => api.id))
     if (userApiId && ids.includes(userApiId)) {
       await closeWindow()
       setUserApiId(null)
     }
     handleRemoveApi(ids)
-    return getUserApis()
+    const apiList = getUserApis()
+    removeUnavailablePlaybackSources(getRemovedUserApiIds(previousIds, apiList))
+    return apiList
   })
 }
 

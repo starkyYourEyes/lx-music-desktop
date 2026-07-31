@@ -160,6 +160,7 @@ git commit -m "feat: define non-activity storage contracts"
 - Modify: `src/main/worker/dbService/index.ts`
 - Modify: `src/main/worker/dbService/schemaContract.ts`
 - Create: `build-config/storage-electron/non-activity-repository.test.js`
+- Modify: `build-config/storage-electron/account-profile.test.js`
 
 **Interfaces:**
 - Consumes: Task 1 commands and `getAppDB()`.
@@ -252,7 +253,7 @@ Expected: PASS; structural and foreign-key checks remain clean.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add src/main/worker/dbService/migrations/0005_non_activity_state.ts src/main/worker/dbService/migrations/index.ts src/main/worker/dbService/modules/app_state src/main/worker/dbService/modules/index.ts src/main/worker/dbService/index.ts src/main/worker/dbService/schemaContract.ts build-config/storage-electron/non-activity-repository.test.js
+git add src/main/worker/dbService/migrations/0005_non_activity_state.ts src/main/worker/dbService/migrations/index.ts src/main/worker/dbService/modules/app_state src/main/worker/dbService/modules/index.ts src/main/worker/dbService/index.ts src/main/worker/dbService/schemaContract.ts build-config/storage-electron/non-activity-repository.test.js build-config/storage-electron/account-profile.test.js
 git commit -m "feat: add typed application state repository"
 ```
 

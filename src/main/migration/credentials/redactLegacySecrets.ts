@@ -2,6 +2,8 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { canonicalJson, type JsonValue } from '../../../common/storage/canonicalJson'
 import type { LegacyCredentialSource, SourceFileIdentity } from './legacySources'
+import { createSyncMetadataRecoveryError, type CredentialMigrationRecoveryError } from './recoveryError'
+import { preflightVersionedSyncMetadata } from './syncMetadataPreflight'
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value != null && typeof value == 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) == Object.prototype
@@ -36,6 +38,16 @@ interface PreparedRedaction {
   redacted: string
 }
 
+const changedVersionedSourceError = (
+  source: LegacyCredentialSource,
+): CredentialMigrationRecoveryError | null => source.documentKind == 'generic'
+  ? null
+  : createSyncMetadataRecoveryError(
+    'credentials.sync_metadata_changed_after_inventory',
+    source.trustedRoot,
+    source.documentPath,
+  )
+
 const validateOpenedIdentity = async(prepared: PreparedRedaction, contentMayDiffer = false): Promise<void> => {
   const opened = identityOf(await prepared.handle.stat())
   const targetStats = await fs.lstat(prepared.filePath)
@@ -57,22 +69,27 @@ const preflight = async(filePath: string, sources: readonly LegacyCredentialSour
     const identity = identityOf(await handle.stat())
     if (!sameIdentity(identity, sources[0].documentIdentity) ||
         sources.some(source => !sameIdentity(source.documentIdentity, identity))) {
-      throw new Error('Legacy credential source identity changed')
+      throw changedVersionedSourceError(sources[0]) ?? new Error('Legacy credential source identity changed')
     }
     const current: unknown = JSON.parse(await handle.readFile('utf8'))
     if (!isRecord(current)) throw new Error('Invalid legacy credential source document')
     for (const source of sources) {
       const currentValue = source.read(current)
       if (currentValue == null || canonicalJson(currentValue) != canonicalJson(source.value)) {
-        throw new Error('Legacy credential source value changed')
+        throw changedVersionedSourceError(source) ?? new Error('Legacy credential source value changed')
       }
     }
     for (const source of sources) source.redact(current)
+    const redacted = canonicalJson(current as unknown as JsonValue)
+    if (sources[0].documentKind != 'generic' &&
+        preflightVersionedSyncMetadata(sources[0].documentKind, JSON.parse(redacted)) == null) {
+      throw changedVersionedSourceError(sources[0]) ?? new Error('Legacy credential source metadata changed')
+    }
     return {
       filePath,
       handle,
       identity,
-      redacted: canonicalJson(current as unknown as JsonValue),
+      redacted,
     }
   } catch (error) {
     await handle.close().catch(() => {})

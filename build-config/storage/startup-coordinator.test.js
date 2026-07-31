@@ -505,6 +505,50 @@ describe('storage run state', () => {
 })
 
 describe('storage recovery dialog', () => {
+  it('opens the changed sync metadata folder without disclosing replacement content', async() => {
+    const openedPaths = []
+    const messages = []
+    let quitCalls = 0
+    const affectedPath = path.join('C:\\profiles\\fixture', 'sync', 'client', 'servers.v1.json')
+    const originalLoad = Module._load
+    Module._load = function(request, parent, isMain) {
+      if (request == 'electron') {
+        return {
+          app: { quit: () => { quitCalls++ } },
+          dialog: {
+            showMessageBox: async options => {
+              messages.push(options)
+              return { response: 0 }
+            },
+          },
+          shell: { openPath: async target => { openedPaths.push(target) } },
+        }
+      }
+      return originalLoad.call(this, request, parent, isMain)
+    }
+    try {
+      const { showStorageRecovery } = require(recoveryPath)
+      await showStorageRecovery({
+        status: 'recovery',
+        reason: 'credential_startup_check_failed',
+        target: {
+          kind: 'external-migration',
+          component: 'credentials',
+          affectedPath,
+          diagnostics: ['credentials.sync_metadata_changed_after_inventory'],
+        },
+      })
+    } finally {
+      Module._load = originalLoad
+    }
+
+    assert.deepEqual(messages[0].buttons, ['Open data folder', 'Quit'])
+    assert.match(messages[0].detail, /credentials\.sync_metadata_changed_after_inventory/)
+    assert.equal(messages[0].detail.includes('REPLACEMENT_KEY_SENTINEL'), false)
+    assert.deepEqual(openedPaths, [path.dirname(affectedPath)])
+    assert.equal(quitCalls, 1)
+  })
+
   it('offers data-folder recovery without reading or disclosing affected file contents', async() => {
     const openedPaths = []
     const messages = []

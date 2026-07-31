@@ -647,6 +647,65 @@ describe('legacy credential migration', () => {
     assert.equal(await fsp.readFile(configPath, 'utf8'), configBefore)
   })
 
+  it('projects a replaced versioned sync source into recovery', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const root = await makeRoot()
+    const target = path.join(root, 'sync', 'client', 'servers.v1.json')
+    const displaced = path.join(root, 'sync', 'client', 'servers.inventory.json')
+    await writeJson(target, {
+      version: 1,
+      servers: {
+        inventoried_server: {
+          clientId: 'inventoried-client',
+          serverName: 'Inventoried Server',
+          key: 'INVENTORIED_KEY_SENTINEL',
+        },
+      },
+    })
+    const replacementBytes = Buffer.from(JSON.stringify({
+      version: 1,
+      servers: {
+        replacement_server: {
+          clientId: 'replacement-client',
+          serverName: 'Replacement Server',
+          key: 'REPLACEMENT_KEY_SENTINEL',
+        },
+      },
+    }), 'utf8')
+    const entries = new Map()
+    let swapped = false
+    const vault = {
+      mode: 'encrypted',
+      async write(ref, value) {
+        entries.set(JSON.stringify(ref), structuredClone(value))
+        return { persistence: 'encrypted' }
+      },
+      async verify(ref, value) {
+        if (!swapped) {
+          swapped = true
+          await fsp.rename(target, displaced)
+          await fsp.writeFile(target, replacementBytes)
+        }
+        return JSON.stringify(entries.get(JSON.stringify(ref))) == JSON.stringify(value)
+      },
+      getMigrationMarker() { return null },
+      async putMigrationMarker() {},
+    }
+
+    await assert.rejects(
+      migrateLegacyCredentials({
+        dataRoot: root,
+        vault,
+        profiles: { migrateLegacyAccountProfiles: async() => {} },
+        now: () => 100,
+      }),
+      error => error.code == 'credentials.sync_metadata_changed_after_inventory' && error.affectedPath == target,
+    )
+    assert.deepEqual(await fsp.readFile(target), replacementBytes)
+    assert.equal(entries.has(JSON.stringify({ kind: 'sync-client', serverId: 'inventoried_server' })), true)
+    assert.equal(entries.has(JSON.stringify({ kind: 'sync-client', serverId: 'replacement_server' })), false)
+  })
+
   it('rejects a source file replaced after inventory even when its value is unchanged', async() => {
     const { collectLegacyCredentialInventory } = require('../../src/main/migration/credentials/legacySources.ts')
     const { redactLegacySecrets } = require('../../src/main/migration/credentials/redactLegacySecrets.ts')

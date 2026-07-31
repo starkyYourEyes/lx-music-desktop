@@ -13,6 +13,7 @@ import { migrateDBData } from './utils/migrate'
 import { initializeCredentialVault } from './storage/credentials'
 import { createAccountRepository } from './storage/accounts/accountRepository'
 import { migrateLegacyCredentials } from './migration/credentials/credentialMigration'
+import { isCredentialMigrationRecoveryError } from './migration/credentials/recoveryError'
 import { setProxyByHost } from '@common/utils/request'
 import { getWebContentsNavigationDecision } from '@main/utils/webContentsNavigationGuard'
 import { getPortableUserDataPaths, migrateLegacyUserData } from './migration/legacyUserData'
@@ -307,13 +308,16 @@ const initTheme = () => {
 let isInitialized = false
 type CredentialRecoveryOutcome = Extract<StorageStartupOutcome, { status: 'recovery' }>
 
-const credentialMigrationRecovery = (diagnostic: string): CredentialRecoveryOutcome => ({
+const credentialMigrationRecovery = (
+  diagnostic: string,
+  affectedPath = path.join(global.lxDataPath, 'credentials.v1.json'),
+): CredentialRecoveryOutcome => ({
   status: 'recovery',
   reason: 'credential_startup_check_failed',
   target: {
     kind: 'external-migration',
     component: 'credentials',
-    affectedPath: path.join(global.lxDataPath, 'credentials.v1.json'),
+    affectedPath,
     diagnostics: [diagnostic],
   },
 })
@@ -351,7 +355,10 @@ export const runStorageMigrationHooks = async(result: { existed: boolean }): Pro
       global.lx.credentialMigration.volatileEntries == 0) {
       return credentialMigrationRecovery('credentials.memory_only_entries_unavailable')
     }
-  } catch {
+  } catch (error) {
+    if (isCredentialMigrationRecoveryError(error)) {
+      return credentialMigrationRecovery(error.code, error.affectedPath)
+    }
     return credentialMigrationRecovery('credentials.legacy_migration_failed')
   }
   try {

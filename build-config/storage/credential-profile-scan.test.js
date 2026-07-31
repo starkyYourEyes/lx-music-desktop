@@ -12,7 +12,11 @@ const loadTsModule = require('../../scripts/test-utils/load-ts-module')
 require.extensions['.ts'] = (module, filename) => {
   const source = fs.readFileSync(filename, 'utf8')
   const output = typescript.transpileModule(source, {
-    compilerOptions: { module: typescript.ModuleKind.CommonJS, esModuleInterop: true },
+    compilerOptions: {
+      target: typescript.ScriptTarget.ESNext,
+      module: typescript.ModuleKind.CommonJS,
+      esModuleInterop: true,
+    },
   }).outputText
   module._compile(output, filename)
 }
@@ -538,6 +542,59 @@ describe('complete credential profile cutover', () => {
 })
 
 describe('credential startup gate', () => {
+  it('projects typed sync metadata migration recovery', async() => {
+    const { CredentialMigrationRecoveryError } = require('../../src/main/migration/credentials/recoveryError.ts')
+    const root = await makeRoot()
+    createLiveGlobal(root)
+    const affectedPath = path.join(root, 'sync', 'client', 'servers.v1.json')
+    const sentinel = 'REPLACEMENT_KEY_SENTINEL'
+    const vault = {
+      mode: 'encrypted',
+      read: () => ({ status: 'missing' }),
+    }
+    const runMigrationHooks = loadStorageMigrationHooks({
+      initializeCredentialVault: async() => {
+        global.lx.credentialVault = vault
+        return vault
+      },
+      migrateLegacyCredentials: async() => {
+        throw new CredentialMigrationRecoveryError(
+          'credentials.sync_metadata_changed_after_inventory',
+          affectedPath,
+        )
+      },
+      createAccountRepository: () => { throw new Error(sentinel) },
+    })
+    const { createStorageCoordinator, checkCredentialStartup } = require(coordinatorPath)
+    const { calls, deps } = createCoordinatorDependencies(
+      async() => await checkCredentialStartup({
+        dataRoot: global.lxDataPath,
+        vault: global.lx.credentialVault,
+        profileRepository: global.lx.accountRepository,
+      }),
+      runMigrationHooks,
+    )
+
+    const outcome = await createStorageCoordinator(deps).start()
+
+    assert.deepEqual(outcome, {
+      status: 'recovery',
+      reason: 'credential_startup_check_failed',
+      target: {
+        kind: 'external-migration',
+        component: 'credentials',
+        affectedPath,
+        diagnostics: ['credentials.sync_metadata_changed_after_inventory'],
+      },
+    })
+    assert.equal(calls.filter(call => Array.isArray(call) && call[0] == 'recovery:show').length, 1)
+    assert.equal(calls.some(call => call == 'credentials:check'), false)
+    assert.equal(calls.some(call => call == 'settings:init'), false)
+    assert.equal(calls.some(call => call == 'modules:register'), false)
+    assert.equal(calls.some(call => call == 'app:inited'), false)
+    assert.equal(JSON.stringify({ outcome, calls }).includes(sentinel), false)
+  })
+
   it('shows credential recovery when live vault initialization fails', async() => {
     const root = await makeRoot()
     createLiveGlobal(root)

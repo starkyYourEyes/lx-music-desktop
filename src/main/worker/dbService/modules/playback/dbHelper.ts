@@ -51,6 +51,47 @@ export const localClockAt = (occurredAtMs: number): { localDay: string, utcOffse
   return { localDay, utcOffsetMinutes: -date.getTimezoneOffset() }
 }
 
+const nextCalendarDay = (localDay: string): string | null => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(localDay)
+  if (match == null) return null
+  let year = Number(match[1])
+  let month = Number(match[2])
+  let day = Number(match[3])
+  const leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth[month - 1]) return null
+  if (day < daysInMonth[month - 1]) {
+    day++
+  } else if (month < 12) {
+    month++
+    day = 1
+  } else {
+    if (year == 9999) return null
+    year++
+    month = 1
+    day = 1
+  }
+  return [
+    String(year).padStart(4, '0'),
+    String(month).padStart(2, '0'),
+    String(day).padStart(2, '0'),
+  ].join('-')
+}
+
+export const isImmediateLocalDayBoundary = (
+  currentLocalDay: string,
+  occurredAtMs: number,
+  nextLocalDay: string,
+  utcOffsetMinutes: number,
+): boolean => {
+  const expectedNextDay = nextCalendarDay(currentLocalDay)
+  if (expectedNextDay == null || nextLocalDay != expectedNextDay) return false
+  const atBoundary = localClockAt(occurredAtMs)
+  if (atBoundary.localDay != nextLocalDay ||
+    atBoundary.utcOffsetMinutes != utcOffsetMinutes) return false
+  return localClockAt(occurredAtMs - 1).localDay == currentLocalDay
+}
+
 export const newSessionUuid = (): string => randomUUID()
 
 export const sessionAck = (row: SessionAckRow): PlaybackCheckpointAckV1 => ({
@@ -133,14 +174,30 @@ export const putResume = (db: Database.Database, value: ResumeWrite): ResumeRow 
 export const exactRecord = (
   value: unknown,
   keys: readonly string[],
-): value is Record<string, unknown> => {
+  optionalKeys: readonly string[] = [],
+): Record<string, unknown> | null => {
   try {
     if (value == null || typeof value != 'object' || Array.isArray(value) ||
-      Object.getPrototypeOf(value) != Object.prototype) return false
-    const actual = Object.keys(value)
-    return actual.length == keys.length && actual.every(key => keys.includes(key))
+      Object.getPrototypeOf(value) != Object.prototype) return null
+    const actual = Reflect.ownKeys(value)
+    if (actual.some(key => typeof key != 'string' ||
+      (!keys.includes(key) && !optionalKeys.includes(key))) ||
+      keys.some(key => !actual.includes(key))) return null
+    const result: Record<string, unknown> = {}
+    for (const key of actual) {
+      if (typeof key != 'string') return null
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      if (descriptor == null || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) return null
+      Object.defineProperty(result, key, {
+        configurable: true,
+        enumerable: true,
+        value: descriptor.value,
+        writable: true,
+      })
+    }
+    return result
   } catch {
-    return false
+    return null
   }
 }
 

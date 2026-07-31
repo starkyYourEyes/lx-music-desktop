@@ -27,6 +27,7 @@ import {
   getResumeRow,
   getSessionAck,
   immediate,
+  isImmediateLocalDayBoundary,
   localClockAt,
   newSessionUuid,
   putResume,
@@ -316,10 +317,15 @@ export const playbackCommit = (
   options: PlaybackCommitOptions = {},
 ): PlaybackCheckpointAckV1 => {
   const input = parsePlaybackCommitRequest(value)
-  if (!exactRecord(options, options.failAt == null ? [] : ['failAt']) ||
-    (options.failAt != null && options.failAt != 'after-daily')) {
+  if ('fact' in input && input.fact?.type == 'play_start') {
+    throw new Error('playback_commit_play_start_forbidden')
+  }
+  const parsedOptions = exactRecord(options, [], ['failAt'])
+  if (parsedOptions == null ||
+    (parsedOptions.failAt != null && parsedOptions.failAt != 'after-daily')) {
     throw new Error('Invalid playback commit options')
   }
+  const failAt = parsedOptions.failAt as PlaybackCommitFailPoint | undefined
   return immediate(db => {
     const current = getOpenSession(db, input.checkpoint.playbackGroupUuid)
     if (current == null) {
@@ -347,10 +353,12 @@ export const playbackCommit = (
     const activeDelta = cumulativeActiveMs - current.cumulativeActiveMs
     const isBoundary = 'boundary' in input
     if (isBoundary) {
-      const clock = localClockAt(input.checkpoint.occurredAtMs)
-      if (clock.localDay != input.boundary.nextLocalDay ||
-        clock.utcOffsetMinutes != input.boundary.utcOffsetMinutes ||
-        input.boundary.nextLocalDay <= current.localDay) {
+      if (!isImmediateLocalDayBoundary(
+        current.localDay,
+        input.checkpoint.occurredAtMs,
+        input.boundary.nextLocalDay,
+        input.boundary.utcOffsetMinutes,
+      )) {
         throw new Error('playback_boundary_mismatch')
       }
     }
@@ -385,10 +393,10 @@ export const playbackCommit = (
         playedMs: playedDelta,
         activeMs: activeDelta,
         occurredAtMs: input.checkpoint.occurredAtMs,
-      }, options.failAt == 'after-daily'
+      }, failAt == 'after-daily'
         ? () => { throw new Error('injected failure') }
         : undefined)
-    } else if (options.failAt == 'after-daily') {
+    } else if (failAt == 'after-daily') {
       throw new Error('injected failure')
     }
     if (!isBoundary && input.fact != null) {
@@ -509,9 +517,10 @@ export const playbackRecordPreplayFailure = (
 }
 
 export const playbackGetRecent = (value: { version: 1, limit: number }): RecentTrackV1[] => {
-  if (!exactRecord(value, ['version', 'limit']) || value.version !== 1 ||
-    !safeInteger(value.limit, 1, 520)) throw new Error('Invalid playback recent query')
-  return readRecentProjection(getDB(), value.limit)
+  const input = exactRecord(value, ['version', 'limit'])
+  if (input == null || input.version !== 1 ||
+    !safeInteger(input.limit, 1, 520)) throw new Error('Invalid playback recent query')
+  return readRecentProjection(getDB(), input.limit)
 }
 
 export const playbackGetListeningStats = (value?: unknown): ListeningStatsV1 => {
@@ -536,12 +545,13 @@ export const playbackGetResume = (value?: unknown): PlaybackResumeV1 | null => {
 }
 
 export const playbackMarkStaleSessionsInterrupted = (value: { nowMs: number }): number => {
-  if (!exactRecord(value, ['nowMs']) || !safeInteger(value.nowMs)) {
+  const input = exactRecord(value, ['nowMs'])
+  if (input == null || !safeInteger(input.nowMs)) {
     throw new Error('Invalid stale playback request')
   }
   return immediate(db => db.prepare(`
     UPDATE playback_sessions
     SET state = 'interrupted', ended_at_ms = ?, end_reason = NULL
     WHERE state IN ('playing', 'paused') AND started_at_ms <= ?
-  `).run(value.nowMs, value.nowMs).changes)
+  `).run(input.nowMs, input.nowMs).changes)
 }

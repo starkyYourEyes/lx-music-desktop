@@ -3,6 +3,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
+const Database = require('better-sqlite3')
 const typescript = require('typescript')
 
 // Electron ABI tests transpile source modules in-process.
@@ -82,6 +83,35 @@ const commitAt = (checkpointSeq, cumulativePlayedMs, fact, overrides = {}) => ({
 })
 
 const pauseFact = { version: 1, type: 'pause', reason: 'user' }
+const playStartFact = { version: 1, type: 'play_start', reason: 'select' }
+
+const activityTables = [
+  'track_snapshots',
+  'playback_sessions',
+  'playback_events',
+  'recent_tracks',
+  'listening_daily',
+  'listening_tracks',
+  'activity_totals',
+  'projection_state',
+  'playback_resume_state',
+]
+
+const durableState = db => Object.fromEntries(activityTables.map(table => [
+  table,
+  db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+]))
+
+const captureError = callback => {
+  let result
+  try {
+    callback()
+  } catch (error) {
+    result = error
+  }
+  assert.ok(result instanceof Error, 'expected callback to throw')
+  return result
+}
 
 const counts = db => Object.fromEntries([
   'track_snapshots',
@@ -294,6 +324,28 @@ describe('atomic playback repository', () => {
     })
   })
 
+  it('rejects commit options after one hostile envelope inspection', async() => {
+    const db = await createStore()
+    repository.playbackStart(startCommand())
+    const before = durableState(db)
+    let ownKeysCalls = 0
+    const options = new Proxy({ failAt: 'after-daily' }, {
+      ownKeys(target) {
+        ownKeysCalls++
+        if (ownKeysCalls == 1) throw new Error('first options trap escaped')
+        return Reflect.ownKeys(target)
+      },
+    })
+
+    const error = captureError(
+      () => repository.playbackCommit(commitAt(2, 1000, pauseFact), options),
+    )
+
+    assert.equal(error.message, 'Invalid playback commit options')
+    assert.equal(ownKeysCalls, 1)
+    assert.deepEqual(durableState(db), before)
+  })
+
   it('rolls back before a baseline plus live projection would exceed the DTO safe-integer range', async() => {
     const db = await createStore()
     db.prepare(`
@@ -333,6 +385,100 @@ describe('atomic playback repository', () => {
       liveActiveMs: 0,
       updatedAtMs: 1,
     })
+  })
+
+  it('rolls back activity start when a trigger aborts after the resume write', async() => {
+    const db = await createStore()
+    const before = durableState(db)
+    db.exec(`
+      CREATE TEMP TRIGGER fail_activity_start_after_resume
+      AFTER INSERT ON playback_resume_state
+      BEGIN
+        SELECT RAISE(ABORT, 'late activity start failure');
+      END;
+    `)
+
+    assert.throws(() => repository.playbackStart(startCommand()), /late activity start failure/)
+
+    assert.deepEqual(durableState(db), before)
+    assert.deepEqual(integrity(db), { quick: [{ quick_check: 'ok' }], foreignKeys: [] })
+  })
+
+  it('rolls back ordinary commit when a trigger aborts after the optional event write', async() => {
+    const db = await createStore()
+    const started = repository.playbackStart(startCommand())
+    const before = durableState(db)
+    db.exec(`
+      CREATE TEMP TRIGGER fail_commit_after_event
+      AFTER INSERT ON playback_events
+      WHEN NEW.sequence_no = 2
+      BEGIN
+        SELECT RAISE(ABORT, 'late ordinary commit failure');
+      END;
+    `)
+
+    assert.throws(
+      () => repository.playbackCommit(commitAt(2, 1000, pauseFact)),
+      /late ordinary commit failure/,
+    )
+
+    assert.deepEqual(durableState(db), before)
+    assert.deepEqual(repository.playbackCommit(commitAt(1, 0)), started.ack)
+    assert.deepEqual(integrity(db), { quick: [{ quick_check: 'ok' }], foreignKeys: [] })
+  })
+
+  it('rolls back day boundary when a trigger aborts after the new segment write', async() => {
+    const db = await createStore()
+    const started = repository.playbackStart(startCommand())
+    const before = durableState(db)
+    db.exec(`
+      CREATE TEMP TRIGGER fail_boundary_after_new_segment
+      AFTER INSERT ON playback_sessions
+      WHEN NEW.segment_no = 1
+      BEGIN
+        SELECT RAISE(ABORT, 'late day boundary failure');
+      END;
+    `)
+    const played = 23 * 60 * 60 * 1000
+
+    assert.throws(() => repository.playbackCommit({
+      version: 1,
+      checkpoint: checkpoint(2, played, {
+        cumulativeActiveMs: played,
+        positionMs: 1000,
+        occurredAtMs: Date.parse('2026-03-09T04:00:00.000Z'),
+      }),
+      boundary: { type: 'day_boundary', nextLocalDay: '2026-03-09', utcOffsetMinutes: -240 },
+    }), /late day boundary failure/)
+
+    assert.deepEqual(durableState(db), before)
+    assert.deepEqual(repository.playbackCommit(commitAt(1, 0)), started.ack)
+    assert.deepEqual(integrity(db), { quick: [{ quick_check: 'ok' }], foreignKeys: [] })
+  })
+
+  it('rolls back preplay failure when a trigger aborts after the error event write', async() => {
+    const db = await createStore()
+    const before = durableState(db)
+    db.exec(`
+      CREATE TEMP TRIGGER fail_preplay_after_error
+      AFTER INSERT ON playback_events
+      WHEN NEW.event_type = 'error'
+      BEGIN
+        SELECT RAISE(ABORT, 'late preplay failure');
+      END;
+    `)
+    const input = {
+      ...startCommand({ recentAllowed: true, statsAllowed: false }),
+      error: { version: 1, type: 'error', stage: 'url', code: 404, recoverable: false, attempt: 2 },
+    }
+
+    assert.throws(
+      () => repository.playbackRecordPreplayFailure(input),
+      /late preplay failure/,
+    )
+
+    assert.deepEqual(durableState(db), before)
+    assert.deepEqual(integrity(db), { quick: [{ quick_check: 'ok' }], foreignKeys: [] })
   })
 
   it('enforces all consent combinations and private playback', async() => {
@@ -475,6 +621,117 @@ describe('atomic playback repository', () => {
     assert.equal(total(db).livePlayedMs, 0)
   })
 
+  it('rejects instants after an ordinary midnight boundary before mutation', async() => {
+    const db = await createStore()
+    const started = repository.playbackStart(startCommand())
+    const before = durableState(db)
+
+    for (const occurredAtMs of [
+      Date.parse('2026-03-09T04:00:00.001Z'),
+      Date.parse('2026-03-09T16:00:00.000Z'),
+    ]) {
+      assert.throws(() => repository.playbackCommit({
+        version: 1,
+        checkpoint: checkpoint(2, 1000, { occurredAtMs }),
+        boundary: { type: 'day_boundary', nextLocalDay: '2026-03-09', utcOffsetMinutes: -240 },
+      }), /playback_boundary_mismatch/)
+      assert.deepEqual(durableState(db), before)
+    }
+
+    assert.deepEqual(repository.playbackCommit(commitAt(1, 0)), started.ack)
+  })
+
+  it('rejects a midnight multiple civil dates after the open segment before mutation', async() => {
+    const db = await createStore()
+    const started = repository.playbackStart(startCommand())
+    const before = durableState(db)
+
+    assert.throws(() => repository.playbackCommit({
+      version: 1,
+      checkpoint: checkpoint(2, 1000, {
+        occurredAtMs: Date.parse('2026-03-10T04:00:00.000Z'),
+      }),
+      boundary: { type: 'day_boundary', nextLocalDay: '2026-03-10', utcOffsetMinutes: -240 },
+    }), /playback_boundary_mismatch/)
+
+    assert.deepEqual(durableState(db), before)
+    assert.deepEqual(repository.playbackCommit(commitAt(1, 0)), started.ack)
+  })
+
+  it('rejects skipped calendar labels and does not jump to the later existing date', async() => {
+    const originalTimeZone = process.env.TZ
+    process.env.TZ = 'Pacific/Apia'
+    try {
+      const db = await createStore()
+      const started = repository.playbackStart(startCommand({}, {
+        occurredAtMs: Date.parse('2011-12-29T10:00:00.000Z'),
+      }))
+      const before = durableState(db)
+      const checkpointAtDateLine = checkpoint(2, 1000, {
+        occurredAtMs: Date.parse('2011-12-30T10:00:00.000Z'),
+      })
+
+      assert.throws(() => repository.playbackCommit({
+        version: 1,
+        checkpoint: checkpointAtDateLine,
+        boundary: { type: 'day_boundary', nextLocalDay: '2011-12-30', utcOffsetMinutes: 840 },
+      }), /playback_boundary_mismatch/)
+      assert.throws(() => repository.playbackCommit({
+        version: 1,
+        checkpoint: checkpointAtDateLine,
+        boundary: { type: 'day_boundary', nextLocalDay: '2011-12-31', utcOffsetMinutes: 840 },
+      }), /playback_boundary_mismatch/)
+
+      assert.deepEqual(durableState(db), before)
+      assert.deepEqual(repository.playbackCommit(commitAt(1, 0)), started.ack)
+    } finally {
+      process.env.TZ = originalTimeZone
+    }
+  })
+
+  it('accepts the first valid instant after a DST-skipped local midnight', async() => {
+    const originalTimeZone = process.env.TZ
+    process.env.TZ = 'America/Santiago'
+    try {
+      const db = await createStore()
+      repository.playbackStart(startCommand({}, {
+        occurredAtMs: Date.parse('2026-09-05T04:00:00.000Z'),
+      }))
+      const played = 24 * 60 * 60 * 1000
+      const before = durableState(db)
+
+      assert.throws(() => repository.playbackCommit({
+        version: 1,
+        checkpoint: checkpoint(2, played, {
+          cumulativeActiveMs: played,
+          positionMs: 1000,
+          occurredAtMs: Date.parse('2026-09-06T04:00:00.001Z'),
+        }),
+        boundary: { type: 'day_boundary', nextLocalDay: '2026-09-06', utcOffsetMinutes: -180 },
+      }), /playback_boundary_mismatch/)
+      assert.deepEqual(durableState(db), before)
+
+      const ack = repository.playbackCommit({
+        version: 1,
+        checkpoint: checkpoint(2, played, {
+          cumulativeActiveMs: played,
+          positionMs: 1000,
+          occurredAtMs: Date.parse('2026-09-06T04:00:00.000Z'),
+        }),
+        boundary: { type: 'day_boundary', nextLocalDay: '2026-09-06', utcOffsetMinutes: -180 },
+      })
+
+      assert.equal(ack.segmentNo, 1)
+      assert.equal(session(db, 0).localDay, '2026-09-05')
+      assert.equal(session(db, 0).utcOffsetMinutes, -240)
+      assert.equal(session(db, 1).localDay, '2026-09-06')
+      assert.equal(session(db, 1).utcOffsetMinutes, -180)
+      assert.equal(total(db).livePlayedMs, played)
+    } finally {
+      process.env.TZ = originalTimeZone
+    }
+  })
+
   it('rotates the 25-hour fall DST day at the supplied civil midnight', async() => {
     const db = await createStore()
     const fallStart = Date.parse('2026-11-01T04:00:00.000Z')
@@ -554,6 +811,41 @@ describe('atomic playback repository', () => {
       { sequenceNo: 5, type: 'error', reason: null, detailsJson: '{"attempt":2,"code":12,"recoverable":true,"stage":"buffer"}' },
       { sequenceNo: 6, type: 'error', reason: null, detailsJson: '{"attempt":3,"code":null,"recoverable":false,"stage":"decode"}' },
     ])
+  })
+
+  it('rejects commit-time play_start while playing or paused without mutation', async() => {
+    const db = await createStore()
+    const started = repository.playbackStart(startCommand())
+    const blocker = new Database(db.name)
+    db.pragma('busy_timeout = 1')
+    let before = durableState(db)
+
+    const rejectWhileWriteLocked = request => {
+      blocker.exec('BEGIN IMMEDIATE')
+      try {
+        assert.equal(
+          captureError(() => repository.playbackCommit(request)).message,
+          'playback_commit_play_start_forbidden',
+        )
+      } finally {
+        blocker.exec('ROLLBACK')
+      }
+    }
+
+    try {
+      rejectWhileWriteLocked(commitAt(2, 1000, playStartFact))
+      assert.deepEqual(durableState(db), before)
+      assert.deepEqual(repository.playbackCommit(commitAt(1, 0)), started.ack)
+
+      const paused = repository.playbackCommit(commitAt(2, 1000, pauseFact))
+      before = durableState(db)
+      rejectWhileWriteLocked(commitAt(3, 2000, playStartFact))
+      assert.deepEqual(durableState(db), before)
+      assert.deepEqual(repository.playbackCommit(commitAt(2, 1000)), paused)
+    } finally {
+      if (blocker.inTransaction) blocker.exec('ROLLBACK')
+      blocker.close()
+    }
   })
 
   it('updates resume idempotently and prevents an older group from replacing newer state', async() => {
@@ -794,8 +1086,56 @@ describe('atomic playback repository', () => {
     await createStore()
     assert.equal(typeof repository.playbackGetRecent, 'function')
     assert.equal(typeof repository.playbackMarkStaleSessionsInterrupted, 'function')
+    const recentError = 'Invalid playback recent query'
+    const staleError = 'Invalid stale playback request'
     const hostile = new Proxy({}, {
       getPrototypeOf() { throw new Error('hostile trap escaped') },
+    })
+    const ownKeysHostile = new Proxy({}, {
+      ownKeys() { throw new Error('ownKeys trap escaped') },
+    })
+    const descriptorHostile = new Proxy({ version: 1, limit: 1 }, {
+      getOwnPropertyDescriptor() { throw new Error('descriptor trap escaped') },
+    })
+    const symbolQuery = { version: 1, limit: 1, [Symbol('extra')]: true }
+    const nonEnumerableExtraQuery = { version: 1, limit: 1 }
+    Object.defineProperty(nonEnumerableExtraQuery, 'extra', { value: true })
+    const nonEnumerableVersionQuery = { limit: 1 }
+    Object.defineProperty(nonEnumerableVersionQuery, 'version', { value: 1 })
+    let getterCalls = 0
+    const accessorVersionQuery = { limit: 1 }
+    Object.defineProperty(accessorVersionQuery, 'version', {
+      enumerable: true,
+      get() {
+        getterCalls++
+        throw new Error('version getter escaped')
+      },
+    })
+    const accessorLimitQuery = { version: 1 }
+    Object.defineProperty(accessorLimitQuery, 'limit', {
+      enumerable: true,
+      get() {
+        getterCalls++
+        throw new Error('limit getter escaped')
+      },
+    })
+    const accessorStale = {}
+    Object.defineProperty(accessorStale, 'nowMs', {
+      enumerable: true,
+      get() {
+        getterCalls++
+        throw new Error('stale getter escaped')
+      },
+    })
+    const countedProxy = (value, counts) => new Proxy(value, {
+      ownKeys(target) {
+        counts.ownKeys++
+        return Reflect.ownKeys(target)
+      },
+      getOwnPropertyDescriptor(target, key) {
+        counts.descriptors++
+        return Reflect.getOwnPropertyDescriptor(target, key)
+      },
     })
 
     for (const input of [
@@ -804,15 +1144,36 @@ describe('atomic playback repository', () => {
       { version: 1, limit: 521 },
       { version: 1, limit: 1.5 },
       { version: 1, limit: 1, extra: true },
-    ]) assert.throws(() => repository.playbackGetRecent(input), /Invalid playback recent query/)
-    assert.throws(() => repository.playbackGetRecent(hostile), /Invalid playback recent query/)
+      hostile,
+      ownKeysHostile,
+      descriptorHostile,
+      symbolQuery,
+      nonEnumerableExtraQuery,
+      nonEnumerableVersionQuery,
+      accessorVersionQuery,
+      accessorLimitQuery,
+    ]) assert.equal(captureError(() => repository.playbackGetRecent(input)).message, recentError)
     for (const input of [
       { nowMs: -1 },
       { nowMs: 1.5 },
       { nowMs: 1, extra: true },
-    ]) assert.throws(() => repository.playbackMarkStaleSessionsInterrupted(input), /Invalid stale playback request/)
-    assert.throws(() => repository.playbackMarkStaleSessionsInterrupted(hostile), /Invalid stale playback request/)
-    assert.throws(() => repository.playbackGetListeningStats({}), /Invalid playback listening query/)
-    assert.throws(() => repository.playbackGetResume({}), /Invalid playback resume query/)
+      { nowMs: 1, [Symbol('extra')]: true },
+      hostile,
+      ownKeysHostile,
+      accessorStale,
+    ]) assert.equal(captureError(() => repository.playbackMarkStaleSessionsInterrupted(input)).message, staleError)
+    assert.equal(getterCalls, 0)
+
+    const queryTraps = { ownKeys: 0, descriptors: 0 }
+    assert.deepEqual(repository.playbackGetRecent(countedProxy({ version: 1, limit: 1 }, queryTraps)), [])
+    assert.deepEqual(queryTraps, { ownKeys: 1, descriptors: 2 })
+    const staleTraps = { ownKeys: 0, descriptors: 0 }
+    assert.equal(repository.playbackMarkStaleSessionsInterrupted(
+      countedProxy({ nowMs: startAt }, staleTraps),
+    ), 0)
+    assert.deepEqual(staleTraps, { ownKeys: 1, descriptors: 1 })
+
+    assert.equal(captureError(() => repository.playbackGetListeningStats({})).message, 'Invalid playback listening query')
+    assert.equal(captureError(() => repository.playbackGetResume({})).message, 'Invalid playback resume query')
   })
 })

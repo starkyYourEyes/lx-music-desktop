@@ -32,6 +32,13 @@ interface JsonDocumentRead {
   value: unknown
 }
 
+interface CurrentMetadataDocuments {
+  clientPath: string
+  serverPath: string
+  client: SyncClientServersFileV1 | null
+  server: SyncServerDevicesFileV2 | null
+}
+
 type RootMigrationPhase =
   | 'after-directories'
   | 'after-server-info'
@@ -119,6 +126,29 @@ const readCurrentMetadataDocument = async(
   }
 }
 
+const preflightCurrentMetadata = async(dataPath: string): Promise<CurrentMetadataDocuments> => {
+  const clientPath = path.join(dataPath, File.clientDataPath, File.syncAuthKeysJSON)
+  const serverPath = path.join(dataPath, File.serverDataPath, File.userDevicesJSON)
+  const clientSource = await readCurrentMetadataDocument(dataPath, clientPath)
+  if (clientSource != null && !isSyncClientServersFileV1(clientSource.value)) {
+    throw createSyncMetadataRecoveryError(
+      'credentials.sync_metadata_invalid', dataPath, clientPath,
+    )
+  }
+  const serverSource = await readCurrentMetadataDocument(dataPath, serverPath)
+  if (serverSource != null && !isSyncServerDevicesFileV2(serverSource.value)) {
+    throw createSyncMetadataRecoveryError(
+      'credentials.sync_metadata_invalid', dataPath, serverPath,
+    )
+  }
+  return {
+    clientPath,
+    serverPath,
+    client: clientSource?.value as SyncClientServersFileV1 | null ?? null,
+    server: serverSource?.value as SyncServerDevicesFileV2 | null ?? null,
+  }
+}
+
 const readJson = async(filePath: string): Promise<unknown | null> => (await readJsonDocument(filePath))?.value ?? null
 
 const verifyJson = async(filePath: string, expected: JsonValue): Promise<void> => {
@@ -158,26 +188,21 @@ const vaultServerKeys = async(value: unknown, userName: string): Promise<void> =
 }
 
 const canonicalizeExistingMetadata = async(dataPath: string, rootSource?: Record<string, unknown>): Promise<void> => {
+  const currentMetadata = await preflightCurrentMetadata(dataPath)
   const clientPath = path.join(dataPath, File.clientDataPath)
   const serverPath = path.join(dataPath, File.serverDataPath)
-  const currentClients = path.join(clientPath, File.syncAuthKeysJSON)
-  const currentDevices = path.join(serverPath, File.userDevicesJSON)
+  const currentClients = currentMetadata.clientPath
+  const currentDevices = currentMetadata.serverPath
   const rootProfiles = toProfiles(rootSource?.syncAuthKey)
   const rootDevices = toDevices(rootSource?.clients)
   await vaultClientKeys(rootSource?.syncAuthKey)
   await vaultServerKeys(rootSource?.clients, 'default')
 
-  const currentClientSource = await readCurrentMetadataDocument(dataPath, currentClients)
-  const hasCurrentClients = currentClientSource != null
+  const hasCurrentClients = currentMetadata.client != null
   let hasClientMetadataSource = hasCurrentClients || Object.keys(rootProfiles).length > 0
-  let currentClientDocument: unknown = currentClientSource?.value ?? null
+  const currentClientDocument = currentMetadata.client
   let currentProfiles: Record<string, LX.Sync.SyncClientProfile> = {}
-  if (hasCurrentClients) {
-    if (!isSyncClientServersFileV1(currentClientDocument)) {
-      throw createSyncMetadataRecoveryError(
-        'credentials.sync_metadata_invalid', dataPath, currentClients,
-      )
-    }
+  if (currentClientDocument != null) {
     currentProfiles = currentClientDocument.servers
   } else {
     const legacyClients = await readJson(path.join(clientPath, legacyClientKeysJSON))
@@ -192,18 +217,12 @@ const canonicalizeExistingMetadata = async(dataPath: string, rootSource?: Record
   }
   if (hasClientMetadataSource) await verifyJson(currentClients, expectedClients as unknown as JsonValue)
 
-  const currentDeviceSource = await readCurrentMetadataDocument(dataPath, currentDevices)
-  const hasCurrentDevices = currentDeviceSource != null
+  const hasCurrentDevices = currentMetadata.server != null
   let hasDeviceMetadataSource = hasCurrentDevices || Object.keys(rootDevices).length > 0
-  let currentDeviceDocument: unknown = currentDeviceSource?.value ?? null
+  const currentDeviceDocument = currentMetadata.server
   let currentUserName = 'default'
   let currentDeviceValues: Record<string, LX.Sync.SyncServerDevice> = {}
-  if (hasCurrentDevices) {
-    if (!isSyncServerDevicesFileV2(currentDeviceDocument)) {
-      throw createSyncMetadataRecoveryError(
-        'credentials.sync_metadata_invalid', dataPath, currentDevices,
-      )
-    }
+  if (currentDeviceDocument != null) {
     currentUserName = currentDeviceDocument.userName
     currentDeviceValues = currentDeviceDocument.clients
   } else {
@@ -236,6 +255,7 @@ const migrateRootSource = async(dataPath: string, info: Record<string, unknown>,
   if (typeof serverId != 'string' || !isRecord(info.clients) || !isRecord(info.syncAuthKey) || !isRecord(info.snapshotInfo)) {
     throw new Error('Invalid root sync migration source')
   }
+  const currentMetadata = await preflightCurrentMetadata(dataPath)
   await vaultClientKeys(info.syncAuthKey)
   await vaultServerKeys(info.clients, 'default')
 
@@ -253,16 +273,10 @@ const migrateRootSource = async(dataPath: string, info: Record<string, unknown>,
   await verifyJson(serverInfoPath, serverInfo)
   failIfRequested(options, 'after-server-info')
 
-  const devicePath = path.join(serverSyncDataPath, File.userDevicesJSON)
-  const currentDeviceSource = await readCurrentMetadataDocument(dataPath, devicePath)
-  const currentDeviceDocument = currentDeviceSource?.value ?? null
+  const devicePath = currentMetadata.serverPath
+  const currentDeviceDocument = currentMetadata.server
   let currentDevices: Record<string, LX.Sync.SyncServerDevice> = {}
-  if (currentDeviceSource != null) {
-    if (!isSyncServerDevicesFileV2(currentDeviceDocument)) {
-      throw createSyncMetadataRecoveryError(
-        'credentials.sync_metadata_invalid', dataPath, devicePath,
-      )
-    }
+  if (currentDeviceDocument != null) {
     currentDevices = currentDeviceDocument.clients
   }
   const deviceMetadata = {
@@ -293,16 +307,10 @@ const migrateRootSource = async(dataPath: string, info: Record<string, unknown>,
   await verifyJson(snapshotInfoPath, snapshotInfo as JsonValue)
   failIfRequested(options, 'after-snapshots')
 
-  const clientPath = path.join(clientSyncDataPath, File.syncAuthKeysJSON)
-  const currentClientSource = await readCurrentMetadataDocument(dataPath, clientPath)
-  const currentClientDocument = currentClientSource?.value ?? null
+  const clientPath = currentMetadata.clientPath
+  const currentClientDocument = currentMetadata.client
   let currentProfiles: Record<string, LX.Sync.SyncClientProfile> = {}
-  if (currentClientSource != null) {
-    if (!isSyncClientServersFileV1(currentClientDocument)) {
-      throw createSyncMetadataRecoveryError(
-        'credentials.sync_metadata_invalid', dataPath, clientPath,
-      )
-    }
+  if (currentClientDocument != null) {
     currentProfiles = currentClientDocument.servers
   }
   const clientMetadata = {

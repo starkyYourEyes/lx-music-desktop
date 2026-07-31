@@ -40,6 +40,7 @@ export const migrateLegacyCredentials = async(deps: CredentialMigrationDeps): Pr
   const inventory = await collectLegacyCredentialInventory(deps.dataRoot)
   const now = deps.now ?? Date.now
   if (inventory.credentials.length == 0 && deps.vault.mode == 'memory-only' && deps.vault.getMigrationMarker(memoryOnlyMarkerName) != null) {
+    await redactLegacySecrets([], inventory.versionedSyncDocuments)
     return { status: 'secure-storage-unavailable', volatileEntries: 0 }
   }
   let encryptedEntries = 0
@@ -87,7 +88,7 @@ export const migrateLegacyCredentials = async(deps: CredentialMigrationDeps): Pr
   }
   failIfRequested(deps, 'after-profile-write')
 
-  if (inventory.credentials.length) await redactLegacySecrets(inventory.credentials)
+  await redactLegacySecrets(inventory.credentials, inventory.versionedSyncDocuments)
   failIfRequested(deps, 'after-source-redaction')
 
   return memoryOnlyEntries > 0

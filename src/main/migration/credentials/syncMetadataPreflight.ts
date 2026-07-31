@@ -4,6 +4,7 @@ import {
   type SyncClientServersFileV1,
   type SyncServerDevicesFileV2,
 } from '../../../common/storage/syncMetadata'
+import { assertSyncKeyCredential } from '../../storage/credentials/types'
 
 export type VersionedSyncMetadataKind = 'sync-client-v1' | 'sync-server-v2'
 export type VersionedSyncMetadataDocument = SyncClientServersFileV1 | SyncServerDevicesFileV2
@@ -11,19 +12,30 @@ export type VersionedSyncMetadataDocument = SyncClientServersFileV1 | SyncServer
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value != null && typeof value == 'object' && !Array.isArray(value)
 
+export const isVersionedSyncMetadataDocument = (
+  kind: VersionedSyncMetadataKind,
+  value: unknown,
+): value is VersionedSyncMetadataDocument => kind == 'sync-client-v1'
+  ? isSyncClientServersFileV1(value)
+  : isSyncServerDevicesFileV2(value)
+
 export const preflightVersionedSyncMetadata = (
   kind: VersionedSyncMetadataKind,
   value: unknown,
 ): VersionedSyncMetadataDocument | null => {
+  if (!isRecord(value)) return null
   const projected = structuredClone(value)
-  if (!isRecord(projected)) return null
   const entries = kind == 'sync-client-v1' ? projected.servers : projected.clients
   if (isRecord(entries)) {
     for (const entry of Object.values(entries)) {
-      if (isRecord(entry)) Reflect.deleteProperty(entry, 'key')
+      if (!isRecord(entry) || !Object.hasOwn(entry, 'key')) continue
+      try {
+        assertSyncKeyCredential(entry.key)
+      } catch {
+        return null
+      }
+      Reflect.deleteProperty(entry, 'key')
     }
   }
-  return kind == 'sync-client-v1'
-    ? isSyncClientServersFileV1(projected) ? projected : null
-    : isSyncServerDevicesFileV2(projected) ? projected : null
+  return isVersionedSyncMetadataDocument(kind, projected) ? projected : null
 }

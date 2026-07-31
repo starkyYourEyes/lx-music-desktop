@@ -18,6 +18,13 @@ export interface LegacyCredentialSource {
   redact: (document: Record<string, unknown>) => void
 }
 
+export interface VersionedSyncMetadataSource {
+  documentKind: VersionedSyncMetadataKind
+  trustedRoot: string
+  documentPath: string
+  documentIdentity: SourceFileIdentity
+}
+
 export interface SourceFileIdentity {
   dev: number | bigint
   ino: number | bigint
@@ -36,6 +43,7 @@ export interface LegacyAccountProfile {
 export interface LegacyCredentialInventory {
   credentials: LegacyCredentialSource[]
   profiles: LegacyAccountProfile[]
+  versionedSyncDocuments: VersionedSyncMetadataSource[]
 }
 
 interface SourceDocument {
@@ -264,6 +272,19 @@ export const collectLegacyCredentialInventory = async(dataRoot: string): Promise
   dataRoot = await resolveTrustedDataRoot(dataRoot)
   const credentials: LegacyCredentialSource[] = []
   const profiles: LegacyAccountProfile[] = []
+  const currentClientPath = path.join(dataRoot, 'sync', 'client', 'servers.v1.json')
+  const currentServerPath = path.join(dataRoot, 'sync', 'server', 'devices.v2.json')
+  const currentClient = await readVersionedSyncDocument(dataRoot, currentClientPath, 'sync-client-v1')
+  const currentServer = await readVersionedSyncDocument(dataRoot, currentServerPath, 'sync-server-v2')
+  const versionedSyncDocuments: VersionedSyncMetadataSource[] = [currentClient, currentServer]
+    .filter((document): document is SourceDocument => document != null)
+    .map(document => ({
+      documentKind: document.documentKind as VersionedSyncMetadataKind,
+      trustedRoot: document.trustedRoot,
+      documentPath: document.path,
+      documentIdentity: document.identity,
+    }))
+
   const data = await readJsonDocument(dataRoot, path.join(dataRoot, 'data.json'))
   if (data != null) accountInventory(data, credentials, profiles)
 
@@ -290,11 +311,6 @@ export const collectLegacyCredentialInventory = async(dataRoot: string): Promise
     })
   }
 
-  const currentClientPath = path.join(dataRoot, 'sync', 'client', 'servers.v1.json')
-  const currentServerPath = path.join(dataRoot, 'sync', 'server', 'devices.v2.json')
-  const currentClient = await readVersionedSyncDocument(dataRoot, currentClientPath, 'sync-client-v1')
-  const currentServer = await readVersionedSyncDocument(dataRoot, currentServerPath, 'sync-server-v2')
-
   if (currentClient != null) clientInventory(currentClient, credentials, 'servers')
   if (currentServer != null) serverInventory(currentServer, credentials, currentServer.value.userName as string)
 
@@ -317,5 +333,5 @@ export const collectLegacyCredentialInventory = async(dataRoot: string): Promise
     if (existing != null && existing != value) throw new Error('Conflicting legacy credential destination')
     destinations.set(destination, value)
   }
-  return { credentials, profiles }
+  return { credentials, profiles, versionedSyncDocuments }
 }

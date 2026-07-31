@@ -1,9 +1,9 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { canonicalJson, type JsonValue } from '../../../common/storage/canonicalJson'
-import type { LegacyCredentialSource, SourceFileIdentity } from './legacySources'
+import type { LegacyCredentialSource, SourceFileIdentity, VersionedSyncMetadataSource } from './legacySources'
 import { createSyncMetadataRecoveryError, type CredentialMigrationRecoveryError } from './recoveryError'
-import { preflightVersionedSyncMetadata } from './syncMetadataPreflight'
+import { isVersionedSyncMetadataDocument, preflightVersionedSyncMetadata } from './syncMetadataPreflight'
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value != null && typeof value == 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) == Object.prototype
@@ -35,11 +35,18 @@ interface PreparedRedaction {
   filePath: string
   handle: Awaited<ReturnType<typeof fs.open>>
   identity: SourceFileIdentity
-  redacted: string
+  redacted: string | null
+  recoveryError: CredentialMigrationRecoveryError | null
+}
+
+interface RedactionTarget {
+  filePath: string
+  sources: LegacyCredentialSource[]
+  versionedDocument?: VersionedSyncMetadataSource
 }
 
 const changedVersionedSourceError = (
-  source: LegacyCredentialSource,
+  source: LegacyCredentialSource | VersionedSyncMetadataSource,
 ): CredentialMigrationRecoveryError | null => source.documentKind == 'generic'
   ? null
   : createSyncMetadataRecoveryError(
@@ -49,30 +56,53 @@ const changedVersionedSourceError = (
   )
 
 const validateOpenedIdentity = async(prepared: PreparedRedaction, contentMayDiffer = false): Promise<void> => {
-  const opened = identityOf(await prepared.handle.stat())
-  const targetStats = await fs.lstat(prepared.filePath)
-  const matches = contentMayDiffer ? sameStableIdentity : sameIdentity
-  if (targetStats.isSymbolicLink() || !targetStats.isFile() ||
-      !matches(opened, prepared.identity) || !matches(identityOf(targetStats), prepared.identity)) {
-    throw new Error('Legacy credential source identity changed')
+  try {
+    const opened = identityOf(await prepared.handle.stat())
+    const targetStats = await fs.lstat(prepared.filePath)
+    const matches = contentMayDiffer ? sameStableIdentity : sameIdentity
+    if (targetStats.isSymbolicLink() || !targetStats.isFile() ||
+        !matches(opened, prepared.identity) || !matches(identityOf(targetStats), prepared.identity)) {
+      throw new Error('Legacy credential source identity changed')
+    }
+  } catch (error) {
+    throw prepared.recoveryError ?? error
   }
 }
 
-const preflight = async(filePath: string, sources: readonly LegacyCredentialSource[]): Promise<PreparedRedaction> => {
-  const trustedRoot = sources[0].trustedRoot
+const preflight = async(target: RedactionTarget): Promise<PreparedRedaction> => {
+  const { filePath, sources, versionedDocument } = target
+  const reference = versionedDocument ?? sources[0]
+  const trustedRoot = reference.trustedRoot
   if (sources.some(source => source.trustedRoot != trustedRoot || source.documentPath != filePath)) {
     throw new Error('Invalid legacy credential source inventory')
   }
+  if (versionedDocument != null && versionedDocument.documentPath != filePath) {
+    throw new Error('Invalid legacy credential source inventory')
+  }
   assertContained(trustedRoot, filePath)
-  const handle = await fs.open(filePath, 'r+')
+  const recoveryError = changedVersionedSourceError(reference)
+  let handle: Awaited<ReturnType<typeof fs.open>>
+  try {
+    handle = await fs.open(filePath, sources.length > 0 ? 'r+' : 'r')
+  } catch (error) {
+    throw recoveryError ?? error
+  }
   try {
     const identity = identityOf(await handle.stat())
-    if (!sameIdentity(identity, sources[0].documentIdentity) ||
+    if (!sameIdentity(identity, reference.documentIdentity) ||
         sources.some(source => !sameIdentity(source.documentIdentity, identity))) {
-      throw changedVersionedSourceError(sources[0]) ?? new Error('Legacy credential source identity changed')
+      throw recoveryError ?? new Error('Legacy credential source identity changed')
     }
-    const current: unknown = JSON.parse(await handle.readFile('utf8'))
-    if (!isRecord(current)) throw new Error('Invalid legacy credential source document')
+    let current: unknown
+    try {
+      current = JSON.parse(await handle.readFile('utf8'))
+    } catch (error) {
+      throw recoveryError ?? error
+    }
+    if (!isRecord(current)) throw recoveryError ?? new Error('Invalid legacy credential source document')
+    if (versionedDocument != null && preflightVersionedSyncMetadata(versionedDocument.documentKind, current) == null) {
+      throw recoveryError ?? new Error('Legacy credential source metadata changed')
+    }
     for (const source of sources) {
       const currentValue = source.read(current)
       if (currentValue == null || canonicalJson(currentValue) != canonicalJson(source.value)) {
@@ -80,16 +110,17 @@ const preflight = async(filePath: string, sources: readonly LegacyCredentialSour
       }
     }
     for (const source of sources) source.redact(current)
-    const redacted = canonicalJson(current as unknown as JsonValue)
-    if (sources[0].documentKind != 'generic' &&
-        preflightVersionedSyncMetadata(sources[0].documentKind, JSON.parse(redacted)) == null) {
-      throw changedVersionedSourceError(sources[0]) ?? new Error('Legacy credential source metadata changed')
+    const redacted = sources.length > 0 ? canonicalJson(current as unknown as JsonValue) : null
+    if (versionedDocument != null && redacted != null &&
+        !isVersionedSyncMetadataDocument(versionedDocument.documentKind, JSON.parse(redacted))) {
+      throw recoveryError ?? new Error('Legacy credential source metadata changed')
     }
     return {
       filePath,
       handle,
       identity,
       redacted,
+      recoveryError,
     }
   } catch (error) {
     await handle.close().catch(() => {})
@@ -97,20 +128,32 @@ const preflight = async(filePath: string, sources: readonly LegacyCredentialSour
   }
 }
 
-export const redactLegacySecrets = async(sources: readonly LegacyCredentialSource[]): Promise<void> => {
-  const byPath = new Map<string, LegacyCredentialSource[]>()
+export const redactLegacySecrets = async(
+  sources: readonly LegacyCredentialSource[],
+  versionedDocuments: readonly VersionedSyncMetadataSource[] = [],
+): Promise<void> => {
+  const byPath = new Map<string, RedactionTarget>()
+  for (const document of versionedDocuments) {
+    if (byPath.has(document.documentPath)) throw new Error('Invalid legacy credential source inventory')
+    byPath.set(document.documentPath, {
+      filePath: document.documentPath,
+      sources: [],
+      versionedDocument: document,
+    })
+  }
   for (const source of sources) {
-    const existing = byPath.get(source.documentPath) ?? []
-    existing.push(source)
-    byPath.set(source.documentPath, existing)
+    const target = byPath.get(source.documentPath) ?? { filePath: source.documentPath, sources: [] }
+    target.sources.push(source)
+    byPath.set(source.documentPath, target)
   }
   const prepared: PreparedRedaction[] = []
   try {
-    for (const [filePath, fileSources] of Array.from(byPath.entries())) {
-      prepared.push(await preflight(filePath, fileSources))
+    for (const target of Array.from(byPath.values())) {
+      prepared.push(await preflight(target))
     }
     for (const target of prepared) {
       await validateOpenedIdentity(target)
+      if (target.redacted == null) continue
       const bytes = Buffer.from(target.redacted, 'utf8')
       await target.handle.write(bytes, 0, bytes.length, 0)
       await target.handle.truncate(bytes.length)

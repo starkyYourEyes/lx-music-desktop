@@ -204,6 +204,29 @@ describe('legacy credential migration', () => {
         relativePath: 'sync/client/servers.v1.json',
         document: { version: 1, servers: {}, key: 'TOP_LEVEL_KEY_SENTINEL' },
       },
+      {
+        name: 'client mixed valid and non-string keys',
+        relativePath: 'sync/client/servers.v1.json',
+        document: {
+          version: 1,
+          servers: {
+            server_valid: { clientId: 'client_valid', serverName: 'Valid', key: 'CLIENT_VALID_SENTINEL' },
+            server_invalid: { clientId: 'client_invalid', serverName: 'Invalid', key: 7 },
+          },
+        },
+      },
+      {
+        name: 'server mixed valid and non-string keys',
+        relativePath: 'sync/server/devices.v2.json',
+        document: {
+          version: 2,
+          userName: 'default',
+          clients: {
+            device_valid: { clientId: 'device_valid', deviceName: 'Valid', isMobile: false, key: 'SERVER_VALID_SENTINEL' },
+            device_invalid: { clientId: 'device_invalid', deviceName: 'Invalid', isMobile: true, key: { invalid: true } },
+          },
+        },
+      },
       ...[1.5, Number.MAX_SAFE_INTEGER + 1, null].map((lastConnectDate, index) => ({
         name: `server invalid date ${index}`,
         relativePath: 'sync/server/devices.v2.json',
@@ -704,6 +727,170 @@ describe('legacy credential migration', () => {
     assert.deepEqual(await fsp.readFile(target), replacementBytes)
     assert.equal(entries.has(JSON.stringify({ kind: 'sync-client', serverId: 'inventoried_server' })), true)
     assert.equal(entries.has(JSON.stringify({ kind: 'sync-client', serverId: 'replacement_server' })), false)
+  })
+
+  it('guards key-free versioned documents against every replacement shape', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const cases = [
+      {
+        name: 'client valid replacement',
+        relativePath: 'sync/client/servers.v1.json',
+        initial: { version: 1, servers: {} },
+        replacement: { version: 1, servers: { replacement: { clientId: 'replacement', serverName: 'Replacement' } } },
+      },
+      {
+        name: 'client invalid replacement',
+        relativePath: 'sync/client/servers.v1.json',
+        initial: { version: 1, servers: {} },
+        replacement: { version: 1, servers: { replacement: { clientId: '', serverName: 'Replacement' } } },
+      },
+      {
+        name: 'client key-bearing replacement',
+        relativePath: 'sync/client/servers.v1.json',
+        initial: { version: 1, servers: {} },
+        replacement: { version: 1, servers: { replacement: { clientId: 'replacement', serverName: 'Replacement', key: 'REPLACEMENT_ONLY_KEY' } } },
+        replacementRef: { kind: 'sync-client', serverId: 'replacement' },
+      },
+      {
+        name: 'server valid replacement',
+        relativePath: 'sync/server/devices.v2.json',
+        initial: { version: 2, userName: 'default', clients: {} },
+        replacement: { version: 2, userName: 'default', clients: { replacement: { clientId: 'replacement', deviceName: 'Replacement', isMobile: false } } },
+      },
+      {
+        name: 'server invalid replacement',
+        relativePath: 'sync/server/devices.v2.json',
+        initial: { version: 2, userName: 'default', clients: {} },
+        replacement: { version: 2, userName: 'default', clients: { replacement: { clientId: '', deviceName: 'Replacement', isMobile: false } } },
+      },
+      {
+        name: 'server key-bearing replacement',
+        relativePath: 'sync/server/devices.v2.json',
+        initial: { version: 2, userName: 'default', clients: {} },
+        replacement: { version: 2, userName: 'default', clients: { replacement: { clientId: 'replacement', deviceName: 'Replacement', isMobile: false, key: 'REPLACEMENT_ONLY_KEY' } } },
+        replacementRef: { kind: 'sync-server-device', userName: 'default', clientId: 'replacement' },
+      },
+    ]
+
+    for (const testCase of cases) {
+      const root = await makeRoot()
+      const target = path.join(root, testCase.relativePath)
+      const displaced = `${target}.inventory`
+      await writeJson(target, testCase.initial)
+      await writeJson(path.join(root, 'data.json'), { neteaseAccount: { cookie: 'inventory-trigger' } })
+      const replacementBytes = Buffer.from(`${JSON.stringify(testCase.replacement, null, 2)}\n`)
+      const entries = new Map()
+      let swapped = false
+      const vault = {
+        mode: 'encrypted',
+        async write(ref, value) {
+          entries.set(JSON.stringify(ref), structuredClone(value))
+          return { persistence: 'encrypted' }
+        },
+        async verify(ref, value) {
+          if (!swapped) {
+            swapped = true
+            await fsp.rename(target, displaced)
+            await fsp.writeFile(target, replacementBytes)
+          }
+          return JSON.stringify(entries.get(JSON.stringify(ref))) == JSON.stringify(value)
+        },
+        getMigrationMarker() { return null },
+        async putMigrationMarker() {},
+      }
+
+      await assert.rejects(
+        migrateLegacyCredentials({
+          dataRoot: root,
+          vault,
+          profiles: { migrateLegacyAccountProfiles: async() => {} },
+          now: () => 100,
+        }),
+        error => error.code == 'credentials.sync_metadata_changed_after_inventory' && error.affectedPath == target,
+        testCase.name,
+      )
+      assert.deepEqual(await fsp.readFile(target), replacementBytes, testCase.name)
+      if (testCase.replacementRef != null) {
+        assert.equal(entries.has(JSON.stringify(testCase.replacementRef)), false, testCase.name)
+      }
+    }
+  })
+
+  it('maps a versioned source deleted before open to its exact recovery path', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const root = await makeRoot()
+    const target = path.join(root, 'sync', 'client', 'servers.v1.json')
+    await writeJson(target, {
+      version: 1,
+      servers: { server_a: { clientId: 'client_a', serverName: 'Server', key: 'CLIENT_KEY_SENTINEL' } },
+    })
+    const vault = {
+      mode: 'encrypted',
+      async write() { return { persistence: 'encrypted' } },
+      async verify() { await fsp.unlink(target); return true },
+      getMigrationMarker() { return null },
+      async putMigrationMarker() {},
+    }
+
+    await assert.rejects(
+      migrateLegacyCredentials({
+        dataRoot: root,
+        vault,
+        profiles: { migrateLegacyAccountProfiles: async() => {} },
+      }),
+      error => error.code == 'credentials.sync_metadata_changed_after_inventory' && error.affectedPath == target,
+    )
+  })
+
+  it('maps a prepared versioned source replacement to its exact recovery path', async() => {
+    const { migrateLegacyCredentials } = require(migrationPath)
+    const root = await makeRoot()
+    const clientPath = path.join(root, 'sync', 'client', 'servers.v1.json')
+    const serverPath = path.join(root, 'sync', 'server', 'devices.v2.json')
+    const displaced = `${clientPath}.inventory`
+    await writeJson(clientPath, {
+      version: 1,
+      servers: { server_a: { clientId: 'client_a', serverName: 'Server', key: 'CLIENT_KEY_SENTINEL' } },
+    })
+    await writeJson(serverPath, {
+      version: 2,
+      userName: 'default',
+      clients: { device_a: { clientId: 'device_a', deviceName: 'Device', isMobile: false, key: 'SERVER_KEY_SENTINEL' } },
+    })
+    const replacementBytes = Buffer.from(JSON.stringify({
+      version: 1,
+      servers: { replacement: { clientId: 'replacement', serverName: 'Replacement', key: 'REPLACEMENT_ONLY_KEY' } },
+    }))
+    const originalOpen = fsp.open
+    let swapped = false
+    fsp.open = async(filePath, ...args) => {
+      const handle = await originalOpen(filePath, ...args)
+      if (!swapped && filePath == serverPath) {
+        swapped = true
+        await fsp.rename(clientPath, displaced)
+        await fsp.writeFile(clientPath, replacementBytes)
+      }
+      return handle
+    }
+    try {
+      await assert.rejects(
+        migrateLegacyCredentials({
+          dataRoot: root,
+          vault: {
+            mode: 'encrypted',
+            async write() { return { persistence: 'encrypted' } },
+            async verify() { return true },
+            getMigrationMarker() { return null },
+            async putMigrationMarker() {},
+          },
+          profiles: { migrateLegacyAccountProfiles: async() => {} },
+        }),
+        error => error.code == 'credentials.sync_metadata_changed_after_inventory' && error.affectedPath == clientPath,
+      )
+      assert.deepEqual(await fsp.readFile(clientPath), replacementBytes)
+    } finally {
+      fsp.open = originalOpen
+    }
   })
 
   it('rejects a source file replaced after inventory even when its value is unchanged', async() => {

@@ -48,6 +48,23 @@ const removeUnavailablePlaybackSources = (removedIds: ReadonlySet<string>) => {
   global.lx.event_app.update_config({ 'common.apiFallbackSources': nextFallbacks })
 }
 
+const reconcileRetainedUserApiState = (
+  err: unknown,
+  apiList: LX.UserApi.UserApiInfo[],
+  removedIds: ReadonlySet<string>,
+  configErrorMessage: string,
+) => {
+  if (err != null && (typeof err == 'object' || typeof err == 'function')) {
+    replacementFailureApiLists.set(err, apiList)
+  }
+  try {
+    removeUnavailablePlaybackSources(removedIds)
+  } catch (configErr) {
+    log.error(configErrorMessage, configErr)
+  }
+  notifyUserApiChanged()
+}
+
 const getRemovedUserApiIds = (
   previousIds: ReadonlySet<string>,
   nextList: readonly LX.UserApi.UserApiInfo[],
@@ -142,6 +159,7 @@ export const overwriteUserApisFromSync = async(data: LX.Sync.UserApi.Data): Prom
     const previousIds = new Set(previousState.apiList.map(api => api.id))
     const nextState = await prepareUserApisFromSync(data)
     const apiList = commitUserApiState(nextState)
+    const failureApiList = cloneUserApiList(apiList)
     const removedIds = getRemovedUserApiIds(previousIds, apiList)
     try {
       await applyRuntimeChanges(
@@ -154,6 +172,12 @@ export const overwriteUserApisFromSync = async(data: LX.Sync.UserApi.Data): Prom
         commitUserApiState(previousState)
       } catch (rollbackErr) {
         log.error('rollback user APIs after sync runtime lifecycle error:', rollbackErr)
+        reconcileRetainedUserApiState(
+          err,
+          failureApiList,
+          removedIds,
+          'cleanup playback fallbacks after sync rollback failure:',
+        )
       }
       throw err
     }
@@ -177,6 +201,7 @@ export const removeApi = async(ids: string[]): Promise<LX.UserApi.UserApiInfo[]>
       scripts: nextScripts,
     }
     const apiList = commitUserApiState(nextState)
+    const failureApiList = cloneUserApiList(apiList)
     try {
       await applyRuntimeChanges(getUserApiRuntimePool(), new Set(), removedIds)
     } catch (err) {
@@ -184,6 +209,12 @@ export const removeApi = async(ids: string[]): Promise<LX.UserApi.UserApiInfo[]>
         commitUserApiState(previousState)
       } catch (rollbackErr) {
         log.error('rollback user APIs after deletion runtime lifecycle error:', rollbackErr)
+        reconcileRetainedUserApiState(
+          err,
+          failureApiList,
+          removedIds,
+          'cleanup playback fallbacks after deletion rollback failure:',
+        )
       }
       throw err
     }

@@ -743,6 +743,138 @@ const originalLx = global.lx
     assert.strictEqual(deleteRollbackRuntime.getChangeEvents(), 0)
     assert.deepStrictEqual(deleteRollbackRuntime.getConfigUpdates(), [])
 
+    const syncRollbackCommitError = new Error('simulated sync rollback commit failure')
+    const syncSecondaryLifecycleError = new Error('simulated sync lifecycle failure')
+    const syncRetainedApis = [{
+      id: 'untouched-id',
+      name: 'Sync retained source',
+      remote: makeRemote(),
+    }]
+    const expectedSyncFailureApiList = structuredClone(syncRetainedApis)
+    const syncSecondaryFailureRuntime = createRuntimeHarness({
+      initialApis: [
+        { id: 'removed-id', name: 'Removed before sync failure' },
+        { id: 'untouched-id', name: 'Untouched before sync failure' },
+      ],
+      initialScripts: {
+        'removed-id': 'script:removed-id:old',
+        'untouched-id': 'script:untouched-id:old',
+      },
+      fallbackSources: ['removed-id', 'untouched-id'],
+      syncSteps: [syncRetainedApis],
+      disposeSteps: [syncSecondaryLifecycleError],
+      commitSteps: [undefined, syncRollbackCommitError],
+    })
+    await assert.rejects(
+      () => syncSecondaryFailureRuntime.runtime.overwriteUserApisFromSync({ apis: [] }),
+      error => {
+        assert.strictEqual(error, syncSecondaryLifecycleError)
+        return true
+      },
+    )
+    assert.deepStrictEqual(syncSecondaryFailureRuntime.getCurrentState(), {
+      apiList: syncRetainedApis,
+      scripts: new Map([['untouched-id', 'script:untouched-id:old']]),
+    })
+    assert.deepStrictEqual(syncSecondaryFailureRuntime.actions, [
+      'sync',
+      'dispose:removed-id:true',
+    ])
+    assert.deepStrictEqual(syncSecondaryFailureRuntime.getConfigUpdates(), [{
+      'common.apiFallbackSources': ['untouched-id'],
+    }])
+    assert.strictEqual(syncSecondaryFailureRuntime.getChangeEvents(), 1)
+    assert.strictEqual(syncSecondaryFailureRuntime.getStoreCommits(), 1)
+    assert.strictEqual(syncSecondaryFailureRuntime.logErrors.length, 1)
+    const syncReadsBeforeRecovery = syncSecondaryFailureRuntime.getStateReads()
+    assert.deepStrictEqual(
+      await syncSecondaryFailureRuntime.runtime.removeApi(['missing-id']),
+      syncRetainedApis,
+    )
+    assert.strictEqual(
+      syncSecondaryFailureRuntime.getStateReads(),
+      syncReadsBeforeRecovery + 1,
+    )
+    const activeSyncList = syncSecondaryFailureRuntime.getCurrentApiList()
+    activeSyncList[0].name = 'Mutated retained sync source'
+    activeSyncList[0].remote.group = 'mutated-sync-group'
+    activeSyncList.push({ id: 'added-after-sync-failure' })
+    assert.deepStrictEqual(
+      syncSecondaryFailureRuntime.runtime
+        .takeReplacementFailureApiList(syncSecondaryLifecycleError),
+      expectedSyncFailureApiList,
+    )
+    assert.strictEqual(
+      syncSecondaryFailureRuntime.runtime
+        .takeReplacementFailureApiList(syncSecondaryLifecycleError),
+      undefined,
+    )
+
+    const deleteRollbackCommitError = new Error('simulated deletion rollback commit failure')
+    const deleteSecondaryLifecycleError = new Error('simulated deletion lifecycle failure')
+    const deleteRetainedApi = {
+      id: 'untouched-id',
+      name: 'Deletion retained source',
+      remote: makeRemote(),
+    }
+    const expectedDeleteFailureApiList = structuredClone([deleteRetainedApi])
+    const deleteSecondaryFailureRuntime = createRuntimeHarness({
+      initialApis: [
+        { id: 'removed-id', name: 'Removed before deletion failure' },
+        deleteRetainedApi,
+      ],
+      initialScripts: {
+        'removed-id': 'script:removed-id:old',
+        'untouched-id': 'script:untouched-id:old',
+      },
+      fallbackSources: ['removed-id', 'untouched-id'],
+      disposeSteps: [deleteSecondaryLifecycleError],
+      commitSteps: [undefined, deleteRollbackCommitError],
+    })
+    await assert.rejects(
+      () => deleteSecondaryFailureRuntime.runtime.removeApi(['removed-id']),
+      error => {
+        assert.strictEqual(error, deleteSecondaryLifecycleError)
+        return true
+      },
+    )
+    assert.deepStrictEqual(deleteSecondaryFailureRuntime.getCurrentState(), {
+      apiList: [deleteRetainedApi],
+      scripts: new Map([['untouched-id', 'script:untouched-id:old']]),
+    })
+    assert.deepStrictEqual(deleteSecondaryFailureRuntime.actions, [
+      'dispose:removed-id:true',
+    ])
+    assert.deepStrictEqual(deleteSecondaryFailureRuntime.getConfigUpdates(), [{
+      'common.apiFallbackSources': ['untouched-id'],
+    }])
+    assert.strictEqual(deleteSecondaryFailureRuntime.getChangeEvents(), 1)
+    assert.strictEqual(deleteSecondaryFailureRuntime.getStoreCommits(), 1)
+    assert.strictEqual(deleteSecondaryFailureRuntime.logErrors.length, 1)
+    const deleteReadsBeforeRecovery = deleteSecondaryFailureRuntime.getStateReads()
+    assert.deepStrictEqual(
+      await deleteSecondaryFailureRuntime.runtime.removeApi(['missing-id']),
+      [deleteRetainedApi],
+    )
+    assert.strictEqual(
+      deleteSecondaryFailureRuntime.getStateReads(),
+      deleteReadsBeforeRecovery + 1,
+    )
+    const activeDeleteList = deleteSecondaryFailureRuntime.getCurrentApiList()
+    activeDeleteList[0].name = 'Mutated retained deletion source'
+    activeDeleteList[0].remote.group = 'mutated-delete-group'
+    activeDeleteList.push({ id: 'added-after-delete-failure' })
+    assert.deepStrictEqual(
+      deleteSecondaryFailureRuntime.runtime
+        .takeReplacementFailureApiList(deleteSecondaryLifecycleError),
+      expectedDeleteFailureApiList,
+    )
+    assert.strictEqual(
+      deleteSecondaryFailureRuntime.runtime
+        .takeReplacementFailureApiList(deleteSecondaryLifecycleError),
+      undefined,
+    )
+
     const lifecycleGate = createDeferred()
     const serializedLifecycleError = new Error('simulated deferred lifecycle failure')
     const lifecycleSerializedRuntime = createRuntimeHarness({

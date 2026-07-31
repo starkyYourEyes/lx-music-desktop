@@ -19,12 +19,19 @@ require.extensions['.ts'] = (module, filename) => {
 const {
   getPlaybackStartMode,
   parsePlaybackCheckpoint,
+  parsePlaybackCheckpointAck,
   parsePlaybackCommitRequest,
   parsePlaybackEventDetails,
   parsePlaybackFact,
   parsePlaybackPreplayFailure,
+  parsePlaybackRecorderCommand,
+  parsePlaybackResume,
+  parsePlaybackResumeAck,
   parsePlaybackResumeUpdate,
+  parsePlaybackStartResult,
   parsePlaybackStartCommand,
+  parseRecentTrack,
+  parseListeningStats,
   sanitizePlayableTrack,
   validateCheckpointAfter,
 } = require('../../src/common/storage/playbackValidation.ts')
@@ -32,20 +39,49 @@ const {
 const UUID = '123e4567-e89b-42d3-a456-426614174000'
 const MAX_MS = 7 * 24 * 60 * 60 * 1000
 
+const webdavPayload = (overrides = {}) => ({
+  id: 'track',
+  source: 'webdav',
+  name: 'Name',
+  singer: 'Singer',
+  interval: '02:00',
+  meta: {
+    songId: 'track',
+    albumName: 'Album',
+    path: 'music/a.flac',
+    url: 'https://dav.example/music/',
+    fileName: 'a.flac',
+    ext: 'flac',
+  },
+  ...overrides,
+})
+
+const localPayload = (overrides = {}) => ({
+  id: 'C:/music/a.flac',
+  source: 'local',
+  name: 'Name',
+  singer: 'Singer',
+  interval: null,
+  meta: { songId: 'C:/music/a.flac', albumName: '', filePath: 'C:/music/a.flac', ext: 'flac' },
+  ...overrides,
+})
+
+const onlinePayload = (source, meta = {}) => ({
+  id: `${source}_track`,
+  source,
+  name: '',
+  singer: '',
+  interval: null,
+  meta: { songId: 'track', albumName: '', qualitys: [], _qualitys: {}, ...meta },
+})
+
 const track = (overrides = {}) => ({
   source: 'webdav',
   sourceTrackId: 'track',
   name: 'Name',
   singer: 'Singer',
   durationMs: 120000,
-  playablePayload: {
-    id: 'track',
-    source: 'webdav',
-    name: 'Name',
-    singer: 'Singer',
-    interval: '02:00',
-    meta: { songId: 'track', albumName: 'Album', path: 'music/a.flac', url: 'https://expired.example/a?token=SECRET' },
-  },
+  playablePayload: webdavPayload(),
   ...overrides,
 })
 
@@ -178,29 +214,26 @@ describe('playback activity contracts', () => {
     assert.throws(() => parsePlaybackStartCommand(start({ track: track({ playablePayload: { id: 'x', meta: { blob: '浣'.repeat(43691) } } }) })))
   })
 
-  it('removes expiring and private fields recursively but preserves WebDAV and local locators', () => {
-    const input = {
-      id: 'track',
-      source: 'webdav',
-      name: 'Name',
-      singer: 'Singer',
-      interval: null,
+  it('removes expiring and private fields recursively but preserves canonical WebDAV and local locators', () => {
+    const input = webdavPayload({
       meta: {
         songId: 'track',
         albumName: 'Album',
         path: 'music/a.flac',
-        url: 'https://expired',
+        url: 'https://dav.example/music?token=SECRET#fragment',
+        fileName: 'a.flac',
+        ext: 'flac',
         cookie: 'SECRET',
         roomId: 'room',
         embeddedLyric: 'lyrics',
         artist: 'Artist',
         nested: { token: 'SECRET', stable: 'keep', playerState: { positionMs: 5 } },
       },
-    }
+    })
     const result = sanitizePlayableTrack(input)
     assert.equal(result.meta.path, 'music/a.flac')
+    assert.equal(result.meta.url, 'https://dav.example/music/')
     assert.equal(result.meta.artist, 'Artist')
-    assert.equal(JSON.stringify(result).includes('https://expired'), false)
     assert.equal(JSON.stringify(result).includes('SECRET'), false)
     assert.equal(JSON.stringify(result).includes('room'), false)
     assert.equal(JSON.stringify(result).includes('lyrics'), false)
@@ -208,7 +241,7 @@ describe('playback activity contracts', () => {
     input.meta.path = 'changed'
     assert.equal(result.meta.path, 'music/a.flac')
 
-    const local = sanitizePlayableTrack({ id: 'local', source: 'local', name: 'Name', singer: 'Singer', interval: null, meta: { songId: 'local', albumName: 'Album', filePath: 'C:/music/a.flac' } })
+    const local = sanitizePlayableTrack(localPayload())
     assert.equal(local.meta.filePath, 'C:/music/a.flac')
   })
 
@@ -221,6 +254,104 @@ describe('playback activity contracts', () => {
         assert.equal(error.message, 'Invalid playablePayload')
         assert.equal(error.message.includes(secret), false)
         return true
+      })
+    }
+  })
+
+  it('requires actual local and WebDAV locator variants while retaining only a canonical WebDAV root', () => {
+    assert.throws(() => sanitizePlayableTrack(localPayload({ meta: { songId: 'x', albumName: '', ext: 'flac' } })))
+    assert.throws(() => sanitizePlayableTrack(webdavPayload({ meta: { songId: 'x', albumName: '', path: 'a.flac', fileName: 'a.flac', ext: 'flac' } })))
+    assert.throws(() => sanitizePlayableTrack(webdavPayload({ meta: { songId: 'x', albumName: '', path: '../a.flac', url: 'https://dav.example/music/', fileName: 'a.flac', ext: 'flac' } })))
+    assert.throws(() => sanitizePlayableTrack(webdavPayload({ meta: { songId: 'x', albumName: '', path: 'a.flac', url: 'https://user:SECRET@dav.example/music/', fileName: 'a.flac', ext: 'flac' } })))
+  })
+
+  it('accepts every documented online MusicInfo discriminant and removes provider URLs', () => {
+    const valid = [
+      onlinePayload('kw'),
+      onlinePayload('wy'),
+      onlinePayload('kg', { hash: 'hash' }),
+      onlinePayload('tx', { strMediaMid: 'media' }),
+      onlinePayload('mg', { copyrightId: 'copyright' }),
+    ]
+    for (const value of valid) {
+      value.meta.picUrl = 'https://provider.example/expired'
+      assert.equal(JSON.stringify(sanitizePlayableTrack(value)).includes('provider.example'), false)
+    }
+    assert.throws(() => sanitizePlayableTrack(onlinePayload('kg')))
+    assert.throws(() => sanitizePlayableTrack(onlinePayload('tx')))
+    assert.throws(() => sanitizePlayableTrack(onlinePayload('mg')))
+    assert.throws(() => sanitizePlayableTrack(onlinePayload('unsupported')))
+  })
+
+  it('accepts empty DTO strings except capped context and does not execute accessor values', () => {
+    const command = start({
+      track: track({ source: '', sourceTrackId: '', name: '', singer: '' }),
+      context: { type: '', id: '' },
+      resume: { listId: '', indexHint: null },
+    })
+    assert.equal(parsePlaybackStartCommand(command).context.type, '')
+    const secret = 'ACCESSOR_SECRET_MUST_NOT_LEAK'
+    const getter = Object.defineProperty(start(), 'version', { enumerable: true, get() { throw new Error(secret) } })
+    assert.throws(() => parsePlaybackStartCommand(getter), error => error.message == 'Invalid start' && !error.message.includes(secret))
+    const array = []
+    Object.defineProperty(array, 0, { enumerable: true, get() { throw new Error(secret) } })
+    assert.throws(() => parsePlaybackEventDetails(array), error => error.message == 'Invalid details' && !error.message.includes(secret))
+    const stats = {
+      version: 1,
+      total: { baselinePlayedMs: 0, livePlayedMs: 0, baselineActiveMs: 0, liveActiveMs: 0, playedMs: 0, activeMs: 0 },
+      daily: [],
+      tracks: [],
+      updatedAtMs: 0,
+    }
+    Object.defineProperty(stats.daily, 0, { enumerable: true, get() { throw new Error(secret) } })
+    assert.throws(() => parseListeningStats(stats), error => error.message == 'Invalid daily' && !error.message.includes(secret))
+  })
+
+  it('validates and clones every acknowledgement, result, recorder, recent, statistics, and resume parser', () => {
+    const checkpointAck = { playbackGroupUuid: UUID, sessionUuid: UUID, segmentNo: 0, checkpointSeq: 1, cumulativePlayedMs: 1, cumulativeActiveMs: 1 }
+    const resumeAck = { playbackGroupUuid: UUID, checkpointSeq: 1, positionMs: 0 }
+    assert.deepEqual(parsePlaybackCheckpointAck(checkpointAck), checkpointAck)
+    assert.deepEqual(parsePlaybackResumeAck(resumeAck), resumeAck)
+    assert.deepEqual(parsePlaybackStartResult({ mode: 'activity', ack: checkpointAck }), { mode: 'activity', ack: checkpointAck })
+    assert.deepEqual(parsePlaybackStartResult({ mode: 'resume-only', ack: resumeAck }), { mode: 'resume-only', ack: resumeAck })
+    assert.deepEqual(parsePlaybackStartResult({ mode: 'private', playbackGroupUuid: UUID, checkpointSeq: 0 }), { mode: 'private', playbackGroupUuid: UUID, checkpointSeq: 0 })
+    assert.deepEqual(parsePlaybackRecorderCommand({ kind: 'start', request: start() }).kind, 'start')
+    assert.deepEqual(parsePlaybackRecorderCommand({ kind: 'commit', request: { version: 1, checkpoint: checkpoint() } }).kind, 'commit')
+    assert.deepEqual(parsePlaybackRecorderCommand({ kind: 'resume', request: { version: 1, playbackGroupUuid: UUID, checkpointSeq: 0, track: { source: '', sourceTrackId: '' }, listId: '', indexHint: null, positionMs: 0, durationMs: null, updatedAtMs: 0 } }).kind, 'resume')
+    assert.deepEqual(parsePlaybackRecorderCommand({ kind: 'preplay_failure', request: { ...start(), error: { version: 1, type: 'error', stage: 'url', code: null, recoverable: true, attempt: 0 } } }).kind, 'preplay_failure')
+
+    const recent = { version: 1, ...track({ playablePayload: localPayload() }), lastPlayedAtMs: null, legacyRank: null }
+    const parsedRecent = parseRecentTrack(recent)
+    assert.deepEqual(parsedRecent, recent)
+    assert.notStrictEqual(parsedRecent.playablePayload, recent.playablePayload)
+    const stats = {
+      version: 1,
+      total: { baselinePlayedMs: 0, livePlayedMs: 0, baselineActiveMs: 0, liveActiveMs: 0, playedMs: 0, activeMs: 0 },
+      daily: [{ baselinePlayedMs: 0, livePlayedMs: 0, baselineActiveMs: 0, liveActiveMs: 0, playedMs: 0, activeMs: 0, localDay: '2026-07-29' }],
+      tracks: [{ baselinePlayedMs: 0, livePlayedMs: 0, baselineActiveMs: 0, liveActiveMs: 0, playedMs: 0, activeMs: 0, source: '', sourceTrackId: '', name: '', singer: '', durationMs: null }],
+      updatedAtMs: 0,
+    }
+    assert.deepEqual(parseListeningStats(stats), stats)
+    const resume = { version: 1, source: '', sourceTrackId: '', listId: '', indexHint: null, positionMs: 0, durationMs: null, updatedAtMs: 0 }
+    assert.deepEqual(parsePlaybackResume(resume), resume)
+
+    for (const value of [
+      { ...checkpointAck, sessionUuid: 'not-a-uuid' },
+      { ...resumeAck, positionMs: MAX_MS + 1 },
+      { mode: 'activity', ack: { ...checkpointAck, extra: true } },
+      { kind: 'unknown', request: {} },
+      { ...recent, legacyRank: -1 },
+      { ...stats, tracks: [{ ...stats.tracks[0], durationMs: MAX_MS + 1 }] },
+      { ...resume, indexHint: -1 },
+    ]) {
+      assert.throws(() => {
+        if ('sessionUuid' in value) parsePlaybackCheckpointAck(value)
+        else if ('positionMs' in value && 'playbackGroupUuid' in value) parsePlaybackResumeAck(value)
+        else if ('mode' in value) parsePlaybackStartResult(value)
+        else if ('kind' in value) parsePlaybackRecorderCommand(value)
+        else if ('legacyRank' in value) parseRecentTrack(value)
+        else if ('tracks' in value) parseListeningStats(value)
+        else parsePlaybackResume(value)
       })
     }
   })

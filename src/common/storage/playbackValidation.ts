@@ -32,19 +32,38 @@ const invalidField = (field: string): never => {
 }
 
 const assertRecord = (value: unknown, field: string): asserts value is Record<string, unknown> => {
-  if (value == null || typeof value != 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) invalidField(field)
+  try {
+    if (value == null || typeof value != 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) invalidField(field)
+    for (const key of Reflect.ownKeys(value)) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      if (typeof key != 'string' || descriptor == null || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) invalidField(field)
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message == `Invalid ${field}`) throw error
+    invalidField(field)
+  }
 }
 
 const assertExactKeys = (value: Record<string, unknown>, field: string, keys: readonly string[]): void => {
-  if (Object.keys(value).length != keys.length || Object.keys(value).some(key => !keys.includes(key))) invalidField(field)
+  try {
+    const actualKeys = Object.keys(value)
+    if (actualKeys.length != keys.length || actualKeys.some(key => !keys.includes(key))) invalidField(field)
+  } catch (error) {
+    if (error instanceof Error && error.message == `Invalid ${field}`) throw error
+    invalidField(field)
+  }
 }
 
-const assertString = (value: unknown, field: string, minimum = 1, maximum = MAX_CONTEXT_LENGTH): asserts value is string => {
-  if (typeof value != 'string' || value.length < minimum || value.length > maximum) invalidField(field)
+const assertString = (value: unknown, field: string): asserts value is string => {
+  if (typeof value != 'string') invalidField(field)
 }
 
 const assertNullableString = (value: unknown, field: string): asserts value is string | null => {
   if (value !== null) assertString(value, field)
+}
+
+const assertContextString = (value: unknown, field: string): asserts value is string => {
+  if (typeof value != 'string' || value.length > MAX_CONTEXT_LENGTH) invalidField(field)
 }
 
 const assertInteger = (value: unknown, field: string, minimum: number, maximum = MAX_SAFE_INTEGER): asserts value is number => {
@@ -72,24 +91,36 @@ const assertJsonValue = (value: unknown, field: string, ancestors = new Set<obje
   if (typeof value != 'object' || ancestors.has(value) || depth > MAX_JSON_DEPTH) invalidField(field)
   ancestors.add(value)
   if (Array.isArray(value)) {
-    if (Reflect.ownKeys(value).length != value.length + 1) invalidField(field)
-    for (let index = 0; index < value.length; index++) {
-      if (!Object.hasOwn(value, index)) invalidField(field)
-      assertJsonValue(value[index], field, ancestors, depth + 1)
+    try {
+      const length = Object.getOwnPropertyDescriptor(value, 'length')
+      if (length == null || !Object.hasOwn(length, 'value') || typeof length.value != 'number' || Reflect.ownKeys(value).length != length.value + 1) invalidField(field)
+      for (let index = 0; index < length.value; index++) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+        if (descriptor == null || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) invalidField(field)
+        assertJsonValue(descriptor.value, field, ancestors, depth + 1)
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message == `Invalid ${field}`) throw error
+      invalidField(field)
     }
   } else {
-    if (Object.getPrototypeOf(value) !== Object.prototype) invalidField(field)
-    for (const key of Reflect.ownKeys(value)) {
-      const descriptor = Object.getOwnPropertyDescriptor(value, key)
-      if (typeof key != 'string' || descriptor == null || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) invalidField(field)
-      assertJsonValue(descriptor.value, field, ancestors, depth + 1)
+    try {
+      if (Object.getPrototypeOf(value) !== Object.prototype) invalidField(field)
+      for (const key of Reflect.ownKeys(value)) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key)
+        if (typeof key != 'string' || descriptor == null || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) invalidField(field)
+        assertJsonValue(descriptor.value, field, ancestors, depth + 1)
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message == `Invalid ${field}`) throw error
+      invalidField(field)
     }
   }
   ancestors.delete(value)
 }
 
 const jsonByteLength = (value: JsonValue, field: string, maximum: number): void => {
-  const serialized = JSON.stringify(value)
+  const serialized = JSON.stringify(cloneJson(value))
   if (Buffer.byteLength(serialized, 'utf8') > maximum) invalidField(field)
 }
 
@@ -106,8 +137,8 @@ const assertVersion = (value: unknown): asserts value is 1 => {
 const assertContext = (value: unknown): asserts value is PlaybackStartCommandV1['context'] => {
   assertRecord(value, 'context')
   assertExactKeys(value, 'context', ['type', 'id'])
-  assertNullableString(value.type, 'context.type')
-  assertNullableString(value.id, 'context.id')
+  if (value.type !== null) assertContextString(value.type, 'context.type')
+  if (value.id !== null) assertContextString(value.id, 'context.id')
 }
 
 const assertResumeHint = (value: unknown, field = 'resume'): asserts value is PlaybackStartCommandV1['resume'] => {
@@ -135,12 +166,127 @@ const isSensitiveKey = (key: string): boolean => {
     normalized == 'playinfo' || normalized == 'transient' || normalized.includes('player') || normalized.includes('playback')
 }
 
-const sanitizeJson = (value: JsonValue): JsonValue => {
-  if (Array.isArray(value)) return value.map(sanitizeJson)
+const sanitizeJson = (value: JsonValue, preserveWebdavRoot = false): JsonValue => {
+  if (Array.isArray(value)) return value.map(item => sanitizeJson(item))
   if (value == null || typeof value != 'object') return value
+  const source = Object.getOwnPropertyDescriptor(value, 'source')?.value
   return Object.fromEntries(Object.entries(value)
-    .filter(([key]) => !isSensitiveKey(key))
-    .map(([key, item]) => [key, sanitizeJson(item)]))
+    .filter(([key]) => (preserveWebdavRoot && key == 'url') || !isSensitiveKey(key))
+    .map(([key, item]) => [key, sanitizeJson(item, source == 'webdav' && key == 'meta')]))
+}
+
+const normalizeWebdavRoot = (value: unknown, field: string): string => {
+  if (typeof value != 'string') invalidField(field)
+  try {
+    const url = new URL(value)
+    if ((url.protocol != 'http:' && url.protocol != 'https:') || url.username || url.password) invalidField(field)
+    url.search = ''
+    url.hash = ''
+    if (!url.pathname.endsWith('/')) url.pathname += '/'
+    return url.toString()
+  } catch (error) {
+    if (error instanceof Error && error.message == `Invalid ${field}`) throw error
+    invalidField(field)
+  }
+}
+
+const assertWebdavPath = (value: unknown, field: string): void => {
+  if (typeof value != 'string' || !value || value.startsWith('/') || value.startsWith('\\')) invalidField(field)
+  try {
+    if (value.split('/').some(segment => {
+      const decoded = decodeURIComponent(segment)
+      return !decoded || decoded == '.' || decoded == '..' || decoded.includes('/') || decoded.includes('\\')
+    })) invalidField(field)
+  } catch (error) {
+    if (error instanceof Error && error.message == `Invalid ${field}`) throw error
+    invalidField(field)
+  }
+}
+
+const assertSongId = (value: unknown, field: string): void => {
+  if (typeof value != 'string' && (typeof value != 'number' || !Number.isFinite(value))) invalidField(field)
+}
+
+const assertQualitys = (value: unknown, field: string, kg = false): void => {
+  if (!Array.isArray(value)) invalidField(field)
+  for (const quality of value) {
+    assertRecord(quality, field)
+    assertExactKeys(quality, field, kg ? ['type', 'size', 'hash'] : ['type', 'size'])
+    assertString(quality.type, field)
+    if (quality.size !== null) assertString(quality.size, field)
+    if (kg) assertString(quality.hash, field)
+  }
+}
+
+const assertQualityMap = (value: unknown, field: string, kg = false): void => {
+  assertRecord(value, field)
+  for (const entry of Object.values(value)) {
+    assertRecord(entry, field)
+    assertExactKeys(entry, field, kg ? ['size', 'hash'] : ['size'])
+    if (entry.size !== null) assertString(entry.size, field)
+    if (kg) assertString(entry.hash, field)
+  }
+}
+
+const assertOptionalString = (value: Record<string, unknown>, key: string, field: string): void => {
+  if (Object.hasOwn(value, key) && value[key] !== null) assertString(value[key], field)
+}
+
+const assertMusicInfo = (value: unknown, field: string): asserts value is LX.Music.MusicInfo => {
+  assertRecord(value, field)
+  for (const key of ['id', 'source', 'name', 'singer', 'interval', 'meta']) if (!Object.hasOwn(value, key)) invalidField(field)
+  assertString(value.id, field)
+  assertOneOf(value.source, field, ['local', 'webdav', 'kw', 'kg', 'tx', 'wy', 'mg'])
+  assertString(value.name, field)
+  assertString(value.singer, field)
+  if (value.interval !== null) assertString(value.interval, field)
+  assertRecord(value.meta, field)
+  for (const key of ['songId', 'albumName']) if (!Object.hasOwn(value.meta, key)) invalidField(field)
+  assertSongId(value.meta.songId, field)
+  assertString(value.meta.albumName, field)
+  assertOptionalString(value.meta, 'recommendTag', field)
+  if (Object.hasOwn(value.meta, 'toggleMusicInfo') && value.meta.toggleMusicInfo !== null) {
+    assertMusicInfo(value.meta.toggleMusicInfo, field)
+    if (value.meta.toggleMusicInfo.source == 'local' || value.meta.toggleMusicInfo.source == 'webdav') invalidField(field)
+  }
+
+  switch (value.source) {
+    case 'local':
+      for (const key of ['filePath', 'ext']) if (!Object.hasOwn(value.meta, key)) invalidField(field)
+      if (typeof value.meta.filePath != 'string' || !value.meta.filePath) invalidField(field)
+      assertString(value.meta.ext, field)
+      break
+    case 'webdav':
+      for (const key of ['url', 'path', 'fileName', 'ext']) if (!Object.hasOwn(value.meta, key)) invalidField(field)
+      normalizeWebdavRoot(value.meta.url, field)
+      assertWebdavPath(value.meta.path, field)
+      assertString(value.meta.fileName, field)
+      assertString(value.meta.ext, field)
+      break
+    case 'kw':
+    case 'wy':
+      assertQualitys(value.meta.qualitys, field)
+      assertQualityMap(value.meta._qualitys, field)
+      break
+    case 'kg':
+      assertQualitys(value.meta.qualitys, field, true)
+      assertQualityMap(value.meta._qualitys, field, true)
+      assertString(value.meta.hash, field)
+      break
+    case 'tx':
+      assertQualitys(value.meta.qualitys, field)
+      assertQualityMap(value.meta._qualitys, field)
+      assertString(value.meta.strMediaMid, field)
+      if (Object.hasOwn(value.meta, 'id') && (typeof value.meta.id != 'number' || !Number.isFinite(value.meta.id))) invalidField(field)
+      assertOptionalString(value.meta, 'albumMid', field)
+      if (Object.hasOwn(value.meta, 'songType') && (typeof value.meta.songType != 'number' || !Number.isFinite(value.meta.songType))) invalidField(field)
+      break
+    case 'mg':
+      assertQualitys(value.meta.qualitys, field)
+      assertQualityMap(value.meta._qualitys, field)
+      assertString(value.meta.copyrightId, field)
+      break
+  }
 }
 
 const assertTrackScalars = (value: Record<string, unknown>, field: string): void => {
@@ -161,17 +307,13 @@ export const sanitizePlayableTrack = (value: unknown): LX.Music.MusicInfo => {
   assertJsonValue(value, 'playablePayload')
   jsonByteLength(value, 'playablePayload', MAX_PLAYABLE_PAYLOAD_BYTES)
   assertRecord(value, 'playablePayload')
-  for (const key of ['id', 'source', 'name', 'singer', 'interval', 'meta']) {
-    if (!Object.hasOwn(value, key)) invalidField('playablePayload')
+  const sanitized = sanitizeJson(value) as Record<string, unknown>
+  if (sanitized.source == 'webdav') {
+    assertRecord(sanitized.meta, 'playablePayload')
+    sanitized.meta.url = normalizeWebdavRoot(sanitized.meta.url, 'playablePayload')
   }
-  assertString(value.id, 'playablePayload')
-  assertString(value.source, 'playablePayload')
-  assertString(value.name, 'playablePayload')
-  assertString(value.singer, 'playablePayload')
-  if (value.interval !== null && typeof value.interval != 'string') invalidField('playablePayload')
-  assertRecord(value.meta, 'playablePayload')
-  const sanitized = sanitizeJson(value) as LX.Music.MusicInfo
-  jsonByteLength(sanitized as unknown as JsonValue, 'playablePayload', MAX_PLAYABLE_PAYLOAD_BYTES)
+  assertMusicInfo(sanitized, 'playablePayload')
+  jsonByteLength(sanitized as JsonValue, 'playablePayload', MAX_PLAYABLE_PAYLOAD_BYTES)
   return sanitized
 }
 
@@ -277,12 +419,14 @@ export const parsePlaybackStartCommand = (value: unknown): PlaybackStartCommandV
   }
 }
 
-export const getPlaybackStartMode = (consent: unknown): PlaybackStartMode => {
+export const classifyPlaybackMode = (consent: unknown): PlaybackStartMode => {
   assertConsent(consent)
   if (consent.privateMode) return 'private'
   if (!consent.recentAllowed && !consent.statsAllowed) return 'resume-only'
   return 'activity'
 }
+
+export const getPlaybackStartMode = classifyPlaybackMode
 
 export const parsePlaybackPreplayFailure = (value: unknown): PlaybackPreplayFailureV1 => {
   assertRecord(value, 'preplayFailure')
@@ -442,6 +586,8 @@ export const parseListeningStats = (value: unknown): ListeningStatsV1 => {
   assertExactKeys(value.total, 'total', ['baselinePlayedMs', 'livePlayedMs', 'baselineActiveMs', 'liveActiveMs', 'playedMs', 'activeMs'])
   assertBucket(value.total, 'total')
   if (!Array.isArray(value.daily) || !Array.isArray(value.tracks)) invalidField('listeningStats')
+  assertJsonValue(value.daily, 'daily')
+  assertJsonValue(value.tracks, 'tracks')
   for (const entry of value.daily) {
     assertRecord(entry, 'daily')
     assertExactKeys(entry, 'daily', ['baselinePlayedMs', 'livePlayedMs', 'baselineActiveMs', 'liveActiveMs', 'playedMs', 'activeMs', 'localDay'])

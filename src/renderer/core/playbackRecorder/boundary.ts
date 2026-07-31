@@ -35,15 +35,23 @@ const offsetAt = (epochMs: number, timeZone: string): number => {
 
 const formatDay = (year: number, month: number, day: number): string => `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 
+const dateValue = ([year, month, day]: [number, number, number]): number => Date.UTC(year, month - 1, day)
+
 export const nextLocalDayBoundary = ({ afterMs, timeZone }: LocalDayBoundaryInput): PlaybackDayBoundary => {
   const [year, month, day] = localDate(afterMs, timeZone)
   const nextDate = new Date(Date.UTC(year, month - 1, day + 1))
   const nextYear = nextDate.getUTCFullYear()
   const nextMonth = nextDate.getUTCMonth() + 1
   const nextDay = nextDate.getUTCDate()
-  const localMidnightAsUtc = Date.UTC(nextYear, nextMonth - 1, nextDay)
-  let occurredAtMs = localMidnightAsUtc - offsetAt(localMidnightAsUtc, timeZone) * 60_000
-  occurredAtMs = localMidnightAsUtc - offsetAt(occurredAtMs, timeZone) * 60_000
+  const targetDate = Date.UTC(nextYear, nextMonth - 1, nextDay)
+  let low = targetDate - 36 * 60 * 60 * 1000
+  let high = targetDate + 36 * 60 * 60 * 1000
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2)
+    if (dateValue(localDate(middle, timeZone)) < targetDate) low = middle + 1
+    else high = middle
+  }
+  const occurredAtMs = low
 
   return {
     occurredAtMs,

@@ -31,13 +31,18 @@ export interface PlaybackSessionState {
 interface TimedAction {
   monotonicMs: number
   positionMs: number
-  occurredAtMs?: number
+  occurredAtMs: number
+}
+
+interface SampleAction {
+  monotonicMs: number
+  positionMs: number
 }
 
 export type PlaybackRecorderAction =
   | { type: 'start-requested', request: PlaybackStartCommandV1 }
   | ({ type: 'native-playing', playbackRate: number } & TimedAction)
-  | ({ type: 'sample' } & TimedAction)
+  | ({ type: 'sample' } & SampleAction)
   | ({ type: 'pause', reason: Extract<PlaybackFactV1, { type: 'pause' }>['reason'] } & TimedAction)
   | ({ type: 'resume', reason: Extract<PlaybackFactV1, { type: 'resume' }>['reason'], playbackRate: number } & TimedAction)
   | ({ type: 'buffering-start' } & TimedAction)
@@ -49,11 +54,12 @@ export type PlaybackRecorderAction =
     fromMs: number
     toMs: number
     monotonicMs: number
-    occurredAtMs?: number
+    occurredAtMs: number
   }
   | ({ type: 'natural-end' } & TimedAction)
   | ({ type: 'skip', reason: Extract<PlaybackFactV1, { type: 'skip' }>['reason'], automatic: boolean } & TimedAction)
   | ({ type: 'teardown' } & TimedAction)
+  | ({ type: 'periodic-checkpoint' } & TimedAction)
   | ({
     type: 'error'
     stage: Extract<PlaybackFactV1, { type: 'error' }>['stage']
@@ -62,6 +68,7 @@ export type PlaybackRecorderAction =
     attempt: number
   } & TimedAction)
   | ({ type: 'repeat', request: PlaybackStartCommandV1 } & TimedAction)
+  | ({ type: 'statistics-clear' } & TimedAction)
   | ({
     type: 'day-boundary'
     nextLocalDay: string

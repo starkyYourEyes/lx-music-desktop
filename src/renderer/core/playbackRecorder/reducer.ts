@@ -28,7 +28,10 @@ const modeFor = (request: PlaybackStartCommandV1): PlaybackSessionState['deliver
   return request.consent.statsAllowed ? 'activity' : 'resume-only'
 }
 
-const occurredAt = (action: { monotonicMs: number, occurredAtMs?: number }): number => action.occurredAtMs ?? action.monotonicMs
+const occurredAt = (action: { occurredAtMs?: number }): number => {
+  if (typeof action.occurredAtMs != 'number' || !Number.isFinite(action.occurredAtMs)) throw new Error('occurredAtMs is required')
+  return action.occurredAtMs
+}
 
 const checkpointCommand = (
   state: PlaybackSessionState,
@@ -102,15 +105,18 @@ const commandSequence = (command: PlaybackRecorderCommandV1): number | null => {
 const acknowledge = (
   state: PlaybackSessionState,
   ack: PlaybackCheckpointAckV1 | PlaybackResumeAckV1,
-): PlaybackSessionState => ({
-  ...state,
-  acknowledged: ack,
-  outbox: state.outbox.filter(command => {
-    if (commandGroup(command) != ack.playbackGroupUuid) return true
-    const sequence = commandSequence(command)
-    return sequence == null || sequence > ack.checkpointSeq
-  }),
-})
+): PlaybackSessionState => {
+  if (state.acknowledged?.playbackGroupUuid == ack.playbackGroupUuid && ack.checkpointSeq < state.acknowledged.checkpointSeq) return state
+  return {
+    ...state,
+    acknowledged: ack,
+    outbox: state.outbox.filter(command => {
+      if (commandGroup(command) != ack.playbackGroupUuid) return true
+      const sequence = commandSequence(command)
+      return sequence == null || sequence > ack.checkpointSeq
+    }),
+  }
+}
 
 export const reduce = (state: PlaybackSessionState, action: PlaybackRecorderAction): PlaybackSessionState => {
   switch (action.type) {
@@ -140,9 +146,15 @@ export const reduce = (state: PlaybackSessionState, action: PlaybackRecorderActi
       }
     }
     case 'start-result': {
-      const withoutStart = { ...state, outbox: state.outbox.filter(command => command.kind != 'start') }
-      if (action.result.mode == 'private') return { ...withoutStart, checkpointSeq: action.result.checkpointSeq }
-      return { ...withoutStart, acknowledged: action.result.ack, checkpointSeq: action.result.ack.checkpointSeq }
+      const playbackGroupUuid = action.result.mode == 'private' ? action.result.playbackGroupUuid : action.result.ack.playbackGroupUuid
+      const withoutMatchingStart = {
+        ...state,
+        outbox: state.outbox.filter(command => command.kind != 'start' || command.request.playbackGroupUuid != playbackGroupUuid),
+      }
+      if (playbackGroupUuid != state.playbackGroupUuid) return withoutMatchingStart
+      if (action.result.mode == 'private') return { ...withoutMatchingStart, checkpointSeq: Math.max(state.checkpointSeq, action.result.checkpointSeq) }
+      const acknowledged = acknowledge(withoutMatchingStart, action.result.ack)
+      return { ...acknowledged, checkpointSeq: Math.max(state.checkpointSeq, action.result.ack.checkpointSeq) }
     }
     case 'sample':
       return sampleAction(state, action)
@@ -198,9 +210,14 @@ export const reduce = (state: PlaybackSessionState, action: PlaybackRecorderActi
       const sampled = sampleAction(state, action)
       return { ...checkpointCommand(sampled, occurredAt(action)), phase: 'closing' }
     }
+    case 'periodic-checkpoint': {
+      if (state.phase != 'playing' && state.phase != 'paused' && state.phase != 'buffering') return state
+      return checkpointCommand(sampleAction(state, action), occurredAt(action))
+    }
     case 'error': {
       const fact: PlaybackFactV1 = { version: 1, type: 'error', stage: action.stage, code: action.code, recoverable: action.recoverable, attempt: action.attempt }
       if (state.phase == 'pending' && state.pending != null) {
+        if (action.recoverable) return state
         const request = { ...state.pending, error: fact }
         return { ...state, pending: null, phase: 'closing', outbox: [...state.outbox, { kind: 'preplay_failure', request }] }
       }
@@ -211,6 +228,11 @@ export const reduce = (state: PlaybackSessionState, action: PlaybackRecorderActi
     case 'repeat': {
       const closing = reduce(state, { type: 'natural-end', monotonicMs: action.monotonicMs, positionMs: action.positionMs, occurredAtMs: action.occurredAtMs })
       return startPending(closing, action.request)
+    }
+    case 'statistics-clear': {
+      if (state.phase != 'playing' && state.phase != 'paused' && state.phase != 'buffering') return state
+      const sampled = sampleAction(state, action)
+      return checkpointCommand(sampled, occurredAt(action))
     }
     case 'day-boundary': {
       if (state.phase != 'playing' && state.phase != 'paused' && state.phase != 'buffering') return state

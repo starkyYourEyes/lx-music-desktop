@@ -33,6 +33,112 @@ const song = onlineMusic
 const songA = onlineMusic
 const songB = { ...onlineMusic, id: 'song-b' }
 
+const createRuntimeWindowHarness = () => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  const sessions = new Map()
+  const windows = []
+  const initEnvelopes = []
+  let webContentsId = 0
+
+  const getSession = partition => {
+    let runtimeSession = sessions.get(partition)
+    if (runtimeSession) return runtimeSession
+    runtimeSession = {
+      cleanupCalls: [],
+      clearAuthCache() { this.cleanupCalls.push('auth') },
+      clearStorageData() { this.cleanupCalls.push('storage') },
+      clearCache() { this.cleanupCalls.push('cache') },
+      setPermissionRequestHandler(handler) { this.permissionHandler = handler },
+    }
+    sessions.set(partition, runtimeSession)
+    return runtimeSession
+  }
+
+  class FakeBrowserWindow {
+    constructor(options) {
+      this.destroyed = false
+      this.listeners = new Map()
+      this.webContents = {
+        id: ++webContentsId,
+        session: options.webPreferences.session,
+        listeners: new Map(),
+        on: (name, listener) => {
+          let listeners = this.webContents.listeners.get(name)
+          if (!listeners) this.webContents.listeners.set(name, listeners = new Set())
+          listeners.add(listener)
+        },
+        removeListener: (name, listener) => this.webContents.listeners.get(name)?.delete(listener),
+        emit: (name, ...args) => {
+          for (const listener of [...(this.webContents.listeners.get(name) ?? [])]) listener(...args)
+        },
+        setWindowOpenHandler() {},
+      }
+      windows.push(this)
+    }
+
+    on(name, listener) {
+      let listeners = this.listeners.get(name)
+      if (!listeners) this.listeners.set(name, listeners = new Set())
+      listeners.add(listener)
+    }
+
+    removeListener(name, listener) {
+      this.listeners.get(name)?.delete(listener)
+    }
+
+    async loadURL() {
+      this.webContents.emit('did-finish-load')
+    }
+
+    isDestroyed() {
+      return this.destroyed
+    }
+
+    destroy() {
+      this.destroyed = true
+      for (const listener of [...(this.listeners.get('closed') ?? [])]) listener()
+    }
+  }
+
+  const runtimeWindow = loadTsModule(
+    path.join(__dirname, '../../src/main/modules/userApi/runtimeWindow.ts'),
+    {
+      electron: { BrowserWindow: FakeBrowserWindow, session: { fromPartition: getSession } },
+      '@common/mainIpc': { mainSend() {} },
+      '@common/projectIdentity': { PROJECT_IDENTITY: { userApiPartition: 'starky-lx-user-api' } },
+      '@common/utils': { log: { error() {} } },
+      './main': { getProxy: () => ({ host: '127.0.0.1', port: '1080' }) },
+      './utils': { getScript: async id => 'script:' + id },
+      fs: { promises: { readFile: async() => '<html></html>' } },
+      'node:path': { join: (...parts) => parts.join('/') },
+    },
+  )
+
+  const deps = {
+    createWindow: options => new FakeBrowserWindow(options),
+    fromPartition: getSession,
+    readRuntimeHtml: async() => '<html></html>',
+    getScript: async id => 'script:' + id,
+    getProxy: () => ({ host: '127.0.0.1', port: '1080' }),
+    send(runtime, name, payload) {
+      if (name == 'userApi_initEnv') initEnvelopes.push(payload)
+      return !runtime.window.isDestroyed()
+    },
+    logError() {},
+  }
+  const hooks = { onClosed() {}, onRenderProcessGone() {} }
+
+  return {
+    create: (apiInfo, generation) => runtimeWindow.createRuntimeWindow({ apiInfo, generation, hooks, deps }),
+    initialize: (runtime, apiInfo) => runtimeWindow.initializeRuntimeWindow(runtime, apiInfo, deps),
+    dispose: (runtime, options) => runtimeWindow.disposeRuntimeWindow(runtime, options, deps),
+    initEnvelopes,
+    sessions,
+    windows,
+  }
+}
+
 const createFakeClock = (start = 0) => {
   let now = start
   let sequence = 0
@@ -83,4 +189,5 @@ module.exports = {
   song,
   songA,
   songB,
+  createRuntimeWindowHarness,
 }

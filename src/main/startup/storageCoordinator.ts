@@ -57,6 +57,7 @@ export interface CredentialStartupCheckOptions {
 
 type DatabaseReadyResult = Extract<DatabaseStartupResult, { status: 'ready' }>
 type RecoveryOutcome = Extract<StorageStartupOutcome, { status: 'recovery' }>
+type Phase2LegacyDataSourceResult = Exclude<LegacyDataSourceResult, { status: 'recovery' }>
 
 interface ShutdownDiagnostic {
   code: 'shutdown_flush_timeout'
@@ -73,7 +74,7 @@ export interface StorageCoordinatorDependencies {
     legacyData: LegacyDataSourceResult,
   ) => Promise<RecoveryOutcome | undefined>
   checkCredentials: () => Promise<CredentialStartupCheck>
-  verifyPhase2Storage?: () => Promise<void>
+  verifyPhase2Storage?: (legacyData: Phase2LegacyDataSourceResult) => Promise<void>
   initSettings: () => Promise<void>
   registerModules: () => void
   appInited: () => void
@@ -181,7 +182,34 @@ const assertPhase2Method = (value: unknown): void => {
   if (typeof value != 'function') throw errorWithCode('phase2_storage_unavailable')
 }
 
-const verifyProductionPhase2Storage = async(): Promise<void> => {
+const assertPhase2Marker = (marker: unknown, required: boolean): void => {
+  if (marker == null) {
+    if (required) throw errorWithCode('phase2_storage_unavailable')
+    return
+  }
+  if (typeof marker != 'object' || Array.isArray(marker) || Object.getPrototypeOf(marker) != Object.prototype) {
+    throw errorWithCode('phase2_storage_unavailable')
+  }
+  const value = marker as Record<string, unknown>
+  if (value.name != PHASE2_MARKER_NAME ||
+    typeof value.sourceSha256 != 'string' || !/^[a-f0-9]{64}$/.test(value.sourceSha256) ||
+    !Number.isSafeInteger(value.completedAtMs) || (value.completedAtMs as number) < 0 ||
+    typeof value.detailsJson != 'string') {
+    throw errorWithCode('phase2_storage_unavailable')
+  }
+  let details: unknown
+  try {
+    details = JSON.parse(value.detailsJson)
+  } catch {
+    throw errorWithCode('phase2_storage_unavailable')
+  }
+  if (details == null || Array.isArray(details) || typeof details != 'object' ||
+    Object.getPrototypeOf(details) != Object.prototype || (details as { version?: unknown }).version !== 1) {
+    throw errorWithCode('phase2_storage_unavailable')
+  }
+}
+
+const verifyProductionPhase2Storage = async(legacyData: Phase2LegacyDataSourceResult): Promise<void> => {
   // Direct coordinator tests inject the verifier and do not initialize the app global.
   if (typeof globalThis.lx == 'undefined') return
   const repository = globalThis.lx.worker?.dbService
@@ -195,7 +223,10 @@ const verifyProductionPhase2Storage = async(): Promise<void> => {
   assertPhase2Method(repository.getSearchHistory)
   assertPhase2Method(repository.applySearchHistory)
 
-  await repository.getNonActivityMigrationMarker(PHASE2_MARKER_NAME)
+  assertPhase2Marker(
+    await repository.getNonActivityMigrationMarker(PHASE2_MARKER_NAME),
+    legacyData.status == 'available',
+  )
   parseLocalStateSnapshot(await repository.getLocalState())
   const playlistMetadata = await repository.getPlaylistMetadata()
   for (const [playlistId, value] of Object.entries(playlistMetadata)) {
@@ -218,11 +249,14 @@ const verifyProductionPhase2Storage = async(): Promise<void> => {
 
 const verifyPhase2Storage = async(
   verifier: StorageCoordinatorDependencies['verifyPhase2Storage'],
+  legacyData: Phase2LegacyDataSourceResult,
 ): Promise<void> => {
   try {
-    await (verifier ?? verifyProductionPhase2Storage)()
+    await (verifier ?? verifyProductionPhase2Storage)(legacyData)
   } catch (error) {
-    throw errorWithCode(failureCode(error, 'phase2_storage_unavailable'))
+    const gateError = errorWithCode('phase2_storage_unavailable')
+    Object.defineProperty(gateError, 'cause', { value: error })
+    throw gateError
   }
 }
 
@@ -312,7 +346,7 @@ export const createStorageCoordinator = (
           return credentialOutcome
         }
 
-        await verifyPhase2Storage(dependencies.verifyPhase2Storage)
+        await verifyPhase2Storage(dependencies.verifyPhase2Storage, legacyData)
         if (shutdownRequested) return startupCancelled()
         await dependencies.initSettings()
         if (shutdownRequested) return startupCancelled()

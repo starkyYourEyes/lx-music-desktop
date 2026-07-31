@@ -4,11 +4,18 @@ import getStore from '@main/utils/store'
 import { STORE_NAMES, URL_SCHEME_RXP } from '@common/constants'
 import defaultSetting from '@common/defaultSetting'
 import defaultHotKey from '@common/defaultHotKey'
-import { migrateDataJson, migrateHotKey, migrateUserApi, parseDataFile } from './migrate'
+import { migrateHotKey, migrateUserApi, parseDataFile } from './migrate'
 import { nativeTheme, powerSaveBlocker } from 'electron'
 import { joinPath } from '@common/utils/nodejs'
 import themes from '@common/theme/index.json'
 import { normalizeWebDAVRootUrl } from '@common/utils/webdavUrl'
+import { type CatalogPreferencesV1 } from '@common/storage/stateContracts'
+import {
+  parseSettingsDocument,
+  replaceCatalogPreferences,
+  replaceOrdinarySettings,
+  type SettingsDocumentV1,
+} from '@main/storage/settings/document'
 
 export const parseEnvParams = (argv = process.argv): { cmdParams: LX.CmdParams, deeplink: string | null } => {
   const cmdParams: LX.CmdParams = {}
@@ -145,13 +152,45 @@ const applyInitSetting = (setting: LX.AppSetting) => {
   }
 }
 
-export const updateSetting = (setting?: Partial<LX.AppSetting>, isInit: boolean = false) => {
-  const electronStore_config = getStore(STORE_NAMES.APP_SETTINGS)
+type SettingsStore = ReturnType<typeof getStore>
+
+const createDefaultSettingsDocument = (): SettingsDocumentV1 => parseSettingsDocument({
+  version: defaultSetting.version,
+  setting: defaultSetting,
+})
+
+const readSettingsDocument = (store: SettingsStore): SettingsDocumentV1 => {
+  if (!store.has('setting')) return createDefaultSettingsDocument()
+
+  const value: Record<string, unknown> = {
+    version: store.get('version'),
+    setting: store.get('setting'),
+  }
+  if (store.has('storageSchemaVersion')) value.storageSchemaVersion = store.get('storageSchemaVersion')
+  if (store.has('catalogPreferences')) value.catalogPreferences = store.get('catalogPreferences')
+  return parseSettingsDocument(value)
+}
+
+const writeSettingsDocument = (store: SettingsStore, document: SettingsDocumentV1): void => {
+  store.override({
+    storageSchemaVersion: document.storageSchemaVersion,
+    version: document.version,
+    setting: document.setting,
+    catalogPreferences: document.catalogPreferences,
+  })
+}
+
+const updateSettingWithStore = (
+  electronStore_config: SettingsStore,
+  setting?: Partial<LX.AppSetting>,
+  isInit: boolean = false,
+) => {
+  const currentDocument = readSettingsDocument(electronStore_config)
 
   let originSetting: LX.AppSetting
   if (isInit) {
     setting &&= migrateSetting(setting)
-    setting = sanitizeSettingUpdate(setting)
+    setting = sanitizeSettingUpdate(setting) ?? {}
     applyInitSetting(setting as LX.AppSetting)
     originSetting = { ...defaultSetting }
   } else {
@@ -168,9 +207,20 @@ export const updateSetting = (setting?: Partial<LX.AppSetting>, isInit: boolean 
 
   result.setting.version = defaultSetting.version
 
-  const persistedSetting = sanitizeSettingUpdate(result.setting) as LX.AppSetting
-  electronStore_config.override({ version: result.setting.version, setting: persistedSetting })
+  const nextDocument = replaceOrdinarySettings(currentDocument, result.setting)
+  writeSettingsDocument(electronStore_config, nextDocument)
   return result
+}
+
+export const updateSetting = (setting?: Partial<LX.AppSetting>, isInit: boolean = false) => {
+  return updateSettingWithStore(getStore(STORE_NAMES.APP_SETTINGS), setting, isInit)
+}
+
+export const updateCatalogPreferences = (preferences: CatalogPreferencesV1): SettingsDocumentV1 => {
+  const electronStore_config = getStore(STORE_NAMES.APP_SETTINGS)
+  const nextDocument = replaceCatalogPreferences(readSettingsDocument(electronStore_config), preferences)
+  writeSettingsDocument(electronStore_config, nextDocument)
+  return nextDocument
 }
 
 /**
@@ -186,11 +236,10 @@ export const initSetting = async() => {
     const config = await parseDataFile<{ setting?: any }>('config.json')
     if (config?.setting) setting = config.setting as LX.AppSetting
     await migrateUserApi()
-    await migrateDataJson()
   }
 
   // console.log(setting)
-  return updateSetting(setting, true)
+  return updateSettingWithStore(electronStore_config, setting, true)
 }
 
 /**

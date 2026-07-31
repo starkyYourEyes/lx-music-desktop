@@ -25,7 +25,6 @@ import {
   notifyUserApiChanged,
   prepareApisFromGitHub,
   prepareUserApisFromSync,
-  removeApi as handleRemoveApi,
   setAllowShowUpdateAlert as saveAllowShowUpdateAlert,
   type UserApiState,
 } from './utils'
@@ -66,15 +65,26 @@ const getChangedUserApiIds = (previous: UserApiState, next: UserApiState) => {
     .filter(id => nextIds.has(id) && !scriptsEqual(previous.scripts.get(id), next.scripts.get(id))))
 }
 
+const cloneUserApiState = (state: UserApiState): UserApiState => ({
+  apiList: state.apiList.map(api => api.remote
+    ? { ...api, remote: { ...api.remote } }
+    : { ...api }),
+  scripts: new Map(state.scripts),
+})
+
 const applyRuntimeChanges = async(
   runtimePool: UserApiRuntimePool,
   changedIds: ReadonlySet<string>,
   removedIds: ReadonlySet<string>,
 ) => {
-  await Promise.all([
+  const results = await Promise.allSettled([
     ...[...changedIds].map(async id => runtimePool.invalidate(id, 'sourceChanged')),
     ...[...removedIds].map(async id => runtimePool.dispose(id, { clearSession: true })),
   ])
+  const failure = results.find((result): result is PromiseRejectedResult => {
+    return result.status == 'rejected'
+  })
+  if (failure) throw failure.reason
 }
 
 export const getApiList = async(): Promise<LX.UserApi.UserApiInfo[]> => getUserApis()
@@ -91,53 +101,91 @@ export const importApi = async(script: string): Promise<LX.UserApi.ImportUserApi
 export const replaceApisFromGitHub = async(
   items: LX.UserApi.GitHubImportItem[],
 ): Promise<LX.UserApi.UserApiInfo[]> => {
-  const result = await runUserApiTask(async() => {
-    const previousState = getUserApiState()
+  return runUserApiTask(async() => {
+    const previousState = cloneUserApiState(getUserApiState())
     const previousIds = new Set(previousState.apiList.map(api => api.id))
     const nextState = await prepareApisFromGitHub(items)
     const apiList = commitUserApiState(nextState)
     const removedIds = getRemovedUserApiIds(previousIds, apiList)
+    try {
+      await applyRuntimeChanges(
+        getUserApiRuntimePool(),
+        getChangedUserApiIds(previousState, nextState),
+        removedIds,
+      )
+    } catch (err) {
+      try {
+        commitUserApiState(previousState)
+      } catch (rollbackErr) {
+        log.error('rollback user APIs after GitHub runtime lifecycle error:', rollbackErr)
+        if (err != null && (typeof err == 'object' || typeof err == 'function')) {
+          replacementFailureApiLists.set(err, apiList)
+        }
+        notifyUserApiChanged()
+      }
+      throw err
+    }
     removeUnavailablePlaybackSources(removedIds)
     notifyUserApiChanged()
-    return {
-      apiList,
-      changedIds: getChangedUserApiIds(previousState, nextState),
-      removedIds,
-    }
+    return apiList
   })
-  await applyRuntimeChanges(getUserApiRuntimePool(), result.changedIds, result.removedIds)
-  return result.apiList
 }
 
 export const overwriteUserApisFromSync = async(data: LX.Sync.UserApi.Data): Promise<void> => {
-  const result = await runUserApiTask(async() => {
-    const previousState = getUserApiState()
+  return runUserApiTask(async() => {
+    const previousState = cloneUserApiState(getUserApiState())
     const previousIds = new Set(previousState.apiList.map(api => api.id))
     const nextState = await prepareUserApisFromSync(data)
     const apiList = commitUserApiState(nextState)
     const removedIds = getRemovedUserApiIds(previousIds, apiList)
-    removeUnavailablePlaybackSources(removedIds)
-    return {
-      changedIds: getChangedUserApiIds(previousState, nextState),
-      removedIds,
+    try {
+      await applyRuntimeChanges(
+        getUserApiRuntimePool(),
+        getChangedUserApiIds(previousState, nextState),
+        removedIds,
+      )
+    } catch (err) {
+      try {
+        commitUserApiState(previousState)
+      } catch (rollbackErr) {
+        log.error('rollback user APIs after sync runtime lifecycle error:', rollbackErr)
+      }
+      throw err
     }
+    removeUnavailablePlaybackSources(removedIds)
   })
-  await applyRuntimeChanges(getUserApiRuntimePool(), result.changedIds, result.removedIds)
 }
 
 export const removeApi = async(ids: string[]): Promise<LX.UserApi.UserApiInfo[]> => {
-  const result = await runUserApiTask(async() => {
-    const previousIds = new Set(getUserApis().map(api => api.id))
-    handleRemoveApi(ids)
-    const apiList = getUserApis()
-    const removedIds = getRemovedUserApiIds(previousIds, apiList)
+  return runUserApiTask(async() => {
+    const currentState = getUserApiState()
+    const previousState = cloneUserApiState(currentState)
+    const removedIds = new Set(currentState.apiList
+      .map(api => api.id)
+      .filter(id => ids.includes(id)))
+    if (!removedIds.size) return currentState.apiList
+
+    const nextScripts = new Map(currentState.scripts)
+    for (const id of removedIds) nextScripts.delete(id)
+    const nextState: UserApiState = {
+      apiList: currentState.apiList.filter(api => !removedIds.has(api.id)),
+      scripts: nextScripts,
+    }
+    const apiList = commitUserApiState(nextState)
+    try {
+      await applyRuntimeChanges(getUserApiRuntimePool(), new Set(), removedIds)
+    } catch (err) {
+      try {
+        commitUserApiState(previousState)
+      } catch (rollbackErr) {
+        log.error('rollback user APIs after deletion runtime lifecycle error:', rollbackErr)
+      }
+      throw err
+    }
     removeUnavailablePlaybackSources(removedIds)
-    return { apiList, removedIds }
+    notifyUserApiChanged()
+    return apiList
   })
-  await Promise.all([...result.removedIds].map(async id => {
-    await getUserApiRuntimePool().dispose(id, { clearSession: true })
-  }))
-  return result.apiList
 }
 
 export const setApi = async(_id: string): Promise<void> => {}

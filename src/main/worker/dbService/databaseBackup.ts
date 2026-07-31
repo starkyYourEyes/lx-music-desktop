@@ -5,6 +5,7 @@ import path from 'node:path'
 export async function createOnlineBackup(
   db: Database.Database,
   destination: string,
+  nativeOptions: { nativeBinding?: string } = {},
 ): Promise<void> {
   const resolvedDestination = path.resolve(destination)
   fs.mkdirSync(path.dirname(resolvedDestination), { recursive: true })
@@ -12,7 +13,7 @@ export async function createOnlineBackup(
   await reservation.close()
   await db.backup(resolvedDestination)
 
-  const verificationDb = new Database(resolvedDestination, { readonly: true, fileMustExist: true })
+  const verificationDb = new Database(resolvedDestination, { ...nativeOptions, readonly: true, fileMustExist: true })
   try {
     if (verificationDb.pragma('quick_check', { simple: true }) != 'ok') {
       throw new Error('backup_quick_check_failed')

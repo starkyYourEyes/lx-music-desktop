@@ -10,10 +10,15 @@ import { createAppEvent, createDislikeEvent, createListEvent } from '@main/event
 import { isMac } from '@common/utils'
 import createWorkers from './worker'
 import { migrateDBData } from './utils/migrate'
+import { initializeCredentialVault } from './storage/credentials'
+import { createAccountRepository } from './storage/accounts/accountRepository'
+import { migrateLegacyCredentials } from './migration/credentials/credentialMigration'
+import { isCredentialMigrationRecoveryError } from './migration/credentials/recoveryError'
 import { setProxyByHost } from '@common/utils/request'
 import { getWebContentsNavigationDecision } from '@main/utils/webContentsNavigationGuard'
 import { getPortableUserDataPaths, migrateLegacyUserData } from './migration/legacyUserData'
 import { PROJECT_IDENTITY } from '@common/projectIdentity'
+import type { StorageStartupOutcome } from './startup/storageCoordinator'
 
 export const initGlobalData = () => {
   const envParams = parseEnvParams()
@@ -301,8 +306,73 @@ const initTheme = () => {
 }
 
 let isInitialized = false
-export const runStorageMigrationHooks = async(result: { existed: boolean }): Promise<undefined> => {
+type CredentialRecoveryOutcome = Extract<StorageStartupOutcome, { status: 'recovery' }>
+
+const credentialMigrationRecovery = (
+  diagnostic: string,
+  affectedPath = path.join(global.lxDataPath, 'credentials.v1.json'),
+): CredentialRecoveryOutcome => ({
+  status: 'recovery',
+  reason: 'credential_startup_check_failed',
+  target: {
+    kind: 'external-migration',
+    component: 'credentials',
+    affectedPath,
+    diagnostics: [diagnostic],
+  },
+})
+
+const credentialVaultReadable = (vault: Awaited<ReturnType<typeof initializeCredentialVault>>): boolean => {
+  try {
+    vault.read({ kind: 'netease-cookie' })
+    vault.read({ kind: 'qq-music-cookie' })
+    vault.read({ kind: 'webdav-basic' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+export const runStorageMigrationHooks = async(result: { existed: boolean }): Promise<CredentialRecoveryOutcome | undefined> => {
   if (!result.existed) await migrateDBData()
+  let vault: Awaited<ReturnType<typeof initializeCredentialVault>>
+  try {
+    vault = await initializeCredentialVault()
+    if (!credentialVaultReadable(vault)) return credentialMigrationRecovery('credentials.vault_unreadable')
+    global.lx.storage?.registerShutdownFlusher('credential-vault', async() => { await vault.flush() })
+  } catch {
+    return credentialMigrationRecovery('credentials.vault_unreadable')
+  }
+  try {
+    global.lx.credentialMigration = await migrateLegacyCredentials({
+      dataRoot: global.lxDataPath,
+      vault,
+      profiles: {
+        migrateLegacyAccountProfiles: input => global.lx.worker.dbService.migrateLegacyAccountProfiles(input),
+      },
+    })
+    if (global.lx.credentialMigration.status == 'secure-storage-unavailable' &&
+      global.lx.credentialMigration.volatileEntries == 0) {
+      return credentialMigrationRecovery('credentials.memory_only_entries_unavailable')
+    }
+  } catch (error) {
+    if (isCredentialMigrationRecoveryError(error)) {
+      return credentialMigrationRecovery(error.code, error.affectedPath)
+    }
+    return credentialMigrationRecovery('credentials.legacy_migration_failed')
+  }
+  try {
+    const accountRepository = createAccountRepository({
+      vault,
+      profiles: global.lx.worker.dbService,
+      profileRoot: global.lxDataPath,
+    })
+    await accountRepository.hydrate()
+    global.lx.accountRepository = accountRepository
+    global.lx.storage?.registerShutdownFlusher('account-repository', async() => { await accountRepository.flush() })
+  } catch {
+    return credentialMigrationRecovery('credentials.profile_repository_unreadable')
+  }
   return undefined
 }
 

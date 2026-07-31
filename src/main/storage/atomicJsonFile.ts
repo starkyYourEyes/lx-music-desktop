@@ -60,8 +60,10 @@ let tempCounter = 0
 const cleanupInFlightByFile = new Map<string, Promise<void>>()
 const activeOwnedTempsByFile = new Map<string, Set<string>>()
 
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
 const ownedTempPattern = (basename: string): RegExp =>
-  new RegExp(`^${basename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.owned-tmp-\\d+-\\d+$`)
+  new RegExp(`^${escapeRegExp(basename)}\\.owned-tmp-\\d+-\\d+$`)
 
 const isActiveOwnedTemp = (filePath: string, ownedPath: string): boolean =>
   activeOwnedTempsByFile.get(filePath)?.has(ownedPath) == true
@@ -103,6 +105,7 @@ export const cleanupAtomicJsonOwnedTempsSync = (targetPath: string): void => {
 export function createAtomicJsonFile<T>(options: {
   filePath: string
   validate: (value: unknown) => value is T
+  shouldPreservePrevious?: (current: T) => boolean
   mode?: number
   fs?: AtomicFileSystem
   initialCleanupComplete?: boolean
@@ -290,6 +293,16 @@ export function createAtomicJsonFile<T>(options: {
     }
   }
 
+  const removePrevious = async(): Promise<void> => {
+    try {
+      await fileSystem.unlink(`${filePath}.previous`)
+    } catch (error) {
+      if (isMissing(error)) return
+      throw error
+    }
+    await syncDirectoryBestEffort()
+  }
+
   const commit = async(candidate: AtomicJsonStage): Promise<{ fileSha256: string }> => {
     const { record } = await verifyStage(candidate)
     let destinationBytes: string | null = null
@@ -299,8 +312,9 @@ export function createAtomicJsonFile<T>(options: {
       if (!isMissing(error)) throw error
     }
     if (destinationBytes != null) {
-      parseAndValidate(destinationBytes, 'durable destination')
-      await preservePrevious(destinationBytes)
+      const destination = parseAndValidate(destinationBytes, 'durable destination')
+      if (options.shouldPreservePrevious?.(destination) ?? true) await preservePrevious(destinationBytes)
+      else await removePrevious()
     }
 
     let replaced = false

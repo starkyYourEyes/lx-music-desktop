@@ -8,6 +8,7 @@ import { migrateDataJson, migrateHotKey, migrateUserApi, parseDataFile } from '.
 import { nativeTheme, powerSaveBlocker } from 'electron'
 import { joinPath } from '@common/utils/nodejs'
 import themes from '@common/theme/index.json'
+import { normalizeWebDAVRootUrl } from '@common/utils/webdavUrl'
 
 export const parseEnvParams = (argv = process.argv): { cmdParams: LX.CmdParams, deeplink: string | null } => {
   const cmdParams: LX.CmdParams = {}
@@ -40,6 +41,31 @@ const checkSameSettingValue = (a: any, b: any): boolean => {
   if (!Array.isArray(a) || !Array.isArray(b)) return a == b
   if (a.length != b.length) return false
   return a.every((value, index) => value == b[index])
+}
+
+const webDAVCredentialSettingKeys = ['webdav.username', 'webdav.password'] as const
+
+export const sanitizeSettingUpdate = (setting?: Partial<LX.AppSetting>): Partial<LX.AppSetting> | undefined => {
+  if (setting == null) return setting
+  const sanitized = { ...setting }
+  for (const key of webDAVCredentialSettingKeys) Reflect.deleteProperty(sanitized, key)
+  if (Object.hasOwn(sanitized, 'webdav.url')) {
+    try {
+      normalizeWebDAVRootUrl(sanitized['webdav.url'])
+    } catch {
+      throw new Error('Invalid WebDAV URL')
+    }
+  }
+  return sanitized
+}
+
+const assertNoWebDAVCredentialWrite = (setting?: Partial<LX.AppSetting>): void => {
+  if (setting == null) return
+  for (const key of webDAVCredentialSettingKeys) {
+    if (Object.hasOwn(setting, key) && setting[key] !== '') {
+      throw new Error('WebDAV credentials cannot be written through settings')
+    }
+  }
 }
 // const handleMergeSetting = (defaultSetting: LX.AppSetting, currentSetting: Partial<LX.AppSetting>) => {
 //   const updatedSettingKeys: Array<keyof LX.AppSetting> = []
@@ -125,15 +151,25 @@ export const updateSetting = (setting?: Partial<LX.AppSetting>, isInit: boolean 
   let originSetting: LX.AppSetting
   if (isInit) {
     setting &&= migrateSetting(setting)
+    setting = sanitizeSettingUpdate(setting)
     applyInitSetting(setting as LX.AppSetting)
     originSetting = { ...defaultSetting }
-  } else originSetting = global.lx.appSetting
+  } else {
+    assertNoWebDAVCredentialWrite(setting)
+    setting = sanitizeSettingUpdate(setting)
+    originSetting = {
+      ...global.lx.appSetting,
+      'webdav.username': '',
+      'webdav.password': '',
+    }
+  }
 
   const result = mergeSetting(originSetting, setting)
 
   result.setting.version = defaultSetting.version
 
-  electronStore_config.override({ version: result.setting.version, setting: result.setting })
+  const persistedSetting = sanitizeSettingUpdate(result.setting) as LX.AppSetting
+  electronStore_config.override({ version: result.setting.version, setting: persistedSetting })
   return result
 }
 

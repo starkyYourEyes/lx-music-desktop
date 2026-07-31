@@ -2,9 +2,8 @@ import Database from 'better-sqlite3'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createOnlineBackup } from './databaseBackup'
-import { getPendingMigrations, getSchemaVersion, runMigrations } from './migrate'
+import { bootstrapDatabaseSchema, getPendingMigrations, getSchemaVersion, runMigrations } from './migrate'
 import { migrations } from './migrations'
-import tables, { LEGACY_DB_VERSION } from './tables'
 import { verifyDatabase } from './verifyDB'
 
 export type DatabaseRecoveryReason =
@@ -247,13 +246,6 @@ const getNativeOptions = (): { nativeBinding?: string } => {
   return pathExists(nativeBinding) ? { nativeBinding } : {}
 }
 
-const initTables = (db: Database.Database): void => {
-  db.exec(`
-    ${Array.from(tables.values()).join('\n')}
-    INSERT INTO "main"."db_info" ("field_name", "field_value") VALUES ('version', '${LEGACY_DB_VERSION}');
-  `)
-}
-
 interface CloseAttempt {
   closed: boolean
   error: unknown | null
@@ -489,7 +481,6 @@ const initializeDatabase = async(
     closeDescriptorBestEffort(target.guardDescriptor)
     localWriteDb.pragma('foreign_keys = ON')
     localWriteDb.pragma('journal_mode = WAL')
-    if (!existed) initTables(localWriteDb)
   } catch {
     const targetIsValid = targetValidatedAfterOpen || validatePreparedDatabaseTarget(databasePath, target)
     closeDescriptorBestEffort(target.guardDescriptor)
@@ -502,6 +493,24 @@ const initializeDatabase = async(
       nativeOptions,
       targetIsValid ? target : null,
     )
+  }
+
+  if (!existed) {
+    try {
+      bootstrapDatabaseSchema(localWriteDb, migrations, {
+        targetSchemaVersion: options.targetSchemaVersion,
+      })
+    } catch {
+      return enterRecovery(
+        'migration_failed',
+        databasePath,
+        null,
+        ['migration.bootstrap_failed'],
+        localWriteDb,
+        nativeOptions,
+        target,
+      )
+    }
   }
 
   let pending
@@ -522,10 +531,10 @@ const initializeDatabase = async(
   }
 
   let backupPath: string | null = null
-  if (pending.length > 0) {
+  if (existed && pending.length > 0) {
     try {
       backupPath = allocateBackupPath(options.backupDir, fromVersion, pending[pending.length - 1].version)
-      await createOnlineBackup(localWriteDb, backupPath)
+      await createOnlineBackup(localWriteDb, backupPath, nativeOptions)
     } catch {
       if (!isCurrentAttempt(generation, key)) {
         closeConnection(localWriteDb)
@@ -570,9 +579,10 @@ const initializeDatabase = async(
 
   let verification: ReturnType<typeof verifyDatabase>
   try {
+    const needsIntegrityChecks = !existed || migratedVersions.length > 0 || !options.previousShutdownWasClean
     verification = verifyDatabase(localWriteDb, {
-      runQuickCheck: migratedVersions.length > 0 || !options.previousShutdownWasClean,
-      runForeignKeyCheck: migratedVersions.length > 0 || !options.previousShutdownWasClean,
+      runQuickCheck: needsIntegrityChecks,
+      runForeignKeyCheck: needsIntegrityChecks,
     })
   } catch {
     return enterRecovery(

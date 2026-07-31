@@ -120,8 +120,22 @@ declare namespace LX {
 
     interface WebDAVListMusicParams {
       url?: string
-      username?: string
-      password?: string
+    }
+
+    interface WebDAVCredentialInput {
+      username: string
+      password: string
+    }
+
+    interface WebDAVCredentialStatus {
+      configured: boolean
+      usernameHint: string | null
+      persistence: 'encrypted' | 'memory-only' | 'missing'
+      unavailableReason?: 'credential_undecryptable'
+    }
+
+    interface WebDAVCredentialSaveResult {
+      persistence: 'encrypted' | 'memory-only'
     }
 
     interface LocalMusicScanParams {

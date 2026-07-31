@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 import { canonicalJson, type JsonValue } from '../../../common/storage/canonicalJson'
-import tables from './tables'
+import tables, { LEGACY_DB_VERSION } from './tables'
 import { migrations } from './migrations'
 import type { MigrationMarker, MigrationRunResult, SchemaMigration } from './migrations/types'
 
@@ -133,49 +133,67 @@ export const getPendingMigrations = (
   return registry.filter(migration => migration.version > currentVersion && migration.version <= target)
 }
 
-export const runMigrations = (
+interface MigrationOptions {
+  now?: () => number
+  targetSchemaVersion?: number
+}
+
+const applyMigrations = (
   db: Database.Database,
   registry: readonly SchemaMigration[],
-  options?: { now?: () => number, targetSchemaVersion?: number },
+  options?: MigrationOptions,
 ): MigrationRunResult => {
   validateRegistry(registry)
-  let fromVersion = 0
-  let toVersion = 0
+  const pending = getPendingMigrations(db, registry, options)
+  const fromVersion = getSchemaVersion(db)
+  let toVersion = fromVersion
   const appliedVersions: number[] = []
+  if (pending.length == 0) return { fromVersion, toVersion, applied: appliedVersions }
 
-  db.transaction(() => {
-    const pending = getPendingMigrations(db, registry, options)
-    fromVersion = getSchemaVersion(db)
-    toVersion = fromVersion
-    if (pending.length == 0) return
+  const applied = readAppliedMigrations(db)
+  if (applied.length == 0) {
+    const legacyVersion = readLegacyVersion(db)
+    validateLegacySchema(db, legacyVersion)
+    if (legacyVersion == 1 && !hasTable(db, 'dislike_list')) db.exec(tables.get('dislike_list')!)
+    if (!hasTable(db, 'schema_migrations')) db.exec(createLedgerSql)
+  }
 
-    const applied = readAppliedMigrations(db)
-    if (applied.length == 0) {
-      const legacyVersion = readLegacyVersion(db)
-      validateLegacySchema(db, legacyVersion)
-      if (legacyVersion == 1 && !hasTable(db, 'dislike_list')) db.exec(tables.get('dislike_list')!)
-      if (!hasTable(db, 'schema_migrations')) db.exec(createLedgerSql)
+  const insert = db.prepare('INSERT INTO schema_migrations (version, name, checksum, applied_at_ms) VALUES (?, ?, ?, ?)')
+  const updateMirror = db.prepare('UPDATE db_info SET field_value = ? WHERE field_name = \'version\'')
+  for (const migration of pending) {
+    migration.up(db)
+    const appliedAtMs = (options?.now ?? Date.now)()
+    if (!Number.isSafeInteger(appliedAtMs) || appliedAtMs < 0) {
+      throw new Error(`Migration ${migration.version} produced an invalid applied timestamp`)
     }
-
-    const insert = db.prepare('INSERT INTO schema_migrations (version, name, checksum, applied_at_ms) VALUES (?, ?, ?, ?)')
-    const updateMirror = db.prepare('UPDATE db_info SET field_value = ? WHERE field_name = \'version\'')
-    for (const migration of pending) {
-      migration.up(db)
-      const appliedAtMs = (options?.now ?? Date.now)()
-      if (!Number.isSafeInteger(appliedAtMs) || appliedAtMs < 0) {
-        throw new Error(`Migration ${migration.version} produced an invalid applied timestamp`)
-      }
-      insert.run(migration.version, migration.name, migration.checksum, appliedAtMs)
-      if (updateMirror.run(String(migration.version)).changes != 1) {
-        throw new Error(`Migration ${migration.version} could not update the legacy version mirror`)
-      }
-      appliedVersions.push(migration.version)
-      toVersion = migration.version
+    insert.run(migration.version, migration.name, migration.checksum, appliedAtMs)
+    if (updateMirror.run(String(migration.version)).changes != 1) {
+      throw new Error(`Migration ${migration.version} could not update the legacy version mirror`)
     }
-  })()
+    appliedVersions.push(migration.version)
+    toVersion = migration.version
+  }
 
   return { fromVersion, toVersion, applied: appliedVersions }
 }
+
+export const runMigrations = (
+  db: Database.Database,
+  registry: readonly SchemaMigration[],
+  options?: MigrationOptions,
+): MigrationRunResult => db.transaction(() => applyMigrations(db, registry, options))()
+
+export const bootstrapDatabaseSchema = (
+  db: Database.Database,
+  registry: readonly SchemaMigration[],
+  options?: MigrationOptions,
+): MigrationRunResult => db.transaction(() => {
+  db.exec(`
+    ${Array.from(tables.values()).join('\n')}
+    INSERT INTO "main"."db_info" ("field_name", "field_value") VALUES ('version', '${LEGACY_DB_VERSION}');
+  `)
+  return applyMigrations(db, registry, options)
+})()
 
 const normalizeMarker = (marker: MigrationMarker): MigrationMarker => {
   if (typeof marker.name != 'string' || marker.name.trim().length == 0) {

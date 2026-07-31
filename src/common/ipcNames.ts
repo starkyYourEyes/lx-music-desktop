@@ -152,6 +152,9 @@ const modules = {
     download_list_clear: 'download_list_clear',
 
     webdav_test: 'webdav_test',
+    webdav_get_credential_status: 'webdav_get_credential_status',
+    webdav_set_credentials: 'webdav_set_credentials',
+    webdav_remove_credentials: 'webdav_remove_credentials',
     webdav_list_musics: 'webdav_list_musics',
     webdav_get_music_url: 'webdav_get_music_url',
     webdav_get_music_pic: 'webdav_get_music_pic',

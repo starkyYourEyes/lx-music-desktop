@@ -104,6 +104,10 @@ const createDeps = (overrides = {}) => {
     },
     closeDatabase: async() => { calls.push('db:close') },
     runMigrationHooks: async() => { calls.push('migration-hooks') },
+    checkCredentials: async() => {
+      calls.push('credentials:check')
+      return { vaultReadable: true, profileRepositoryReadable: true, activePlaintextSources: [] }
+    },
     initSettings: async() => { calls.push('settings:init') },
     registerModules: () => { calls.push('modules:register') },
     appInited: () => { calls.push('app:inited') },
@@ -191,7 +195,7 @@ describe('storage startup coordinator', () => {
     releaseDatabase()
     assert.deepEqual(await first, { status: 'ready', schemaVersion: 3 })
     assert.deepEqual(calls, [
-      'run-state:unclean', 'db:init', 'migration-hooks', 'settings:init', 'modules:register', 'app:inited',
+      'run-state:unclean', 'db:init', 'migration-hooks', 'credentials:check', 'settings:init', 'modules:register', 'app:inited',
     ])
 
     assert.strictEqual(await coordinator.start(), await first)
@@ -501,6 +505,50 @@ describe('storage run state', () => {
 })
 
 describe('storage recovery dialog', () => {
+  it('opens the changed sync metadata folder without disclosing replacement content', async() => {
+    const openedPaths = []
+    const messages = []
+    let quitCalls = 0
+    const affectedPath = path.join('C:\\profiles\\fixture', 'sync', 'client', 'servers.v1.json')
+    const originalLoad = Module._load
+    Module._load = function(request, parent, isMain) {
+      if (request == 'electron') {
+        return {
+          app: { quit: () => { quitCalls++ } },
+          dialog: {
+            showMessageBox: async options => {
+              messages.push(options)
+              return { response: 0 }
+            },
+          },
+          shell: { openPath: async target => { openedPaths.push(target) } },
+        }
+      }
+      return originalLoad.call(this, request, parent, isMain)
+    }
+    try {
+      const { showStorageRecovery } = require(recoveryPath)
+      await showStorageRecovery({
+        status: 'recovery',
+        reason: 'credential_startup_check_failed',
+        target: {
+          kind: 'external-migration',
+          component: 'credentials',
+          affectedPath,
+          diagnostics: ['credentials.sync_metadata_changed_after_inventory'],
+        },
+      })
+    } finally {
+      Module._load = originalLoad
+    }
+
+    assert.deepEqual(messages[0].buttons, ['Open data folder', 'Quit'])
+    assert.match(messages[0].detail, /credentials\.sync_metadata_changed_after_inventory/)
+    assert.equal(messages[0].detail.includes('REPLACEMENT_KEY_SENTINEL'), false)
+    assert.deepEqual(openedPaths, [path.dirname(affectedPath)])
+    assert.equal(quitCalls, 1)
+  })
+
   it('offers data-folder recovery without reading or disclosing affected file contents', async() => {
     const openedPaths = []
     const messages = []
@@ -541,6 +589,48 @@ describe('storage recovery dialog', () => {
     assert.equal(messages[0].detail.includes('schema.table_missing:my_list'), true)
     assert.equal(messages[0].detail.includes('file payload'), false)
     assert.deepEqual(openedPaths, ['C:\\profiles\\alice\\LxDatas'])
+    assert.equal(quitCalls, 1)
+  })
+
+  it('omits the data-folder action when the recovery target has no usable path', async() => {
+    const openedPaths = []
+    const messages = []
+    let quitCalls = 0
+    const originalLoad = Module._load
+    Module._load = function(request, parent, isMain) {
+      if (request == 'electron') {
+        return {
+          app: { quit: () => { quitCalls++ } },
+          dialog: {
+            showMessageBox: async options => {
+              messages.push(options)
+              return { response: 0 }
+            },
+          },
+          shell: { openPath: async target => { openedPaths.push(target) } },
+        }
+      }
+      return originalLoad.call(this, request, parent, isMain)
+    }
+    try {
+      const { showStorageRecovery } = require(recoveryPath)
+      await showStorageRecovery({
+        status: 'recovery',
+        reason: 'credential_startup_check_failed',
+        target: {
+          kind: 'external-migration',
+          component: 'credentials',
+          affectedPath: null,
+          diagnostics: ['credentials.vault_unreadable'],
+        },
+      })
+    } finally {
+      Module._load = originalLoad
+    }
+
+    assert.deepEqual(messages[0].buttons, ['Quit'])
+    assert.equal(messages[0].defaultId, 0)
+    assert.deepEqual(openedPaths, [])
     assert.equal(quitCalls, 1)
   })
 })

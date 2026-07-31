@@ -37,6 +37,9 @@ const connectServer = async(host: string, authCode?: string) => {
     sendSyncStatus({
       status: false,
       message: err.message,
+      ...(err?.unavailableReason == 'credential_undecryptable'
+        ? { unavailableReason: 'credential_undecryptable' as const }
+        : {}),
     })
     switch (err.message) {
       case SYNC_CODE.connectServiceFailed:

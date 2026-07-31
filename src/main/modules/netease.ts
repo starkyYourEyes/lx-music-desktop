@@ -1,11 +1,10 @@
-import { DATA_KEYS, STORE_NAMES } from '@common/constants'
 import { formatPlayTime, sizeFormate } from '@common/utils/common'
 import {
   getDailySongCategoryPlaylistId,
   getDailySongCategoryTagKey,
   parseDailySongCategoryPlaylistId,
 } from '@common/utils/neteaseDailySongCategory'
-import getStore from '@main/utils/store'
+import { createNeteaseAccountService } from './netease/account'
 import { filterPublicRecommendPlaylists, normalizePlaylistList } from './neteasePlaylist'
 
 // @neteasecloudmusicapienhanced/api is CommonJS and dynamically loads module files internally.
@@ -35,126 +34,29 @@ const neteaseApi = require('@neteasecloudmusicapienhanced/api') as {
   api: (params: Record<string, any>) => Promise<any>
 }
 
-interface NeteaseAccountData {
-  cookie: string
-  profile: LX.Netease.Profile | null
-  updatedAt: number
+let accountService: ReturnType<typeof createNeteaseAccountService> | undefined
+
+const getAccountService = () => {
+  if (accountService) return accountService
+  const accounts = global.lx.accountRepository
+  if (accounts == null) throw new Error('Account repository has not been initialized')
+  accountService = createNeteaseAccountService({ accounts, api: neteaseApi })
+  return accountService
 }
 
-const getAccountStore = () => getStore(STORE_NAMES.DATA)
-
-const getAccountData = (): NeteaseAccountData => {
-  return getAccountStore().get<NeteaseAccountData | null>(DATA_KEYS.neteaseAccount) ?? {
-    cookie: '',
-    profile: null,
-    updatedAt: 0,
-  }
-}
-
-const saveAccountData = (data: NeteaseAccountData) => {
-  getAccountStore().set(DATA_KEYS.neteaseAccount, data)
-}
-
-const normalizeCookie = (cookie: unknown): string => {
-  if (!cookie) return ''
-  if (Array.isArray(cookie)) return cookie.join(';')
-  return String(cookie)
-}
-
-const normalizeProfile = (profile: any): LX.Netease.Profile | null => {
-  if (!profile?.userId) return null
-  return {
-    userId: profile.userId,
-    nickname: profile.nickname ?? '',
-    avatarUrl: profile.avatarUrl ?? '',
-    backgroundUrl: profile.backgroundUrl,
-    signature: profile.signature,
-  }
-}
-
-const refreshLoginStatus = async(cookie: string): Promise<LX.Netease.AccountStatus> => {
-  if (!cookie) return { isLoggedIn: false, profile: null }
-
-  const result = await neteaseApi.login_status({ cookie })
-  const profile = normalizeProfile(result.body?.data?.profile ?? result.body?.profile)
-  const mergedCookie = normalizeCookie(result.body?.cookie || result.cookie) || cookie
-  saveAccountData({
-    cookie: mergedCookie,
-    profile,
-    updatedAt: Date.now(),
-  })
-
-  return {
-    isLoggedIn: !!profile,
-    profile,
-  }
-}
+const getAccountCookie = () => getAccountService().getCookie()
 
 export const getAccountStatus = async(): Promise<LX.Netease.AccountStatus> => {
-  const account = getAccountData()
-  if (!account.cookie) return { isLoggedIn: false, profile: null }
-
-  // Avoid hitting the login status endpoint on every renderer mount.
-  if (account.profile && Date.now() - account.updatedAt < 5 * 60 * 1000) {
-    return {
-      isLoggedIn: true,
-      profile: account.profile,
-    }
-  }
-
-  return refreshLoginStatus(account.cookie).catch(() => ({
-    isLoggedIn: !!account.profile,
-    profile: account.profile,
-  }))
+  return getAccountService().getAccountStatus()
 }
 
-export const createLoginQr = async(): Promise<LX.Netease.LoginQr> => {
-  const keyResult = await neteaseApi.login_qr_key()
-  const key = keyResult.body?.data?.unikey
-  if (!key) throw new Error('Failed to create login QR key')
-
-  const qrResult = await neteaseApi.login_qr_create({ key, qrimg: true })
-  const data = qrResult.body?.data
-  return {
-    key,
-    qrurl: data?.qrurl ?? '',
-    qrimg: data?.qrimg ?? '',
-  }
-}
+export const createLoginQr = async(): Promise<LX.Netease.LoginQr> => getAccountService().createLoginQr()
 
 export const checkLoginQr = async(key: string): Promise<LX.Netease.LoginQrCheck> => {
-  const result = await neteaseApi.login_qr_check({ key })
-  const code = Number(result.body?.code ?? 0)
-  const message = result.body?.message ?? ''
-  if (code !== 803) {
-    return {
-      code,
-      message,
-      isLoggedIn: false,
-      profile: null,
-    }
-  }
-
-  const cookie = normalizeCookie(result.body?.cookie || result.cookie)
-  const status = await refreshLoginStatus(cookie)
-  return {
-    code,
-    message,
-    ...status,
-  }
+  return getAccountService().checkLoginQr(key)
 }
 
-export const logout = async() => {
-  const account = getAccountData()
-  if (account.cookie) {
-    await neteaseApi.logout({ cookie: account.cookie }).catch(() => null)
-  }
-  saveAccountData({
-    cookie: '',
-    profile: null,
-    updatedAt: Date.now(),
-  })
-}
+export const logout = async() => getAccountService().logout()
 
 const getSinger = (singers: any[] | undefined): string => {
   return singers?.map(s => s.name).filter(Boolean).join('、') ?? ''
@@ -220,10 +122,10 @@ const normalizeSong = (
 }
 
 export const getRecommendSongs = async(): Promise<LX.Music.MusicInfoOnline[]> => {
-  const account = getAccountData()
-  if (!account.cookie) throw new Error('Not logged in')
+  const cookie = getAccountCookie()
+  if (!cookie) throw new Error('Not logged in')
 
-  const result = await neteaseApi.recommend_songs({ cookie: account.cookie })
+  const result = await neteaseApi.recommend_songs({ cookie })
   if (result.body?.code != 200) throw new Error(result.body?.message ?? 'Failed to load recommendations')
 
   const songs = result.body?.data?.dailySongs ?? result.body?.recommend ?? []
@@ -238,15 +140,15 @@ const privateFmSceneModeMap: Partial<Record<LX.Netease.PrivateFmModeId, string>>
 }
 
 export const getPrivateFmSongs = async(params: LX.Netease.PrivateFmParams = {}): Promise<LX.Music.MusicInfoOnline[]> => {
-  const account = getAccountData()
-  if (!account.cookie) throw new Error('Not logged in')
+  const cookie = getAccountCookie()
+  if (!cookie) throw new Error('Not logged in')
 
   const mode = params.mode ?? 'DEFAULT'
   const limit = Math.max(1, params.limit ?? 3)
   const result = mode == 'DEFAULT'
-    ? await neteaseApi.personal_fm({ cookie: account.cookie })
+    ? await neteaseApi.personal_fm({ cookie })
     : await neteaseApi.personal_fm_mode({
-      cookie: account.cookie,
+      cookie,
       mode: privateFmSceneModeMap[mode] ? 'SCENE_RCMD' : mode,
       submode: privateFmSceneModeMap[mode],
       limit,
@@ -343,11 +245,11 @@ const normalizeDailySongCategories = (categories: any[]): LX.Netease.DailySongCa
 }
 
 export const getDailySongCategories = async(): Promise<LX.Netease.DailySongCategory[]> => {
-  const account = getAccountData()
-  if (!account.cookie) throw new Error('Not logged in')
+  const cookie = getAccountCookie()
+  if (!cookie) throw new Error('Not logged in')
 
   const result = await neteaseApi.api({
-    cookie: account.cookie,
+    cookie,
     uri: '/api/homepage/daily/song/config/get',
     data: {
       limit: '20',
@@ -539,17 +441,17 @@ const resolveDailySongCategoryTags = (
 }
 
 const getDailySongCategoryPlaylists = async(): Promise<LX.Netease.Playlist[]> => {
-  const account = getAccountData()
-  if (!account.cookie) return []
+  const cookie = getAccountCookie()
+  if (!cookie) return []
 
   const categories = await getDailySongCategories().catch(() => [])
   const tags = resolveDailySongCategoryTags(categories)
   if (!tags.length) return []
 
-  const seedMap = await getDailySongCategorySeedMap(account.cookie).catch(() => new Map<string, string>())
+  const seedMap = await getDailySongCategorySeedMap(cookie).catch(() => new Map<string, string>())
   const playlists: LX.Netease.Playlist[] = []
   for (const tag of tags) {
-    const songs = await getDailySongCategorySongs(tag, account.cookie, seedMap).catch(() => [])
+    const songs = await getDailySongCategorySongs(tag, cookie, seedMap).catch(() => [])
     if (!songs.length) continue
     playlists.push({
       id: getDailySongCategoryPlaylistId(tag.categoryId, tag.tagId),
@@ -567,8 +469,8 @@ const getDailySongCategoryPlaylists = async(): Promise<LX.Netease.Playlist[]> =>
 }
 
 const getDailySongCategoryPlaylistDetail = async(id: string, page = 1): Promise<LX.Netease.PlaylistDetailInfo> => {
-  const account = getAccountData()
-  if (!account.cookie) throw new Error('Not logged in')
+  const cookie = getAccountCookie()
+  if (!cookie) throw new Error('Not logged in')
 
   const parsedId = parseDailySongCategoryPlaylistId(id)
   if (!parsedId) throw new Error('Invalid daily song category playlist')
@@ -577,8 +479,8 @@ const getDailySongCategoryPlaylistDetail = async(id: string, page = 1): Promise<
   const tag = resolveDailySongCategoryTags(categories, [getDailySongCategoryTagKey(parsedId.categoryId, parsedId.tagId)])[0]
   if (!tag) throw new Error('Daily song category tag not found')
 
-  const seedMap = await getDailySongCategorySeedMap(account.cookie).catch(() => new Map<string, string>())
-  const list = await getDailySongCategorySongs(tag, account.cookie, seedMap)
+  const seedMap = await getDailySongCategorySeedMap(cookie).catch(() => new Map<string, string>())
+  const list = await getDailySongCategorySongs(tag, cookie, seedMap)
   const safePage = Math.max(1, page)
   const rangeStart = (safePage - 1) * playlistDetailLimit
   const img = list[0]?.meta?.picUrl ?? ''
@@ -604,13 +506,13 @@ const getDailySongCategoryPlaylistDetail = async(id: string, page = 1): Promise<
 }
 
 export const getRecommendPlaylistDetail = async(id: string, page = 1): Promise<LX.Netease.PlaylistDetailInfo> => {
-  const account = getAccountData()
-  if (!account.cookie) throw new Error('Not logged in')
+  const cookie = getAccountCookie()
+  if (!cookie) throw new Error('Not logged in')
 
   if (parseDailySongCategoryPlaylistId(id)) return getDailySongCategoryPlaylistDetail(id, page)
 
   const result = await neteaseApi.playlist_detail({
-    cookie: account.cookie,
+    cookie,
     id,
     timestamp: Date.now(),
   })
@@ -619,7 +521,7 @@ export const getRecommendPlaylistDetail = async(id: string, page = 1): Promise<L
   const playlist = result.body?.playlist
   if (!playlist) throw new Error('Playlist not found')
 
-  const list = await normalizePlaylistTracks(playlist, result.body?.privileges ?? [], account.cookie)
+  const list = await normalizePlaylistTracks(playlist, result.body?.privileges ?? [], cookie)
   const normalizedPlaylist = normalizePlaylistList([playlist])[0]
   const safePage = Math.max(1, page)
   const rangeStart = (safePage - 1) * playlistDetailLimit
@@ -1205,17 +1107,17 @@ const getHomeCharts = async(cookie: string): Promise<LX.Netease.HomeChart[]> => 
 }
 
 export const getRecommendPlaylists = async(limit = 10, removePrivateRecommend = false): Promise<LX.Netease.Playlist[]> => {
-  const account = getAccountData()
+  const cookie = getAccountCookie()
 
-  if (!account.cookie) {
+  if (!cookie) {
     const result = await neteaseApi.personalized({ limit })
     if (result.body?.code != 200) throw new Error(result.body?.message ?? 'Failed to load playlists')
     return normalizePlaylistList(result.body?.result ?? []).slice(0, limit)
   }
 
   const [dailyResult, publicResult] = await Promise.all([
-    neteaseApi.recommend_resource({ cookie: account.cookie, timestamp: Date.now() }).catch(() => null),
-    neteaseApi.personalized({ cookie: account.cookie, limit }),
+    neteaseApi.recommend_resource({ cookie, timestamp: Date.now() }).catch(() => null),
+    neteaseApi.personalized({ cookie, limit }),
   ])
 
   if (publicResult.body?.code != 200) throw new Error(publicResult.body?.message ?? 'Failed to load playlists')
@@ -1223,7 +1125,7 @@ export const getRecommendPlaylists = async(limit = 10, removePrivateRecommend = 
   let dailyRecommend = normalizePlaylistList(dailyResult?.body?.recommend ?? [])
   if (dailyRecommend.length) {
     if (removePrivateRecommend) dailyRecommend = dailyRecommend.slice(1)
-    await replaceSpecialRecommendResult(dailyRecommend, account.cookie)
+    await replaceSpecialRecommendResult(dailyRecommend, cookie)
   }
 
   return mergePlaylists([
@@ -1233,8 +1135,7 @@ export const getRecommendPlaylists = async(limit = 10, removePrivateRecommend = 
 }
 
 export const getHomeRecommendation = async(params: LX.Netease.HomeRecommendationParams = {}): Promise<LX.Netease.HomeRecommendation> => {
-  const account = getAccountData()
-  const cookie = account.cookie
+  const cookie = getAccountCookie()
   const sectionSet = new Set(params.sections ?? ['radarPlaylists', 'styleSongs', 'dailySongCategories', 'similarSongs', 'recommendPlaylists', 'charts'])
   const needRadarPlaylists = sectionSet.has('radarPlaylists')
   const needStyleSongs = sectionSet.has('styleSongs')
@@ -1290,26 +1191,26 @@ export const getHomeRecommendation = async(params: LX.Netease.HomeRecommendation
 }
 
 export const likeMusic = async(musicInfo: LX.Music.MusicInfo) => {
-  const account = getAccountData()
-  if (!account.cookie || musicInfo.source != 'wy') return
+  const cookie = getAccountCookie()
+  if (!cookie || musicInfo.source != 'wy') return
   const songId = musicInfo.meta.songId ?? musicInfo.id?.replace(/^wy_/, '')
   if (!songId) throw new Error('Missing NetEase song id')
 
   await neteaseApi.like({
-    cookie: account.cookie,
+    cookie,
     id: songId,
     like: true,
   })
 }
 
 export const trashPrivateFmMusic = async({ musicInfo, time = 25 }: LX.Netease.PrivateFmTrashParams) => {
-  const account = getAccountData()
-  if (!account.cookie || musicInfo.source != 'wy') return
+  const cookie = getAccountCookie()
+  if (!cookie || musicInfo.source != 'wy') return
   const songId = musicInfo.meta.songId ?? musicInfo.id?.replace(/^wy_/, '')
   if (!songId) throw new Error('Missing NetEase song id')
 
   const result = await neteaseApi.fm_trash({
-    cookie: account.cookie,
+    cookie,
     id: songId,
     time,
   })
@@ -1326,11 +1227,11 @@ const qualityLevelMap: Partial<Record<LX.Quality, string>> = {
 }
 
 export const getMusicUrl = async(musicInfo: LX.Music.MusicInfo, quality: LX.Quality = '320k'): Promise<string> => {
-  const account = getAccountData()
-  if (!account.cookie || musicInfo.source != 'wy') return ''
+  const cookie = getAccountCookie()
+  if (!cookie || musicInfo.source != 'wy') return ''
 
   const result = await neteaseApi.song_url_v1({
-    cookie: account.cookie,
+    cookie,
     id: musicInfo.meta.songId,
     level: qualityLevelMap[quality] ?? 'exhigh',
   })

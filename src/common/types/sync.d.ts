@@ -46,20 +46,27 @@ declare namespace LX {
     | SyncAction<'user_api_pull', UserApiSyncServiceParams>
     | SyncAction<'user_api_push', UserApiSyncServiceParams>
 
-    type ServerDevices = ServerKeyInfo[]
+    type SyncClientProfile = Omit<ClientKeyInfo, 'key'>
+    type SyncServerDevice = Omit<ServerKeyInfo, 'key'>
+    interface SyncServerDeviceStatus extends SyncServerDevice {
+      unavailableReason?: 'credential_undecryptable'
+    }
+
+    type ServerDevices = SyncServerDeviceStatus[]
 
     interface ServerStatus {
       status: boolean
       message: string
       address: string[]
       code: string
-      devices: ServerKeyInfo[]
+      devices: SyncServerDeviceStatus[]
     }
 
     interface ClientStatus {
       status: boolean
       message: string
       address: string[]
+      unavailableReason?: 'credential_undecryptable'
     }
 
     type SyncProtocolId = 'current' | 'legacy'

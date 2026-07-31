@@ -25,6 +25,7 @@ const actualMigrations = require('../../src/main/worker/dbService/migrations/ind
 const actualVerify = require('../../src/main/worker/dbService/verifyDB.ts')
 const tables = require('../../src/main/worker/dbService/tables.ts').default
 const { createAtomicJsonFile } = require('../../src/main/storage/atomicJsonFile.ts')
+const currentSchemaVersion = actualMigrations.migrations.at(-1).version
 
 const MIGRATION_3_CHECKSUM = '9243aa510e8355d2c3d0f687c6736654adf584ec6007b1bcf46f374a9d694e41'
 const FOUNDATION_V3_SCHEMA = [
@@ -261,7 +262,7 @@ const createV2Database = databasePath => {
   }
 }
 
-const createV3Database = databasePath => {
+const createCurrentDatabase = databasePath => {
   createV2Database(databasePath)
   const db = new Database(databasePath)
   try {
@@ -312,7 +313,7 @@ const databaseMetadata = databasePath => {
       foundationSchema: readFoundationSchema(db),
       version: db.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value,
       migration: hasLedger
-        ? db.prepare('SELECT version, name, checksum FROM schema_migrations ORDER BY version').get()
+        ? db.prepare('SELECT version, name, checksum FROM schema_migrations WHERE version = 3').get()
         : null,
       sentinelCount: db.prepare("SELECT count(*) count FROM my_list WHERE id = 'foundation-sentinel'").get().count,
     }
@@ -528,7 +529,7 @@ const databaseCases = [
   },
   {
     name: 'unclean run with valid DB',
-    fixture: 'v3',
+    fixture: 'current',
     fault: 'observe_unclean_quick_check',
     status: 'ready',
     authoritative: 'original',
@@ -537,7 +538,7 @@ const databaseCases = [
   },
   {
     name: 'quick-check failure',
-    fixture: 'v3',
+    fixture: 'current',
     fault: 'quick_check_failure',
     status: 'recovery',
     reason: 'quick_check_failed',
@@ -567,7 +568,7 @@ test('database Foundation failure matrix', async t => {
       let dbService
       try {
         if (fixtureCase.fixture == 'v2') createV2Database(paths.databasePath)
-        else if (fixtureCase.fixture == 'v3') createV3Database(paths.databasePath)
+        else if (fixtureCase.fixture == 'current') createCurrentDatabase(paths.databasePath)
         else await fsp.writeFile(paths.databasePath, Buffer.from('corrupt-foundation-database\0bytes'))
         const originalBytes = await fsp.readFile(paths.databasePath)
         const originalSha256 = sha256Bytes(originalBytes)
@@ -584,7 +585,7 @@ test('database Foundation failure matrix', async t => {
           assert.equal(result.reason, fixtureCase.reason)
           assert.deepEqual(result.diagnostics, fixtureCase.diagnostics)
         } else {
-          assert.equal(result.schemaVersion, 3)
+          assert.equal(result.schemaVersion, currentSchemaVersion)
           assert.deepEqual(result.migratedVersions, [])
           assert.equal(result.backupPath, null)
         }
@@ -607,10 +608,10 @@ test('database Foundation failure matrix', async t => {
           assert.equal(authoritative.quickCheck, 'ok')
           assert.equal(authoritative.sentinelCount, 1)
           if (fixtureCase.authoritative == 'original') {
-            assert.equal(authoritative.version, fixtureCase.fixture == 'v2' ? '2' : '3')
+            assert.equal(authoritative.version, fixtureCase.fixture == 'v2' ? '2' : String(currentSchemaVersion))
             if (fixtureCase.fixture == 'v2') assert.equal(authoritative.migration, null)
           } else {
-            assert.equal(authoritative.version, '3')
+            assert.equal(authoritative.version, String(currentSchemaVersion))
             assert.equal(authoritative.migration.version, 3)
             assert.equal(authoritative.migration.name, 'storage_foundation')
             assert.equal(authoritative.migration.checksum, MIGRATION_3_CHECKSUM)

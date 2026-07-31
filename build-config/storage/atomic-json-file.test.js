@@ -1,5 +1,4 @@
 const assert = require('node:assert/strict')
-const crypto = require('node:crypto')
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
 const os = require('node:os')
@@ -55,7 +54,6 @@ const exists = async(filePath) => {
 
 const isValue = value => value != null && typeof value == 'object' && !Array.isArray(value) && Number.isInteger(value.value)
 const isCounter = value => value != null && typeof value == 'object' && !Array.isArray(value) && Number.isInteger(value.n)
-
 const withFailingTempSync = (syncError = new Error('injected fsync failure')) => ({
   ...fsp,
   async open(filePath, flags, mode) {
@@ -184,6 +182,81 @@ describe('atomic JSON file', () => {
     assert.equal(await exists(path.join(dir, 'settings.json.other.owned-tmp-1-1')), true)
   })
 
+  it('preserves and verifies the previous version by default', async() => {
+    const { target } = await createFixture('previous-default')
+    await fsp.writeFile(target, '{"n":1}')
+    await fsp.writeFile(`${target}.previous`, '{"n":0}')
+    const file = createAtomicJsonFile({ filePath: target, validate: isCounter })
+
+    await file.replace({ n: 2 })
+
+    assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { n: 2 })
+    assert.deepEqual(JSON.parse(await fsp.readFile(`${target}.previous`, 'utf8')), { n: 1 })
+  })
+
+  it('omits the previous version when the parsed destination opts out', async() => {
+    for (const hasExistingPrevious of [false, true]) {
+      const { target } = await createFixture(`previous-opt-out-${hasExistingPrevious}`)
+      await fsp.writeFile(target, '{"n":1}')
+      if (hasExistingPrevious) await fsp.writeFile(`${target}.previous`, '{"n":0}')
+      const file = createAtomicJsonFile({
+        filePath: target,
+        validate: isCounter,
+        shouldPreservePrevious: current => current.n != 1,
+      })
+
+      await file.replace({ n: 2 })
+
+      assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { n: 2 })
+      assert.equal(await exists(`${target}.previous`), false)
+    }
+  })
+
+  it('aborts before primary replacement when opted-out previous removal fails', async() => {
+    const { target } = await createFixture('previous-remove-failure')
+    const previousPath = `${target}.previous`
+    await fsp.writeFile(target, '{"n":1}')
+    await fsp.writeFile(previousPath, '{"n":0}')
+    const unlinkError = Object.assign(new Error('injected previous unlink failure'), { code: 'EACCES' })
+    let primaryReplacements = 0
+    const faultFs = {
+      ...fsp,
+      async unlink(filePath) {
+        if (filePath == previousPath) throw unlinkError
+        return fsp.unlink(filePath)
+      },
+      async rename(source, destination) {
+        if (destination == target) primaryReplacements++
+        return fsp.rename(source, destination)
+      },
+    }
+    const file = createAtomicJsonFile({
+      filePath: target,
+      validate: isCounter,
+      shouldPreservePrevious: () => false,
+      fs: faultFs,
+    })
+
+    await assert.rejects(file.replace({ n: 2 }), error => error === unlinkError)
+
+    assert.equal(primaryReplacements, 0)
+    assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { n: 1 })
+    assert.deepEqual(JSON.parse(await fsp.readFile(previousPath, 'utf8')), { n: 0 })
+  })
+
+  it('does not interpret or remove unknown predecessor-shaped files', async() => {
+    const { target } = await createFixture('unknown-predecessor')
+    const unknown = `${target}.${['expected', 'previous'].join('-')}-${'0'.repeat(64)}-404-17`
+    await fsp.writeFile(target, '{"n":1}')
+    await fsp.writeFile(unknown, 'preserve')
+    const file = createAtomicJsonFile({ filePath: target, validate: isCounter })
+
+    await file.cleanupOwnedTemps()
+
+    assert.equal(await fsp.readFile(unknown, 'utf8'), 'preserve')
+    assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { n: 1 })
+  })
+
   it('runs one owned-temp cleanup before concurrent first read and write operations', async() => {
     const { dir, target } = await createFixture('first-operation-cleanup')
     await fsp.writeFile(target, '{"n":0}')
@@ -282,7 +355,7 @@ describe('atomic JSON file', () => {
     const stage = await file.stage({ n: 1 })
     const bytes = await fsp.readFile(stage.filePath)
 
-    assert.equal(stage.fileSha256, crypto.createHash('sha256').update('{"n":1}').digest('hex'))
+    assert.equal(stage.fileSha256, '2bfd14f43d17fc7cea24e0917a8879b4b2f880b8baeec1b9d90fbaad655e71bd')
     await fsp.rename(stage.filePath, `${stage.filePath}.swapped`)
     await fsp.writeFile(stage.filePath, bytes)
     await assert.rejects(file.commit(stage), /identity/)

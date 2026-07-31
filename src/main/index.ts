@@ -15,7 +15,7 @@ import { initAppSetting, runStorageMigrationHooks } from '@main/app'
 import registerModules from '@main/modules'
 import { flushStores } from '@main/utils/store'
 import { createRunState } from '@main/startup/runState'
-import { createStorageCoordinator } from '@main/startup/storageCoordinator'
+import { checkCredentialStartup, createStorageCoordinator } from '@main/startup/storageCoordinator'
 import { showStorageRecovery } from '@main/startup/recovery'
 
 // 初始化应用
@@ -31,6 +31,11 @@ const getStorageCoordinator = () => {
     }),
     closeDatabase: () => global.lx.worker.dbService.close(),
     runMigrationHooks: runStorageMigrationHooks,
+    checkCredentials: () => checkCredentialStartup({
+      dataRoot: global.lxDataPath,
+      vault: global.lx.credentialVault,
+      profileRepository: global.lx.accountRepository,
+    }),
     initSettings: initAppSetting,
     registerModules,
     appInited: () => global.lx.event_app.app_inited(),

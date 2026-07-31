@@ -115,6 +115,69 @@ describe('authoritative non-activity storage', () => {
     )
   })
 
+  it('returns validated defaults from a fresh authoritative store', async() => {
+    const { db } = await createStore()
+    const repository = getRepository()
+
+    assert.deepEqual(repository.getLocalState(), {
+      version: 1,
+      viewPrevState: { url: '/search', query: {} },
+      listScrollPosition: {},
+      listPrevSelectId: 'default',
+    })
+    assert.deepEqual(
+      db.prepare('SELECT key, updated_at_ms FROM local_state ORDER BY key').all(),
+      [
+        { key: 'list_prev_select_id', updated_at_ms: 0 },
+        { key: 'list_scroll_positions', updated_at_ms: 0 },
+        { key: 'view_prev_state', updated_at_ms: 0 },
+      ],
+    )
+  })
+
+  it('sets one local-state key in a fresh store and returns default siblings', async() => {
+    await createStore()
+    const repository = getRepository()
+
+    assert.deepEqual(repository.setLocalState({
+      version: 1,
+      key: 'list_scroll_positions',
+      value: { fresh: 8 },
+      updatedAtMs: 25,
+    }), {
+      version: 1,
+      viewPrevState: { url: '/search', query: {} },
+      listScrollPosition: { fresh: 8 },
+      listPrevSelectId: 'default',
+    })
+  })
+
+  it('resets clear local state to defaults and remains writable', async() => {
+    const { db } = await createStore()
+    const repository = getRepository()
+    repository.importLegacyNonActivity(legacyImport())
+
+    repository.clearLocalState()
+    assert.deepEqual(repository.getLocalState(), {
+      version: 1,
+      viewPrevState: { url: '/search', query: {} },
+      listScrollPosition: {},
+      listPrevSelectId: 'default',
+    })
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM local_state WHERE updated_at_ms = 0').get().count, 3)
+    assert.deepEqual(repository.setLocalState({
+      version: 1,
+      key: 'list_prev_select_id',
+      value: 'fresh-list',
+      updatedAtMs: 30,
+    }), {
+      version: 1,
+      viewPrevState: { url: '/search', query: {} },
+      listScrollPosition: {},
+      listPrevSelectId: 'fresh-list',
+    })
+  })
+
   it('imports all three domains and markers atomically with unknown timestamps', async() => {
     const { db } = await createStore()
     const repository = getRepository()
@@ -155,6 +218,88 @@ describe('authoritative non-activity storage', () => {
     assert.deepEqual(repository.getLocalState(), localState)
     assert.deepEqual(repository.getPlaylistMetadata(), playlistMetadata)
     assert.equal(repository.getSearchHistory()[0], 'A')
+  })
+
+  it('preserves newer authoritative values on a same-hash replay', async() => {
+    await createStore()
+    const repository = getRepository()
+    const input = legacyImport()
+    repository.importLegacyNonActivity(input)
+    const currentLocalState = repository.setLocalState({
+      version: 1,
+      key: 'list_prev_select_id',
+      value: 'runtime-list',
+      updatedAtMs: 500,
+    })
+    const currentPlaylistMetadata = repository.applyPlaylistMetadata({
+      version: 1,
+      action: 'upsert',
+      playlistId: 'runtime-list',
+      value: { updateTime: 500, isAutoUpdate: false },
+      updatedAtMs: 500,
+    })
+    const currentSearchHistory = repository.applySearchHistory({
+      version: 1,
+      action: 'record',
+      term: 'runtime-term',
+      usedAtMs: 500,
+    })
+
+    assert.deepEqual(repository.importLegacyNonActivity(input), {
+      localState: currentLocalState,
+      playlistMetadata: currentPlaylistMetadata,
+      searchHistory: currentSearchHistory,
+    })
+  })
+
+  it('preflights second and third marker conflicts before any target write', async() => {
+    const conflicts = [
+      marker('legacy_data_v1.playlist_metadata', 'f'),
+      marker('legacy_data_v1.search_history', 'f'),
+    ]
+    for (const conflict of conflicts) {
+      const { db } = await createStore(`lx-non-activity-conflict-${conflict.name.split('.').at(-1)}-`)
+      const repository = getRepository()
+      repository.completeNonActivityMigrationMarker(conflict)
+
+      assert.throws(() => repository.importLegacyNonActivity(legacyImport()), /source conflict/i)
+      assert.deepEqual(repository.getLocalState(), {
+        version: 1,
+        viewPrevState: { url: '/search', query: {} },
+        listScrollPosition: {},
+        listPrevSelectId: 'default',
+      })
+      assert.deepEqual(repository.getPlaylistMetadata(), {})
+      assert.deepEqual(repository.getSearchHistory(), [])
+      assert.deepEqual(
+        db.prepare('SELECT name, source_sha256 FROM migration_markers').all(),
+        [{ name: conflict.name, source_sha256: conflict.sourceSha256 }],
+      )
+      dbService.close()
+    }
+  })
+
+  it('rolls back earlier target writes and markers when readback verification fails', async() => {
+    const { db } = await createStore()
+    const repository = getRepository()
+    db.exec(`
+      CREATE TRIGGER corrupt_search_history_readback
+      AFTER INSERT ON search_history
+      BEGIN
+        UPDATE search_history SET term = 'corrupt:' || term WHERE term = NEW.term;
+      END;
+    `)
+
+    assert.throws(() => repository.importLegacyNonActivity(legacyImport()), /search history import readback/i)
+    assert.deepEqual(repository.getLocalState(), {
+      version: 1,
+      viewPrevState: { url: '/search', query: {} },
+      listScrollPosition: {},
+      listPrevSelectId: 'default',
+    })
+    assert.deepEqual(repository.getPlaylistMetadata(), {})
+    assert.deepEqual(repository.getSearchHistory(), [])
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM migration_markers').get().count, 0)
   })
 
   it('returns authoritative post-write values for local, playlist, and search commands', async() => {
@@ -203,6 +348,42 @@ describe('authoritative non-activity storage', () => {
     )
   })
 
+  it('enforces the 10000-row playlist metadata limit without blocking updates', async() => {
+    const { db } = await createStore()
+    const repository = getRepository()
+    const fullMetadata = Object.fromEntries(Array.from({ length: 10_000 }, (_, index) => [
+      `list-${index}`,
+      { updateTime: index, isAutoUpdate: false },
+    ]))
+    repository.importLegacyNonActivity(legacyImport({ playlistMetadata: fullMetadata }))
+
+    const updated = repository.applyPlaylistMetadata({
+      version: 1,
+      action: 'upsert',
+      playlistId: 'list-0',
+      value: { updateTime: 20_000, isAutoUpdate: true },
+      updatedAtMs: 50,
+    })
+    assert.equal(Object.keys(updated).length, 10_000)
+    assert.deepEqual(updated['list-0'], { updateTime: 20_000, isAutoUpdate: true })
+
+    assert.throws(() => repository.applyPlaylistMetadata({
+      version: 1,
+      action: 'upsert',
+      playlistId: 'list-overflow',
+      value: { updateTime: 1, isAutoUpdate: false },
+      updatedAtMs: 50,
+    }), /playlist metadata limit/i)
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM playlist_metadata').get().count, 10_000)
+
+    db.prepare(`
+      INSERT INTO playlist_metadata (
+        playlist_id, is_auto_update, update_time_ms, profile_json, updated_at_ms
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run('direct-overflow', 0, 1, null, 0)
+    assert.throws(() => repository.getPlaylistMetadata(), /playlist metadata limit/i)
+  })
+
   it('validates every import input before writing any domain or marker', async() => {
     const { db } = await createStore()
     const repository = getRepository()
@@ -214,9 +395,26 @@ describe('authoritative non-activity storage', () => {
     })
 
     assert.throws(() => repository.importLegacyNonActivity(invalid), /search history marker/i)
-    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM local_state').get().count, 0)
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM local_state').get().count, 3)
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM playlist_metadata').get().count, 0)
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM search_history').get().count, 0)
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM migration_markers').get().count, 0)
+  })
+
+  it('validates search import terms after the retained history is full', async() => {
+    const { db } = await createStore()
+    const repository = getRepository()
+    const searchHistory = [...Array.from({ length: 15 }, (_, index) => `valid-${index}`), 42]
+
+    assert.throws(() => repository.importLegacyNonActivity(legacyImport({ searchHistory })), /term/i)
+    assert.deepEqual(repository.getLocalState(), {
+      version: 1,
+      viewPrevState: { url: '/search', query: {} },
+      listScrollPosition: {},
+      listPrevSelectId: 'default',
+    })
+    assert.deepEqual(repository.getPlaylistMetadata(), {})
+    assert.deepEqual(repository.getSearchHistory(), [])
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM migration_markers').get().count, 0)
   })
 
@@ -242,11 +440,51 @@ describe('authoritative non-activity storage', () => {
     )
   })
 
+  it('enforces non-negative safe-integer timestamps in schema 5', async() => {
+    const { db } = await createStore()
+
+    for (const value of ['-1', '1.5', '9007199254740992']) {
+      assert.throws(
+        () => db.exec(`UPDATE local_state SET updated_at_ms = ${value} WHERE key = 'view_prev_state'`),
+        /constraint/i,
+      )
+      assert.throws(
+        () => db.exec(`
+          INSERT INTO playlist_metadata (
+            playlist_id, is_auto_update, update_time_ms, profile_json, updated_at_ms
+          ) VALUES ('update-${value}', 0, ${value}, NULL, 0)
+        `),
+        /constraint/i,
+      )
+      assert.throws(
+        () => db.exec(`
+          INSERT INTO playlist_metadata (
+            playlist_id, is_auto_update, update_time_ms, profile_json, updated_at_ms
+          ) VALUES ('write-${value}', 0, 0, NULL, ${value})
+        `),
+        /constraint/i,
+      )
+      assert.throws(
+        () => db.exec(`
+          INSERT INTO search_history (term, recency_seq, last_used_at_ms, use_count)
+          VALUES ('search-${value}', ${value == '-1' ? 1 : value == '1.5' ? 2 : 3}, ${value}, 1)
+        `),
+        /constraint/i,
+      )
+    }
+    db.exec(`
+      INSERT INTO search_history (term, recency_seq, last_used_at_ms, use_count)
+      VALUES ('unknown-time', 4, NULL, 1)
+    `)
+    assert.equal(db.prepare("SELECT last_used_at_ms FROM search_history WHERE term = 'unknown-time'").get().last_used_at_ms, null)
+  })
+
   it('rejects malformed authoritative rows that are looser than the SQL checks', async() => {
     const { db } = await createStore()
     const repository = getRepository()
     repository.importLegacyNonActivity(legacyImport())
 
+    db.pragma('ignore_check_constraints = ON')
     db.prepare("UPDATE local_state SET updated_at_ms = 1.5 WHERE key = 'view_prev_state'").run()
     assert.throws(() => repository.getLocalState(), /local state row/i)
     db.prepare("UPDATE local_state SET updated_at_ms = 0 WHERE key = 'view_prev_state'").run()

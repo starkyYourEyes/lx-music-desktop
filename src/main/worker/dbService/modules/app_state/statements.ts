@@ -28,6 +28,14 @@ export const createGetPlaylistMetadataStatement = () => getDB().prepare<[], Play
   ORDER BY playlist_id
 `)
 
+export const createGetPlaylistMetadataCountStatement = () => getDB().prepare<[], { count: number }>(`
+  SELECT COUNT(*) AS count FROM playlist_metadata
+`)
+
+export const createHasPlaylistMetadataStatement = () => getDB().prepare<[string], { present: 1 }>(`
+  SELECT 1 AS present FROM playlist_metadata WHERE playlist_id = ?
+`)
+
 export const createUpsertPlaylistMetadataStatement = () => getDB().prepare<[PlaylistMetadataRow]>(`
   INSERT INTO playlist_metadata (
     playlist_id, is_auto_update, update_time_ms, profile_json, updated_at_ms

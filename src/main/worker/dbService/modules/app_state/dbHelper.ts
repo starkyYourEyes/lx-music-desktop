@@ -1,4 +1,5 @@
 import { canonicalJson, type JsonValue } from '../../../../../common/storage/canonicalJson'
+import { DEFAULT_SETTING } from '../../../../../common/constants'
 import type { LocalStateSnapshotV1 } from '../../../../../common/storage/stateContracts'
 import {
   parseLocalStateSnapshot,
@@ -27,10 +28,12 @@ import {
   createDeleteSearchHistoryTermStatement,
   createGetLocalStateStatement,
   createGetMaxSearchRecencyStatement,
+  createGetPlaylistMetadataCountStatement,
   createGetPlaylistMetadataStatement,
   createGetSearchHistoryStatement,
   createGetSearchHistoryTermStatement,
   createInsertSearchHistoryStatement,
+  createHasPlaylistMetadataStatement,
   createTrimSearchHistoryStatement,
   createUpsertLocalStateStatement,
   createUpsertPlaylistMetadataStatement,
@@ -53,6 +56,13 @@ const localStateProperties: Record<LocalStateKey, keyof Omit<LocalStateSnapshotV
   list_scroll_positions: 'listScrollPosition',
   list_prev_select_id: 'listPrevSelectId',
 }
+
+const defaultLocalState = parseLocalStateSnapshot({
+  version: 1,
+  viewPrevState: DEFAULT_SETTING.viewPrevState,
+  listScrollPosition: {},
+  listPrevSelectId: 'default',
+})
 
 const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
   value != null && !Array.isArray(value) && typeof value == 'object' && Object.getPrototypeOf(value) == Object.prototype
@@ -178,8 +188,10 @@ const playlistMetadataRow = (
   updatedAtMs,
 })
 
-const readPlaylistMetadata = (): LX.List.ListUpdateInfo => Object.fromEntries(
-  createGetPlaylistMetadataStatement().all().map(row => {
+const readPlaylistMetadata = (): LX.List.ListUpdateInfo => {
+  const rows = createGetPlaylistMetadataStatement().all()
+  if (rows.length > MAX_PLAYLIST_METADATA_ENTRIES) throw new Error('Playlist metadata limit exceeded')
+  return Object.fromEntries(rows.map(row => {
     const value: LX.List.ListUpdateInfo[string] = {
       updateTime: row.updateTimeMs,
       isAutoUpdate: row.isAutoUpdate == 1,
@@ -194,8 +206,8 @@ const readPlaylistMetadata = (): LX.List.ListUpdateInfo => Object.fromEntries(
     })
     if (command.action != 'upsert') throw new Error('Invalid playlist metadata row')
     return [command.playlistId, command.value]
-  }),
-)
+  }))
+}
 
 const normalizeSearchHistory = (value: unknown): string[] => {
   if (!Array.isArray(value)) throw new Error('Invalid search history')
@@ -206,8 +218,7 @@ const normalizeSearchHistory = (value: unknown): string[] => {
     if (command.action != 'remove') throw new Error('Invalid search history')
     if (seen.has(command.term)) continue
     seen.add(command.term)
-    result.push(command.term)
-    if (result.length == SEARCH_HISTORY_LIMIT) break
+    if (result.length < SEARCH_HISTORY_LIMIT) result.push(command.term)
   }
   return result
 }
@@ -280,7 +291,11 @@ export const updateLocalState = (input: unknown): LocalStateSnapshotV1 => {
 }
 
 export const deleteAllLocalState = (): void => {
-  getDB().transaction(() => createClearLocalStateStatement().run())()
+  getDB().transaction(() => {
+    createClearLocalStateStatement().run()
+    for (const row of localStateRows(defaultLocalState, 0)) createUpsertLocalStateStatement().run(row)
+    readLocalState()
+  })()
 }
 
 export const queryPlaylistMetadata = (): LX.List.ListUpdateInfo => readPlaylistMetadata()
@@ -289,13 +304,22 @@ export const mutatePlaylistMetadata = (input: unknown): LX.List.ListUpdateInfo =
   const command = parsePlaylistMetadataCommand(input)
   return getDB().transaction(() => {
     switch (command.action) {
-      case 'upsert':
+      case 'upsert': {
+        const exists = createHasPlaylistMetadataStatement().get(command.playlistId) != null
+        const countRow = createGetPlaylistMetadataCountStatement().get()
+        if (countRow == null || !Number.isSafeInteger(countRow.count) || countRow.count < 0) {
+          throw new Error('Invalid playlist metadata count')
+        }
+        if (!exists && countRow.count >= MAX_PLAYLIST_METADATA_ENTRIES) {
+          throw new Error('Playlist metadata limit exceeded')
+        }
         createUpsertPlaylistMetadataStatement().run(playlistMetadataRow(
           command.playlistId,
           command.value,
           command.updatedAtMs,
         ))
         break
+      }
       case 'remove':
         createDeletePlaylistMetadataStatement().run(command.playlistId)
         break

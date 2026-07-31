@@ -104,7 +104,7 @@ export function createAtomicJsonFile<T>(options: {
   filePath: string
   validate: (value: unknown) => value is T
   shouldPreservePrevious?: (current: T) => boolean
-  allowInvalidPrevious?: boolean
+  allowInvalidPreviousFileSha256?: string
   mode?: number
   fs?: AtomicFileSystem
   initialCleanupComplete?: boolean
@@ -315,7 +315,8 @@ export function createAtomicJsonFile<T>(options: {
       try {
         destination = parseAndValidate(destinationBytes, 'durable destination')
       } catch (error) {
-        if (!options.allowInvalidPrevious) throw error
+        if (options.allowInvalidPreviousFileSha256 == null ||
+          sha256(destinationBytes) != options.allowInvalidPreviousFileSha256) throw error
       }
       if (destination != null && (options.shouldPreservePrevious?.(destination) ?? true)) {
         await preservePrevious(destinationBytes)

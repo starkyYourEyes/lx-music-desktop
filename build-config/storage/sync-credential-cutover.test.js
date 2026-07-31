@@ -75,10 +75,12 @@ const deferred = () => {
 const createGatedMetadataFile = initialValue => {
   let value = structuredClone(initialValue)
   let nextGate = null
+  let readCalls = 0
   let replaceCalls = 0
   return {
     file: {
       async read() {
+        readCalls++
         return structuredClone(value)
       },
       async replace(nextValue) {
@@ -101,6 +103,7 @@ const createGatedMetadataFile = initialValue => {
       return { started: gate.started.promise, release: gate.release.resolve }
     },
     read: () => structuredClone(value),
+    getReadCalls: () => readCalls,
     getReplaceCalls: () => replaceCalls,
   }
 }
@@ -766,6 +769,56 @@ describe('sync credential cutover', () => {
     }
   })
 
+  it('rejects invalid sync metadata changed after credential inventory', async() => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-sync-invalid-destination-race-'))
+    const vault = createVault()
+    const destination = path.join(root, 'sync/client/servers.v1.json')
+    const inventoried = {
+      version: 1,
+      servers: {
+        server_inventoried: { clientId: '', serverName: 'Inventoried', key: 'INVENTORIED_KEY_1234567890' },
+      },
+    }
+    const replacement = {
+      version: 1,
+      servers: {
+        server_replacement: { clientId: '', serverName: 'Replacement', key: 'REPLACEMENT_KEY_1234567890' },
+      },
+    }
+    global.lxDataPath = root
+    global.lx = { credentialVault: vault, appSetting: {} }
+    try {
+      await writeJson(destination, inventoried)
+      const { createAtomicJsonFile } = freshRequire('../../src/main/storage/atomicJsonFile.ts')
+      let destinationChanged = false
+      const migrateData = loadTsModule(path.join(sourceRoot, 'main/modules/sync/migrate.ts'), {
+        '@main/storage/atomicJsonFile': {
+          createAtomicJsonFile(options) {
+            const file = createAtomicJsonFile(options)
+            if (path.resolve(options.filePath) != path.resolve(destination)) return file
+            return {
+              ...file,
+              async replace(value) {
+                if (!destinationChanged) {
+                  destinationChanged = true
+                  await writeJson(destination, replacement)
+                }
+                return await file.replace(value)
+              },
+            }
+          },
+        },
+      }).default
+
+      await assert.rejects(migrateData(root), /Atomic JSON durable destination/)
+      assert.deepEqual(JSON.parse(await fsp.readFile(destination, 'utf8')), replacement)
+      assert.equal(vault.read({ kind: 'sync-client', serverId: 'server_inventoried' }).status, 'available')
+      assert.equal(vault.read({ kind: 'sync-client', serverId: 'server_replacement' }).status, 'missing')
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('resumes every root sync migration phase before verified source cleanup', async() => {
     const phases = [
       'after-directories',
@@ -1048,6 +1101,41 @@ describe('sync credential cutover', () => {
 
     assert.equal(interleaveReplacementsBeforeRelease, 3)
     assert.deepEqual(Object.keys(metadata.read().clients).sort(), ['device_b', 'device_c'])
+  })
+
+  it('serializes replacement manager initialization with in-flight server mutations', async() => {
+    const vault = createVault()
+    const metadata = createGatedMetadataFile({ version: 2, userName: 'default', clients: {} })
+    const serverData = loadTsModule(path.join(sourceRoot, 'main/modules/sync/server/user/data.ts'), {
+      '@main/storage/atomicJsonFile': { createAtomicJsonFile: () => metadata.file },
+      '@main/storage/credentials': { getCredentialVault: () => vault },
+      '@main/storage/operationJournal': { createOperationJournal: createJournal },
+    })
+    global.lxDataPath = path.join(os.tmpdir(), 'lx-sync-server-manager-lifecycle')
+    global.lx = {
+      credentialVault: vault,
+      appSetting: { 'sync.server.maxSsnapshotNum': 3, 'list.addMusicLocationType': 'top' },
+    }
+    const firstManager = new serverData.UserDataManage('default')
+    await firstManager.getAllClientKeyInfo()
+
+    const saveGate = metadata.gateNextReplace()
+    const firstSave = firstManager.saveClientKeyInfo({
+      clientId: 'device_first', key: 'FIRST_MANAGER_KEY_1234567890', deviceName: 'First', isMobile: false,
+    })
+    await saveGate.started
+    const readsAtBlockedCommit = metadata.getReadCalls()
+    const replacementManager = new serverData.UserDataManage('default')
+    const replacementSave = replacementManager.saveClientKeyInfo({
+      clientId: 'device_replacement', key: 'REPLACEMENT_MANAGER_KEY_1234567890', deviceName: 'Replacement', isMobile: false,
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    const readsBeforeRelease = metadata.getReadCalls()
+    saveGate.release()
+    await Promise.all([firstSave, replacementSave])
+
+    assert.deepEqual(Object.keys(metadata.read().clients).sort(), ['device_first', 'device_replacement'])
+    assert.equal(readsBeforeRelease, readsAtBlockedCommit)
   })
 
   it('registers client and server credential flushers with the storage coordinator', async() => {

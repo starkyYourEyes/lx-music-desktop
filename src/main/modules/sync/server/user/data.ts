@@ -161,19 +161,21 @@ export class UserDataManage {
   private readonly metadataFile: AtomicJsonFile<SyncServerDevicesFileV2>
   private readonly ready: Promise<void>
 
-  private async init(): Promise<void> {
+  private async readLatestDevicesInfo(): Promise<SyncServerDevicesFileV2> {
     const document = await this.metadataFile.read()
-    if (document != null && document.userName == this.userName) {
-      this.devicesInfo = document
-    } else {
-      this.devicesInfo = { version: 2, userName: this.userName, clients: {} }
-      await this.metadataFile.replace(this.devicesInfo)
-    }
-    for (const intent of await getOperationJournal().list()) {
-      const destination = parseOperationKey(intent.key)
-      if (destination == null) throw new Error('Invalid sync server operation key')
-      if (destination.userName != this.userName) continue
-      await serializeCredentialOperation(intent.key, async() => {
+    if (document != null && document.userName == this.userName) return document
+    const empty = { version: 2 as const, userName: this.userName, clients: {} }
+    await this.metadataFile.replace(empty)
+    return empty
+  }
+
+  private async init(): Promise<void> {
+    await serializeCredentialOperation(this.userName, async() => {
+      this.devicesInfo = await this.readLatestDevicesInfo()
+      for (const intent of await getOperationJournal().list()) {
+        const destination = parseOperationKey(intent.key)
+        if (destination == null) throw new Error('Invalid sync server operation key')
+        if (destination.userName != this.userName) continue
         await getCredentialVault().remove({
           kind: 'sync-server-device',
           userName: this.userName,
@@ -189,21 +191,24 @@ export class UserDataManage {
           this.devicesInfo = next
         }
         await getOperationJournal().complete(intent.key, intent.revision)
-      })
-    }
+      }
+    })
   }
 
   getAllClientKeyInfo = async(): Promise<LX.Sync.SyncServerDeviceStatus[]> => {
     await this.ready
-    return Object.values(this.devicesInfo.clients)
-      .map(device => getCredentialVault().read<SyncKeyPayloadV1>({
-        kind: 'sync-server-device',
-        userName: this.userName,
-        clientId: device.clientId,
-      }).status == 'undecryptable'
-        ? { ...device, unavailableReason: 'credential_undecryptable' as const }
-        : device)
-      .sort((a, b) => (b.lastConnectDate ?? 0) - (a.lastConnectDate ?? 0))
+    return await serializeCredentialOperation(this.userName, async() => {
+      this.devicesInfo = await this.readLatestDevicesInfo()
+      return Object.values(this.devicesInfo.clients)
+        .map(device => getCredentialVault().read<SyncKeyPayloadV1>({
+          kind: 'sync-server-device',
+          userName: this.userName,
+          clientId: device.clientId,
+        }).status == 'undecryptable'
+          ? { ...device, unavailableReason: 'credential_undecryptable' as const }
+          : device)
+        .sort((a, b) => (b.lastConnectDate ?? 0) - (a.lastConnectDate ?? 0))
+    })
   }
 
   saveClientKeyInfo = async(
@@ -213,6 +218,7 @@ export class UserDataManage {
     await this.ready
     const key = operationKey(this.userName, keyInfo.clientId)
     await serializeCredentialOperation(key, async() => {
+      this.devicesInfo = await this.readLatestDevicesInfo()
       if (this.devicesInfo.clients[keyInfo.clientId] == null && Object.keys(this.devicesInfo.clients).length > 101) throw new Error('max keys')
       const journal = getOperationJournal()
       const revision = await journal.begin(key, 'save')
@@ -236,6 +242,7 @@ export class UserDataManage {
     await this.ready
     if (!clientId) return null
     return await serializeCredentialOperation(operationKey(this.userName, clientId), async() => {
+      this.devicesInfo = await this.readLatestDevicesInfo()
       const device = this.devicesInfo.clients[clientId]
       if (device == null) return null
       const credential = getCredentialVault().read<SyncKeyPayloadV1>({
@@ -252,6 +259,7 @@ export class UserDataManage {
     await this.ready
     const key = operationKey(this.userName, clientId)
     await serializeCredentialOperation(key, async() => {
+      this.devicesInfo = await this.readLatestDevicesInfo()
       const journal = getOperationJournal()
       const revision = await journal.begin(key, 'remove')
       const ref = { kind: 'sync-server-device' as const, userName: this.userName, clientId }
@@ -270,7 +278,10 @@ export class UserDataManage {
 
   isIncluedsClient = async(clientId: string) => {
     await this.ready
-    return Object.hasOwn(this.devicesInfo.clients, clientId)
+    return await serializeCredentialOperation(operationKey(this.userName, clientId), async() => {
+      this.devicesInfo = await this.readLatestDevicesInfo()
+      return Object.hasOwn(this.devicesInfo.clients, clientId)
+    })
   }
 
   flush = async(): Promise<void> => {

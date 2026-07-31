@@ -12,11 +12,6 @@ export const NON_ACTIVITY_STATE_SOURCE = `CREATE TABLE local_state (
   )
 );
 
-INSERT INTO local_state (key, version, value_json, updated_at_ms) VALUES
-  ('view_prev_state', 1, '{"query":{},"url":"/search"}', 0),
-  ('list_scroll_positions', 1, '{}', 0),
-  ('list_prev_select_id', 1, '"default"', 0);
-
 CREATE TABLE playlist_metadata (
   playlist_id TEXT PRIMARY KEY,
   is_auto_update INTEGER NOT NULL CHECK(is_auto_update IN (0, 1)),

@@ -115,28 +115,46 @@ describe('authoritative non-activity storage', () => {
     )
   })
 
+  it('keeps every Phase 2 target empty before legacy import preflight', async() => {
+    const { db } = await createStore()
+
+    assert.deepEqual({
+      localState: db.prepare('SELECT COUNT(*) AS count FROM local_state').get().count,
+      playlistMetadata: db.prepare('SELECT COUNT(*) AS count FROM playlist_metadata').get().count,
+      searchHistory: db.prepare('SELECT COUNT(*) AS count FROM search_history').get().count,
+      markers: db.prepare("SELECT COUNT(*) AS count FROM migration_markers WHERE name LIKE 'legacy_data_v1.%'").get().count,
+    }, {
+      localState: 0,
+      playlistMetadata: 0,
+      searchHistory: 0,
+      markers: 0,
+    })
+  })
+
   it('returns validated defaults from a fresh authoritative store', async() => {
     const { db } = await createStore()
     const repository = getRepository()
 
+    const result = repository.getLocalState()
+    assert.deepEqual(result, {
+      version: 1,
+      viewPrevState: { url: '/search', query: {} },
+      listScrollPosition: {},
+      listPrevSelectId: 'default',
+    })
+    result.viewPrevState.query.mutated = true
+    result.listScrollPosition.mutated = 1
     assert.deepEqual(repository.getLocalState(), {
       version: 1,
       viewPrevState: { url: '/search', query: {} },
       listScrollPosition: {},
       listPrevSelectId: 'default',
     })
-    assert.deepEqual(
-      db.prepare('SELECT key, updated_at_ms FROM local_state ORDER BY key').all(),
-      [
-        { key: 'list_prev_select_id', updated_at_ms: 0 },
-        { key: 'list_scroll_positions', updated_at_ms: 0 },
-        { key: 'view_prev_state', updated_at_ms: 0 },
-      ],
-    )
+    assert.deepEqual(db.prepare('SELECT key FROM local_state').all(), [])
   })
 
   it('sets one local-state key in a fresh store and returns default siblings', async() => {
-    await createStore()
+    const { db } = await createStore()
     const repository = getRepository()
 
     assert.deepEqual(repository.setLocalState({
@@ -150,6 +168,10 @@ describe('authoritative non-activity storage', () => {
       listScrollPosition: { fresh: 8 },
       listPrevSelectId: 'default',
     })
+    assert.deepEqual(
+      db.prepare('SELECT key, updated_at_ms FROM local_state').all(),
+      [{ key: 'list_scroll_positions', updated_at_ms: 25 }],
+    )
   })
 
   it('resets clear local state to defaults and remains writable', async() => {
@@ -164,7 +186,7 @@ describe('authoritative non-activity storage', () => {
       listScrollPosition: {},
       listPrevSelectId: 'default',
     })
-    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM local_state WHERE updated_at_ms = 0').get().count, 3)
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM local_state').get().count, 0)
     assert.deepEqual(repository.setLocalState({
       version: 1,
       key: 'list_prev_select_id',
@@ -176,6 +198,10 @@ describe('authoritative non-activity storage', () => {
       listScrollPosition: {},
       listPrevSelectId: 'fresh-list',
     })
+    assert.deepEqual(
+      db.prepare('SELECT key, updated_at_ms FROM local_state').all(),
+      [{ key: 'list_prev_select_id', updated_at_ms: 30 }],
+    )
   })
 
   it('imports all three domains and markers atomically with unknown timestamps', async() => {
@@ -299,6 +325,7 @@ describe('authoritative non-activity storage', () => {
     })
     assert.deepEqual(repository.getPlaylistMetadata(), {})
     assert.deepEqual(repository.getSearchHistory(), [])
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM local_state').get().count, 0)
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM migration_markers').get().count, 0)
   })
 
@@ -395,7 +422,7 @@ describe('authoritative non-activity storage', () => {
     })
 
     assert.throws(() => repository.importLegacyNonActivity(invalid), /search history marker/i)
-    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM local_state').get().count, 3)
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM local_state').get().count, 0)
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM playlist_metadata').get().count, 0)
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM search_history').get().count, 0)
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM migration_markers').get().count, 0)
@@ -445,7 +472,10 @@ describe('authoritative non-activity storage', () => {
 
     for (const value of ['-1', '1.5', '9007199254740992']) {
       assert.throws(
-        () => db.exec(`UPDATE local_state SET updated_at_ms = ${value} WHERE key = 'view_prev_state'`),
+        () => db.exec(`
+          INSERT INTO local_state (key, version, value_json, updated_at_ms)
+          VALUES ('view_prev_state', 1, '{}', ${value})
+        `),
         /constraint/i,
       )
       assert.throws(

@@ -148,14 +148,17 @@ const localStateRows = (snapshot: LocalStateSnapshotV1, updatedAtMs: number): Lo
 
 const readLocalState = (): LocalStateSnapshotV1 => {
   const rows = createGetLocalStateStatement().all()
-  if (rows.length != 3) throw new Error('Authoritative local state is incomplete')
+  if (rows.length > 3) throw new Error('Authoritative local state has unexpected rows')
   for (const row of rows) assertLocalStateRow(row)
   const values = new Map(rows.map(row => [row.key, parseJson(row.valueJson, `local state ${row.key}`)]))
+  const valueOrDefault = (key: LocalStateKey): unknown => values.has(key)
+    ? values.get(key)
+    : defaultLocalState[localStateProperties[key]]
   return parseLocalStateSnapshot({
     version: 1,
-    viewPrevState: values.get('view_prev_state'),
-    listScrollPosition: values.get('list_scroll_positions'),
-    listPrevSelectId: values.get('list_prev_select_id'),
+    viewPrevState: valueOrDefault('view_prev_state'),
+    listScrollPosition: valueOrDefault('list_scroll_positions'),
+    listPrevSelectId: valueOrDefault('list_prev_select_id'),
   })
 }
 
@@ -293,7 +296,6 @@ export const updateLocalState = (input: unknown): LocalStateSnapshotV1 => {
 export const deleteAllLocalState = (): void => {
   getDB().transaction(() => {
     createClearLocalStateStatement().run()
-    for (const row of localStateRows(defaultLocalState, 0)) createUpsertLocalStateStatement().run(row)
     readLocalState()
   })()
 }

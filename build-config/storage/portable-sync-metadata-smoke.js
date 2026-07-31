@@ -102,15 +102,18 @@ const run = async() => {
     assert.equal(JSON.stringify({ clientDocument, serverDocument }).includes('SMOKE_KEY_SENTINEL'), false)
     assert.equal(entries.size, 2)
   } finally {
-    if (fixture != null) {
-      if (path.dirname(fixture) != volumeRoot) throw new Error('Smoke fixture escaped explicit root')
-      await fsp.rm(fixture, { recursive: true, force: true })
+    try {
+      if (fixture != null) {
+        if (path.dirname(fixture) != volumeRoot) throw new Error('Smoke fixture escaped explicit root')
+        await fsp.rm(fixture, { recursive: true, force: true })
+      }
+    } finally {
+      Module._resolveFilename = originalResolveFilename
+      // eslint-disable-next-line n/no-deprecated-api
+      if (originalTsExtension == null) delete require.extensions['.ts']
+      // eslint-disable-next-line n/no-deprecated-api
+      else require.extensions['.ts'] = originalTsExtension
     }
-    Module._resolveFilename = originalResolveFilename
-    // eslint-disable-next-line n/no-deprecated-api
-    if (originalTsExtension == null) delete require.extensions['.ts']
-    // eslint-disable-next-line n/no-deprecated-api
-    else require.extensions['.ts'] = originalTsExtension
   }
 
   process.stdout.write(`${JSON.stringify({ status: 'pass', fixtureRemoved: true })}\n`)

@@ -97,6 +97,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   const creatingByApiId = new Map<string, RuntimeCreationState>()
   const retiringByApiId = new Map<string, Promise<void>>()
   const nextGenerationByApiId = new Map<string, number>()
+  const intentionalCreationCancellations = new WeakSet<Error>()
 
   const hasLeases = (apiId: string) => {
     const owners = leasesByApiId.get(apiId)
@@ -243,7 +244,9 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
         await deps.disposeRuntimeWindow(runtime, { clearSession: false })
         if (state.clearSession) await deps.clearRuntimeSession(apiId)
         const failure = messageFailure(apiId, 'sourceChanged', 'User API source changed')
-        throw Object.assign(new Error(failure.message), failure)
+        const cancellation = Object.assign(new Error(failure.message), failure)
+        intentionalCreationCancellations.add(cancellation)
+        throw cancellation
       }
 
       creatingByApiId.delete(apiId)
@@ -291,8 +294,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     try {
       await creating.promise
     } catch (error) {
-      if (error instanceof Error && error.name == 'PlaybackSourceError' &&
-        'kind' in error && error.kind == 'sourceChanged') return
+      if (error instanceof Error && intentionalCreationCancellations.has(error)) return
       throw error
     }
   }

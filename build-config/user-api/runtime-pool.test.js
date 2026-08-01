@@ -292,7 +292,7 @@ test('invalidation during async window creation cannot install a stale record', 
   const invalidating = harness.pool.invalidate('a', 'sourceChanged')
   gate.resolve()
   await assert.rejects(oldEnsure, error => error.kind == 'sourceChanged')
-  await invalidating
+  await assert.doesNotReject(invalidating)
   assert.deepEqual(harness.statusEvents, [])
   const currentEnsure = harness.pool.ensure('a')
   await harness.waitForRuntimeCreated('a', 2)

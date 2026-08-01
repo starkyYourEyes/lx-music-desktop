@@ -408,6 +408,8 @@ const createPoolHarness = (options = {}) => {
         disposedIds.push(runtime.identity.apiId)
         disposedGenerations.push(runtime.identity.generation)
         notify(disposeWaiters, runtime.identity.apiId, runtime.identity.generation)
+        const disposeError = options.disposeErrors?.get(runtime.identity.apiId)
+        if (disposeError) throw disposeError
         if (options.disposeRejectIds?.includes(runtime.identity.apiId)) throw new Error(`dispose ${runtime.identity.apiId} failed`)
         if (clearSession) {
           lifecycle.push(`clearSession:${runtime.identity.apiId}`)

@@ -782,6 +782,13 @@ const createColdPrimaryMusicEntryHarness = () => {
       getLyric: info => primaryModule.requestPrimarySourceAction({ source: 'local', action: 'lyric', info }),
       getPic: info => primaryModule.requestPrimarySourceAction({ source: 'local', action: 'pic', info }),
     }
+    const candidateModule = loadTsModule(
+      path.join(__dirname, '../../src/renderer/core/music/playback/candidates.ts'),
+      {
+        '@renderer/utils/musicSdk': { findMusic: async() => [] },
+        '@renderer/utils': { toNewMusicInfo: value => value },
+      },
+    )
     const musicModule = loadTsModule(path.join(__dirname, '../../src/renderer/core/music/utils.ts'), {
       '@renderer/store': { qualityList: { value: {} } },
       '@renderer/store/utils': { assertApiSupport: () => true },
@@ -794,6 +801,7 @@ const createColdPrimaryMusicEntryHarness = () => {
       '@renderer/utils': { langS2T: async value => value, toNewMusicInfo: value => value, toOldMusicInfo: value => value },
       '@renderer/utils/message': { requestMsg: {} },
       '@renderer/utils/musicSdk/api-source': { apis: () => compatibilityApi },
+      './playback/candidates': candidateModule,
     })
     const globalDataKeys = Object.keys(global.window.lx)
     return {
@@ -818,6 +826,18 @@ const loadSourceSelectors = () => {
 const canStartPlaybackWithRegistry = (...args) => loadSourceSelectors().canStartPlaybackWithRegistry(...args)
 const canOpenPrimaryDownloadWithRegistry = (...args) => loadSourceSelectors().canOpenPrimaryDownloadWithRegistry(...args)
 const deriveQualityListFromCapabilities = (...args) => loadSourceSelectors().deriveQualityListFromCapabilities(...args)
+
+const loadCandidates = () => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  return loadTsModule(path.join(__dirname, '../../src/renderer/core/music/playback/candidates.ts'), {
+    '@renderer/utils/musicSdk': { findMusic: async() => [] },
+    '@renderer/utils': { toNewMusicInfo: value => value },
+  })
+}
+const createOnlineProvider = (...args) => loadCandidates().createOnlineCandidateProvider(...args)
+const createLocalProvider = (...args) => loadCandidates().createLocalCandidateProvider(...args)
+const selectPlaybackQuality = (...args) => loadCandidates().selectPlaybackQuality(...args)
 
 const createCacheHarness = ({ rows = new Map(), read, save, remove } = {}) => {
   const path = require('node:path')
@@ -905,6 +925,9 @@ module.exports = {
   canStartPlaybackWithRegistry,
   canOpenPrimaryDownloadWithRegistry,
   deriveQualityListFromCapabilities,
+  createOnlineProvider,
+  createLocalProvider,
+  selectPlaybackQuality,
   toPlaybackCachePersistenceFailure: (...args) => {
     const path = require('node:path')
     const loadTsModule = require('../../scripts/test-utils/load-ts-module')

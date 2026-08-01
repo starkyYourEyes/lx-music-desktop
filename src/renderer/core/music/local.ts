@@ -14,6 +14,7 @@ import {
   getOnlineOtherSourcePicUrl,
   getOtherSource,
 } from './utils'
+import { createLocalCandidateProvider, findPlaybackCandidates } from './playback/candidates'
 
 
 const getOtherSourceByLocal = async<T>(musicInfo: LX.Music.MusicInfoLocal, handler: (infos: LX.Music.MusicInfoOnline[]) => Promise<T>) => {
@@ -87,15 +88,21 @@ export const getMusicUrl = async({ musicInfo, isRefresh, allowToggleSource = tru
   if (!allowToggleSource) throw new Error('failed')
 
   onToggleSource()
-  return getOtherSourceByLocal(musicInfo, async(otherSource) => {
-    return getOnlineOtherSourceMusicUrl({ musicInfos: [...otherSource], onToggleSource, isRefresh }).then(({ url, quality: targetQuality, musicInfo: targetMusicInfo, isFromCache }) => {
-      // saveLyric(musicInfo, data.lyricInfo)
-      if (!isFromCache) void saveMusicUrl(targetMusicInfo, targetQuality, url)
+  const candidateProvider = createLocalCandidateProvider(musicInfo, findPlaybackCandidates)
+  for (let index = 0; index < candidateProvider.batchCount; index++) {
+    const otherSource = await candidateProvider.getBatch(index)
+    if (!otherSource.length) continue
+    try {
+      return await getOnlineOtherSourceMusicUrl({ musicInfos: [...otherSource], onToggleSource, isRefresh }).then(({ url, quality: targetQuality, musicInfo: targetMusicInfo, isFromCache }) => {
+        // saveLyric(musicInfo, data.lyricInfo)
+        if (!isFromCache) void saveMusicUrl(targetMusicInfo, targetQuality, url)
 
-      // TODO: save url ?
-      return url
-    })
-  })
+        // TODO: save url ?
+        return url
+      })
+    } catch {}
+  }
+  throw new Error('source not found')
 }
 
 export const getPicUrl = async({ musicInfo, listId, isRefresh, onToggleSource = () => {} }: {

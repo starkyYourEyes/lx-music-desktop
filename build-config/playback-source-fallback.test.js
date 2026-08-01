@@ -5,12 +5,79 @@ const {
   createColdUserApiRegistryHarness,
   createPrimaryCapabilityHarness,
   createColdPrimaryMusicEntryHarness,
+  createOnlineProvider,
+  createLocalProvider,
+  selectPlaybackQuality,
   canStartPlaybackWithRegistry,
   canOpenPrimaryDownloadWithRegistry,
   deferred,
   onlineMusic,
+  matchedTx,
+  matchedKg,
+  flacMusic,
+  no128Music,
   localMusic,
 } = require('./test-utils/playback-fallback-harness')
+
+test('online matching is lazy and runs once across API sources', async() => {
+  const calls = []
+  const provider = createOnlineProvider(onlineMusic, async query => {
+    calls.push(query)
+    return [matchedTx, matchedKg]
+  })
+  assert.equal(calls.length, 0)
+  assert.equal(provider.getOriginal(), onlineMusic)
+  const [first, second] = await Promise.all([provider.getMatched(), provider.getMatched()])
+  assert.equal(calls.length, 1)
+  assert.equal(first, second)
+  assert.deepEqual(first, [matchedTx, matchedKg])
+})
+
+test('source capability filtering does not rerun matching', async() => {
+  let calls = 0
+  const provider = createOnlineProvider(onlineMusic, async() => {
+    calls++
+    return [matchedTx, matchedKg]
+  })
+  assert.deepEqual(await provider.getMatched(new Set(['tx'])), [matchedTx])
+  assert.deepEqual(await provider.getMatched(new Set(['kg'])), [matchedKg])
+  assert.equal(calls, 1)
+})
+
+test('quality selection uses the active API source capabilities', () => {
+  assert.equal(selectPlaybackQuality('flac', flacMusic, ['flac', '320k', '128k']), 'flac')
+  assert.equal(selectPlaybackQuality('flac', flacMusic, ['128k']), '128k')
+  assert.equal(selectPlaybackQuality('flac', no128Music, ['128k']), null)
+})
+
+test('local recovery discovers metadata and filename variants lazily in order', async() => {
+  const queries = []
+  const local = {
+    ...localMusic,
+    name: 'Song - Artist',
+    singer: 'Metadata Artist',
+    meta: { ...localMusic.meta, filePath: 'C:\\Music\\File Artist - File Song.mp3' },
+  }
+  const provider = createLocalProvider(local, async query => {
+    queries.push([query.name, query.singer])
+    return []
+  })
+  await provider.getBatch(0)
+  assert.deepEqual(queries, [['Song - Artist', 'Metadata Artist']])
+  await provider.getBatch(1)
+  await provider.getBatch(2)
+  await provider.getBatch(3)
+  await provider.getBatch(4)
+  assert.deepEqual(queries, [
+    ['Song - Artist', 'Metadata Artist'],
+    ['Song', 'Artist'],
+    ['Artist', 'Song'],
+    ['File Artist', 'File Song'],
+    ['File Song', 'File Artist'],
+  ])
+  await provider.getBatch(4)
+  assert.equal(queries.length, 5)
+})
 
 test('custom source requests carry explicit API and request IDs', async() => {
   const calls = []

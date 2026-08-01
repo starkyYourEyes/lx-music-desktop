@@ -11,6 +11,11 @@ import { appSetting } from '@renderer/store/setting'
 import { langS2T, toNewMusicInfo, toOldMusicInfo } from '@renderer/utils'
 import { requestMsg } from '@renderer/utils/message'
 import { apis } from '@renderer/utils/musicSdk/api-source'
+import {
+  createOnlineCandidateProvider,
+  findPlaybackCandidates,
+  selectPlaybackQuality,
+} from './playback/candidates'
 
 
 const getOtherSourcePromises = new Map()
@@ -245,19 +250,12 @@ export const getOnlineOtherSourcePicByLocal = async(musicInfo: LX.Music.MusicInf
 }
 
 export const TRY_QUALITYS_LIST = ['flac24bit', 'flac', '320k'] as const
-type TryQualityType = typeof TRY_QUALITYS_LIST[number]
 export const getPlayQuality = (highQuality: LX.Quality, musicInfo: LX.Music.MusicInfoOnline): LX.Quality => {
-  let type: LX.Quality = '128k'
-  if (TRY_QUALITYS_LIST.includes(highQuality as TryQualityType)) {
-    let list = qualityList.value[musicInfo.source]
-
-    let t = TRY_QUALITYS_LIST
-      .slice(TRY_QUALITYS_LIST.indexOf(highQuality as TryQualityType))
-      .find(q => musicInfo.meta._qualitys[q] && list?.includes(q))
-
-    if (t) type = t
-  }
-  return type
+  return selectPlaybackQuality(
+    highQuality,
+    musicInfo,
+    qualityList.value[musicInfo.source] ?? [],
+  ) ?? '128k'
 }
 
 export const getOnlineOtherSourceMusicUrl = async({ musicInfos, quality, onToggleSource, isRefresh, retryedSource = [] }: {
@@ -279,8 +277,12 @@ export const getOnlineOtherSourceMusicUrl = async({ musicInfos, quality, onToggl
     if (retryedSource.includes(musicInfo.source)) continue
     retryedSource.push(musicInfo.source)
     if (!assertApiSupport(musicInfo.source)) continue
-    itemQuality = quality ?? getPlayQuality(appSetting['player.playQuality'], musicInfo)
-    if (!musicInfo.meta._qualitys[itemQuality]) continue
+    itemQuality = selectPlaybackQuality(
+      quality ?? appSetting['player.playQuality'],
+      musicInfo,
+      qualityList.value[musicInfo.source] ?? [],
+    )
+    if (!itemQuality) continue
 
     console.log('try toggle to: ', musicInfo.source, musicInfo.name, musicInfo.singer, musicInfo.interval)
     onToggleSource(musicInfo)
@@ -325,6 +327,7 @@ export const handleGetOnlineMusicUrl = async({ musicInfo, quality, onToggleSourc
   isFromCache: boolean
 }> => {
   // console.log(musicInfo.source)
+  const candidateProvider = createOnlineCandidateProvider(musicInfo, findPlaybackCandidates)
   const targetQuality = quality ?? getPlayQuality(appSetting['player.playQuality'], musicInfo)
 
   let reqPromise
@@ -340,7 +343,7 @@ export const handleGetOnlineMusicUrl = async({ musicInfo, quality, onToggleSourc
     if (!allowToggleSource || err.message == requestMsg.tooManyRequests) throw err
     onToggleSource()
     // eslint-disable-next-line @typescript-eslint/promise-function-async
-    return getOtherSource(musicInfo).then(otherSource => {
+    return candidateProvider.getMatched().then(otherSource => {
       console.log('find otherSource', otherSource)
       if (otherSource.length) {
         return getOnlineOtherSourceMusicUrl({

@@ -11,9 +11,15 @@ import {
 export interface Phase3CredentialEvidence {
   state: Phase3CheckState
   encrypted: boolean
-  vaultReadable: boolean
-  profileRepositoryReadable: boolean
-  activePlaintextSources: string[]
+  health: Phase3CredentialHealth
+}
+
+export interface Phase3CredentialHealth {
+  version: 1
+  status: 'ready'
+  vaultReadable: true
+  profileRepositoryReadable: true
+  plaintextSourcesAbsent: true
 }
 
 export interface Phase3PlaybackSmokeEvidence {
@@ -45,11 +51,26 @@ const hash = (value: string | null, field: string): string => {
   return value!
 }
 
+const hasFixedCredentialHealth = (value: unknown): value is Phase3CredentialHealth => {
+  try {
+    if (value == null || typeof value != 'object' || Array.isArray(value) ||
+      Object.getPrototypeOf(value) != Object.prototype) return false
+    const health = value as Record<string, unknown>
+    const keys = Reflect.ownKeys(health)
+    return keys.length == 5 && keys.every(key => typeof key == 'string' && [
+      'version', 'status', 'vaultReadable', 'profileRepositoryReadable', 'plaintextSourcesAbsent',
+    ].includes(key)) && health.version === 1 && health.status == 'ready' &&
+      health.vaultReadable === true && health.profileRepositoryReadable === true &&
+      health.plaintextSourcesAbsent === true
+  } catch {
+    return false
+  }
+}
+
 export const createPhase3AttestationCommand = (
   options: CreatePhase3AttestationCommandOptions,
 ): Phase3AttestationCommandV1 => {
-  if (!options.credential.vaultReadable || !options.credential.profileRepositoryReadable ||
-    options.credential.activePlaintextSources.length != 0) fail('credential')
+  if (!hasFixedCredentialHealth(options.credential.health)) fail('credential')
   if (options.credential.state == 'complete' && !options.credential.encrypted) fail('credential')
   if (options.prerequisites.version !== 1 || options.smoke.version !== 1) fail('version')
   if (options.activity.sourceState != options.prerequisites.playbackActivity.state) fail('playback activity')
@@ -62,9 +83,11 @@ export const createPhase3AttestationCommand = (
         evidenceSha256: phase3Evidence('credentials', {
           state: 'complete',
           encrypted: true,
-          vaultReadable: true,
-          profileRepositoryReadable: true,
-          activePlaintextSourceCount: 0,
+          healthVersion: 1,
+          healthStatus: 'ready',
+          vaultReadable: options.credential.health.vaultReadable,
+          profileRepositoryReadable: options.credential.health.profileRepositoryReadable,
+          plaintextSourcesAbsent: options.credential.health.plaintextSourcesAbsent,
         }),
       }
     : {

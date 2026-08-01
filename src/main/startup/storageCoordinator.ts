@@ -16,7 +16,7 @@ import type {
   Phase3AttestationPrerequisitesV1,
   Phase3CheckState,
 } from '../../common/storage/phase3'
-import type { Phase3PlaybackSmokeEvidence } from './phase3Attestation'
+import type { Phase3CredentialHealth, Phase3PlaybackSmokeEvidence } from './phase3Attestation'
 
 export type StorageRecoveryTarget =
   | {
@@ -92,7 +92,7 @@ export interface StorageCoordinatorDependencies {
   completePhase3Attestation: (input: {
     completedAtMs: number
     legacySourceState: Phase3CheckState
-    credentialCheck: CredentialStartupCheck
+    credentialHealth: Phase3CredentialHealth
     activity: Phase3ActivityEvidence | null
     prerequisites: Phase3AttestationPrerequisitesV1
     smoke: Phase3PlaybackSmokeEvidence
@@ -285,7 +285,7 @@ const verifyPhase2Storage = async(
 const runPhase3Gate = async(
   dependencies: StorageCoordinatorDependencies,
   legacySourceState: Phase3CheckState,
-  credentialCheck: CredentialStartupCheck,
+  credentialHealth: Phase3CredentialHealth,
   activity: Phase3ActivityEvidence | null,
 ): Promise<void> => {
   try {
@@ -297,7 +297,7 @@ const runPhase3Gate = async(
     await dependencies.completePhase3Attestation({
       completedAtMs: nowMs,
       legacySourceState,
-      credentialCheck,
+      credentialHealth,
       activity,
       prerequisites,
       smoke,
@@ -343,6 +343,19 @@ const credentialRecovery = (check: CredentialStartupCheck): RecoveryOutcome | un
       affectedPath: check.recoveryPath ?? null,
       diagnostics,
     },
+  }
+}
+
+const fixedCredentialHealth = (check: CredentialStartupCheck): Phase3CredentialHealth => {
+  if (!check.vaultReadable || !check.profileRepositoryReadable || check.activePlaintextSources.length != 0) {
+    throw errorWithCode('credential_startup_check_failed')
+  }
+  return {
+    version: 1,
+    status: 'ready',
+    vaultReadable: true,
+    profileRepositoryReadable: true,
+    plaintextSourcesAbsent: true,
   }
 }
 
@@ -406,11 +419,12 @@ export const createStorageCoordinator = (
           await dependencies.showRecovery(credentialOutcome)
           return credentialOutcome
         }
+        const credentialHealth = fixedCredentialHealth(credentialCheck)
 
         await verifyPhase2Storage(dependencies.verifyPhase2Storage, legacyData)
         if (shutdownRequested) return startupCancelled()
         const legacySourceState = legacyData.status == 'available' ? 'complete' : 'not-applicable'
-        await runPhase3Gate(dependencies, legacySourceState, credentialCheck, activityEvidence)
+        await runPhase3Gate(dependencies, legacySourceState, credentialHealth, activityEvidence)
         if (shutdownRequested) return startupCancelled()
         await dependencies.initSettings()
         if (shutdownRequested) return startupCancelled()

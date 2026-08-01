@@ -96,6 +96,13 @@ const canonical = value => {
 
 const sha256 = value => crypto.createHash('sha256').update(value).digest('hex')
 const notApplicableEvidence = name => sha256(canonical({ version: 1, name, state: 'not-applicable' }))
+const credentialHealth = {
+  version: 1,
+  status: 'ready',
+  vaultReadable: true,
+  profileRepositoryReadable: true,
+  plaintextSourcesAbsent: true,
+}
 
 const activityTables = [
   'track_snapshots',
@@ -213,6 +220,60 @@ describe('Phase 3 scoped attestation worker', () => {
     assert.equal(markerRow(db).completedAtMs, original.completedAtMs)
     assert.equal(markerRow(db).sourceSha256, original.sourceSha256)
   })
+
+  it('rejects byte-noncanonical immutable marker replay even when parsed details are equivalent', async() => {
+    const db = await createStore()
+    seedPrerequisites(db)
+    const repository = require(phase3Path)
+    repository.completePhase3Attestation(command())
+    const original = markerRow(db)
+    const parsed = JSON.parse(original.detailsJson)
+    const noncanonicalDetails = [
+      JSON.stringify({ version: parsed.version, checks: parsed.checks }),
+      JSON.stringify(parsed, null, 2),
+    ]
+
+    for (const detailsJson of noncanonicalDetails) {
+      assert.notEqual(detailsJson, original.detailsJson)
+      db.prepare('UPDATE migration_markers SET details_json = ? WHERE name = ?').run(detailsJson, original.name)
+      assert.throws(() => repository.completePhase3Attestation(command()), /phase.?3.*conflict/i)
+      assert.equal(markerRow(db).detailsJson, detailsJson)
+    }
+  })
+
+  it('rolls back a newly inserted marker when raw readback mismatches the requested timestamp', async() => {
+    const db = await createStore()
+    seedPrerequisites(db)
+    db.exec(`
+      CREATE TEMP TRIGGER phase3_inject_readback_mismatch
+      AFTER INSERT ON migration_markers
+      WHEN NEW.name = 'legacy_data_v1.cross_artifact_complete'
+      BEGIN
+        UPDATE migration_markers SET completed_at_ms = completed_at_ms + 1 WHERE name = NEW.name;
+      END
+    `)
+    const repository = require(phase3Path)
+
+    assert.throws(() => repository.completePhase3Attestation(command()), /phase.?3.*verification/i)
+    assert.equal(markerRow(db), null)
+  })
+
+  it('rolls back a newly inserted marker when raw details readback is corrupt', async() => {
+    const db = await createStore()
+    seedPrerequisites(db)
+    db.exec(`
+      CREATE TEMP TRIGGER phase3_inject_readback_failure
+      AFTER INSERT ON migration_markers
+      WHEN NEW.name = 'legacy_data_v1.cross_artifact_complete'
+      BEGIN
+        UPDATE migration_markers SET details_json = '{"version":2}' WHERE name = NEW.name;
+      END
+    `)
+    const repository = require(phase3Path)
+
+    assert.throws(() => repository.completePhase3Attestation(command()), /phase.?3.*(verification|conflict|corrupt)/i)
+    assert.equal(markerRow(db), null)
+  })
 })
 
 describe('rollback-safe typed playback smoke', () => {
@@ -285,6 +346,34 @@ describe('Phase 3 startup ordering and sanitized inputs', () => {
     ])
   })
 
+  it('passes only fixed credential health to the Phase 3 gate', async() => {
+    const calls = []
+    const rawSource = 'PRIVATE-credential-source-path'
+    const deps = dependencies(calls)
+    deps.checkCredentials = async() => ({
+      vaultReadable: true,
+      profileRepositoryReadable: true,
+      activePlaintextSources: [],
+      recoveryPath: rawSource,
+      rawSource,
+    })
+    deps.completePhase3Attestation = async value => {
+      assert.equal('credentialCheck' in value, false)
+      assert.deepEqual(value.credentialHealth, {
+        version: 1,
+        status: 'ready',
+        vaultReadable: true,
+        profileRepositoryReadable: true,
+        plaintextSourcesAbsent: true,
+      })
+      assert.equal(JSON.stringify(value).includes(rawSource), false)
+      calls.push('attestation')
+    }
+
+    const { createStorageCoordinator } = require(coordinatorPath)
+    assert.deepEqual(await createStorageCoordinator(deps).start(), { status: 'ready', schemaVersion: 6 })
+  })
+
   it('fails with a stable code and starts no settings or modules after every gate failure', async() => {
     for (const failed of ['interruptStalePlaybackSessions', 'runPlaybackTypedSmoke', 'getPhase3AttestationPrerequisites', 'completePhase3Attestation']) {
       const calls = []
@@ -304,7 +393,7 @@ describe('Phase 3 startup ordering and sanitized inputs', () => {
     const { createPhase3AttestationCommand } = require(inputPath)
     const base = {
       completedAtMs: 1_000,
-      credential: { state: 'not-applicable', encrypted: false, vaultReadable: true, profileRepositoryReadable: true, activePlaintextSources: [] },
+      credential: { state: 'not-applicable', encrypted: false, health: credentialHealth },
       prerequisites: {
         version: 1,
         accountProfile: { markerName: 'legacy_data_v1.account_profiles', state: 'not-applicable', evidenceSha256: hashes['1'] },
@@ -339,7 +428,7 @@ describe('Phase 3 startup ordering and sanitized inputs', () => {
     const { createPhase3AttestationCommand } = require(inputPath)
     const base = {
       completedAtMs: 1_000,
-      credential: { state: 'not-applicable', encrypted: false, vaultReadable: true, profileRepositoryReadable: true, activePlaintextSources: [] },
+      credential: { state: 'not-applicable', encrypted: false, health: credentialHealth },
       prerequisites: {
         version: 1,
         accountProfile: { markerName: 'legacy_data_v1.account_profiles', state: 'not-applicable', evidenceSha256: hashes['1'] },

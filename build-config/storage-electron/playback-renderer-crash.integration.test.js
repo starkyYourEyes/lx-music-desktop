@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict')
 const { fork } = require('node:child_process')
+const { EventEmitter } = require('node:events')
 const fs = require('node:fs')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
@@ -29,12 +30,9 @@ const dbService = require('../../src/main/worker/dbService/db.ts')
 const repository = require('../../src/main/worker/dbService/modules/playback/index.ts')
 const roots = []
 const children = new Set()
+const exitedChildren = new WeakSet()
+const closedChildren = new WeakSet()
 const startedAtMs = Date.parse('2026-08-01T00:00:00.000Z')
-
-const timeoutAfter = (timeoutMs, code) => new Promise((resolve, reject) => {
-  const timer = setTimeout(() => reject(new Error(code)), timeoutMs)
-  timer.unref?.()
-})
 
 const waitForMessage = (child, predicate, timeoutMs = 3_000) => new Promise((resolve, reject) => {
   let timer
@@ -60,8 +58,8 @@ const waitForMessage = (child, predicate, timeoutMs = 3_000) => new Promise((res
 })
 
 const awaitExitAndClose = (child, timeoutMs = 3_000) => new Promise((resolve, reject) => {
-  let exited = child.exitCode != null
-  let closed = false
+  let exited = child.exitCode != null || child.signalCode != null || exitedChildren.has(child)
+  let closed = closedChildren.has(child)
   let timer
   const cleanup = () => {
     clearTimeout(timer)
@@ -72,23 +70,47 @@ const awaitExitAndClose = (child, timeoutMs = 3_000) => new Promise((resolve, re
   const finish = () => {
     if (!exited || !closed) return
     cleanup()
-    children.delete(child)
     resolve({ exitCode: child.exitCode, signalCode: child.signalCode })
   }
-  const onExit = () => { exited = true; finish() }
-  const onClose = () => { closed = true; finish() }
+  const onExit = () => { exited = true; exitedChildren.add(child); finish() }
+  const onClose = () => { closed = true; closedChildren.add(child); finish() }
   const onError = error => { cleanup(); reject(error) }
   child.on('exit', onExit)
   child.on('close', onClose)
   child.on('error', onError)
+  if (exited && closed) { finish(); return }
   timer = setTimeout(() => { cleanup(); reject(new Error('child_exit_timeout')) }, timeoutMs)
-  timer.unref?.()
 })
 
+const signalAndWait = async(child, signal, timeoutMs) => {
+  const completed = awaitExitAndClose(child, timeoutMs)
+  try {
+    child.kill(signal)
+  } catch (error) {
+    completed.catch(() => {})
+    throw error
+  }
+  return completed
+}
+
+const terminateChild = async(child, { gracefulTimeoutMs = 1_000, forcedTimeoutMs = 1_000 } = {}) => {
+  if (exitedChildren.has(child) && closedChildren.has(child)) {
+    return { exitCode: child.exitCode, signalCode: child.signalCode }
+  }
+  try {
+    return await signalAndWait(child, 'SIGTERM', gracefulTimeoutMs)
+  } catch {}
+  try {
+    return await signalAndWait(child, 'SIGKILL', forcedTimeoutMs)
+  } catch {
+    throw new Error('cleanup_child_timeout')
+  }
+}
+
 const killAndWait = async(child, timeoutMs = 3_000) => {
-  const exited = awaitExitAndClose(child, timeoutMs)
-  assert.equal(child.kill(), true)
-  return exited
+  const result = await terminateChild(child, { gracefulTimeoutMs: timeoutMs, forcedTimeoutMs: timeoutMs })
+  children.delete(child)
+  return result
 }
 
 const spawnRecorder = async(root, options = {}) => {
@@ -107,6 +129,8 @@ const spawnRecorder = async(root, options = {}) => {
     },
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
   })
+  child.once('exit', () => exitedChildren.add(child))
+  child.once('close', () => closedChildren.add(child))
   children.add(child)
   if (!options.suppressReady) {
     assert.deepEqual(await waitForMessage(child, message => message?.type == 'ready'), { type: 'ready', version: 1 })
@@ -125,8 +149,9 @@ const sendCommand = async(child, action, expectedType = 'durable', timeoutMs = 3
 const acknowledge = async(child, durable, ack) => {
   const id = ++requestId
   const pending = waitForMessage(child, message => message?.type == 'ack' && message.requestId == id)
-  child.send({ type: 'ack', version: 1, requestId: id, ack })
+  child.send({ type: 'ack', version: 1, requestId: id, durableRequestId: durable.requestId, ack })
   const result = await pending
+  assert.equal(result.durableRequestId, durable.requestId)
   assert.equal(result.checkpointSeq, ack.mode == 'activity' ? ack.ack.checkpointSeq : ack.checkpointSeq)
   return result
 }
@@ -176,16 +201,44 @@ const withoutInterruption = value => ({
   playback_sessions: value.playback_sessions.map(row => ({ ...row, state: 'playing', ended_at_ms: null })),
 })
 
-afterEach(async() => {
-  for (const child of [...children]) {
-    try {
-      if (child.exitCode == null && child.signalCode == null) {
-        await Promise.race([killAndWait(child, 1_000), timeoutAfter(1_100, 'cleanup_child_timeout')])
-      }
-    } catch {}
+const terminationDouble = ({ exitOnSignal = null } = {}) => {
+  const child = new EventEmitter()
+  child.exitCode = null
+  child.signalCode = null
+  child.signals = []
+  child.kill = signal => {
+    const actual = signal ?? 'SIGTERM'
+    child.signals.push(actual)
+    if (actual == exitOnSignal) {
+      queueMicrotask(() => {
+        child.signalCode = actual
+        child.emit('exit', null, actual)
+        child.emit('close', null, actual)
+      })
+    }
+    return true
   }
-  try { dbService.close() } catch {}
-  for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true })
+  return child
+}
+
+const cleanupCrashResources = async({
+  activeChildren = children,
+  cleanupRoots = roots,
+  closeDatabase = () => dbService.close(),
+  gracefulTimeoutMs = 1_000,
+  forcedTimeoutMs = 1_000,
+} = {}) => {
+  for (const child of [...activeChildren]) {
+    await terminateChild(child, { gracefulTimeoutMs, forcedTimeoutMs })
+    activeChildren.delete(child)
+  }
+  await closeDatabase()
+  for (const root of cleanupRoots) fs.rmSync(root, { recursive: true, force: true })
+  cleanupRoots.splice(0)
+}
+
+afterEach(async() => {
+  await cleanupCrashResources()
 })
 
 describe('renderer crash checkpoint durability', () => {
@@ -207,6 +260,117 @@ describe('renderer crash checkpoint durability', () => {
     assert.deepEqual(error, { type: 'error', version: 1, requestId: 0, code: 'invalid_command_message' })
     await assert.rejects(sendCommand(child, { type: 'advance-only', cumulativePlayedMs: 1 }, 'durable', 50), /child_message_timeout/)
     await killAndWait(child)
+  })
+
+  it('requires a durable request correlation before accepting an acknowledgement', async() => {
+    const root = createRoot()
+    await openStore(root)
+    const child = await spawnRecorder(root)
+    const durable = await sendCommand(child, {
+      type: 'start',
+      playbackGroupUuid: group('10'),
+      occurredAtMs: startedAtMs,
+    })
+    const ack = commitDurable(durable)
+    const id = ++requestId
+    const response = waitForMessage(child, message => message?.type == 'error' || message?.requestId == id)
+    child.send({ type: 'ack', version: 1, requestId: id, ack })
+    assert.deepEqual(await response, { type: 'error', version: 1, requestId: id, code: 'invalid_ack_message' })
+  })
+
+  it('rejects malformed acknowledgement payloads through production validation', async() => {
+    const root = createRoot()
+    await openStore(root)
+    const child = await spawnRecorder(root)
+    const durable = await sendCommand(child, {
+      type: 'start',
+      playbackGroupUuid: group('11'),
+      occurredAtMs: startedAtMs,
+    })
+    const id = ++requestId
+    const response = waitForMessage(child, message => message?.type == 'error')
+    child.send({ type: 'ack', version: 1, requestId: id, durableRequestId: durable.requestId, ack: { mode: 'activity', ack: {} } })
+    assert.deepEqual(await response, { type: 'error', version: 1, requestId: id, code: 'invalid_ack_payload' })
+  })
+
+  it('rejects a valid acknowledgement for the wrong playback group', async() => {
+    const root = createRoot()
+    await openStore(root)
+    const child = await spawnRecorder(root)
+    const durable = await sendCommand(child, {
+      type: 'start',
+      playbackGroupUuid: group('12'),
+      occurredAtMs: startedAtMs,
+    })
+    const ack = commitDurable(durable)
+    ack.ack.playbackGroupUuid = group('13')
+    const id = ++requestId
+    const response = waitForMessage(child, message => message?.type == 'error')
+    child.send({ type: 'ack', version: 1, requestId: id, durableRequestId: durable.requestId, ack })
+    assert.deepEqual(await response, { type: 'error', version: 1, requestId: id, code: 'ack_group_mismatch' })
+  })
+
+  it('rejects a valid acknowledgement for the wrong durable sequence', async() => {
+    const root = createRoot()
+    await openStore(root)
+    const child = await spawnRecorder(root)
+    const durable = await sendCommand(child, {
+      type: 'start',
+      playbackGroupUuid: group('14'),
+      occurredAtMs: startedAtMs,
+    })
+    const ack = commitDurable(durable)
+    ack.ack.checkpointSeq++
+    const id = ++requestId
+    const response = waitForMessage(child, message => message?.type == 'error')
+    child.send({ type: 'ack', version: 1, requestId: id, durableRequestId: durable.requestId, ack })
+    assert.deepEqual(await response, { type: 'error', version: 1, requestId: id, code: 'ack_sequence_mismatch' })
+  })
+
+  it('rejects stale and unrelated durable request correlation', async() => {
+    const root = createRoot()
+    await openStore(root)
+    const child = await spawnRecorder(root)
+    const durable = await sendCommand(child, {
+      type: 'start',
+      playbackGroupUuid: group('15'),
+      occurredAtMs: startedAtMs,
+    })
+    const ack = commitDurable(durable)
+    const retry = await sendCommand(child, { type: 'retry' })
+    assert.equal(JSON.stringify(retry.command), JSON.stringify(durable.command))
+
+    for (const durableRequestId of [durable.requestId, retry.requestId + 100]) {
+      const id = ++requestId
+      const response = waitForMessage(child, message => message?.type == 'error')
+      child.send({ type: 'ack', version: 1, requestId: id, durableRequestId, ack })
+      assert.deepEqual(await response, { type: 'error', version: 1, requestId: id, code: 'ack_durable_mismatch' })
+    }
+  })
+
+  it('escalates a timed-out graceful termination and waits for forced exit and close', async() => {
+    const child = terminationDouble({ exitOnSignal: 'SIGKILL' })
+    await terminateChild(child, { gracefulTimeoutMs: 10, forcedTimeoutMs: 50 })
+    assert.deepEqual(child.signals, ['SIGTERM', 'SIGKILL'])
+  })
+
+  it('preserves roots and surfaces cleanup failure while a child may still be alive', async() => {
+    const root = fs.mkdtempSync(path.join(taskRoot, 'cleanup-failure-'))
+    const child = terminationDouble()
+    let databaseClosed = false
+    try {
+      await assert.rejects(async() => cleanupCrashResources({
+        activeChildren: new Set([child]),
+        cleanupRoots: [root],
+        closeDatabase: () => { databaseClosed = true },
+        gracefulTimeoutMs: 10,
+        forcedTimeoutMs: 10,
+      }), /cleanup_child_timeout/)
+      assert.equal(databaseClosed, false)
+      assert.equal(fs.existsSync(root), true)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('loses exactly 14,999 ms after sequence 2 is durable and the renderer is killed', async() => {

@@ -1,6 +1,6 @@
 import type { MigrationMarker } from '../../migrations/types'
 import { getDB } from '../../db'
-import { getMigrationMarker, putMigrationMarker } from '../../migrate'
+import { getMigrationMarker } from '../../migrate'
 import {
   createPhase3Manifest,
   parsePhase3AttestationCommand,
@@ -14,6 +14,13 @@ import {
 } from '../../../../../common/storage/phase3'
 
 const CROSS_ARTIFACT_MARKER_NAME = 'legacy_data_v1.cross_artifact_complete'
+
+interface RawCrossMarkerRow {
+  name: unknown
+  sourceSha256: unknown
+  completedAtMs: unknown
+  detailsJson: unknown
+}
 
 const phase3Error = (code: string, message: string): Error & { code: string } => {
   const error = new Error(message) as Error & { code: string }
@@ -56,13 +63,32 @@ const assertPrerequisite = (
   }
 }
 
-const readCrossMarker = (): MigrationMarker | null => {
-  try {
-    return getMigrationMarker(getDB(), CROSS_ARTIFACT_MARKER_NAME)
-  } catch {
+const readCrossMarker = (db: ReturnType<typeof getDB>): MigrationMarker | null => {
+  const row = db.prepare<[string]>(`
+    SELECT name, source_sha256 AS sourceSha256, completed_at_ms AS completedAtMs,
+      details_json AS detailsJson
+    FROM migration_markers WHERE name = ?
+  `).get(CROSS_ARTIFACT_MARKER_NAME) as RawCrossMarkerRow | undefined
+  if (row == null) return null
+  if (row.name !== CROSS_ARTIFACT_MARKER_NAME || typeof row.sourceSha256 != 'string' ||
+    !Number.isSafeInteger(row.completedAtMs) || (row.completedAtMs as number) < 0 ||
+    typeof row.detailsJson != 'string') {
     throw phase3Error('phase3_attestation_conflict', 'Phase 3 attestation marker is corrupt')
   }
+  return {
+    name: CROSS_ARTIFACT_MARKER_NAME,
+    sourceSha256: row.sourceSha256,
+    completedAtMs: row.completedAtMs as number,
+    detailsJson: row.detailsJson,
+  }
 }
+
+const matchesImmutableMarker = (actual: MigrationMarker, expected: MigrationMarker): boolean =>
+  actual.name == expected.name && actual.sourceSha256 == expected.sourceSha256 &&
+  actual.detailsJson == expected.detailsJson
+
+const matchesExactMarker = (actual: MigrationMarker, expected: MigrationMarker): boolean =>
+  matchesImmutableMarker(actual, expected) && actual.completedAtMs == expected.completedAtMs
 
 export const completePhase3Attestation = (value: unknown): MigrationMarker => {
   let command
@@ -86,26 +112,40 @@ export const completePhase3Attestation = (value: unknown): MigrationMarker => {
     completedAtMs: command.completedAtMs,
     detailsJson: phase3ManifestJson(manifest),
   }
-  const existing = readCrossMarker()
-  if (existing != null) {
-    if (existing.name != expected.name || existing.sourceSha256 != expected.sourceSha256 ||
-      existing.detailsJson != expected.detailsJson) {
-      throw phase3Error('phase3_attestation_conflict', 'Phase 3 attestation marker conflict')
+  const db = getDB()
+  return db.transaction(() => {
+    let existing: MigrationMarker | null
+    try {
+      existing = readCrossMarker(db)
+    } catch {
+      throw phase3Error('phase3_attestation_conflict', 'Phase 3 attestation marker is corrupt')
     }
-    return existing
-  }
+    if (existing != null) {
+      if (!matchesImmutableMarker(existing, expected)) {
+        throw phase3Error('phase3_attestation_conflict', 'Phase 3 attestation marker conflict')
+      }
+      return existing
+    }
 
-  try {
-    putMigrationMarker(getDB(), expected)
-  } catch {
-    throw phase3Error('phase3_attestation_write_failed', 'Phase 3 attestation marker write failed')
-  }
-  const stored = readCrossMarker()
-  if (stored == null || stored.name != expected.name || stored.sourceSha256 != expected.sourceSha256 ||
-    stored.completedAtMs != expected.completedAtMs || stored.detailsJson != expected.detailsJson) {
-    throw phase3Error('phase3_attestation_verification_failed', 'Phase 3 attestation marker verification failed')
-  }
-  return stored
+    try {
+      db.prepare(`
+        INSERT INTO migration_markers (name, source_sha256, completed_at_ms, details_json)
+        VALUES (?, ?, ?, ?)
+      `).run(expected.name, expected.sourceSha256, expected.completedAtMs, expected.detailsJson)
+    } catch {
+      throw phase3Error('phase3_attestation_write_failed', 'Phase 3 attestation marker write failed')
+    }
+    let stored: MigrationMarker | null
+    try {
+      stored = readCrossMarker(db)
+    } catch {
+      throw phase3Error('phase3_attestation_verification_failed', 'Phase 3 attestation marker verification failed')
+    }
+    if (stored == null || !matchesExactMarker(stored, expected)) {
+      throw phase3Error('phase3_attestation_verification_failed', 'Phase 3 attestation marker verification failed')
+    }
+    return stored
+  }).immediate()
 }
 
 export type {

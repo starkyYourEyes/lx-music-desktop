@@ -24,10 +24,11 @@ import { setProxyByHost } from '@common/utils/request'
 import { getWebContentsNavigationDecision } from '@main/utils/webContentsNavigationGuard'
 import { getPortableUserDataPaths, migrateLegacyUserData } from './migration/legacyUserData'
 import { PROJECT_IDENTITY } from '@common/projectIdentity'
-import type { StorageStartupOutcome, CredentialStartupCheck } from './startup/storageCoordinator'
+import type { StorageStartupOutcome } from './startup/storageCoordinator'
 import {
   createPhase3AttestationCommand,
   type Phase3ActivityEvidence,
+  type Phase3CredentialHealth,
   type Phase3PlaybackSmokeEvidence,
 } from './startup/phase3Attestation'
 import type { Phase3AttestationPrerequisitesV1 } from '../common/storage/phase3'
@@ -446,7 +447,7 @@ export const runPlaybackActivityMigration = async(
 export const completePhase3StartupAttestation = async(input: {
   completedAtMs: number
   legacySourceState: Phase3ActivityEvidence['sourceState']
-  credentialCheck: CredentialStartupCheck
+  credentialHealth: Phase3CredentialHealth
   activity: Phase3ActivityEvidence | null
   prerequisites: Phase3AttestationPrerequisitesV1
   smoke: Phase3PlaybackSmokeEvidence
@@ -481,9 +482,7 @@ export const completePhase3StartupAttestation = async(input: {
     credential: {
       state: credentialState,
       encrypted: vault.mode == 'encrypted',
-      vaultReadable: input.credentialCheck.vaultReadable,
-      profileRepositoryReadable: input.credentialCheck.profileRepositoryReadable,
-      activePlaintextSources: [...input.credentialCheck.activePlaintextSources],
+      health: input.credentialHealth,
     },
     prerequisites: input.prerequisites,
     activity: input.activity,

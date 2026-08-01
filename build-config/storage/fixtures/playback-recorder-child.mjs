@@ -22,7 +22,13 @@ require.extensions['.ts'] = (module, filename) => {
 
 const dirname = path.dirname(fileURLToPath(import.meta.url))
 const reducerPath = path.resolve(dirname, '../../../src/renderer/core/playbackRecorder/reducer.ts')
+const validationPath = path.resolve(dirname, '../../../src/common/storage/playbackValidation.ts')
 const { createPlaybackRecorderState, reduce } = require(reducerPath)
+const {
+  parsePlaybackCheckpointAck,
+  parsePlaybackResumeAck,
+  parsePlaybackStartResult,
+} = require(validationPath)
 const allowedRoot = path.resolve(dirname, '../../../.superpowers/sdd/2026-07-29-playback-activity/tmp/task-11')
 
 const isContained = candidate => {
@@ -54,12 +60,14 @@ let state = createPlaybackRecorderState()
 let lastParentRequestId = 0
 let lastDurable = null
 let lastDurableBytes = null
+let lastDurableRequestId = null
 
 const durable = requestId => {
   const command = state.outbox[0]
   if (command == null) throw new Error('durable_command_missing')
   lastDurable = { type: 'durable', version: 1, requestId, command }
   lastDurableBytes = JSON.stringify(lastDurable.command)
+  lastDurableRequestId = requestId
   send(lastDurable)
 }
 
@@ -127,25 +135,70 @@ const retry = (requestId, action) => {
   const input = exactRecord(action, ['type'])
   if (input == null || input.type != 'retry' || lastDurable == null || lastDurableBytes == null) throw new Error('invalid_retry_command')
   if (JSON.stringify(lastDurable.command) != lastDurableBytes) throw new Error('durable_request_changed')
-  send({ ...lastDurable, requestId })
+  lastDurable = { ...lastDurable, requestId }
+  lastDurableRequestId = requestId
+  send(lastDurable)
 }
 
 const acknowledge = message => {
-  const input = exactRecord(message, ['type', 'version', 'requestId', 'ack'])
-  if (input == null || input.type != 'ack' || input.version !== 1 || !safeRequestId(input.requestId)) throw new Error('invalid_ack_message')
+  const input = exactRecord(message, ['type', 'version', 'requestId', 'durableRequestId', 'ack'])
+  if (input == null || input.type != 'ack' || input.version !== 1 || !safeRequestId(input.requestId) ||
+    !safeRequestId(input.durableRequestId)) throw new Error('invalid_ack_message')
   if (input.requestId <= lastParentRequestId) throw new Error('invalid_ack_message')
   lastParentRequestId = input.requestId
+  if (input.durableRequestId != lastDurableRequestId) throw new Error('ack_durable_mismatch')
   const command = state.outbox[0]
-  if (command == null) throw new Error('unexpected_ack')
-  if (command.kind == 'start') state = reduce(state, { type: 'start-result', result: input.ack })
-  else state = reduce(state, { type: 'acknowledged', ack: input.ack })
-  send({ type: 'ack', version: 1, requestId: input.requestId, checkpointSeq: state.checkpointSeq })
+  if (command == null || lastDurable == null || command !== lastDurable.command) throw new Error('unexpected_ack')
+  try {
+    switch (command.kind) {
+      case 'start': {
+        const result = parsePlaybackStartResult(input.ack)
+        if (result.mode != 'activity') throw new Error('ack_kind_mismatch')
+        if (result.ack.playbackGroupUuid != command.request.playbackGroupUuid) throw new Error('ack_group_mismatch')
+        if (result.ack.checkpointSeq != 1) throw new Error('ack_sequence_mismatch')
+        state = reduce(state, { type: 'start-result', result })
+        break
+      }
+      case 'commit': {
+        const ack = parsePlaybackCheckpointAck(input.ack)
+        if (ack.playbackGroupUuid != command.request.checkpoint.playbackGroupUuid) throw new Error('ack_group_mismatch')
+        if (ack.checkpointSeq != command.request.checkpoint.checkpointSeq) throw new Error('ack_sequence_mismatch')
+        state = reduce(state, { type: 'acknowledged', ack })
+        break
+      }
+      case 'resume': {
+        const ack = parsePlaybackResumeAck(input.ack)
+        if (ack.playbackGroupUuid != command.request.playbackGroupUuid) throw new Error('ack_group_mismatch')
+        if (ack.checkpointSeq != command.request.checkpointSeq) throw new Error('ack_sequence_mismatch')
+        state = reduce(state, { type: 'acknowledged', ack })
+        break
+      }
+      case 'preplay_failure': {
+        const ack = parsePlaybackCheckpointAck(input.ack)
+        if (ack.playbackGroupUuid != command.request.playbackGroupUuid) throw new Error('ack_group_mismatch')
+        if (ack.checkpointSeq != 1) throw new Error('ack_sequence_mismatch')
+        state = reduce(state, { type: 'acknowledged', ack })
+        break
+      }
+    }
+  } catch (error) {
+    if (error instanceof Error && /^ack_[a-z0-9_]+$/.test(error.message)) throw error
+    throw new Error('invalid_ack_payload')
+  }
+  send({
+    type: 'ack',
+    version: 1,
+    requestId: input.requestId,
+    durableRequestId: input.durableRequestId,
+    checkpointSeq: state.checkpointSeq,
+  })
 }
 
 process.on('message', message => {
   let requestId = 0
   try {
-    if (exactRecord(message, ['type', 'version', 'requestId', 'ack']) != null && message.type == 'ack') {
+    if (message != null && typeof message == 'object' && message.type == 'ack') {
+      if (safeRequestId(message.requestId)) requestId = message.requestId
       acknowledge(message)
       return
     }

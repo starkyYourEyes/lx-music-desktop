@@ -11,6 +11,16 @@ export type PlaybackSkipReason =
   | 'load_timeout' | 'buffer_timeout' | 'queue_removed'
 export type PlaybackEndReason = PlaybackSkipReason | 'natural_end' | 'day_boundary' | 'statistics_clear'
 
+export interface PlaybackSelectionIntent {
+  startReason: PlaybackStartReason
+}
+
+export interface PlaybackSeekIntent {
+  origin: PlaybackSeekOrigin
+  fromMs: number
+  toMs: number
+}
+
 export interface PlaybackCheckpointV1 {
   playbackGroupUuid: string
   checkpointSeq: number
@@ -69,6 +79,8 @@ export type PlaybackFactV1 =
     recoverable: boolean
     attempt: number
   }
+
+export type PlaybackErrorIntent = Omit<Extract<PlaybackFactV1, { type: 'error' }>, 'version' | 'type'>
 
 export interface PlaybackPreplayFailureV1 {
   version: 1

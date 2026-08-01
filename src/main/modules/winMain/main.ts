@@ -130,6 +130,8 @@ export const createWindow = () => {
 }
 
 export const isExistWindow = (): boolean => !!browserWindow
+export const isRendererAlive = (): boolean =>
+  browserWindow != null && !browserWindow.isDestroyed() && !browserWindow.webContents.isDestroyed()
 export const isShowWindow = (): boolean => {
   if (!browserWindow) return false
   return browserWindow.isVisible() && (isWin ? true : browserWindow.isFocused())

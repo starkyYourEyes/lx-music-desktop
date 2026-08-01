@@ -142,6 +142,7 @@ export default () => {
         isTempPlay: true,
         clearTempList: true,
         startTime: remoteProgress,
+        startReason: 'remote',
       })
     }
 

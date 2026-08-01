@@ -131,6 +131,8 @@ const modules = {
     playback_recent_get: 'playback_recent_get',
     playback_listening_get: 'playback_listening_get',
     playback_resume_get: 'playback_resume_get',
+    storage_shutdown_flush_request: 'storage_shutdown_flush_request',
+    storage_shutdown_flush_ack: 'storage_shutdown_flush_ack',
     get_sound_effect_eq_preset: 'get_sound_effect_eq_preset',
     save_sound_effect_eq_preset: 'save_sound_effect_eq_preset',
     get_sound_effect_convolution_preset: 'get_sound_effect_convolution_preset',

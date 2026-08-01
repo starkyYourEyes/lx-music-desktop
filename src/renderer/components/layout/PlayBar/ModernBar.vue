@@ -173,7 +173,7 @@ export default {
       isTrashingPrivateFm.value = true
       try {
         await trashNeteasePrivateFmMusic(currentMusicInfo)
-        await playNext({ automatic: true, reason: 'dislike' })
+        await playNext({ automatic: true, reason: 'dislike', startReason: 'auto' })
       } catch (err) {
         console.warn('Trash private FM music failed:', err)
       } finally {

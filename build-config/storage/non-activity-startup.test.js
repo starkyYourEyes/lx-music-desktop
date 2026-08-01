@@ -393,19 +393,21 @@ describe('non-activity startup gate', () => {
     const { Store } = loadSourceModule(storePath)
     const { createDataHandlers } = loadSourceModule(dataHandlerPath)
     const store = new Store(dataJsonPath)
-    const handlers = createDataHandlers(store)
+    const handlers = createDataHandlers(store, {
+      getPlaybackActivityMigrationMarker: async() => null,
+    })
     const expectedActivity = {
       playInfo: { id: 'next-song', progress: 12 },
       recentPlayList: [{ id: 'recent-next' }],
       listeningTimeStats: { totalSeconds: 20 },
     }
     for (const [activityKey, value] of Object.entries(expectedActivity)) {
-      handlers.set({ path: activityKey, data: value })
+      await handlers.set({ path: activityKey, data: value })
     }
     await store.flush()
 
     for (const [activityKey, value] of Object.entries(expectedActivity)) {
-      assert.deepEqual(handlers.get(activityKey), value)
+      assert.deepEqual(await handlers.get(activityKey), value)
     }
     assert.deepEqual(JSON.parse(fs.readFileSync(dataJsonPath, 'utf8')), expectedActivity)
     assert.equal(fs.readFileSync(listeningTimePath, 'utf8'), '{"today":19}')

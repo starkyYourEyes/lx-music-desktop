@@ -62,13 +62,13 @@ export default {
   name: 'SettingListeningTime',
   setup() {
     const todayKey = computed(() => getLocalDateKey())
-    const todaySeconds = computed(() => listeningTimeStats.daily[todayKey.value] ?? 0)
+    const todaySeconds = computed(() => (listeningTimeStats.daily.find(item => item.localDay == todayKey.value)?.playedMs ?? 0) / 1000)
     const weekItems = computed(() => {
       const days = Array.from({ length: 7 }, (_, index) => {
         const date = new Date()
         date.setDate(date.getDate() - (6 - index))
         const key = getLocalDateKey(date)
-        const seconds = listeningTimeStats.daily[key] ?? 0
+        const seconds = (listeningTimeStats.daily.find(item => item.localDay == key)?.playedMs ?? 0) / 1000
         return {
           key,
           label: getDayLabel(date),
@@ -86,22 +86,22 @@ export default {
     const ringStyle = computed(() => ({
       '--progress': `${todayPercent.value * 3.6}deg`,
     }))
-    const topSongs = computed(() => Object.entries(listeningTimeStats.songs)
-      .map(([key, song]) => ({
-        key,
+    const topSongs = computed(() => listeningTimeStats.tracks
+      .map(song => ({
+        key: `${song.source}:${song.sourceTrackId}`,
         name: song.name,
         singer: song.singer,
-        seconds: song.seconds,
-        time: formatListeningTime(song.seconds),
+        seconds: song.playedMs / 1000,
+        time: formatListeningTime(song.playedMs / 1000),
       }))
       .sort((a, b) => b.seconds - a.seconds)
       .slice(0, 5))
 
     return {
-      totalLabel: computed(() => formatListeningTime(listeningTimeStats.totalSeconds)),
+      totalLabel: computed(() => formatListeningTime(listeningTimeStats.total.playedMs / 1000)),
       todayLabel: computed(() => formatListeningTime(todaySeconds.value)),
       weekLabel: computed(() => formatListeningTime(weekSeconds.value)),
-      songCount: computed(() => Object.keys(listeningTimeStats.songs).length),
+      songCount: computed(() => listeningTimeStats.tracks.length),
       todayPercent,
       ringStyle,
       weekItems,

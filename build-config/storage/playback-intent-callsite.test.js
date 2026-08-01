@@ -134,6 +134,7 @@ const loadPlayerActions = ({
   autoSkipOnError = true,
   eventLog = [],
   getMusicUrl = async() => 'url',
+  requestMsg = {},
 } = {}) => {
   const first = { id: 'first', source: 'local', name: 'First', singer: 'Singer', meta: {} }
   const second = { id: 'second', source: 'local', name: 'Second', singer: 'Singer', meta: {} }
@@ -142,13 +143,14 @@ const loadPlayerActions = ({
   const playInfo = { playerListId: 'list', playerPlayIndex: playerIndex, playIndex: playerIndex }
   const playMusicInfo = { musicInfo: initialMusic, listId: 'list', isTempPlay: false }
   const musicInfo = { ...initialMusic }
-  const setPlayMusicInfo = (listId, musicInfo, isTempPlay = false) => {
+  const setPlayMusicInfo = (listId, musicInfo, isTempPlay = false, selectionIntent) => {
     eventLog.push(['setPlayMusicInfo', listId, musicInfo?.id ?? null])
     playMusicInfo.listId = listId
     playMusicInfo.musicInfo = musicInfo
     playMusicInfo.isTempPlay = isTempPlay
     playInfo.playerPlayIndex = list.indexOf(musicInfo)
     playInfo.playIndex = playInfo.playerPlayIndex
+    if (musicInfo && selectionIntent) global.window.app_event.musicToggled(selectionIntent)
   }
 
   const actions = loadTsModule(path.join(rendererRoot, 'core/player/action.ts'), {
@@ -196,7 +198,7 @@ const loadPlayerActions = ({
     './utils': {
       filterList: async({ playerMusicInfo }) => ({ filteredList: list, playerIndex: list.indexOf(playerMusicInfo) }),
     },
-    '@renderer/utils/message': { requestMsg: {} },
+    '@renderer/utils/message': { requestMsg },
     '@renderer/utils/index': { getRandom: () => 1, toNewMusicInfo: value => value },
     '@renderer/store/list/action': { addListMusics() {}, removeListMusics() {} },
     '@renderer/store/list/state': { loveList: { id: 'love' } },
@@ -222,19 +224,62 @@ describe('typed playback intent callsites', () => {
     assert.doesNotMatch(source, /app_event\.setProgress\([^,\n)]*\)/)
   })
 
-  it('propagates typed advance and seek payloads through AppEvent', () => {
+  it('propagates typed selection, advance, seek, and error payloads through AppEvent', () => {
     const { AppEvent } = require('../../src/renderer/event/appEvent.ts')
     const event = new AppEvent()
+    const selections = []
     const advances = []
     const seeks = []
+    const seekFacts = []
+    const errors = []
+    event.on('musicToggled', intent => selections.push(intent))
     event.on('playbackAdvance', options => advances.push(options))
     event.on('setProgress', (...args) => seeks.push(args))
+    event.on('playbackSeek', intent => seekFacts.push(intent))
+    event.on('playbackError', error => errors.push(error))
 
+    event.musicToggled({ startReason: 'remote' })
     event.playbackAdvance({ automatic: true, reason: 'buffer_timeout' })
     event.setProgress(12, 'bar', 120)
+    event.playbackSeek({ origin: 'bar', fromMs: 10_000, toMs: 12_000 })
+    event.playbackError({ stage: 'decode', code: 3, recoverable: false, attempt: 2 })
 
+    assert.deepEqual(selections, [{ startReason: 'remote' }])
     assert.deepEqual(advances, [{ automatic: true, reason: 'buffer_timeout' }])
     assert.deepEqual(seeks, [[12, 'bar', 120]])
+    assert.deepEqual(seekFacts, [{ origin: 'bar', fromMs: 10_000, toMs: 12_000 }])
+    assert.deepEqual(errors, [{ stage: 'decode', code: 3, recoverable: false, attempt: 2 }])
+  })
+
+  it('propagates explicit select, restore, remote, and automatic start reasons through player actions', async() => {
+    const previousWindow = global.window
+    const appEvent = createEventHub()
+    const selections = []
+    appEvent.on('musicToggled', intent => selections.push(intent))
+    global.window = {
+      lx: { isPlayedStop: false, restorePlayInfo: null },
+      i18n: { t: value => value },
+      app_event: appEvent,
+    }
+
+    try {
+      const harness = loadPlayerActions({ autoSkipOnError: false })
+      harness.actions.playList('list', 1)
+      harness.actions.playList('list', 0, { automatic: false, reason: 'select', startReason: 'restore' })
+      harness.actions.playMusicByInfo(harness.second, { startReason: 'remote' })
+      await harness.actions.playNext({ automatic: true, reason: 'error', startReason: 'auto' })
+      await flushAsync()
+      await flushAsync()
+
+      assert.deepEqual(selections, [
+        { startReason: 'select' },
+        { startReason: 'restore' },
+        { startReason: 'remote' },
+        { startReason: 'auto' },
+      ])
+    } finally {
+      global.window = previousWindow
+    }
   })
 
   it('carries exact next, previous, dislike, and selection reasons through player actions', async() => {
@@ -279,7 +324,9 @@ describe('typed playback intent callsites', () => {
     const restoreConsole = muteExpectedConsoleOutput()
     const appEvent = createEventHub()
     const advances = []
+    const errors = []
     appEvent.on('playbackAdvance', options => advances.push(options))
+    appEvent.on('playbackError', error => errors.push(error))
     global.window = {
       lx: { isPlayedStop: false, restorePlayInfo: null },
       i18n: { t: value => value },
@@ -321,6 +368,13 @@ describe('typed playback intent callsites', () => {
         { automatic: true, reason: 'load_timeout' },
         { automatic: true, reason: 'error' },
       ])
+      assert.deepEqual(errors, [
+        { stage: 'load', code: null, recoverable: true, attempt: 1 },
+        { stage: 'load', code: null, recoverable: false, attempt: 2 },
+        { stage: 'load', code: 2, recoverable: true, attempt: 1 },
+        { stage: 'load', code: 2, recoverable: true, attempt: 2 },
+        { stage: 'load', code: 2, recoverable: false, attempt: 3 },
+      ])
     } finally {
       timers.restore()
       restoreConsole()
@@ -335,7 +389,9 @@ describe('typed playback intent callsites', () => {
     const restoreConsole = muteExpectedConsoleOutput()
     const appEvent = createEventHub()
     const advances = []
+    const errors = []
     appEvent.on('playbackAdvance', options => advances.push(options))
+    appEvent.on('playbackError', error => errors.push(error))
     global.window = {
       lx: { isPlayedStop: false, restorePlayInfo: null },
       i18n: { t: value => value },
@@ -368,6 +424,55 @@ describe('typed playback intent callsites', () => {
         { automatic: true, reason: 'load_timeout' },
         { automatic: true, reason: 'error' },
       ])
+      assert.deepEqual(errors, [
+        { stage: 'url', code: null, recoverable: false, attempt: 2 },
+      ])
+    } finally {
+      timers.restore()
+      restoreConsole()
+      global.window = previousWindow
+    }
+  })
+
+  it('reports the actual terminal URL attempt after repeated delayed retries', async() => {
+    const previousWindow = global.window
+    const timers = installFakeTimers()
+    const restoreConsole = muteExpectedConsoleOutput()
+    const appEvent = createEventHub()
+    const errors = []
+    appEvent.on('playbackError', error => errors.push(error))
+    global.window = {
+      lx: { isPlayedStop: false, restorePlayInfo: null },
+      i18n: { t: value => value },
+      app_event: appEvent,
+    }
+
+    try {
+      let attempts = 0
+      const tooManyRequests = 'too many requests'
+      const harness = loadPlayerActions({
+        autoSkipOnError: false,
+        requestMsg: { tooManyRequests, cancelRequest: 'cancel request' },
+        getMusicUrl: async() => {
+          attempts++
+          throw new Error(attempts <= 2 ? tooManyRequests : 'url failed')
+        },
+      })
+
+      harness.actions.setMusicUrl(harness.first)
+      await flushAsync()
+      await flushAsync()
+      timers.runNext(1000)
+      await flushAsync()
+      await flushAsync()
+      timers.runNext(1000)
+      await flushAsync()
+      await flushAsync()
+
+      assert.equal(attempts, 3)
+      assert.deepEqual(errors, [
+        { stage: 'url', code: null, recoverable: false, attempt: 3 },
+      ])
     } finally {
       timers.restore()
       restoreConsole()
@@ -383,9 +488,11 @@ describe('typed playback intent callsites', () => {
     const appEvent = createEventHub()
     const advances = []
     const seeks = []
+    const seekFacts = []
     let currentTime = 10
     appEvent.on('playbackAdvance', options => advances.push(options))
     appEvent.on('setProgress', (...args) => seeks.push(args))
+    appEvent.on('playbackSeek', intent => seekFacts.push(intent))
     global.window = {
       lx: { isPlayedStop: false, restorePlayInfo: null },
       i18n: { t: value => value },
@@ -432,6 +539,9 @@ describe('typed playback intent callsites', () => {
       assert.deepEqual(seeks, [
         [13, 'buffer_recovery', undefined],
         [13, 'buffer_recovery', undefined],
+      ])
+      assert.deepEqual(seekFacts, [
+        { origin: 'buffer_recovery', fromMs: 10_000, toMs: 13_000 },
       ])
 
       playProgress.maxPlayTime = 13.5
@@ -579,6 +689,7 @@ describe('typed playback intent callsites', () => {
           setStop() {},
         },
         './useMediaSessionInfo': noOpComposable,
+        './usePlaybackRecorder': noOpComposable,
         './usePlayProgress': noOpComposable,
         './usePlayEvent': noOpComposable,
         './useLyric': noOpComposable,

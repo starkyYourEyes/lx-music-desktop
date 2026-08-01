@@ -1,9 +1,12 @@
 import type {
   PlaybackCheckpointAckV1,
   PlaybackFactV1,
+  PlaybackPauseReason,
   PlaybackPreplayFailureV1,
   PlaybackRecorderCommandV1,
   PlaybackResumeAckV1,
+  PlaybackSeekOrigin,
+  PlaybackSkipReason,
   PlaybackStartCommandV1,
   PlaybackStartResultV1,
 } from '../../../common/storage/playback'
@@ -43,21 +46,21 @@ export type PlaybackRecorderAction =
   | { type: 'start-requested', request: PlaybackStartCommandV1 }
   | ({ type: 'native-playing', playbackRate: number } & TimedAction)
   | ({ type: 'sample' } & SampleAction)
-  | ({ type: 'pause', reason: Extract<PlaybackFactV1, { type: 'pause' }>['reason'] } & TimedAction)
-  | ({ type: 'resume', reason: Extract<PlaybackFactV1, { type: 'resume' }>['reason'], playbackRate: number } & TimedAction)
+  | ({ type: 'pause', reason: PlaybackPauseReason } & TimedAction)
+  | ({ type: 'resume', reason: PlaybackPauseReason, playbackRate: number } & TimedAction)
   | ({ type: 'buffering-start' } & TimedAction)
   | ({ type: 'buffering-end', playbackRate: number } & TimedAction)
   | ({ type: 'rate-changed', playbackRate: number } & TimedAction)
   | {
     type: 'seek-requested'
-    origin: Extract<PlaybackFactV1, { type: 'seek' }>['origin']
+    origin: PlaybackSeekOrigin
     fromMs: number
     toMs: number
     monotonicMs: number
     occurredAtMs: number
   }
   | ({ type: 'natural-end' } & TimedAction)
-  | ({ type: 'skip', reason: Extract<PlaybackFactV1, { type: 'skip' }>['reason'], automatic: boolean } & TimedAction)
+  | ({ type: 'skip', reason: PlaybackSkipReason, automatic: boolean } & TimedAction)
   | ({ type: 'teardown' } & TimedAction)
   | ({ type: 'periodic-checkpoint' } & TimedAction)
   | ({

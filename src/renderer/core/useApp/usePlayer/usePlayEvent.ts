@@ -25,9 +25,11 @@ export default () => {
 
       // 如果加载超时，则尝试刷新URL
       if (prevTimeoutId == musicInfo.id) {
+        window.app_event.playbackError({ stage: 'load', code: null, recoverable: false, attempt: 2 })
         prevTimeoutId = null
-        void playNext({ automatic: true, reason: 'load_timeout' })
+        void playNext({ automatic: true, reason: 'load_timeout', startReason: 'auto' })
       } else {
+        window.app_event.playbackError({ stage: 'load', code: null, recoverable: true, attempt: 1 })
         prevTimeoutId = musicInfo.id
         if (playMusicInfo.musicInfo) setMusicUrl(playMusicInfo.musicInfo, true)
       }
@@ -53,7 +55,7 @@ export default () => {
         setAllStatus('')
         return
       }
-      void playNext({ automatic: true, reason: 'error' })
+      void playNext({ automatic: true, reason: 'error', startReason: 'auto' })
     }, 5000)
   }
 
@@ -86,6 +88,13 @@ export default () => {
     clearLoadingTimeout()
     if (window.lx.isPlayedStop) return
     if (!isEmpty()) setStop()
+    const recoverable = playMusicInfo.musicInfo != null && errCode !== 1 && retryNum < 2
+    window.app_event.playbackError({
+      stage: errCode == 3 ? 'decode' : 'load',
+      code: errCode ?? null,
+      recoverable,
+      attempt: retryNum + 1,
+    })
     if (playMusicInfo.musicInfo && errCode !== 1 && retryNum < 2) { // 若音频URL无效则尝试刷新2次URL
       // console.log(this.retryNum)
       retryNum++
@@ -97,7 +106,7 @@ export default () => {
     if (appSetting['player.autoSkipOnError']) {
       if (document.hidden) {
         console.warn('error skip to next')
-        void playNext({ automatic: true, reason: 'error' })
+        void playNext({ automatic: true, reason: 'error', startReason: 'auto' })
       } else {
         setAllStatus(t('player__error'))
         setTimeout(addDelayNextTimeout)

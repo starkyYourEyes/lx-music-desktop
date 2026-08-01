@@ -23,7 +23,7 @@ import { loveList } from '@renderer/store/list/state'
 import { addDislikeInfo } from '@renderer/core/dislikeList'
 import musicSdk from '@renderer/utils/musicSdk'
 import { assertApiSupport } from '@renderer/store/utils'
-import type { PlaybackSkipReason } from '@common/storage/playback'
+import type { PlaybackSelectionIntent, PlaybackSkipReason, PlaybackStartReason } from '@common/storage/playback'
 
 interface SetMusicUrlOptions {
   isRefresh?: boolean
@@ -35,12 +35,20 @@ interface PlayMusicByInfoOptions extends SetMusicUrlOptions {
   listId?: string | null
   isTempPlay?: boolean
   clearTempList?: boolean
+  startReason?: PlaybackStartReason
 }
 
 export interface PlaybackAdvanceOptions {
   automatic: boolean
   reason: PlaybackSkipReason | 'natural_end'
+  startReason: PlaybackStartReason
 }
+
+const emitPlaybackAdvance = ({ automatic, reason }: PlaybackAdvanceOptions): void => {
+  window.app_event.playbackAdvance({ automatic, reason })
+}
+
+const selectionIntent = ({ startReason }: Pick<PlaybackAdvanceOptions, 'startReason'>): PlaybackSelectionIntent => ({ startReason })
 
 let gettingUrlId = ''
 let loadedMusicIdentity = ''
@@ -89,6 +97,7 @@ const normalizePlayMusicByInfoOptions = (options?: PlayMusicByInfoOptions): Requ
     listId: options?.listId ?? null,
     isTempPlay: options?.isTempPlay ?? true,
     clearTempList: options?.clearTempList ?? true,
+    startReason: options?.startReason ?? 'select',
   }
 }
 
@@ -117,8 +126,8 @@ const createDelayNextTimeout = (delay: number, options: PlaybackAdvanceOptions) 
   }
 }
 
-const { addDelayNextTimeout, clearDelayNextTimeout } = createDelayNextTimeout(5000, { automatic: true, reason: 'error' })
-const { addDelayNextTimeout: addLoadTimeout, clearDelayNextTimeout: clearLoadTimeout } = createDelayNextTimeout(100000, { automatic: true, reason: 'load_timeout' })
+const { addDelayNextTimeout, clearDelayNextTimeout } = createDelayNextTimeout(5000, { automatic: true, reason: 'error', startReason: 'auto' })
+const { addDelayNextTimeout: addLoadTimeout, clearDelayNextTimeout: clearLoadTimeout } = createDelayNextTimeout(100000, { automatic: true, reason: 'load_timeout', startReason: 'auto' })
 
 const getPartyQueueCurrentIndex = () => {
   const room = party.room
@@ -240,12 +249,16 @@ const getDirectMusicUrl = async(musicInfo: LX.Music.MusicInfo | LX.Download.List
 }
 
 let cancelDelayRetry: (() => void) | null = null
-const delayRetry = async(musicInfo: LX.Music.MusicInfo | LX.Download.ListItem, isRefresh = false): Promise<string | null> => {
+const delayRetry = async(
+  musicInfo: LX.Music.MusicInfo | LX.Download.ListItem,
+  isRefresh: boolean,
+  attempt: number,
+): Promise<string | null> => {
   return new Promise<string | null>((resolve, reject) => {
     const time = getRandom(2, 6)
     setAllStatus(window.i18n.t('player__getting_url_delay_retry', { time }))
     const timeout = setTimeout(() => {
-      getMusicPlayUrl(musicInfo, isRefresh, true).then(result => {
+      getMusicPlayUrl(musicInfo, isRefresh, attempt).then(result => {
         cancelDelayRetry = null
         resolve(result)
       }).catch((err: any) => {
@@ -261,7 +274,11 @@ const delayRetry = async(musicInfo: LX.Music.MusicInfo | LX.Download.ListItem, i
   })
 }
 
-const getMusicPlayUrl = async(musicInfo: LX.Music.MusicInfo | LX.Download.ListItem, isRefresh = false, isRetryed = false): Promise<string | null> => {
+const getMusicPlayUrl = async(
+  musicInfo: LX.Music.MusicInfo | LX.Download.ListItem,
+  isRefresh = false,
+  attempt = 1,
+): Promise<string | null> => {
   setAllStatus(window.i18n.t('player__getting_url'))
   if (appSetting['player.autoSkipOnError']) addLoadTimeout()
 
@@ -275,9 +292,10 @@ const getMusicPlayUrl = async(musicInfo: LX.Music.MusicInfo | LX.Download.ListIt
       err.message == requestMsg.cancelRequest
     ) return null
 
-    if (err.message == requestMsg.tooManyRequests) return delayRetry(musicInfo, isRefresh)
-    if (!isRetryed) return getMusicPlayUrl(musicInfo, isRefresh, true)
-    throw err
+    if (err.message == requestMsg.tooManyRequests) return delayRetry(musicInfo, isRefresh, attempt + 1)
+    if (attempt == 1) return getMusicPlayUrl(musicInfo, isRefresh, attempt + 1)
+    const terminalError = err instanceof Error ? err : new Error(String(err))
+    throw Object.assign(terminalError, { playbackAttempt: attempt })
   })
 }
 
@@ -300,6 +318,7 @@ export const setMusicUrl = (musicInfo: LX.Music.MusicInfo | LX.Download.ListItem
   }).catch((err: any) => {
     console.log(err)
     setAllStatus(err.message)
+    window.app_event.playbackError({ stage: 'url', code: null, recoverable: false, attempt: err.playbackAttempt ?? 1 })
     window.app_event.error()
     if (appSetting['player.autoSkipOnError']) addDelayNextTimeout()
   }).finally(() => {
@@ -383,7 +402,7 @@ export const playListById = (listId: string, id: string) => {
   const currentMusicInfo = getList(listId).find(m => m.id == id)
   if (!currentMusicInfo) return
   window.app_event.playbackAdvance({ automatic: false, reason: 'select' })
-  setPlayMusicInfo(listId, currentMusicInfo)
+  setPlayMusicInfo(listId, currentMusicInfo, false, { startReason: 'select' })
   if (appSetting['player.isAutoCleanPlayedList'] || prevListId != listId) clearPlayedList()
   clearTempPlayeList()
   handlePlay()
@@ -392,12 +411,12 @@ export const playListById = (listId: string, id: string) => {
 export const playList = (
   listId: string,
   index: number,
-  advanceOptions: PlaybackAdvanceOptions = { automatic: false, reason: 'select' },
+  advanceOptions: PlaybackAdvanceOptions = { automatic: false, reason: 'select', startReason: 'select' },
 ) => {
   const prevListId = playInfo.playerListId
   setPlayListId(listId)
-  window.app_event.playbackAdvance(advanceOptions)
-  setPlayMusicInfo(listId, getList(listId)[index])
+  emitPlaybackAdvance(advanceOptions)
+  setPlayMusicInfo(listId, getList(listId)[index], false, selectionIntent(advanceOptions))
   if (appSetting['player.isAutoCleanPlayedList'] || prevListId != listId) clearPlayedList()
   clearTempPlayeList()
   handlePlay()
@@ -409,7 +428,9 @@ export const playMusicByInfo = (musicInfo: LX.Music.MusicInfo, options?: PlayMus
     setPlayListId(normalizedOptions.listId)
   }
   window.app_event.playbackAdvance({ automatic: false, reason: 'select' })
-  setPlayMusicInfo(normalizedOptions.listId, musicInfo, normalizedOptions.isTempPlay)
+  setPlayMusicInfo(normalizedOptions.listId, musicInfo, normalizedOptions.isTempPlay, {
+    startReason: normalizedOptions.startReason,
+  })
   if (normalizedOptions.clearTempList) clearTempPlayeList()
   handlePlay({
     isRefresh: normalizedOptions.isRefresh,
@@ -419,7 +440,7 @@ export const playMusicByInfo = (musicInfo: LX.Music.MusicInfo, options?: PlayMus
 }
 
 const handleToggleStop = (options: PlaybackAdvanceOptions) => {
-  if (playMusicInfo.musicInfo) window.app_event.playbackAdvance(options)
+  if (playMusicInfo.musicInfo) emitPlaybackAdvance(options)
   stop()
   setTimeout(() => {
     setPlayMusicInfo(null, null)
@@ -510,13 +531,18 @@ export const getNextPlayMusicInfo = async(): Promise<LX.Player.PlayMusicInfo | n
 }
 
 const handlePlayNext = (nextPlayMusicInfo: LX.Player.PlayMusicInfo, options: PlaybackAdvanceOptions) => {
-  window.app_event.playbackAdvance(options)
-  setPlayMusicInfo(nextPlayMusicInfo.listId, nextPlayMusicInfo.musicInfo, nextPlayMusicInfo.isTempPlay)
+  emitPlaybackAdvance(options)
+  setPlayMusicInfo(
+    nextPlayMusicInfo.listId,
+    nextPlayMusicInfo.musicInfo,
+    nextPlayMusicInfo.isTempPlay,
+    selectionIntent(options),
+  )
   handlePlay()
 }
 
 export const playNext = async(
-  options: PlaybackAdvanceOptions = { automatic: false, reason: 'next' },
+  options: PlaybackAdvanceOptions = { automatic: false, reason: 'next', startReason: 'next' },
 ): Promise<void> => {
   const partyQueuePlayMusicInfo = getPartyQueuePlayMusicInfo(1)
   if (partyQueuePlayMusicInfo) {
@@ -623,7 +649,7 @@ export const playNext = async(
 }
 
 export const playPrev = async(
-  options: PlaybackAdvanceOptions = { automatic: false, reason: 'previous' },
+  options: PlaybackAdvanceOptions = { automatic: false, reason: 'previous', startReason: 'previous' },
 ): Promise<void> => {
   const partyQueuePlayMusicInfo = getPartyQueuePlayMusicInfo(-1)
   if (partyQueuePlayMusicInfo) {
@@ -759,5 +785,5 @@ export const dislikeMusic = async() => {
   if (!playMusicInfo.musicInfo) return
   const currentMusicInfo = 'progress' in playMusicInfo.musicInfo ? playMusicInfo.musicInfo.metadata.musicInfo : playMusicInfo.musicInfo
   await addDislikeInfo([{ name: currentMusicInfo.name, singer: currentMusicInfo.singer }])
-  await playNext({ automatic: true, reason: 'dislike' })
+  await playNext({ automatic: true, reason: 'dislike', startReason: 'auto' })
 }

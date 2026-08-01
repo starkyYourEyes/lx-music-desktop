@@ -1,5 +1,11 @@
 import Event from './Event'
-import type { PlaybackSeekOrigin, PlaybackSkipReason } from '@common/storage/playback'
+import type {
+  PlaybackErrorIntent,
+  PlaybackSeekIntent,
+  PlaybackSeekOrigin,
+  PlaybackSelectionIntent,
+  PlaybackSkipReason,
+} from '@common/storage/playback'
 
 
 // {
@@ -31,12 +37,20 @@ export class AppEvent extends Event {
   /**
    * 音乐信息切换
    */
-  musicToggled() {
-    this.emit('musicToggled')
+  musicToggled(intent: PlaybackSelectionIntent) {
+    this.emit('musicToggled', intent)
   }
 
   playbackAdvance(options: { automatic: boolean, reason: PlaybackSkipReason | 'natural_end' }) {
     this.emit('playbackAdvance', options)
+  }
+
+  playbackSeek(intent: PlaybackSeekIntent) {
+    this.emit('playbackSeek', intent)
+  }
+
+  playbackError(error: PlaybackErrorIntent) {
+    this.emit('playbackError', error)
   }
 
   /**

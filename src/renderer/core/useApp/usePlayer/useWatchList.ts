@@ -22,7 +22,7 @@ export default () => {
         })
       } else if (!playMusicInfo.isTempPlay) {
         console.log('current music removed')
-        void playNext({ automatic: true, reason: 'queue_removed' })
+        void playNext({ automatic: true, reason: 'queue_removed', startReason: 'auto' })
       }
     }
   })

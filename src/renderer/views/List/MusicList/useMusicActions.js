@@ -47,7 +47,7 @@ export default ({ props, list, selectedList, removeAllSelect }) => {
     if (!confirm) return
     await addDislikeInfo([{ name: minfo.name, singer: minfo.singer }])
     if (hasDislike(playMusicInfo.musicInfo)) {
-      playNext({ automatic: true, reason: 'dislike' })
+      playNext({ automatic: true, reason: 'dislike', startReason: 'auto' })
     }
   }
 

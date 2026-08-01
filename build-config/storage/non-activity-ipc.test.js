@@ -65,12 +65,15 @@ describe('typed non-activity IPC', () => {
     })
 
     await assert.rejects(dispatch({ type: 'local_state.set', update: { key: 'unknown', value: {} } }))
-    await assert.rejects(dispatch({ type: 'search_history.mutate', command: {
-      version: 1,
-      action: 'record',
-      term: 'x'.repeat(201),
-      usedAtMs: 1,
-    } }))
+    await assert.rejects(dispatch({
+      type: 'search_history.mutate',
+      command: {
+        version: 1,
+        action: 'record',
+        term: 'x'.repeat(201),
+        usedAtMs: 1,
+      },
+    }))
     await assert.rejects(dispatch({ type: 'unknown.get' }))
     assert.deepEqual(workerCalls, [])
   })
@@ -118,16 +121,18 @@ describe('typed non-activity IPC', () => {
     })
   })
 
-  it('rejects non-activity and malformed generic data keys before Store access', () => {
+  it('rejects non-activity and malformed generic data keys before Store access', async() => {
     const storeCalls = []
     const { createDataHandlers } = loadSourceModule(dataHandlerPath)
     const handlers = createDataHandlers({
       get: key => { storeCalls.push(['get', key]); return null },
       set: (key, value) => { storeCalls.push(['set', key, value]) },
+    }, {
+      getPlaybackActivityMigrationMarker: async() => null,
     })
 
     for (const key of ['viewPrevState', 'searchHistoryList', 'neteaseAccount', 'unknown', null, {}]) {
-      assert.throws(() => handlers.get(key))
+      await assert.rejects(handlers.get(key))
     }
     for (const params of [
       { path: 'listUpdateInfo', data: {} },
@@ -136,13 +141,13 @@ describe('typed non-activity IPC', () => {
       { data: {} },
       null,
     ]) {
-      assert.throws(() => handlers.set(params))
+      await assert.rejects(handlers.set(params))
     }
     assert.deepEqual(storeCalls, [])
 
-    handlers.get('playInfo')
-    handlers.set({ path: 'recentPlayList', data: [] })
-    handlers.get('listeningTimeStats')
+    await handlers.get('playInfo')
+    await handlers.set({ path: 'recentPlayList', data: [] })
+    await handlers.get('listeningTimeStats')
     assert.deepEqual(storeCalls, [
       ['get', 'playInfo'],
       ['set', 'recentPlayList', []],
@@ -348,11 +353,13 @@ describe('typed non-activity IPC', () => {
           },
         }
       }
-      if (request == '@common/rendererIpc') return {
-        rendererSend: () => {},
-        rendererInvoke: () => { throw new Error('unexpected renderer invoke') },
-        rendererOn: () => {},
-        rendererOff: () => {},
+      if (request == '@common/rendererIpc') {
+        return {
+          rendererSend: () => {},
+          rendererInvoke: () => { throw new Error('unexpected renderer invoke') },
+          rendererOn: () => {},
+          rendererOff: () => {},
+        }
       }
       if (request == '@common/utils') return { log: { error: error => reports.push(error) } }
       if (request.startsWith('@common/')) {
@@ -406,9 +413,11 @@ describe('typed non-activity IPC', () => {
           },
         }
       }
-      if (request == '@common/utils') return {
-        throttle: fn => fn,
-        log: { error: error => reports.push(error) },
+      if (request == '@common/utils') {
+        return {
+          throttle: fn => fn,
+          log: { error: error => reports.push(error) },
+        }
       }
       if (request == '@common/constants') return { DEFAULT_SETTING: {}, LIST_IDS: { DEFAULT: 'default' } }
       if (request == '@renderer/store/list/action') return { setUpdateTime: () => {} }

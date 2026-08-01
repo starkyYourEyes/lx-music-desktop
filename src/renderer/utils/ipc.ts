@@ -9,6 +9,8 @@ import type { StorageCapabilitiesV1, StorageRequestV1 } from '@common/storage/co
 import type { LocalStateSnapshotV1 } from '@common/storage/stateContracts'
 import { getLocalState, setLocalState } from './storageState'
 
+export { registerShutdownFlusher } from './shutdown'
+
 type RemoveListener = () => void
 
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))

@@ -171,3 +171,57 @@ export interface PlaybackResumeV1 {
   durationMs: number | null
   updatedAtMs: number
 }
+
+export interface PlaybackCompactCommandV1 {
+  version: 1
+  nowMs: number
+  batchSize: number
+}
+
+export interface PlaybackCompactResultV1 {
+  version: 1
+  deleted: number
+  remainingEligible: number
+}
+
+export interface PlaybackClearRecentCommandV1 {
+  version: 1
+  occurredAtMs: number
+}
+
+export interface PlaybackClearStatisticsCommandV1 {
+  version: 1
+  occurredAtMs: number
+  activeCheckpoint?: PlaybackCheckpointV1
+}
+
+export interface PlaybackDeleteAllActivityCommandV1 {
+  version: 1
+  occurredAtMs: number
+}
+
+export interface PlaybackResetDeviceStateCommandV1 {
+  version: 1
+}
+
+export interface PlaybackVacuumEligibilityCommandV1 {
+  version: 1
+}
+
+export type PlaybackVacuumEligibilityReasonV1 =
+  | 'eligible'
+  | 'insufficient_free_pages'
+  | 'insufficient_disk_space'
+
+export interface PlaybackVacuumEligibilityResultV1 {
+  version: 1
+  eligible: boolean
+  reason: PlaybackVacuumEligibilityReasonV1
+  pageCount: number
+  freelistCount: number
+  pageSize: number
+  freePageRatio: number
+  databaseFileBytes: number
+  requiredFreeBytes: number
+  availableFreeBytes: number
+}

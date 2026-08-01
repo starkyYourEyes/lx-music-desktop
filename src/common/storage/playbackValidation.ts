@@ -3,16 +3,24 @@ import type {
   ListeningStatsV1,
   PlaybackCheckpointAckV1,
   PlaybackCheckpointV1,
+  PlaybackClearRecentCommandV1,
+  PlaybackClearStatisticsCommandV1,
+  PlaybackCompactCommandV1,
+  PlaybackCompactResultV1,
   PlaybackCommitRequestV1,
+  PlaybackDeleteAllActivityCommandV1,
   PlaybackFactV1,
   PlaybackPreplayFailureV1,
   PlaybackRecorderCommandV1,
   PlaybackResumeAckV1,
   PlaybackResumeUpdateV1,
   PlaybackResumeV1,
+  PlaybackResetDeviceStateCommandV1,
   PlaybackStartCommandV1,
   PlaybackStartResultV1,
   PlaybackTrackV1,
+  PlaybackVacuumEligibilityCommandV1,
+  PlaybackVacuumEligibilityResultV1,
   RecentTrackV1,
 } from './playback'
 
@@ -743,5 +751,116 @@ export const parsePlaybackResume = (value: unknown): PlaybackResumeV1 => {
     assertDuration(value.durationMs, 'durationMs')
     assertInteger(value.updatedAtMs, 'updatedAtMs', 0)
     return cloneJson(value as JsonValue) as unknown as PlaybackResumeV1
+  })
+}
+
+export const parsePlaybackCompactCommand = (value: unknown): PlaybackCompactCommandV1 => {
+  return fixedError('playback compact', () => {
+    assertRecord(value, 'playback compact')
+    assertExactKeys(value, 'playback compact', ['version', 'nowMs', 'batchSize'])
+    assertVersion(value.version)
+    assertInteger(value.nowMs, 'playback compact.nowMs', 0)
+    assertInteger(value.batchSize, 'playback compact.batchSize', 1, 500)
+    return cloneJson(value as JsonValue) as unknown as PlaybackCompactCommandV1
+  })
+}
+
+export const parsePlaybackCompactResult = (value: unknown): PlaybackCompactResultV1 => {
+  return fixedError('playback compact result', () => {
+    assertRecord(value, 'playback compact result')
+    assertExactKeys(value, 'playback compact result', ['version', 'deleted', 'remainingEligible'])
+    assertVersion(value.version)
+    assertInteger(value.deleted, 'playback compact result.deleted', 0, 500)
+    assertInteger(value.remainingEligible, 'playback compact result.remainingEligible', 0)
+    return cloneJson(value as JsonValue) as unknown as PlaybackCompactResultV1
+  })
+}
+
+export const parsePlaybackClearRecentCommand = (value: unknown): PlaybackClearRecentCommandV1 => {
+  return fixedError('playback recent clear', () => {
+    assertRecord(value, 'playback recent clear')
+    assertExactKeys(value, 'playback recent clear', ['version', 'occurredAtMs'])
+    assertVersion(value.version)
+    assertInteger(value.occurredAtMs, 'playback recent clear.occurredAtMs', 0)
+    return cloneJson(value as JsonValue) as unknown as PlaybackClearRecentCommandV1
+  })
+}
+
+export const parsePlaybackClearStatisticsCommand = (value: unknown): PlaybackClearStatisticsCommandV1 => {
+  return fixedError('playback statistics clear', () => {
+    assertRecord(value, 'playback statistics clear')
+    const hasCheckpoint = Object.hasOwn(value, 'activeCheckpoint')
+    assertExactKeys(
+      value,
+      'playback statistics clear',
+      hasCheckpoint ? ['version', 'occurredAtMs', 'activeCheckpoint'] : ['version', 'occurredAtMs'],
+    )
+    assertVersion(value.version)
+    assertInteger(value.occurredAtMs, 'playback statistics clear.occurredAtMs', 0)
+    return {
+      version: 1,
+      occurredAtMs: value.occurredAtMs,
+      ...(hasCheckpoint ? { activeCheckpoint: parsePlaybackCheckpoint(value.activeCheckpoint) } : {}),
+    }
+  })
+}
+
+export const parsePlaybackDeleteAllActivityCommand = (
+  value: unknown,
+): PlaybackDeleteAllActivityCommandV1 => {
+  return fixedError('playback activity delete', () => {
+    assertRecord(value, 'playback activity delete')
+    assertExactKeys(value, 'playback activity delete', ['version', 'occurredAtMs'])
+    assertVersion(value.version)
+    assertInteger(value.occurredAtMs, 'playback activity delete.occurredAtMs', 0)
+    return cloneJson(value as JsonValue) as unknown as PlaybackDeleteAllActivityCommandV1
+  })
+}
+
+export const parsePlaybackResetDeviceStateCommand = (
+  value: unknown,
+): PlaybackResetDeviceStateCommandV1 => {
+  return fixedError('playback device reset', () => {
+    assertRecord(value, 'playback device reset')
+    assertExactKeys(value, 'playback device reset', ['version'])
+    assertVersion(value.version)
+    return { version: 1 }
+  })
+}
+
+export const parsePlaybackVacuumEligibilityCommand = (
+  value: unknown,
+): PlaybackVacuumEligibilityCommandV1 => {
+  return fixedError('playback vacuum eligibility', () => {
+    assertRecord(value, 'playback vacuum eligibility')
+    assertExactKeys(value, 'playback vacuum eligibility', ['version'])
+    assertVersion(value.version)
+    return { version: 1 }
+  })
+}
+
+export const parsePlaybackVacuumEligibilityResult = (
+  value: unknown,
+): PlaybackVacuumEligibilityResultV1 => {
+  return fixedError('playback vacuum eligibility result', () => {
+    assertRecord(value, 'playback vacuum eligibility result')
+    assertExactKeys(value, 'playback vacuum eligibility result', [
+      'version', 'eligible', 'reason', 'pageCount', 'freelistCount', 'pageSize',
+      'freePageRatio', 'databaseFileBytes', 'requiredFreeBytes', 'availableFreeBytes',
+    ])
+    assertVersion(value.version)
+    if (typeof value.eligible != 'boolean') invalidField('playback vacuum eligibility result.eligible')
+    assertOneOf(value.reason, 'playback vacuum eligibility result.reason', [
+      'eligible', 'insufficient_free_pages', 'insufficient_disk_space',
+    ])
+    for (const key of [
+      'pageCount', 'freelistCount', 'pageSize', 'databaseFileBytes',
+      'requiredFreeBytes', 'availableFreeBytes',
+    ] as const) assertInteger(value[key], `playback vacuum eligibility result.${key}`, 0)
+    if (typeof value.freePageRatio != 'number' || !Number.isFinite(value.freePageRatio) ||
+      value.freePageRatio < 0 || value.freePageRatio > 1) {
+      invalidField('playback vacuum eligibility result.freePageRatio')
+    }
+    return cloneJson(value as JsonValue) as unknown as PlaybackVacuumEligibilityResultV1
   })
 }

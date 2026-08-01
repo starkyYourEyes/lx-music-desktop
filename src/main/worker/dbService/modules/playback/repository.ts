@@ -50,7 +50,7 @@ import {
   SELECT_OPEN_SESSION,
 } from './statements'
 
-interface OpenSessionRow extends SessionAckRow {
+export interface OpenSessionRow extends SessionAckRow {
   trackId: number
   localDay: string
   utcOffsetMinutes: number
@@ -74,13 +74,13 @@ export interface PlaybackCommitOptions {
   failAt?: PlaybackCommitFailPoint
 }
 
-const getOpenSession = (
+export const getOpenSession = (
   db: Database.Database,
   playbackGroupUuid: string,
 ): OpenSessionRow | null =>
   (db.prepare(SELECT_OPEN_SESSION).get(playbackGroupUuid) as OpenSessionRow | undefined) ?? null
 
-const insertSession = (
+export const insertSession = (
   db: Database.Database,
   value: {
     sessionUuid: string
@@ -312,10 +312,10 @@ const updateResumeForCommit = (
   })
 }
 
-export const playbackCommit = (
-  value: PlaybackCommitRequestV1,
+const validateCommit = (
+  value: unknown,
   options: PlaybackCommitOptions = {},
-): PlaybackCheckpointAckV1 => {
+): { input: PlaybackCommitRequestV1, failAt?: PlaybackCommitFailPoint } => {
   const input = parsePlaybackCommitRequest(value)
   if ('fact' in input && input.fact?.type == 'play_start') {
     throw new Error('playback_commit_play_start_forbidden')
@@ -326,45 +326,52 @@ export const playbackCommit = (
     throw new Error('Invalid playback commit options')
   }
   const failAt = parsedOptions.failAt as PlaybackCommitFailPoint | undefined
-  return immediate(db => {
-    const current = getOpenSession(db, input.checkpoint.playbackGroupUuid)
-    if (current == null) {
-      const terminal = getSessionAck(db, input.checkpoint.playbackGroupUuid)
-      if (terminal == null) throw new Error('playback_group_not_found')
-      if (input.checkpoint.checkpointSeq <= terminal.checkpointSeq) return sessionAck(terminal)
-      throw new Error('playback_group_closed')
-    }
-    if (input.checkpoint.checkpointSeq <= current.checkpointSeq) return sessionAck(current)
-    if (input.checkpoint.cumulativePlayedMs < current.cumulativePlayedMs) {
-      throw new Error('Invalid cumulativePlayedMs')
-    }
-    if (input.checkpoint.cumulativeActiveMs < current.cumulativeActiveMs) {
-      throw new Error('Invalid cumulativeActiveMs')
-    }
-    if (input.checkpoint.occurredAtMs < current.startedAtMs) throw new Error('Invalid occurredAtMs')
+  return { input, failAt }
+}
 
-    const cumulativePlayedMs = current.statsAllowed
-      ? input.checkpoint.cumulativePlayedMs
-      : 0
-    const cumulativeActiveMs = current.statsAllowed
-      ? input.checkpoint.cumulativeActiveMs
-      : 0
-    const playedDelta = cumulativePlayedMs - current.cumulativePlayedMs
-    const activeDelta = cumulativeActiveMs - current.cumulativeActiveMs
-    const isBoundary = 'boundary' in input
-    if (isBoundary) {
-      if (!isImmediateLocalDayBoundary(
-        current.localDay,
-        input.checkpoint.occurredAtMs,
-        input.boundary.nextLocalDay,
-        input.boundary.utcOffsetMinutes,
-      )) {
-        throw new Error('playback_boundary_mismatch')
-      }
+export const commitInTransaction = (
+  db: Database.Database,
+  input: PlaybackCommitRequestV1,
+  failAt?: PlaybackCommitFailPoint,
+): PlaybackCheckpointAckV1 => {
+  const current = getOpenSession(db, input.checkpoint.playbackGroupUuid)
+  if (current == null) {
+    const terminal = getSessionAck(db, input.checkpoint.playbackGroupUuid)
+    if (terminal == null) throw new Error('playback_group_not_found')
+    if (input.checkpoint.checkpointSeq <= terminal.checkpointSeq) return sessionAck(terminal)
+    throw new Error('playback_group_closed')
+  }
+  if (input.checkpoint.checkpointSeq <= current.checkpointSeq) return sessionAck(current)
+  if (input.checkpoint.cumulativePlayedMs < current.cumulativePlayedMs) {
+    throw new Error('Invalid cumulativePlayedMs')
+  }
+  if (input.checkpoint.cumulativeActiveMs < current.cumulativeActiveMs) {
+    throw new Error('Invalid cumulativeActiveMs')
+  }
+  if (input.checkpoint.occurredAtMs < current.startedAtMs) throw new Error('Invalid occurredAtMs')
+
+  const cumulativePlayedMs = current.statsAllowed
+    ? input.checkpoint.cumulativePlayedMs
+    : 0
+  const cumulativeActiveMs = current.statsAllowed
+    ? input.checkpoint.cumulativeActiveMs
+    : 0
+  const playedDelta = cumulativePlayedMs - current.cumulativePlayedMs
+  const activeDelta = cumulativeActiveMs - current.cumulativeActiveMs
+  const isBoundary = 'boundary' in input
+  if (isBoundary) {
+    if (!isImmediateLocalDayBoundary(
+      current.localDay,
+      input.checkpoint.occurredAtMs,
+      input.boundary.nextLocalDay,
+      input.boundary.utcOffsetMinutes,
+    )) {
+      throw new Error('playback_boundary_mismatch')
     }
-    const reason = isBoundary ? 'day_boundary' : terminalReason(input.fact)
-    const nextState = isBoundary ? 'closed' : stateAfter(current.state, input.fact)
-    db.prepare(`
+  }
+  const reason = isBoundary ? 'day_boundary' : terminalReason(input.fact)
+  const nextState = isBoundary ? 'closed' : stateAfter(current.state, input.fact)
+  db.prepare(`
       UPDATE playback_sessions
       SET last_position_ms = ?, duration_ms = ?,
         played_ms = played_ms + ?, active_ms = active_ms + ?,
@@ -372,80 +379,88 @@ export const playbackCommit = (
         checkpoint_seq = ?, state = ?, end_reason = ?, ended_at_ms = ?
       WHERE session_id = ?
     `).run(
-      input.checkpoint.positionMs,
-      input.checkpoint.durationMs,
-      playedDelta,
-      activeDelta,
-      cumulativePlayedMs,
-      cumulativeActiveMs,
-      input.checkpoint.checkpointSeq,
-      nextState,
-      reason,
-      nextState == 'closed' ? input.checkpoint.occurredAtMs : null,
-      current.sessionId,
-    )
-    updateResumeForCommit(db, current, input)
-    if (current.statsAllowed) {
-      updateListeningProjections(db, {
-        trackId: current.trackId,
-        sessionId: current.sessionId,
-        localDay: current.localDay,
-        playedMs: playedDelta,
-        activeMs: activeDelta,
-        occurredAtMs: input.checkpoint.occurredAtMs,
-      }, failAt == 'after-daily'
-        ? () => { throw new Error('injected failure') }
-        : undefined)
-    } else if (failAt == 'after-daily') {
-      throw new Error('injected failure')
-    }
-    if (!isBoundary && input.fact != null) {
-      insertEvent(
-        db,
-        current.sessionId,
-        input.checkpoint.checkpointSeq,
-        input.checkpoint.occurredAtMs,
-        input.checkpoint.positionMs,
-        input.fact,
-      )
-    }
-    if (!isBoundary) {
-      return sessionAck({
-        ...current,
-        checkpointSeq: input.checkpoint.checkpointSeq,
-        cumulativePlayedMs,
-        cumulativeActiveMs,
-      })
-    }
-
-    const boundary = input.boundary
-    const next = insertSession(db, {
-      sessionUuid: newSessionUuid(),
-      playbackGroupUuid: current.playbackGroupUuid,
-      segmentNo: current.segmentNo + 1,
+    input.checkpoint.positionMs,
+    input.checkpoint.durationMs,
+    playedDelta,
+    activeDelta,
+    cumulativePlayedMs,
+    cumulativeActiveMs,
+    input.checkpoint.checkpointSeq,
+    nextState,
+    reason,
+    nextState == 'closed' ? input.checkpoint.occurredAtMs : null,
+    current.sessionId,
+  )
+  updateResumeForCommit(db, current, input)
+  if (current.statsAllowed) {
+    updateListeningProjections(db, {
       trackId: current.trackId,
-      localDay: boundary.nextLocalDay,
-      utcOffsetMinutes: boundary.utcOffsetMinutes,
-      contextType: current.contextType,
-      contextId: current.contextId,
-      startReason: 'day_boundary',
-      endReason: null,
-      startedAtMs: input.checkpoint.occurredAtMs,
-      endedAtMs: null,
-      startPositionMs: input.checkpoint.positionMs,
-      lastPositionMs: input.checkpoint.positionMs,
-      durationMs: input.checkpoint.durationMs,
-      playedMs: 0,
-      activeMs: 0,
+      sessionId: current.sessionId,
+      localDay: current.localDay,
+      startedAtMs: current.startedAtMs,
+      playedMs: playedDelta,
+      activeMs: activeDelta,
+      occurredAtMs: input.checkpoint.occurredAtMs,
+    }, failAt == 'after-daily'
+      ? () => { throw new Error('injected failure') }
+      : undefined)
+  } else if (failAt == 'after-daily') {
+    throw new Error('injected failure')
+  }
+  if (!isBoundary && input.fact != null) {
+    insertEvent(
+      db,
+      current.sessionId,
+      input.checkpoint.checkpointSeq,
+      input.checkpoint.occurredAtMs,
+      input.checkpoint.positionMs,
+      input.fact,
+    )
+  }
+  if (!isBoundary) {
+    return sessionAck({
+      ...current,
+      checkpointSeq: input.checkpoint.checkpointSeq,
       cumulativePlayedMs,
       cumulativeActiveMs,
-      checkpointSeq: input.checkpoint.checkpointSeq,
-      state: current.state,
-      recentAllowed: current.recentAllowed == 1,
-      statsAllowed: current.statsAllowed == 1,
     })
-    return sessionAck(next)
+  }
+
+  const boundary = input.boundary
+  const next = insertSession(db, {
+    sessionUuid: newSessionUuid(),
+    playbackGroupUuid: current.playbackGroupUuid,
+    segmentNo: current.segmentNo + 1,
+    trackId: current.trackId,
+    localDay: boundary.nextLocalDay,
+    utcOffsetMinutes: boundary.utcOffsetMinutes,
+    contextType: current.contextType,
+    contextId: current.contextId,
+    startReason: 'day_boundary',
+    endReason: null,
+    startedAtMs: input.checkpoint.occurredAtMs,
+    endedAtMs: null,
+    startPositionMs: input.checkpoint.positionMs,
+    lastPositionMs: input.checkpoint.positionMs,
+    durationMs: input.checkpoint.durationMs,
+    playedMs: 0,
+    activeMs: 0,
+    cumulativePlayedMs,
+    cumulativeActiveMs,
+    checkpointSeq: input.checkpoint.checkpointSeq,
+    state: current.state,
+    recentAllowed: current.recentAllowed == 1,
+    statsAllowed: current.statsAllowed == 1,
   })
+  return sessionAck(next)
+}
+
+export const playbackCommit = (
+  value: PlaybackCommitRequestV1,
+  options: PlaybackCommitOptions = {},
+): PlaybackCheckpointAckV1 => {
+  const commit = validateCommit(value, options)
+  return immediate(db => commitInTransaction(db, commit.input, commit.failAt))
 }
 
 export const playbackUpdateResume = (value: PlaybackResumeUpdateV1): PlaybackResumeAckV1 => {

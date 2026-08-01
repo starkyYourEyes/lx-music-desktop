@@ -556,3 +556,15 @@ export {
   playbackStart,
   playbackUpdateResume,
 } from './repository'
+
+export {
+  playbackClearRecent,
+  playbackClearStatistics,
+  playbackDeleteAllActivity,
+  playbackResetDeviceState,
+} from './clear'
+
+export {
+  playbackCompact,
+  playbackGetVacuumEligibility,
+} from './retention'

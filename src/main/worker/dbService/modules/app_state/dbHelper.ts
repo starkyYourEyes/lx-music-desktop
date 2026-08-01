@@ -1,3 +1,4 @@
+import type Database from 'better-sqlite3'
 import { canonicalJson, type JsonValue } from '../../../../../common/storage/canonicalJson'
 import { DEFAULT_SETTING } from '../../../../../common/constants'
 import type { LocalStateSnapshotV1 } from '../../../../../common/storage/stateContracts'
@@ -298,6 +299,10 @@ export const deleteAllLocalState = (): void => {
     createClearLocalStateStatement().run()
     readLocalState()
   })()
+}
+
+export const clearLocalStateInTransaction = (db: Database.Database): void => {
+  db.prepare('DELETE FROM local_state').run()
 }
 
 export const queryPlaylistMetadata = (): LX.List.ListUpdateInfo => readPlaylistMetadata()

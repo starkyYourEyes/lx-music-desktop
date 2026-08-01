@@ -11,12 +11,26 @@ import {
 
 const MAX_RECENT_TRACKS = 520
 
+const projectionCutoff = (
+  db: Database.Database,
+  name: 'recent' | 'statistics',
+): number | null => {
+  const row = db.prepare(`
+    SELECT visible_after_ms AS visibleAfterMs
+    FROM projection_state WHERE name = ?
+  `).get(name) as { visibleAfterMs: number | null } | undefined
+  if (row == null) throw new Error('playback_projection_state_missing')
+  return row.visibleAfterMs
+}
+
 export const updateRecentProjection = (
   db: Database.Database,
   trackId: number,
   sessionId: number,
   occurredAtMs: number,
 ): void => {
+  const cutoff = projectionCutoff(db, 'recent')
+  if (cutoff != null && occurredAtMs < cutoff) return
   const row = db.prepare(`
     SELECT MAX(recency_seq) AS maxSequence
     FROM recent_tracks
@@ -53,6 +67,7 @@ export interface ListeningDelta {
   trackId: number
   sessionId: number
   localDay: string
+  startedAtMs: number
   playedMs: number
   activeMs: number
   occurredAtMs: number
@@ -90,6 +105,8 @@ export const updateListeningProjections = (
   delta: ListeningDelta,
   afterDaily?: () => void,
 ): void => {
+  const cutoff = projectionCutoff(db, 'statistics')
+  if (cutoff != null && delta.startedAtMs < cutoff) return
   if (delta.playedMs == 0 && delta.activeMs == 0) return
   const columns = `
     baseline_played_ms AS baselinePlayedMs, live_played_ms AS livePlayedMs,
@@ -164,6 +181,10 @@ export const readRecentProjection = (
     recent.last_played_at_ms AS lastPlayedAtMs, recent.legacy_rank AS legacyRank
   FROM recent_tracks recent
   JOIN track_snapshots track ON track.track_id = recent.track_id
+  WHERE (SELECT visible_after_ms FROM projection_state WHERE name = 'recent') IS NULL
+    OR recent.last_played_at_ms >= (
+      SELECT visible_after_ms FROM projection_state WHERE name = 'recent'
+    )
   ORDER BY recent.recency_seq DESC
   LIMIT ?
 `).all(limit) as Array<Record<string, unknown>>).map(row => parseRecentTrack({
@@ -207,6 +228,10 @@ export const readListeningStats = (db: Database.Database): ListeningStatsV1 => {
       live_played_ms AS livePlayedMs, baseline_active_ms AS baselineActiveMs,
       live_active_ms AS liveActiveMs
     FROM listening_daily
+    WHERE (SELECT visible_after_ms FROM projection_state WHERE name = 'statistics') IS NULL
+      OR updated_at_ms >= (
+        SELECT visible_after_ms FROM projection_state WHERE name = 'statistics'
+      )
     ORDER BY local_day
   `).all() as Array<Record<string, unknown>>).map(row => ({
     ...bucket(row),
@@ -220,6 +245,10 @@ export const readListeningStats = (db: Database.Database): ListeningStatsV1 => {
       listening.live_active_ms AS liveActiveMs
     FROM listening_tracks listening
     JOIN track_snapshots track ON track.track_id = listening.track_id
+    WHERE (SELECT visible_after_ms FROM projection_state WHERE name = 'statistics') IS NULL
+      OR listening.updated_at_ms >= (
+        SELECT visible_after_ms FROM projection_state WHERE name = 'statistics'
+      )
     ORDER BY
       listening.baseline_played_ms + listening.live_played_ms DESC,
       track.source COLLATE BINARY,

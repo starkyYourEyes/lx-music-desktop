@@ -17,15 +17,17 @@ export interface UserApiState {
 
 const serializeUserApis = (apis: LX.UserApi.UserApiInfo[], apiScripts: Map<string, string>) => {
   return apis.map(api => {
-    const serialized = { ...api, script: apiScripts.get(api.id) }
+    const { sources: _sources, ...persistentInfo } = api
+    const serialized = { ...persistentInfo, script: apiScripts.get(api.id) }
     if (api.remote) serialized.remote = { ...api.remote }
     return serialized
   })
 }
 
 export const commitUserApiState = (state: UserApiState): LX.UserApi.UserApiInfo[] => {
-  getStore(STORE_NAMES.USER_API).set('userApis', serializeUserApis(state.apiList, state.scripts))
-  userApis = state.apiList
+  const sanitized = state.apiList.map(({ sources: _sources, ...api }) => api)
+  getStore(STORE_NAMES.USER_API).set('userApis', serializeUserApis(sanitized, state.scripts))
+  userApis = sanitized
   scripts = state.scripts
   return userApis
 }
@@ -70,7 +72,7 @@ export const getUserApis = (): LX.UserApi.UserApiInfo[] => {
   }
   userApis = infoFull.map(api => {
     if (api.allowShowUpdateAlert == null) api.allowShowUpdateAlert = false
-    const { script, remote, ...info } = api
+    const { script, remote, sources: _sources, ...info } = api
     scripts.set(api.id, script)
     return remote ? { ...info, remote: { ...remote } } : info
   })

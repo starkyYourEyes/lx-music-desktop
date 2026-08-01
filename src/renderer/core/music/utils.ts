@@ -156,66 +156,92 @@ export const getCachedLyricInfo = async(musicInfo: LX.Music.MusicInfo): Promise<
   return null
 }
 
+let localPrimaryActionStart = Promise.resolve()
+const reserveLocalPrimaryAction = <T>() => {
+  let provide!: (action: () => Promise<T>) => void
+  const actionReady = new Promise<() => Promise<T>>(resolve => { provide = resolve })
+  const previous = localPrimaryActionStart
+  const result = previous.then(async() => {
+    const action = await actionReady
+    return action()
+  })
+  localPrimaryActionStart = result.then(() => undefined, () => undefined)
+  return { provide, result }
+}
+
 export const getOnlineOtherSourceMusicUrlByLocal = async(musicInfo: LX.Music.MusicInfoLocal, isRefresh: boolean): Promise<{
   url: string
   quality: LX.Quality
   isFromCache: boolean
 }> => {
-  if (!await window.lx.apiInitPromise[0]) throw new Error('source init failed')
-
+  const reserved = reserveLocalPrimaryAction<{ url: string, quality: LX.Quality, isFromCache: boolean }>()
   const quality = '128k'
 
-  const cachedUrl = await getStoreMusicUrl(musicInfo, quality)
-  if (cachedUrl && !isRefresh) return { url: cachedUrl, quality, isFromCache: true }
-
-  let reqPromise
+  let cachedUrl: string | null
   try {
-    reqPromise = apis('local').getMusicUrl(toOldMusicInfo(musicInfo), null).promise
-  } catch (err: any) {
-    reqPromise = Promise.reject(err)
+    cachedUrl = await getStoreMusicUrl(musicInfo, quality)
+  } catch (error) {
+    reserved.provide(() => Promise.reject(error))
+    return reserved.result
   }
-
-  return reqPromise.then(({ url }: { url: string }) => {
-    return { url, quality, isFromCache: false }
-  })
+  if (cachedUrl && !isRefresh) {
+    reserved.provide(async() => ({ url: cachedUrl, quality, isFromCache: true }))
+  } else {
+    reserved.provide(async() => {
+      let reqPromise
+      try {
+        reqPromise = apis('local').getMusicUrl(toOldMusicInfo(musicInfo), null).promise
+      } catch (err: any) {
+        reqPromise = Promise.reject(err)
+      }
+      return reqPromise.then(({ url }: { url: string }) => ({ url, quality, isFromCache: false }))
+    })
+  }
+  return reserved.result
 }
 
 export const getOnlineOtherSourceLyricByLocal = async(musicInfo: LX.Music.MusicInfoLocal, isRefresh: boolean): Promise<{
   lyricInfo: LX.Music.LyricInfo
   isFromCache: boolean
 }> => {
-  if (!await window.lx.apiInitPromise[0]) throw new Error('source init failed')
-
-  const lyricInfo = await getCachedLyricInfo(musicInfo)
-  if (lyricInfo && !isRefresh) return { lyricInfo, isFromCache: true }
-
-  let reqPromise
+  const reserved = reserveLocalPrimaryAction<{ lyricInfo: LX.Music.LyricInfo, isFromCache: boolean }>()
+  let lyricInfo: LX.Player.LyricInfo | null
   try {
-    reqPromise = apis('local').getLyric(toOldMusicInfo(musicInfo)).promise
-  } catch (err: any) {
-    reqPromise = Promise.reject(err)
+    lyricInfo = await getCachedLyricInfo(musicInfo)
+  } catch (error) {
+    reserved.provide(() => Promise.reject(error))
+    return reserved.result
   }
-
-  return reqPromise.then((lyricInfo: LX.Music.LyricInfo) => {
-    return { lyricInfo, isFromCache: false }
-  })
+  if (lyricInfo && !isRefresh) {
+    reserved.provide(async() => ({ lyricInfo, isFromCache: true }))
+  } else {
+    reserved.provide(async() => {
+      let reqPromise
+      try {
+        reqPromise = apis('local').getLyric(toOldMusicInfo(musicInfo)).promise
+      } catch (err: any) {
+        reqPromise = Promise.reject(err)
+      }
+      return reqPromise.then((value: LX.Music.LyricInfo) => ({ lyricInfo: value, isFromCache: false }))
+    })
+  }
+  return reserved.result
 }
 
 export const getOnlineOtherSourcePicByLocal = async(musicInfo: LX.Music.MusicInfoLocal): Promise<{
   url: string
 }> => {
-  if (!await window.lx.apiInitPromise[0]) throw new Error('source init failed')
-
-  let reqPromise
-  try {
-    reqPromise = apis('local').getPic(toOldMusicInfo(musicInfo)).promise
-  } catch (err: any) {
-    reqPromise = Promise.reject(err)
-  }
-
-  return reqPromise.then((url: string) => {
-    return { url }
+  const reserved = reserveLocalPrimaryAction<{ url: string }>()
+  reserved.provide(async() => {
+    let reqPromise
+    try {
+      reqPromise = apis('local').getPic(toOldMusicInfo(musicInfo)).promise
+    } catch (err: any) {
+      reqPromise = Promise.reject(err)
+    }
+    return reqPromise.then((url: string) => ({ url }))
   })
+  return reserved.result
 }
 
 export const TRY_QUALITYS_LIST = ['flac24bit', 'flac', '320k'] as const
@@ -246,8 +272,6 @@ export const getOnlineOtherSourceMusicUrl = async({ musicInfos, quality, onToggl
   quality: LX.Quality
   isFromCache: boolean
 }> => {
-  if (!await window.lx.apiInitPromise[0]) throw new Error('source init failed')
-
   let musicInfo: LX.Music.MusicInfoOnline | null = null
   let itemQuality: LX.Quality | null = null
   // eslint-disable-next-line no-cond-assign
@@ -300,7 +324,6 @@ export const handleGetOnlineMusicUrl = async({ musicInfo, quality, onToggleSourc
   quality: LX.Quality
   isFromCache: boolean
 }> => {
-  if (!await window.lx.apiInitPromise[0]) throw new Error('source init failed')
   // console.log(musicInfo.source)
   const targetQuality = quality ?? getPlayQuality(appSetting['player.playQuality'], musicInfo)
 

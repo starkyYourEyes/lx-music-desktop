@@ -28,7 +28,6 @@ interface Lx {
     songlistPosition?: number
   }
   rootOffset: number
-  apiInitPromise: [Promise<boolean>, boolean, (success: boolean) => void]
 }
 
 declare global {

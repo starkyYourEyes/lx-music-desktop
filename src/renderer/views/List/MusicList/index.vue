@@ -56,7 +56,7 @@
         @scroll="handleListScroll" @contextmenu.capture="handleListRightClick"
       >
         <div
-          class="list-item" :class="[{ [$style.active]: playerInfo.isPlayList && playerInfo.playIndex === index }, { [$style.locatingCurrent]: locatingCurrentIndex === index }, { selected: selectedIndex == index || rightClickSelectedIndex == index }, { active: selectedList.includes(item) }, { disabled: !assertApiSupport(item.source) }]"
+          class="list-item" :class="[{ [$style.active]: playerInfo.isPlayList && playerInfo.playIndex === index }, { [$style.locatingCurrent]: locatingCurrentIndex === index }, { selected: selectedIndex == index || rightClickSelectedIndex == index }, { active: selectedList.includes(item) }, { disabled: !canStartPlayback(item.source) }]"
           @click="handleListItemClick($event, index)" @contextmenu="handleListItemRightClick($event, index)"
         >
           <div class="list-item-cell no-select" :class="$style.num" style="flex: 0 0 5%;">
@@ -75,7 +75,7 @@
           <div class="list-item-cell" style="flex: 0 0 22%;"><span class="select" :aria-label="item.meta.albumName">{{ item.meta.albumName }}</span></div>
           <div class="list-item-cell" style="flex: 0 0 9%;"><span class="no-select">{{ item.interval || '--/--' }}</span></div>
           <div class="list-item-cell" style="flex: 0 0 16%; padding-left: 0; padding-right: 0;">
-            <material-list-buttons :index="index" :download-btn="assertApiSupport(item.source) && item.source != 'local'" @btn-click="handleListBtnClick" />
+            <material-list-buttons :index="index" :download-btn="canOpenPrimaryDownload(item.source)" @btn-click="handleListBtnClick" />
           </div>
         </div>
       </base-virtualized-list>
@@ -86,7 +86,7 @@
       >
         <div
           class="list-item"
-          :class="[{ [$style.active]: playerInfo.isPlayList && playerInfo.playIndex === index }, { [$style.locatingCurrent]: locatingCurrentIndex === index }, { selected: selectedIndex == index || rightClickSelectedIndex == index }, { active: selectedList.includes(item) }, { disabled: !assertApiSupport(item.source) }]"
+          :class="[{ [$style.active]: playerInfo.isPlayList && playerInfo.playIndex === index }, { [$style.locatingCurrent]: locatingCurrentIndex === index }, { selected: selectedIndex == index || rightClickSelectedIndex == index }, { active: selectedList.includes(item) }, { disabled: !canStartPlayback(item.source) }]"
           @click="handleListItemClick($event, index)" @contextmenu="handleListItemRightClick($event, index)"
         >
           <div class="list-item-cell no-select" :class="$style.num" style="flex: 0 0 5%;">
@@ -150,7 +150,7 @@
 import { clipboardWriteText } from '@common/utils/electron'
 import { encodePath } from '@common/utils/common'
 import { computed, onBeforeUnmount, ref, watch } from '@common/utils/vueTools'
-import { assertApiSupport } from '@renderer/store/utils'
+import { canOpenPrimaryDownload, canStartPlayback } from '@renderer/store/utils'
 import SearchList from './components/SearchList.vue'
 import MusicSortModal from './components/MusicSortModal.vue'
 import MusicToggleModal from './components/MusicToggleModal.vue'
@@ -317,7 +317,8 @@ export default {
       menuClick,
     } = useMenu({
       props,
-      assertApiSupport,
+      canStartPlayback,
+      canOpenPrimaryDownload,
       emit,
 
       handleShowDownloadModal,
@@ -515,7 +516,8 @@ export default {
       handleMenuClick,
 
       handleListRightClick,
-      assertApiSupport,
+      canStartPlayback,
+      canOpenPrimaryDownload,
 
       isShowListAdd,
       isMove,

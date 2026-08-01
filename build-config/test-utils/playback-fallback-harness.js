@@ -525,6 +525,299 @@ const createPoolHarness = (options = {}) => {
   }
 }
 
+const createAdapterHarness = (options = {}) => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  const builtinLookups = []
+  const leases = []
+  const builtinCapabilities = options.builtinCapabilities
+    ? { builtin: options.builtinCapabilities }
+    : options.builtinCapabilitiesById ?? {}
+  const module = loadTsModule(
+    path.join(__dirname, '../../src/renderer/core/music/playback/sourceAdapter.ts'),
+    {
+      '@common/utils/playbackSourceError': loadTsModule(
+        path.join(__dirname, '../../src/common/utils/playbackSourceError.ts'),
+      ),
+      '@renderer/utils/ipc': {},
+      '@renderer/utils/message': { requestMsg: {} },
+      '@renderer/utils/musicSdk/api-source': {},
+    },
+  )
+  const adapter = module.createPlaybackSourceAdapter({
+    isCustomApi: apiId => /^user_api/.test(apiId) || ['a'].includes(apiId),
+    ensureUserApi: options.ensure ?? (async apiId => ({
+      ok: true,
+      value: { apiId, status: true, apiInfo: { id: apiId, sources: {} } },
+    })),
+    requestUserApi: options.request ?? (async params => ({
+      ok: true,
+      value: { source: params.data.source, action: params.data.action, data: { type: params.data.info.type, url: 'https://audio/custom' } },
+    })),
+    cancelUserApi: options.cancel ?? (() => {}),
+    acquireRuntime: params => leases.push({ action: 'retain', ...params }),
+    releaseRuntime: params => leases.push({ action: 'release', ...params }),
+    getBuiltinCapabilities: apiId => {
+      const sources = builtinCapabilities[apiId]
+      return sources ? { sources } : undefined
+    },
+    getBuiltinApi(apiId, platform) {
+      builtinLookups.push({ apiId, platform })
+      return {
+        getMusicUrl: options.builtinRequest ?? (async(_musicInfo, quality) => ({
+          type: quality,
+          url: 'https://audio/builtin',
+        })),
+      }
+    },
+    tooManyRequestsMessage: options.tooManyRequestsMessage,
+    serverBusyMessages: options.serverBusyMessages ?? new Set(),
+  })
+  return Object.assign(adapter, { builtinLookups, leases })
+}
+
+const createColdUserApiRegistryHarness = () => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  let serializedUserApis
+  const store = {
+    get: key => key == 'userApis' && serializedUserApis != null
+      ? structuredClone(serializedUserApis)
+      : undefined,
+    set: (key, value) => {
+      if (key == 'userApis') serializedUserApis = structuredClone(value)
+    },
+  }
+  const load = () => {
+    const originalLx = global.lx
+    try {
+      global.lx = { event_app: { user_api_changed() {} } }
+      return loadTsModule(path.join(__dirname, '../../src/main/modules/userApi/utils.ts'), {
+        './config': { userApis: [] },
+        '@common/constants': { STORE_NAMES: { USER_API: 'userApi' } },
+        '@main/utils/store': () => store,
+        '@common/utils/userApiSync': {
+          assertUserApiSyncData() {},
+          createUserApiSyncData() { return {} },
+        },
+        '@common/utils': { log: { error() {} } },
+        '@common/utils/githubUserApi': {
+          createGitHubUserApiError: message => new Error(message),
+          GITHUB_USER_API_LIMITS: { maxFiles: 100, maxScriptBytes: 1024 * 1024, maxTotalBytes: 10 * 1024 * 1024 },
+        },
+      })
+    } finally {
+      global.lx = originalLx
+    }
+  }
+  return {
+    async importAndRestart(script) {
+      const originalLx = global.lx
+      try {
+        global.lx = { event_app: { user_api_changed() {} } }
+        await load().importApi(script)
+      } finally {
+        global.lx = originalLx
+      }
+      return load().getUserApis()
+    },
+    persistCapabilitiesAndRestart(apiId, sources) {
+      const module = load()
+      const state = module.getUserApiState()
+      const api = state.apiList.find(api => api.id == apiId)
+      api.sources = sources
+      module.commitUserApiState(state)
+      return Promise.resolve(load().getUserApis())
+    },
+    get serializedUserApis() {
+      return structuredClone(serializedUserApis ?? [])
+    },
+  }
+}
+
+const createPrimaryCapabilityHarness = (options) => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  const module = loadTsModule(
+    path.join(__dirname, '../../src/renderer/core/music/primarySource.ts'),
+    {
+      '@common/utils/playbackSourceError': loadTsModule(
+        path.join(__dirname, '../../src/common/utils/playbackSourceError.ts'),
+      ),
+      '@renderer/store': {},
+      '@renderer/store/setting': {},
+      '@renderer/utils/ipc': {},
+      '@renderer/utils/musicSdk/api-source': {},
+      './playback/sourceSelectors': loadTsModule(
+        path.join(__dirname, '../../src/renderer/core/music/playback/sourceSelectors.ts'),
+      ),
+    },
+  )
+  let primary = options.primary
+  let ensureIndex = 0
+  let requestId = 0
+  const ensureCalls = []
+  const requestActions = []
+  const cancelledRequests = []
+  const publishedCapabilities = []
+  const ensureWaiters = new Map()
+  const customIds = new Set((options.customApis ?? []).map(api => api.id))
+  const runtimeStates = options.runtimeStates ?? {}
+  const knownCapabilities = options.knownCapabilities ?? {}
+  const notifyEnsure = apiId => {
+    const count = ensureCalls.filter(id => id == apiId).length
+    ensureWaiters.get(`${apiId}:${count}`)?.resolve()
+  }
+  const controller = module.createPrimarySourceCapabilityController({
+    getPrimaryId: () => primary,
+    isInstalledCustom: apiId => customIds.has(apiId),
+    getBuiltinCapabilities: apiId => options.builtinCapabilities?.[apiId],
+    getRuntimeStatus: apiId => runtimeStates[apiId],
+    getKnownCapabilities: apiId => knownCapabilities[apiId],
+    ensureUserApi(apiId) {
+      ensureCalls.push(apiId)
+      notifyEnsure(apiId)
+      if (options.ensure) return options.ensure(apiId)
+      return Promise.resolve(options.ensureResults?.[ensureIndex++] ?? {
+        ok: true,
+        value: { apiId, status: true, apiInfo: { id: apiId, sources: {} } },
+      })
+    },
+    requestUserApi(params) {
+      requestActions.push(`${params.apiId}:${params.data.source}:${params.data.action}`)
+      if (options.request) return options.request(params)
+      return Promise.resolve({
+        ok: true,
+        value: { source: params.data.source, action: params.data.action, data: {} },
+      })
+    },
+    cancelUserApi(params) { cancelledRequests.push(params) },
+    publishCapabilities(apiId, value) { publishedCapabilities.push({ apiId, value }) },
+    createRequestId: () => `primary:${++requestId}`,
+  })
+  const selectors = loadTsModule(
+    path.join(__dirname, '../../src/renderer/core/music/playback/sourceSelectors.ts'),
+  )
+  return {
+    controller,
+    setPrimary(apiId) { primary = apiId },
+    waitForEnsureCall(apiId, ordinal = 1) {
+      if (ensureCalls.filter(id => id == apiId).length >= ordinal) return Promise.resolve()
+      const key = `${apiId}:${ordinal}`
+      let item = ensureWaiters.get(key)
+      if (!item) ensureWaiters.set(key, item = deferred())
+      return item.promise
+    },
+    ensureCalls,
+    requestActions,
+    cancelledRequests,
+    publishedCapabilities,
+    get qualityList() {
+      const last = publishedCapabilities.at(-1)
+      return selectors.deriveQualityListFromCapabilities(last?.value)
+    },
+  }
+}
+
+const createColdPrimaryMusicEntryHarness = () => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  const ensureCalls = []
+  const requestActions = []
+  const runtimeStates = {}
+  const capabilities = {}
+  const rendererUserApi = {
+    list: [{ id: 'user_api_a' }],
+    runtimeStates,
+    capabilities,
+  }
+  const runtimeSources = {
+    local: { name: 'Local', type: 'music', actions: ['musicUrl', 'lyric', 'pic'], qualitys: [] },
+  }
+  const originalWindow = global.window
+  const originalLx = global.lx
+  try {
+    global.window = { dt: false }
+    loadTsModule(path.join(__dirname, '../../src/renderer/core/globalData.ts'), {
+      '@renderer/worker': () => ({}),
+    })
+    const primaryModule = loadTsModule(
+      path.join(__dirname, '../../src/renderer/core/music/primarySource.ts'),
+      {
+        '@common/utils/playbackSourceError': loadTsModule(
+          path.join(__dirname, '../../src/common/utils/playbackSourceError.ts'),
+        ),
+        '@renderer/store': {
+          userApi: rendererUserApi,
+          qualityList: { value: {} },
+        },
+        '@renderer/store/setting': { appSetting: { 'common.apiSource': 'user_api_a' } },
+        '@renderer/utils/ipc': {
+          ensureUserApi: async apiId => {
+            ensureCalls.push(apiId)
+            const status = { apiId, status: true, apiInfo: { id: apiId, sources: runtimeSources } }
+            runtimeStates[apiId] = status
+            return { ok: true, value: status }
+          },
+          sendUserApiRequest: async params => {
+            requestActions.push(`${params.apiId}:${params.data.source}:${params.data.action}`)
+            const data = params.data.action == 'musicUrl'
+              ? { type: null, url: 'https://audio/local' }
+              : params.data.action == 'lyric'
+                ? { lyric: '[00:00]local' }
+                : 'https://image/local'
+            return { ok: true, value: { source: params.data.source, action: params.data.action, data } }
+          },
+          userApiRequestCancel() {},
+        },
+        '@renderer/utils/musicSdk/api-source': { supportQuality: {} },
+        './playback/sourceSelectors': loadTsModule(
+          path.join(__dirname, '../../src/renderer/core/music/playback/sourceSelectors.ts'),
+        ),
+      },
+    )
+    const compatibilityApi = {
+      getMusicUrl: info => primaryModule.requestPrimarySourceAction({ source: 'local', action: 'musicUrl', info, quality: null }),
+      getLyric: info => primaryModule.requestPrimarySourceAction({ source: 'local', action: 'lyric', info }),
+      getPic: info => primaryModule.requestPrimarySourceAction({ source: 'local', action: 'pic', info }),
+    }
+    const musicModule = loadTsModule(path.join(__dirname, '../../src/renderer/core/music/utils.ts'), {
+      '@renderer/store': { qualityList: { value: {} } },
+      '@renderer/store/utils': { assertApiSupport: () => true },
+      '@renderer/utils/musicSdk': { findMusic: async() => [] },
+      '@renderer/utils/ipc': {
+        getMusicUrl: async() => '',
+        getPlayerLyric: async() => ({ lyric: '' }),
+      },
+      '@renderer/store/setting': { appSetting: { 'player.isS2t': false } },
+      '@renderer/utils': { langS2T: async value => value, toNewMusicInfo: value => value, toOldMusicInfo: value => value },
+      '@renderer/utils/message': { requestMsg: {} },
+      '@renderer/utils/musicSdk/api-source': { apis: () => compatibilityApi },
+    })
+    const globalDataKeys = Object.keys(global.window.lx)
+    return {
+      getLocalMusicUrl: () => musicModule.getOnlineOtherSourceMusicUrlByLocal(localMusic, false),
+      getLocalLyric: () => musicModule.getOnlineOtherSourceLyricByLocal(localMusic, false),
+      getLocalPicture: () => musicModule.getOnlineOtherSourcePicByLocal(localMusic),
+      ensureCalls,
+      requestActions,
+      globalDataKeys,
+    }
+  } finally {
+    global.window = originalWindow
+    global.lx = originalLx
+  }
+}
+
+const loadSourceSelectors = () => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  return loadTsModule(path.join(__dirname, '../../src/renderer/core/music/playback/sourceSelectors.ts'))
+}
+const canStartPlaybackWithRegistry = (...args) => loadSourceSelectors().canStartPlaybackWithRegistry(...args)
+const canOpenPrimaryDownloadWithRegistry = (...args) => loadSourceSelectors().canOpenPrimaryDownloadWithRegistry(...args)
+const deriveQualityListFromCapabilities = (...args) => loadSourceSelectors().deriveQualityListFromCapabilities(...args)
+
 module.exports = {
   deferred,
   playbackError,
@@ -542,4 +835,11 @@ module.exports = {
   songB,
   createRuntimeWindowHarness,
   createPoolHarness,
+  createAdapterHarness,
+  createColdUserApiRegistryHarness,
+  createPrimaryCapabilityHarness,
+  createColdPrimaryMusicEntryHarness,
+  canStartPlaybackWithRegistry,
+  canOpenPrimaryDownloadWithRegistry,
+  deriveQualityListFromCapabilities,
 }

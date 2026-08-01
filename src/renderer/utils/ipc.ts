@@ -1,3 +1,5 @@
+/// <reference path="../../common/types/playback_source.d.ts" />
+
 import { rendererSend, rendererInvoke, rendererOn, rendererOff } from '@common/rendererIpc'
 import { HOTKEY_RENDERER_EVENT_NAME, WIN_MAIN_RENDERER_EVENT_NAME, CMMON_EVENT_NAME } from '@common/ipcNames'
 import { markRaw, toRaw } from '@common/utils/vueTools'

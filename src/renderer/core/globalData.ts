@@ -26,7 +26,6 @@ window.lx = {
   worker: createWorkers(),
   isProd: process.env.NODE_ENV == 'production',
   rootOffset: window.dt ? 0 : 8,
-  apiInitPromise: [Promise.resolve(false), true, () => {}],
 }
 
 window.lxData = {}

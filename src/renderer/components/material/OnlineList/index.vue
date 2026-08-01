@@ -50,7 +50,7 @@
                 <div class="list-item-cell" style="flex: 0 0 22%;"><span class="select" :aria-label="item.meta.albumName">{{ item.meta.albumName }}</span></div>
                 <div class="list-item-cell" style="flex: 0 0 9%;"><span class="no-select">{{ item.interval || '--/--' }}</span></div>
                 <div class="list-item-cell" style="flex: 0 0 16%; padding-left: 0; padding-right: 0;">
-                  <material-list-buttons :index="index" :remove-btn="false" :download-btn="assertApiSupport(item.source)" :play-btn="checkApiSource ? assertApiSupport(item.source) : true" @btn-click="handleListBtnClick" />
+                  <material-list-buttons :index="index" :remove-btn="false" :download-btn="canOpenPrimaryDownload(item.source)" :play-btn="checkApiSource ? canStartPlayback(item.source) : true" @btn-click="handleListBtnClick" />
                 </div>
               </div>
             </template>
@@ -114,7 +114,7 @@
 
 <script>
 import { clipboardWriteText } from '@common/utils/electron'
-import { assertApiSupport } from '@renderer/store/utils'
+import { canOpenPrimaryDownload, canStartPlayback } from '@renderer/store/utils'
 import { computed, ref } from '@common/utils/vueTools'
 import useList from './useList'
 import useMenu from './useMenu'
@@ -254,7 +254,8 @@ export default {
       menuClick,
     } = useMenu({
       props,
-      assertApiSupport,
+      canStartPlayback,
+      canOpenPrimaryDownload,
       emit,
 
       handleShowDownloadModal,
@@ -335,7 +336,8 @@ export default {
       handleMenuClick,
 
       handleListRightClick,
-      assertApiSupport,
+      canStartPlayback,
+      canOpenPrimaryDownload,
 
       isShowListAdd,
       isShowListAddMultiple,

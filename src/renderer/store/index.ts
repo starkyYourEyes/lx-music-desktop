@@ -113,12 +113,16 @@ export const userApi = reactive<{
   status: boolean
   message?: string
   apis: Partial<LX.UserApi.UserApiSources>
+  runtimeStates: Record<string, LX.UserApi.UserApiStatus>
+  capabilities: Record<string, LX.Playback.SourceCapabilities>
 }>({
   list: [],
   listLoaded: false,
   status: false,
   message: 'initing',
   apis: {},
+  runtimeStates: {},
+  capabilities: {},
 })
 
 export const isFullscreen = ref(false)

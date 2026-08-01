@@ -6,7 +6,8 @@ import { LIST_IDS } from '@common/constants'
 
 export default ({
   props,
-  assertApiSupport,
+  canStartPlayback,
+  canOpenPrimaryDownload,
   emit,
 
   handleShowDownloadModal,
@@ -110,7 +111,8 @@ export default ({
     itemMenuControl.sourceDetail = !!musicSdk[musicInfo.source]?.getMusicDetailPageUrl
     // itemMenuControl.play =
     //   itemMenuControl.playLater =
-    itemMenuControl.download = !isWebDAVList && assertApiSupport(musicInfo.source) && musicInfo.source != 'local' && musicInfo.source != 'webdav'
+    itemMenuControl.download = !isWebDAVList && canOpenPrimaryDownload(musicInfo.source)
+    itemMenuControl.play = itemMenuControl.playLater = canStartPlayback(musicInfo.source)
     itemMenuControl.moveTo = !isWebDAVList
     itemMenuControl.sort = !isWebDAVList
     itemMenuControl.toggleSource = !isWebDAVList

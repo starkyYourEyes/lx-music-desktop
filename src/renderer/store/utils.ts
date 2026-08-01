@@ -9,10 +9,33 @@ import { encodePath, isUrl } from '@common/utils/common'
 import { joinPath } from '@common/utils/nodejs'
 import { markRaw, shallowReactive } from '@common/utils/vueTools'
 import { getThemes as getTheme } from '@renderer/utils/ipc'
-import { qualityList, themeInfo, themeShouldUseDarkColors } from './index'
+import { themeInfo, themeShouldUseDarkColors, userApi } from './index'
+import { appSetting } from './setting'
+import apiSourceInfo from '@renderer/utils/musicSdk/api-source-info'
+import { supportQuality } from '@renderer/utils/musicSdk/api-source'
+import {
+  canOpenPrimaryDownloadWithRegistry,
+  canStartPlaybackWithRegistry,
+} from '@renderer/core/music/playback/sourceSelectors'
 
 export const assertApiSupport = (source: LX.Source): boolean => {
-  return source == 'local' || source == 'webdav' || qualityList.value[source] != null
+  return canStartPlayback(source)
+}
+
+export const canStartPlayback = (source: LX.Source): boolean => {
+  const installed = new Set(apiSourceInfo.filter(api => !api.disabled).map(api => api.id))
+  if (userApi.listLoaded) for (const api of userApi.list) installed.add(api.id)
+  return canStartPlaybackWithRegistry(source, appSetting, installed)
+}
+
+export const canOpenPrimaryDownload = (source: LX.Source): boolean => {
+  return canOpenPrimaryDownloadWithRegistry(
+    source,
+    appSetting['common.apiSource'],
+    supportQuality as Record<string, LX.QualityList>,
+    new Set(userApi.list.map(api => api.id)),
+    userApi.capabilities,
+  )
 }
 
 export const buildBgUrl = (originUrl: string, dataPath: string): string => {

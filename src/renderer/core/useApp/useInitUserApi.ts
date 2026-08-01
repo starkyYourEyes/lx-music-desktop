@@ -1,6 +1,6 @@
 import { onBeforeUnmount, watch } from '@common/utils/vueTools'
 import { useI18n } from '@renderer/plugins/i18n'
-import { onUserApiStatus, getUserApiList, sendUserApiRequest as sendUserApiRequestRemote, userApiRequestCancel, onShowUserApiUpdateAlert } from '@renderer/utils/ipc'
+import { getUserApiList, onShowUserApiUpdateAlert, onUserApiStatus } from '@renderer/utils/ipc'
 import { openUrl } from '@common/utils/electron'
 import { qualityList, userApi } from '@renderer/store'
 import { appSetting, updateSetting } from '@renderer/store/setting'
@@ -8,21 +8,39 @@ import { dialog } from '@renderer/plugins/Dialog'
 import { setUserApi } from '@renderer/core/apiSource'
 import apiSourceInfo from '@renderer/utils/musicSdk/api-source-info'
 import { reconcilePlaybackSourceRegistry } from '@common/utils/playbackSourceSetting'
+import {
+  primarySourceCapabilityController,
+  requestPrimarySourceAction,
+} from '@renderer/core/music/primarySource'
+import { deriveQualityListFromCapabilities } from '@renderer/core/music/playback/sourceSelectors'
 
-const sendUserApiRequest: typeof sendUserApiRequestRemote = async(data) => {
-  let stop: () => void
-  return new Promise<void>((resolve, reject) => {
-    stop = watch(() => appSetting['common.apiSource'], () => {
-      reject(new Error('source changed'))
-    })
-    void sendUserApiRequestRemote(data).then(resolve).catch(reject)
-  }).finally(() => {
-    stop()
-  })
+const compatibilitySources: Array<LX.OnlineSource | 'local'> = [
+  'kw', 'kg', 'tx', 'wy', 'mg', 'local',
+]
+
+const buildPrimaryCompatibilityApis = () => {
+  const apis: Record<string, unknown> = {}
+  for (const source of compatibilitySources) {
+    apis[source] = {
+      getMusicUrl(info: LX.Music.MusicInfo, quality: LX.Quality | null) {
+        return requestPrimarySourceAction<{ type: LX.Quality | null, url: string }>({
+          source, action: 'musicUrl', info, quality,
+        })
+      },
+      getLyric(info: LX.Music.MusicInfo) {
+        return requestPrimarySourceAction<LX.Music.LyricInfo>({ source, action: 'lyric', info })
+      },
+      getPic(info: LX.Music.MusicInfo) {
+        return requestPrimarySourceAction<string>({ source, action: 'pic', info })
+      },
+    }
+  }
+  return apis as Partial<LX.UserApi.UserApiSources>
 }
 
 export default () => {
   const t = useI18n()
+  userApi.apis = buildPrimaryCompatibilityApis()
 
   const reconcileInstalledPlaybackSources = (list: LX.UserApi.UserApiInfo[]) => {
     const normalized = reconcilePlaybackSourceRegistry(
@@ -50,124 +68,43 @@ export default () => {
     { immediate: true },
   )
 
-  const rUserApiStatus = onUserApiStatus(({ params: { status, message, apiInfo } }) => {
-    // console.log({ status, message, apiInfo })
-    userApi.status = status
-    userApi.message = message
+  const stopRuntimeInvalidation = watch(
+    () => userApi.list.map(api => `${api.id}:${api.version ?? ''}:${api.remote?.blobSha ?? ''}`).join('\u0000'),
+    (current, previous) => {
+      if (previous == null || !userApi.listLoaded) return
+      const parse = (value: string) => new Map(value.split('\u0000').filter(Boolean).map(item => {
+        const separator = item.indexOf(':')
+        return [item.substring(0, separator), item]
+      }))
+      const before = parse(previous)
+      const after = parse(current)
+      for (const [apiId, signature] of before) {
+        if (after.get(apiId) == signature) continue
+        primarySourceCapabilityController.invalidate(apiId)
+        delete userApi.runtimeStates[apiId]
+        delete userApi.capabilities[apiId]
+      }
+    },
+  )
 
-    if (!apiInfo || apiInfo.id !== appSetting['common.apiSource']) return
-    if (status) {
-      if (apiInfo.sources) {
-        let apis: any = {}
-        let qualitys: LX.QualityList = {}
-        for (const [source, { actions, type, qualitys: sourceQualitys }] of Object.entries(apiInfo.sources)) {
-          if (type != 'music') continue
-          apis[source as LX.Source] = {}
-          for (const action of actions) {
-            switch (action) {
-              case 'musicUrl':
-                apis[source].getMusicUrl = (songInfo: LX.Music.MusicInfo, type: LX.Quality) => {
-                  const requestKey = `request__${Math.random().toString().substring(2)}`
-                  return {
-                    canceleFn() {
-                      userApiRequestCancel(requestKey)
-                    },
-                    promise: sendUserApiRequest({
-                      requestKey,
-                      data: {
-                        source,
-                        action: 'musicUrl',
-                        info: {
-                          type,
-                          musicInfo: songInfo,
-                        },
-                      },
-                      // eslint-disable-next-line @typescript-eslint/promise-function-async
-                    }).then(res => {
-                      // console.log(res)
-                      return { type, url: res.data.url }
-                    }).catch(async err => {
-                      console.log(err.message)
-                      return Promise.reject(err)
-                    }),
-                  }
-                }
-                break
-              case 'lyric':
-                apis[source].getLyric = (songInfo: LX.Music.MusicInfo) => {
-                  const requestKey = `request__${Math.random().toString().substring(2)}`
-                  return {
-                    canceleFn() {
-                      userApiRequestCancel(requestKey)
-                    },
-                    promise: sendUserApiRequest({
-                      requestKey,
-                      data: {
-                        source,
-                        action: 'lyric',
-                        info: {
-                          type,
-                          musicInfo: songInfo,
-                        },
-                      },
-                      // eslint-disable-next-line @typescript-eslint/promise-function-async
-                    }).then(res => {
-                      // console.log(res)
-                      return res.data
-                    }).catch(async err => {
-                      console.log(err.message)
-                      return Promise.reject(err)
-                    }),
-                  }
-                }
-                break
-              case 'pic':
-                apis[source].getPic = (songInfo: LX.Music.MusicInfo) => {
-                  const requestKey = `request__${Math.random().toString().substring(2)}`
-                  return {
-                    canceleFn() {
-                      userApiRequestCancel(requestKey)
-                    },
-                    promise: sendUserApiRequest({
-                      requestKey,
-                      data: {
-                        source,
-                        action: 'pic',
-                        info: {
-                          type,
-                          musicInfo: songInfo,
-                        },
-                      },
-                      // eslint-disable-next-line @typescript-eslint/promise-function-async
-                    }).then(res => {
-                      // console.log(res)
-                      return res.data
-                    }).catch(async err => {
-                      console.log(err.message)
-                      return Promise.reject(err)
-                    }),
-                  }
-                }
-                break
-              default:
-                break
-            }
-          }
-          qualitys[source as LX.Source] = sourceQualitys
-        }
-        qualityList.value = qualitys
-        userApi.apis = apis
-      }
-    } else {
-      if (message) {
-        void dialog({
-          message: `${t('user_api__init_failed_alert', { name: apiInfo.name })}\n${message}`,
-          selection: true,
-          confirmButtonText: t('ok'),
-        })
-      }
+  const rUserApiStatus = onUserApiStatus(({ params: runtime }) => {
+    userApi.runtimeStates[runtime.apiId] = runtime
+    if (runtime.status && runtime.apiInfo?.sources) {
+      userApi.capabilities[runtime.apiId] = { sources: runtime.apiInfo.sources }
     }
-    if (!window.lx.apiInitPromise[1]) window.lx.apiInitPromise[2](status)
+    if (runtime.apiId != appSetting['common.apiSource']) return
+
+    userApi.status = runtime.status
+    userApi.message = runtime.message
+    if (runtime.status) {
+      qualityList.value = deriveQualityListFromCapabilities(userApi.capabilities[runtime.apiId])
+    } else if (runtime.message && runtime.apiInfo) {
+      void dialog({
+        message: `${t('user_api__init_failed_alert', { name: runtime.apiInfo.name })}\n${runtime.message}`,
+        selection: true,
+        confirmButtonText: t('ok'),
+      })
+    }
   })
 
   const rUserApiShowUpdateAlert = onShowUserApiUpdateAlert(({ params: { name, log, updateUrl } }) => {
@@ -180,9 +117,7 @@ export default () => {
         cancelButtonText: t('close'),
       }).then(confirm => {
         if (!confirm) return
-        window.setTimeout(() => {
-          void openUrl(updateUrl)
-        }, 300)
+        window.setTimeout(() => { void openUrl(updateUrl) }, 300)
       })
     } else {
       void dialog({
@@ -195,21 +130,17 @@ export default () => {
 
   onBeforeUnmount(() => {
     stopRegistryReconcile()
+    stopRuntimeInvalidation()
     rUserApiStatus()
     rUserApiShowUpdateAlert()
   })
 
   return async() => {
-    await setUserApi(appSetting['common.apiSource'])
+    void setUserApi(appSetting['common.apiSource'])
     void getUserApiList().then(list => {
-      // console.log(list)
-      // if (![...apiSourceInfo.map(s => s.id), ...list.map(s => s.id)].includes(appSetting['common.apiSource'])) {
-      //   console.warn('reset api')
-      //   let api = apiSourceInfo.find(api => !api.disabled)
-      //   if (api) apiSource.value = api.id
-      // }
       userApi.list = list
       userApi.listLoaded = true
+      void setUserApi(appSetting['common.apiSource'])
     }).catch(err => {
       console.log(err)
     })

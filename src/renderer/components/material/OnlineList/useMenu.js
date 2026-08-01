@@ -5,7 +5,8 @@ import { hasDislike } from '@renderer/core/dislikeList'
 
 export default ({
   props,
-  assertApiSupport,
+  canStartPlayback,
+  canOpenPrimaryDownload,
   emit,
 
   handleShowDownloadModal,
@@ -81,7 +82,7 @@ export default ({
     itemMenuControl.sourceDetail = !!musicSdk[musicInfo.source]?.getMusicDetailPageUrl
     // this.listMenu.itemMenuControl.play =
     //   this.listMenu.itemMenuControl.playLater =
-    itemMenuControl.download = assertApiSupport(musicInfo.source)
+    itemMenuControl.download = canOpenPrimaryDownload(musicInfo.source)
     itemMenuControl.uploadToWebDAV = props.localMusicUpload && musicInfo.source == 'local'
 
     itemMenuControl.dislike = !hasDislike(musicInfo)
@@ -89,7 +90,7 @@ export default ({
     if (props.checkApiSource) {
       itemMenuControl.playLater =
       itemMenuControl.play =
-        itemMenuControl.download
+        canStartPlayback(musicInfo.source)
     }
 
     menuLocation.x = event.pageX

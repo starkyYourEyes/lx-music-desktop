@@ -26,6 +26,13 @@ const seedSource = fixture => {
   fs.writeFileSync(path.join(fixture.sourceRoot, 'nested', 'config.json'), '{"theme":"dark"}')
 }
 
+const replaceDirectoryWithSameContent = directoryPath => {
+  const originalPath = `${directoryPath}-original`
+  fs.renameSync(directoryPath, originalPath)
+  fs.cpSync(originalPath, directoryPath, { recursive: true })
+  return originalPath
+}
+
 const makeLockMetadata = pid => JSON.stringify({
   version: 1,
   pid,
@@ -289,6 +296,8 @@ describe('portable profile migration journal', () => {
       version: 1,
       sourceManifestHash: journal.sourceManifestHash,
       destinationManifestHash: journal.destinationManifestHash,
+      userDataIdentity: journal.userDataIdentity,
+      sourceIdentity: journal.sourceIdentity,
       destinationIdentity: journal.destinationIdentity,
       promotionRunId: journal.promotionRunId,
       preparationRunId: journal.preparationRunId,
@@ -356,6 +365,47 @@ describe('portable profile migration journal', () => {
     })
   }
 
+  it('rejects same-content source replacement before acknowledgement', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const {
+      PORTABLE_PROFILE_JOURNAL_FILE,
+      acknowledgePortableProfileStartup,
+      preparePortableProfile,
+    } = require(migrationModule)
+    const promoted = preparePortableProfile(fixture)
+    const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
+    const journalBeforeAcknowledgement = fs.readFileSync(journalPath, 'utf8')
+    const originalSourceRoot = replaceDirectoryWithSameContent(fixture.sourceRoot)
+
+    await assert.rejects(acknowledgePortableProfileStartup(promoted.token), /source|identity|ownership/i)
+
+    assert.equal(fs.readFileSync(journalPath, 'utf8'), journalBeforeAcknowledgement)
+    assert.equal(fs.readFileSync(path.join(fixture.sourceRoot, 'lx.data.db'), 'utf8'), 'database-v1')
+    assert.equal(fs.readFileSync(path.join(originalSourceRoot, 'lx.data.db'), 'utf8'), 'database-v1')
+  })
+
+  it('rejects same-content userData ancestry replacement before acknowledgement', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const userDataRoot = path.dirname(fixture.sourceRoot)
+    const {
+      PORTABLE_PROFILE_JOURNAL_FILE,
+      acknowledgePortableProfileStartup,
+      preparePortableProfile,
+    } = require(migrationModule)
+    const promoted = preparePortableProfile(fixture)
+    const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
+    const journalBeforeAcknowledgement = fs.readFileSync(journalPath, 'utf8')
+    const originalUserDataRoot = replaceDirectoryWithSameContent(userDataRoot)
+
+    await assert.rejects(acknowledgePortableProfileStartup(promoted.token), /userData|identity|ownership/i)
+
+    assert.equal(fs.readFileSync(journalPath, 'utf8'), journalBeforeAcknowledgement)
+    assert.equal(fs.readFileSync(path.join(fixture.sourceRoot, 'lx.data.db'), 'utf8'), 'database-v1')
+    assert.equal(fs.readFileSync(path.join(originalUserDataRoot, 'LxDatas', 'lx.data.db'), 'utf8'), 'database-v1')
+  })
+
   it('rejects a token whose startup run ID changed without changing the journal', async() => {
     const fixture = createFixture()
     seedSource(fixture)
@@ -416,6 +466,45 @@ describe('portable profile migration journal', () => {
       assert.equal(result.state, 'failed', mutation)
       assert.equal(exists(fixture.sourceRoot), true, mutation)
     }
+  })
+
+  it('rejects same-content source replacement before later-start retirement', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const {
+      acknowledgePortableProfileStartup,
+      preparePortableProfile,
+      retireAcknowledgedPortableSource,
+    } = require(migrationModule)
+    const promoted = preparePortableProfile(fixture)
+    await acknowledgePortableProfileStartup(promoted.token)
+    const originalSourceRoot = replaceDirectoryWithSameContent(fixture.sourceRoot)
+
+    const result = retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-2' })
+
+    assert.equal(result.state, 'failed')
+    assert.equal(fs.readFileSync(path.join(fixture.sourceRoot, 'lx.data.db'), 'utf8'), 'database-v1')
+    assert.equal(fs.readFileSync(path.join(originalSourceRoot, 'lx.data.db'), 'utf8'), 'database-v1')
+  })
+
+  it('rejects same-content userData ancestry replacement before later-start retirement', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const userDataRoot = path.dirname(fixture.sourceRoot)
+    const {
+      acknowledgePortableProfileStartup,
+      preparePortableProfile,
+      retireAcknowledgedPortableSource,
+    } = require(migrationModule)
+    const promoted = preparePortableProfile(fixture)
+    await acknowledgePortableProfileStartup(promoted.token)
+    const originalUserDataRoot = replaceDirectoryWithSameContent(userDataRoot)
+
+    const result = retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-2' })
+
+    assert.equal(result.state, 'failed')
+    assert.equal(fs.readFileSync(path.join(fixture.sourceRoot, 'lx.data.db'), 'utf8'), 'database-v1')
+    assert.equal(fs.readFileSync(path.join(originalUserDataRoot, 'LxDatas', 'lx.data.db'), 'utf8'), 'database-v1')
   })
 
   it('revalidates source identity after the final retirement race boundary', async() => {

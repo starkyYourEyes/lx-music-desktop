@@ -107,10 +107,12 @@ const parseJournal = raw => {
   const journal = parseJsonObject(raw, 'Portable profile migration journal is invalid')
   const keys = Object.keys(journal ?? {}).sort()
   if (
-    keys.join(',') != 'acknowledgementRunId,destinationIdentity,destinationManifestHash,preparationRunId,promotionRunId,sourceManifestHash,state,version' ||
+    keys.join(',') != 'acknowledgementRunId,destinationIdentity,destinationManifestHash,preparationRunId,promotionRunId,sourceIdentity,sourceManifestHash,state,userDataIdentity,version' ||
     journal.version != JOURNAL_VERSION ||
     typeof journal.sourceManifestHash != 'string' || !/^[a-f0-9]{64}$/.test(journal.sourceManifestHash) ||
     typeof journal.destinationManifestHash != 'string' || !/^[a-f0-9]{64}$/.test(journal.destinationManifestHash) ||
+    !isRecordedNodeIdentity(journal.userDataIdentity) ||
+    !isRecordedNodeIdentity(journal.sourceIdentity) ||
     !isRecordedNodeIdentity(journal.destinationIdentity) ||
     !RUN_ID_PATTERN.test(journal.preparationRunId) ||
     !RUN_ID_PATTERN.test(journal.promotionRunId) ||
@@ -127,10 +129,12 @@ const parseReceipt = raw => {
   const receipt = parseJsonObject(raw, 'Portable profile migration receipt is invalid')
   const keys = Object.keys(receipt).sort()
   if (
-    keys.join(',') != 'destinationIdentity,destinationManifestHash,nonce,preparationRunId,promotionRunId,sourceManifestHash,version' ||
+    keys.join(',') != 'destinationIdentity,destinationManifestHash,nonce,preparationRunId,promotionRunId,sourceIdentity,sourceManifestHash,userDataIdentity,version' ||
     receipt.version != JOURNAL_VERSION ||
     typeof receipt.sourceManifestHash != 'string' || !/^[a-f0-9]{64}$/.test(receipt.sourceManifestHash) ||
     typeof receipt.destinationManifestHash != 'string' || !/^[a-f0-9]{64}$/.test(receipt.destinationManifestHash) ||
+    !isRecordedNodeIdentity(receipt.userDataIdentity) ||
+    !isRecordedNodeIdentity(receipt.sourceIdentity) ||
     !isRecordedNodeIdentity(receipt.destinationIdentity) ||
     !RUN_ID_PATTERN.test(receipt.preparationRunId) ||
     !RUN_ID_PATTERN.test(receipt.promotionRunId) ||
@@ -264,6 +268,12 @@ const assertRecordedTrees = (fsApi, paths, journal, {
     return { destinationIdentity, destinationManifestHash }
   }
   const sourceIdentities = assertSourceAncestry(fsApi, paths)
+  if (!recordedIdentityMatches(journal.userDataIdentity, sourceIdentities.userDataIdentity)) {
+    throw new Error('Portable profile userData identity does not match the migration record')
+  }
+  if (!recordedIdentityMatches(journal.sourceIdentity, sourceIdentities.sourceIdentity)) {
+    throw new Error('Portable profile source identity does not match the migration record')
+  }
   if (hashDirectory(fsApi, paths.sourcePath) != journal.sourceManifestHash) {
     throw new Error('Portable profile source manifest does not match the journal')
   }
@@ -296,12 +306,16 @@ const receiptMatchesJournal = (receipt, journal) =>
   receipt.promotionRunId == journal.promotionRunId &&
   receipt.sourceManifestHash == journal.sourceManifestHash &&
   receipt.destinationManifestHash == journal.destinationManifestHash &&
+  recordedIdentityMatches(receipt.userDataIdentity, journal.userDataIdentity) &&
+  recordedIdentityMatches(receipt.sourceIdentity, journal.sourceIdentity) &&
   recordedIdentityMatches(receipt.destinationIdentity, journal.destinationIdentity)
 
 const journalFromReceipt = (receipt, preparationRunId) => ({
   version: JOURNAL_VERSION,
   sourceManifestHash: receipt.sourceManifestHash,
   destinationManifestHash: receipt.destinationManifestHash,
+  userDataIdentity: { ...receipt.userDataIdentity },
+  sourceIdentity: { ...receipt.sourceIdentity },
   destinationIdentity: { ...receipt.destinationIdentity },
   promotionRunId: receipt.promotionRunId,
   preparationRunId,
@@ -419,8 +433,9 @@ const preparePortableProfile = ({
     if (!hasSource) {
       return createResult('failed', { error: new Error('Portable profile source is missing before promotion') })
     }
+    let promotionSourceIdentities
     try {
-      assertSourceAncestry(fsApi, paths)
+      promotionSourceIdentities = assertSourceAncestry(fsApi, paths)
     } catch (error) {
       return createResult('failed', { error })
     }
@@ -444,6 +459,8 @@ const preparePortableProfile = ({
           version: JOURNAL_VERSION,
           sourceManifestHash,
           destinationManifestHash,
+          userDataIdentity: recordNodeIdentity(promotionSourceIdentities.userDataIdentity),
+          sourceIdentity: recordNodeIdentity(promotionSourceIdentities.sourceIdentity),
           destinationIdentity: recordNodeIdentity(payloadIdentity),
           promotionRunId,
           preparationRunId: runId,

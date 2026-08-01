@@ -819,6 +819,67 @@ const canStartPlaybackWithRegistry = (...args) => loadSourceSelectors().canStart
 const canOpenPrimaryDownloadWithRegistry = (...args) => loadSourceSelectors().canOpenPrimaryDownloadWithRegistry(...args)
 const deriveQualityListFromCapabilities = (...args) => loadSourceSelectors().deriveQualityListFromCapabilities(...args)
 
+const createCacheHarness = ({ rows = new Map(), read, save, remove } = {}) => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  const durableRows = rows
+  const memoryRows = new Map()
+  const removed = []
+  const saveCalls = []
+  const persistenceMutations = []
+  const persistenceErrors = []
+  const cacheModule = loadTsModule(
+    path.join(__dirname, '../../src/renderer/core/music/playback/cache.ts'),
+    {
+      '@renderer/utils/ipc': {
+        getMusicUrl: async(musicInfo, quality) => durableRows.get(`${musicInfo.id}_${quality}`) ?? '',
+        saveMusicUrl: async(musicInfo, quality, url) => {
+          durableRows.set(`${musicInfo.id}_${quality}`, url)
+        },
+        removeMusicUrlByKey: async key => {
+          durableRows.delete(key)
+        },
+      },
+    },
+  )
+  const cache = cacheModule.createPlaybackUrlCache({
+    read: async key => read ? read(key) : durableRows.get(key) ?? '',
+    save: async(musicInfo, quality, url) => {
+      const key = `${musicInfo.id}_${quality}`
+      saveCalls.push({ key, url })
+      persistenceMutations.push(`save:${key}:${url}`)
+      try {
+        if (save) return await save(musicInfo, quality, url)
+        durableRows.set(key, url)
+      } catch (error) {
+        persistenceErrors.push(error)
+        throw error
+      }
+    },
+    remove: async key => {
+      removed.push(key)
+      persistenceMutations.push(`remove:${key}`)
+      try {
+        if (remove) return await remove(key)
+        durableRows.delete(key)
+      } catch (error) {
+        persistenceErrors.push(error)
+        throw error
+      }
+    },
+    memory: memoryRows,
+  })
+
+  return Object.assign(cache, {
+    memoryRows,
+    durableRows,
+    removed,
+    saveCalls,
+    persistenceMutations,
+    persistenceErrors,
+  })
+}
+
 module.exports = {
   deferred,
   playbackError,
@@ -840,7 +901,22 @@ module.exports = {
   createColdUserApiRegistryHarness,
   createPrimaryCapabilityHarness,
   createColdPrimaryMusicEntryHarness,
+  createCacheHarness,
   canStartPlaybackWithRegistry,
   canOpenPrimaryDownloadWithRegistry,
   deriveQualityListFromCapabilities,
+  toPlaybackCachePersistenceFailure: (...args) => {
+    const path = require('node:path')
+    const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+    return loadTsModule(path.join(__dirname, '../../src/renderer/core/music/playback/cache.ts'), {
+      '@renderer/utils/ipc': {},
+    }).toPlaybackCachePersistenceFailure(...args)
+  },
+  observePlaybackCachePersistence: (...args) => {
+    const path = require('node:path')
+    const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+    return loadTsModule(path.join(__dirname, '../../src/renderer/core/music/playback/cache.ts'), {
+      '@renderer/utils/ipc': {},
+    }).observePlaybackCachePersistence(...args)
+  },
 }

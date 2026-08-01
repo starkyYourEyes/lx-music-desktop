@@ -660,9 +660,12 @@ export const getThemes = async() => {
  * @param type URL音质
  * @returns
  */
-export const getMusicUrl = async(musicInfo: LX.Music.MusicInfo, type: LX.Quality): Promise<string> => {
-  return rendererInvoke<string, string>(WIN_MAIN_RENDERER_EVENT_NAME.get_music_url, `${musicInfo.id}_${type}`)
+export const getMusicUrlByKey = async(key: string): Promise<string> => {
+  return rendererInvoke<string, string>(WIN_MAIN_RENDERER_EVENT_NAME.get_music_url, key)
 }
+export const getMusicUrl = async(musicInfo: LX.Music.MusicInfo, type: LX.Quality): Promise<string> => (
+  getMusicUrlByKey(`${musicInfo.id}_${type}`)
+)
 
 /**
  * 缓存歌曲URL
@@ -676,6 +679,12 @@ export const saveMusicUrl = async(musicInfo: LX.Music.MusicInfo, type: LX.Qualit
     url,
   })
 }
+export const removeMusicUrlByKey = async(key: string) => {
+  await rendererInvoke<string>(WIN_MAIN_RENDERER_EVENT_NAME.remove_music_url, key)
+}
+export const removeMusicUrl = async(musicInfo: LX.Music.MusicInfo, type: LX.Quality) => (
+  removeMusicUrlByKey(`${musicInfo.id}_${type}`)
+)
 /**
  * 清理所有缓存的歌曲URL
  */

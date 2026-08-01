@@ -64,6 +64,36 @@ test('explicit force refresh clears lower cache and starts full fallback from pr
   assert.equal(harness.refreshedApiIds[0], 'primary')
 })
 
+test('player reasons flow through production playback session factories', async() => {
+  const harness = createPlayerHarness()
+  await harness.setMusicUrl(onlineMusic, { reason: 'initial' })
+  await harness.setMusicUrl(onlineMusic, { reason: 'forceRefresh' })
+  const postCommitRefresh = harness.setMusicUrl(onlineMusic, { reason: 'postCommitError' })
+  await harness.flush()
+  await postCommitRefresh
+  assert.deepEqual(harness.sessionFactorySnapshots, [
+    {
+      sourceIds: ['primary', 'fallback'],
+      requestedQuality: 'flac',
+      cacheMode: 'lookup',
+    },
+    {
+      sourceIds: ['primary', 'fallback'],
+      requestedQuality: 'flac',
+      cacheMode: 'bypass',
+    },
+    {
+      sourceIds: ['primary'],
+      requestedQuality: 'flac',
+      cacheMode: 'bypass',
+    },
+  ])
+  assert.deepEqual(harness.invalidatedQualities, ['flac', '320k', '128k'])
+  assert.deepEqual(harness.invalidatedCacheKeys, [
+    'song_flac', 'song_320k', 'song_128k',
+  ])
+})
+
 test('direct local WebDAV and downloaded resources commit identity on canplay', async() => {
   const harness = createPlayerHarness()
   const resources = [

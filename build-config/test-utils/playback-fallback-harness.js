@@ -1780,6 +1780,9 @@ const loadPlayerIntegrationFactories = () => {
     path.join(__dirname, '../../src/common/utils/playbackSourceError.ts'),
   )
   const cacheModule = loadPlaybackCache()
+  const candidatesModule = loadCandidates()
+  const coordinatorModule = loadPlaybackCoordinator()
+  const sessionModule = loadPlaybackSession()
   const identity = musicInfo => {
     const target = 'progress' in musicInfo ? musicInfo.metadata.musicInfo : musicInfo
     return `${target.source}:${target.id}`
@@ -1875,13 +1878,57 @@ const loadPlayerIntegrationFactories = () => {
     path.join(__dirname, `../../${relativePath}`),
     { ...baseMocks, ...mocks },
   )
+  const playbackAdapter = {
+    retainSources: noop,
+    releaseSources: noop,
+    async getCapabilities() { return { sources: {} } },
+    async getMusicUrl() { throw new Error('not used') },
+    async getLocalMusicUrl() { throw new Error('not used') },
+  }
+  const originalWindow = global.window
+  global.window = {
+    ...(originalWindow ?? {}),
+    setTimeout,
+    clearTimeout,
+  }
+  let playback
+  try {
+    playback = load('src/renderer/core/music/playback/index.ts', {
+      '@common/utils': { encodePath: value => value, log: { debug: noop, error: noop } },
+      '@renderer/store/setting': {
+        appSetting: {
+          ...appSetting,
+          'common.apiSource': 'primary',
+          'common.apiFallbackSources': ['fallback'],
+        },
+      },
+      '@renderer/store/download/utils': { buildSavePath: () => '' },
+      '@renderer/plugins/player': { clearResourceIf: noop },
+      '@renderer/utils/music': {
+        getDownloadFilePath: async() => null,
+        getLocalFilePath: async() => null,
+      },
+      '../webdav': { getMusicUrl: async() => '' },
+      './cache': { ...cacheModule, playbackUrlCache: {} },
+      './candidates': candidatesModule,
+      './coordinator': {
+        ...coordinatorModule,
+        createPlaybackResolutionCoordinator: () => ({}),
+      },
+      './session': sessionModule,
+      './sourceAdapter': { playbackSourceAdapter: playbackAdapter },
+    })
+  } finally {
+    global.window = originalWindow
+  }
   return {
     player: loadWithImportMeta('src/renderer/plugins/player/index.ts', baseMocks),
     media: load('src/renderer/core/useApp/usePlayer/usePlayerEvent.ts'),
     play: load('src/renderer/core/useApp/usePlayer/usePlayEvent.ts'),
     action: load('src/renderer/core/player/action.ts'),
     preload: load('src/renderer/core/useApp/usePlayer/usePreloadNextMusic.ts'),
-    coordinator: loadPlaybackCoordinator(),
+    playback,
+    coordinator: coordinatorModule,
     cache: cacheModule,
     error: errorModule,
     identity,
@@ -2032,7 +2079,8 @@ const createPlayerHarness = (options = {}) => {
   const candidateMetadata = new Map()
   const deferredForegroundCalls = []
   const queuedSessionUrls = []
-  const postCommitGates = []
+  const sessionCreationGates = []
+  const sessionFactorySnapshots = []
   let currentMusicInfo = onlineMusic
   let playedStop = false
   let createRequestCount = 0
@@ -2081,23 +2129,51 @@ const createPlayerHarness = (options = {}) => {
     persistenceErrorCount++
     if (options.throwPersistenceReporter) throw new Error('reporter failed')
   }
-  const observePersistence = promise => factories.cache.observePlaybackCachePersistence(
+  const realPlayerCache = factories.cache.createPlaybackUrlCache({
+    async read() { return null },
+    async save() {
+      if (options.rejectCacheSave) {
+        throw Object.assign(new Error('save failed'), { code: 'SQLITE_BUSY' })
+      }
+    },
+    async remove(key) {
+      invalidatedCacheKeys.push(key)
+      invalidatedQualities.push(key.slice(key.lastIndexOf('_') + 1))
+      if (options.rejectCacheDelete) {
+        throw Object.assign(new Error('delete failed'), { code: 'SQLITE_BUSY' })
+      }
+    },
+  })
+  const playerCache = {
+    ...realPlayerCache,
+    commit(musicInfo, quality, url) {
+      cacheCommitCount++
+      committedCacheKeys.push(`${musicInfo.id}_${quality}`)
+      return realPlayerCache.commit(musicInfo, quality, url)
+    },
+    tombstoneKey(key) {
+      tombstonedKeys.push(key)
+      return realPlayerCache.tombstoneKey(key)
+    },
+  }
+  const observePersistence = (promise, operation) => factories.cache.observePlaybackCachePersistence(
     promise,
-    promise.operation ?? 'commit',
+    operation,
     reportPersistenceFailure,
   )
-  const makeSession = (musicInfo, reason) => {
+  const makeSession = input => {
     sessionCreateCount++
     const id = `player-session-${++sessionOrdinal}`
-    const identity = factories.identity(musicInfo)
+    const identity = factories.identity(input.musicInfo)
     const configuredUrls = queuedSessionUrls.shift() ?? options.sourceUrls ?? [
-      options.winner ? `https://${options.winner}` : `https://${options.primary ?? 'primary'}`,
+      options.winner ? `https://${options.winner}` : `https://${input.sourceIds[0]}`,
     ]
     const urls = [...configuredUrls]
     let index = 0
     let activeCandidate = null
     let state = 'active'
     let rejected = false
+    let cacheLookupDone = input.cacheMode != 'lookup'
     const expire = () => {
       activeCandidate = null
       index++
@@ -2106,12 +2182,16 @@ const createPlayerHarness = (options = {}) => {
     return {
       id,
       songIdentity: identity,
-      sourceIds: Object.freeze([options.primary ?? 'primary', ...(options.fallbacks ?? ['fallback'])]),
+      sourceIds: Object.freeze([...input.sourceIds]),
       async nextCandidate() {
         if (state != 'active') throw playbackError('session', 'cancelled')
-        if ((options.allSourcesFail && reason != 'preload') || (options.allPreloadSourcesFail && reason == 'preload')) {
+        if (!cacheLookupDone) {
+          cacheLookupDone = true
+          await input.cache.lookup(input.musicInfo, input.requestedQuality)
+        }
+        if (options.allSourcesFail || options.allPreloadSourcesFail) {
           state = 'failed'
-          throw playbackError('source', 'request', options.primary ?? 'primary')
+          throw playbackError('source', 'request', input.sourceIds[0])
         }
         if (rejected && index >= urls.length && options.exhaustAfterMediaError) {
           state = 'failed'
@@ -2119,7 +2199,7 @@ const createPlayerHarness = (options = {}) => {
         }
         const url = urls[index] ?? `https://fallback-${id}-${index}`
         const quality = options.winnerQuality ?? '128k'
-        const apiId = options.winner ?? (index == 0 ? options.primary ?? 'primary' : (options.fallbacks ?? ['fallback'])[0])
+        const apiId = options.winner ?? input.sourceIds[Math.min(index, input.sourceIds.length - 1)]
         activeCandidate = {
           sessionId: id,
           candidateId: `${id}:candidate:${++candidateOrdinal}`,
@@ -2129,7 +2209,7 @@ const createPlayerHarness = (options = {}) => {
           ...(options.winnerPlatform ? { platform: options.winnerPlatform } : {}),
           quality,
           url,
-          cacheKey: `${musicInfo.id}_${quality}`,
+          cacheKey: `${input.musicInfo.id}_${quality}`,
           deadlineAt: clock.now() + 10_000,
         }
         candidateMetadata.set(url, activeCandidate)
@@ -2139,13 +2219,13 @@ const createPlayerHarness = (options = {}) => {
         if (state != 'active' || activeCandidate?.candidateId != candidateId) return 'stale'
         if (clock.now() >= activeCandidate.deadlineAt) return expire()
         state = 'accepted'
-        cacheCommitCount++
-        committedCacheKeys.push(activeCandidate.cacheKey)
-        if (options.rejectCacheSave) {
-          const failure = Promise.reject(Object.assign(new Error('save failed'), { code: 'SQLITE_BUSY' }))
-          failure.operation = 'commit'
-          void observePersistence(failure)
+        let committing
+        try {
+          committing = input.cache.commit(input.musicInfo, activeCandidate.quality, activeCandidate.url)
+        } catch (error) {
+          committing = Promise.reject(error)
         }
+        void observePersistence(committing, 'commit')
         activeCandidate = null
         return 'accepted'
       },
@@ -2168,36 +2248,60 @@ const createPlayerHarness = (options = {}) => {
     }
   }
 
+  const sessionFactories = factories.playback.createPlaybackSessionFactories({
+    readSettings: () => ({
+      primaryId: options.primary ?? 'primary',
+      fallbackIds: [...(options.fallbacks ?? ['fallback'])],
+      requestedQuality: 'flac',
+    }),
+    cache: playerCache,
+    adapter: {
+      retainSources() {},
+      releaseSources() {},
+      async getCapabilities() { return { sources: {} } },
+      async getMusicUrl() { throw new Error('not used') },
+      async getLocalMusicUrl() { throw new Error('not used') },
+    },
+    clock,
+    createId: () => `player-session-factory-${sessionCreateCount + 1}`,
+    diagnostics: { record() {} },
+    reportPersistenceFailure,
+    createResolveSession(input) {
+      sessionFactorySnapshots.push({
+        sourceIds: [...input.sourceIds],
+        requestedQuality: input.requestedQuality,
+        cacheMode: input.cacheMode,
+      })
+      if (input.cacheMode == 'bypass') refreshedApiIds.push(input.sourceIds[0])
+      const session = makeSession(input)
+      const gate = sessionCreationGates.find(item => !item.used)
+      if (!gate) return session
+      gate.used = true
+      return gate.promise.then(() => session)
+    },
+    createOnlineCandidateProvider: musicInfo => ({ musicInfo }),
+    createLocalCandidateProvider: musicInfo => ({ musicInfo }),
+  })
+  const facade = factories.playback.createPlaybackMusicFacade({
+    getDownloadFilePath: async() => null,
+    buildSavePath: () => '',
+    getLocalFilePath: async musicInfo => musicInfo.source == 'local'
+      ? options.directPreloadUrl ?? null
+      : null,
+    encodePath: value => value,
+    getWebDAVMusicUrl: async() => 'https://webdav/song.mp3',
+    ...sessionFactories,
+  })
   const createRequest = async input => {
     createRequestCount++
-    if (input.reason == 'forceRefresh' || input.reason == 'postCommitError') {
-      refreshRequests.push({ reason: input.reason })
-      refreshedApiIds.push(options.primary ?? 'primary')
-    }
-    if (input.reason == 'forceRefresh') {
-      for (const quality of ['flac', '320k', '128k']) {
-        invalidatedQualities.push(quality)
-        invalidatedCacheKeys.push(`${input.musicInfo.id}_${quality}`)
-      }
-    }
+    if (input.reason != 'initial' && input.reason != 'preload') refreshRequests.push({ reason: input.reason })
     if (options.deferredForeground && input.reason != 'preload') {
       const call = deferredForegroundCalls.find(item => !item.used)
       if (!call) throw new Error('No deferred foreground call was prepared')
       call.used = true
       return call.gate.promise
     }
-    if (options.directPreloadUrl && input.reason == 'preload' && input.musicInfo.source == 'local') {
-      return {
-        kind: 'direct',
-        resource: { kind: 'direct', songIdentity: factories.identity(input.musicInfo), url: options.directPreloadUrl },
-      }
-    }
-    if (input.reason == 'postCommitError') {
-      const gate = deferred()
-      postCommitGates.push({ gate, musicInfo: input.musicInfo, reason: input.reason })
-      return gate.promise
-    }
-    return { kind: 'session', session: makeSession(input.musicInfo, input.reason) }
+    return facade.createPlaybackRequest(input)
   }
   const realCoordinator = factories.coordinator.createPlaybackResolutionCoordinator({
     createRequest,
@@ -2273,19 +2377,10 @@ const createPlayerHarness = (options = {}) => {
     playerLoadeddata() { playHandlers.loadeddata() },
     playerWaiting() { playHandlers.waiting() },
   }
-  const cache = {
-    tombstoneKey(key) {
-      tombstonedKeys.push(key)
-      const promise = options.rejectCacheDelete
-        ? Promise.reject(Object.assign(new Error('delete failed'), { code: 'SQLITE_BUSY' }))
-        : Promise.resolve()
-      return promise
-    },
-  }
   const mediaHandlers = createPlayerMediaEventHandlers({
     resource,
     coordinator,
-    cache,
+    cache: playerCache,
     getErrorCode: () => mainAudio.error?.code,
     setLoadedMusicIdentity: identity => action.setLoadedMusicIdentity(identity),
     appEvent,
@@ -2320,9 +2415,7 @@ const createPlayerHarness = (options = {}) => {
     return gate.promise
   }
   const flush = async() => {
-    for (const pending of postCommitGates.splice(0)) {
-      pending.gate.resolve({ kind: 'session', session: makeSession(pending.musicInfo, pending.reason) })
-    }
+    for (const gate of sessionCreationGates.splice(0)) gate.resolve()
     await clock.flush()
     for (let index = 0; index < 4; index++) await new Promise(resolve => setImmediate(resolve))
     await clock.flush()
@@ -2344,7 +2437,12 @@ const createPlayerHarness = (options = {}) => {
     cancelPlayback(reason) { action.cancel(reason) },
     disposePlayback() { action.dispose() },
     emitCanplay(listener) { mainAudio.emitFor(listener, 'canplay') },
-    async emitError(listener, code) { mainAudio.emitFor(listener, 'error', code) },
+    async emitError(listener, code) {
+      if (resource.getResourceContext()?.kind == 'validated') {
+        sessionCreationGates.push({ ...deferred(), used: false })
+      }
+      mainAudio.emitFor(listener, 'error', code)
+    },
     emitLoadedmetadata(listener) { mainAudio.emitFor(listener, 'loadedmetadata') },
     rejectCurrentCandidate() {
       const current = resource.getResourceContext()
@@ -2386,6 +2484,7 @@ const createPlayerHarness = (options = {}) => {
     postCommitCacheHits,
     invalidatedQualities,
     invalidatedCacheKeys,
+    sessionFactorySnapshots,
     get loadedMusicIdentity() { return action.getLoadedMusicIdentity() },
     get createRequestCount() { return createRequestCount },
     get persistenceErrorCount() { return persistenceErrorCount },

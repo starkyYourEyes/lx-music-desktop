@@ -1,6 +1,5 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
-const os = require('node:os')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
@@ -20,6 +19,7 @@ process.env.TZ = 'UTC'
 const dbService = require('../../src/main/worker/dbService/db.ts')
 const repository = require('../../src/main/worker/dbService/modules/playback/index.ts')
 const { evaluateVacuumEligibility } = require('../../src/main/worker/dbService/modules/playback/retention.ts')
+const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const tempDirs = []
 const yearMs = 365 * 24 * 60 * 60 * 1000
@@ -27,16 +27,19 @@ const group = '11111111-1111-4111-8111-111111111111'
 
 afterEach(() => {
   try { dbService.close() } catch {}
-  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+  for (const fixture of tempDirs.splice(0)) fixture.cleanup()
 })
 
 const createStore = async() => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-playback-retention-'))
-  tempDirs.push(root)
+  const fixture = createTestStorageRoot('lx-playback-retention')
+  tempDirs.push(fixture)
+  const root = fixture.path
   const result = await dbService.init({
     dataPath: root,
-    backupDir: path.join(root, 'backups'),
+    cacheRoot: path.join(root, 'cache'),
+    backupsRoot: path.join(root, 'backups'),
     previousShutdownWasClean: true,
+    targetSchemaVersion: 6,
   })
   assert.equal(result.status, 'ready')
   return dbService.getDB()
@@ -362,7 +365,7 @@ describe('idle vacuum eligibility', () => {
 
   it('reports from the open database path and startup leaves free pages untouched', async() => {
     let db = await createStore()
-    const root = tempDirs[0]
+    const root = tempDirs[0].path
     db.exec('CREATE TABLE vacuum_fixture(value BLOB)')
     const insert = db.prepare('INSERT INTO vacuum_fixture(value) VALUES(zeroblob(65536))')
     db.transaction(() => {
@@ -378,8 +381,10 @@ describe('idle vacuum eligibility', () => {
     dbService.close()
     const startup = await dbService.init({
       dataPath: root,
-      backupDir: path.join(root, 'backups'),
+      cacheRoot: path.join(root, 'cache'),
+      backupsRoot: path.join(root, 'backups'),
       previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
     })
     assert.equal(startup.status, 'ready')
     db = dbService.getDB()

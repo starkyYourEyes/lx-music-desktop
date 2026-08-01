@@ -1,5 +1,4 @@
 import path from 'node:path'
-import { existsSync, mkdirSync } from 'fs'
 import { app, shell, screen, nativeTheme } from 'electron'
 import { URL_SCHEME_RXP } from '@common/constants'
 import { getProxy, getTheme, initHotKey, initSetting, parseEnvParams } from './utils'
@@ -22,7 +21,6 @@ import { createAtomicJsonFile } from './storage/atomicJsonFile'
 import { parseSettingsDocument, type SettingsDocumentV1 } from './storage/settings/document'
 import { setProxyByHost } from '@common/utils/request'
 import { getWebContentsNavigationDecision } from '@main/utils/webContentsNavigationGuard'
-import { getPortableUserDataPaths, migrateLegacyUserData } from './migration/legacyUserData'
 import { PROJECT_IDENTITY } from '@common/projectIdentity'
 import type { StorageStartupOutcome } from './startup/storageCoordinator'
 import {
@@ -143,31 +141,6 @@ export const applyElectronEnvParams = () => {
     app.commandLine.appendSwitch('proxy-server', global.envParams.cmdParams['proxy-server'])
     app.commandLine.appendSwitch('proxy-bypass-list', global.envParams.cmdParams['proxy-bypass-list'] ?? '<local>')
   }
-}
-
-export const setUserDataPath = (): { ready: true } | { ready: false, error: unknown } => {
-  const portablePaths = getPortableUserDataPaths({
-    platform: process.platform,
-    executablePath: app.getPath('exe'),
-  })
-
-  if (portablePaths) {
-    app.setPath('appData', portablePaths.appDataPath)
-    if (!existsSync(portablePaths.userDataPath)) mkdirSync(portablePaths.userDataPath, { recursive: true })
-    app.setPath('userData', portablePaths.userDataPath)
-  } else {
-    const migration = migrateLegacyUserData({ appDataPath: app.getPath('appData'), logger: console })
-    if (!migration.userDataPathReady) {
-      return { ready: false, error: migration.error ?? new Error('User-data migration did not produce a usable path') }
-    }
-    app.setPath('userData', migration.userDataPath)
-  }
-
-  const userDataPath = app.getPath('userData')
-  global.lxOldDataPath = userDataPath
-  global.lxDataPath = path.join(userDataPath, 'LxDatas')
-  if (!existsSync(global.lxDataPath)) mkdirSync(global.lxDataPath, { recursive: true })
-  return { ready: true }
 }
 
 export const registerDeeplink = (startApp: () => void) => {

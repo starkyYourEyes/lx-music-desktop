@@ -1,7 +1,6 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const Module = require('node:module')
-const os = require('node:os')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
@@ -29,12 +28,13 @@ const { createAtomicJsonFile } = require('../../src/main/storage/atomicJsonFile.
 const { parseSettingsDocument } = require('../../src/main/storage/settings/document.ts')
 const { migrateLegacyNonActivity } = require('../../src/main/migration/legacyData/nonActivity.ts')
 const { readLegacyDataSource } = require('../../src/main/migration/legacyData/source.ts')
+const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const tempDirs = []
 
 afterEach(() => {
   try { dbService.close() } catch {}
-  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+  for (const fixture of tempDirs.splice(0)) fixture.cleanup()
 })
 
 const validLegacy = {
@@ -55,17 +55,24 @@ const validLegacy = {
 }
 
 const createFixture = async() => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-non-activity-retry-'))
+  const fixture = createTestStorageRoot('lx-non-activity-retry')
+  tempDirs.push(fixture)
+  const root = fixture.path
   const profileRoot = path.join(root, 'profile')
   const legacyRoot = path.join(root, 'legacy')
   fs.mkdirSync(profileRoot)
   fs.mkdirSync(legacyRoot)
-  tempDirs.push(root)
   const profileDataPath = path.join(profileRoot, 'data.json')
   fs.writeFileSync(profileDataPath, JSON.stringify(validLegacy))
   const configPath = path.join(profileRoot, 'config_v2.json')
   fs.writeFileSync(configPath, JSON.stringify({ version: '3.0.0', setting: { version: '3.0.0' } }))
-  const result = await dbService.init({ dataPath: profileRoot, backupDir: path.join(root, 'backups'), previousShutdownWasClean: true })
+  const result = await dbService.init({
+    dataPath: profileRoot,
+    cacheRoot: path.join(root, 'cache'),
+    backupsRoot: path.join(root, 'backups'),
+    previousShutdownWasClean: true,
+    targetSchemaVersion: 6,
+  })
   assert.equal(result.status, 'ready')
   const settingsFile = createAtomicJsonFile({
     filePath: configPath,

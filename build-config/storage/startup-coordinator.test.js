@@ -152,8 +152,10 @@ const createAppDbFixture = async() => {
   appDbFixtures.push(fixture)
   const options = {
     dataPath: fixture.path,
-    backupDir: path.join(fixture.path, 'backups'),
+    cacheRoot: path.join(fixture.path, 'cache'),
+    backupsRoot: path.join(fixture.path, 'backups'),
     previousShutdownWasClean: true,
+    targetSchemaVersion: 6,
   }
   const startup = await workerDbService.init(options)
   assert.equal(startup.status, 'ready')
@@ -592,8 +594,10 @@ describe('database worker startup surface', () => {
     })
     const options = {
       dataPath: 'C:\\profiles\\alice\\LxDatas',
-      backupDir: 'C:\\profiles\\alice\\LxDatas\\backups',
+      cacheRoot: 'C:\\profiles\\alice-cache',
+      backupsRoot: 'C:\\profiles\\alice\\LxDatas\\backups',
       previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
     }
 
     assert.deepEqual(await adapter.init(options), readyResult)

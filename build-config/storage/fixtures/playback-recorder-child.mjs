@@ -29,7 +29,21 @@ const {
   parsePlaybackResumeAck,
   parsePlaybackStartResult,
 } = require(validationPath)
-const allowedRoot = path.resolve(dirname, '../../../.superpowers/sdd/2026-07-29-playback-activity/tmp/task-11')
+const configuredRoot = process.env.LX_TEST_STORAGE_ROOT
+if (typeof configuredRoot != 'string' || !path.isAbsolute(configuredRoot)) {
+  throw new Error('invalid_child_storage_root')
+}
+const allowedRoot = path.resolve(configuredRoot)
+try {
+  const configuredStats = fs.lstatSync(configuredRoot)
+  const rootStats = fs.lstatSync(allowedRoot)
+  if (configuredStats.isSymbolicLink() || !configuredStats.isDirectory() || rootStats.isSymbolicLink() ||
+    !rootStats.isDirectory() || fs.realpathSync(configuredRoot) != allowedRoot) {
+    throw new Error('invalid_child_storage_root')
+  }
+} catch {
+  throw new Error('invalid_child_storage_root')
+}
 
 const isContained = candidate => {
   const relative = path.relative(allowedRoot, candidate)

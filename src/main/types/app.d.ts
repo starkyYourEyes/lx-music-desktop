@@ -7,6 +7,7 @@ import { type StorageCoordinator } from '@main/startup/storageCoordinator'
 import { type CredentialVault } from '@main/storage/credentials/credentialVault'
 import { type CredentialMigrationResult } from '@main/migration/credentials/credentialMigration'
 import { type AccountRepository } from '@main/storage/accounts/accountRepository'
+import { type StoragePaths } from '@main/utils/storagePaths'
 
 interface Lx {
   inited: boolean
@@ -55,6 +56,7 @@ declare global {
   var staticPath: string
   var lxDataPath: string
   var lxOldDataPath: string
+  var storagePaths: Readonly<StoragePaths>
   var lx: Lx
   var appWorder: AppWorder
 }

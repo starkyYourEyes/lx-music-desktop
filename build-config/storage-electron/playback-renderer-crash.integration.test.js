@@ -7,11 +7,7 @@ const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
 
 const worktreeRoot = path.resolve(__dirname, '../..')
-const taskRoot = path.join(worktreeRoot, '.superpowers/sdd/2026-07-29-playback-activity/tmp/task-11')
 const fixturePath = path.join(worktreeRoot, 'build-config/storage/fixtures/playback-recorder-child.mjs')
-fs.mkdirSync(taskRoot, { recursive: true })
-process.env.TEMP = taskRoot
-process.env.TMP = taskRoot
 
 // Electron ABI tests transpile source modules in-process.
 // eslint-disable-next-line n/no-deprecated-api
@@ -28,6 +24,7 @@ require.extensions['.ts'] = (module, filename) => {
 
 const dbService = require('../../src/main/worker/dbService/db.ts')
 const repository = require('../../src/main/worker/dbService/modules/playback/index.ts')
+const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 const roots = []
 const children = new Set()
 const exitedChildren = new WeakSet()
@@ -166,8 +163,9 @@ const commitDurable = durable => {
 }
 
 const createRoot = () => {
-  const root = fs.mkdtempSync(path.join(taskRoot, 'crash-'))
-  roots.push(root)
+  const fixture = createTestStorageRoot('crash')
+  roots.push(fixture)
+  const root = fixture.path
   for (const child of ['profile', 'data', 'database']) fs.mkdirSync(path.join(root, child), { recursive: true })
   return root
 }
@@ -176,8 +174,10 @@ const openStore = async root => {
   const dataPath = path.join(root, 'database')
   const result = await dbService.init({
     dataPath,
-    backupDir: path.join(dataPath, 'backups'),
+    cacheRoot: path.join(root, 'cache'),
+    backupsRoot: path.join(root, 'backups'),
     previousShutdownWasClean: false,
+    targetSchemaVersion: 6,
   })
   assert.equal(result.status, 'ready')
   return dbService.getDB()
@@ -233,7 +233,7 @@ const cleanupCrashResources = async({
     activeChildren.delete(child)
   }
   await closeDatabase()
-  for (const root of cleanupRoots) fs.rmSync(root, { recursive: true, force: true })
+  for (const fixture of cleanupRoots) fixture.cleanup()
   cleanupRoots.splice(0)
 }
 
@@ -355,13 +355,14 @@ describe('renderer crash checkpoint durability', () => {
   })
 
   it('preserves roots and surfaces cleanup failure while a child may still be alive', async() => {
-    const root = fs.mkdtempSync(path.join(taskRoot, 'cleanup-failure-'))
+    const fixture = createTestStorageRoot('cleanup-failure')
+    const root = fixture.path
     const child = terminationDouble()
     let databaseClosed = false
     try {
       await assert.rejects(async() => cleanupCrashResources({
         activeChildren: new Set([child]),
-        cleanupRoots: [root],
+        cleanupRoots: [fixture],
         closeDatabase: () => { databaseClosed = true },
         gracefulTimeoutMs: 10,
         forcedTimeoutMs: 10,
@@ -369,7 +370,7 @@ describe('renderer crash checkpoint durability', () => {
       assert.equal(databaseClosed, false)
       assert.equal(fs.existsSync(root), true)
     } finally {
-      fs.rmSync(root, { recursive: true, force: true })
+      fixture.cleanup()
     }
   })
 

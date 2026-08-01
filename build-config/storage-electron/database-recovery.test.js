@@ -1,7 +1,6 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const Module = require('node:module')
-const os = require('node:os')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
@@ -22,6 +21,7 @@ const { runMigrations } = require('../../src/main/worker/dbService/migrate.ts')
 const tables = require('../../src/main/worker/dbService/tables.ts').default
 const currentSchemaVersion = migrations.at(-1).version
 const currentMigrationVersions = migrations.map(migration => migration.version)
+const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 const MIGRATION_3_CHECKSUM = '9243aa510e8355d2c3d0f687c6736654adf584ec6007b1bcf46f374a9d694e41'
 const tempDirs = []
 const databases = []
@@ -142,15 +142,13 @@ afterEach(() => {
     const dbService = require('../../src/main/worker/dbService/db.ts')
     dbService.close?.()
   } catch {}
-  for (const dir of tempDirs.splice(0)) {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
-  }
+  for (const fixture of tempDirs.splice(0)) fixture.cleanup()
 })
 
 const tempDir = prefix => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
-  tempDirs.push(directory)
-  return directory
+  const fixture = createTestStorageRoot(prefix)
+  tempDirs.push(fixture)
+  return fixture.path
 }
 
 const openTracked = (filename, options) => {
@@ -162,9 +160,10 @@ const openTracked = (filename, options) => {
 const makePaths = prefix => {
   const root = tempDir(prefix)
   const dataPath = path.join(root, 'profile')
-  const backupDir = path.join(root, 'backups')
+  const cacheRoot = path.join(root, 'cache')
+  const backupsRoot = path.join(root, 'backups')
   fs.mkdirSync(dataPath, { recursive: true })
-  return { root, dataPath, backupDir, databasePath: path.join(dataPath, 'lx.data.db') }
+  return { root, dataPath, cacheRoot, backupsRoot, databasePath: path.join(dataPath, 'lx.data.db') }
 }
 
 const createDatabaseSymlinkOrSkip = (testContext, {
@@ -302,8 +301,10 @@ const loadRealWorkerAdapter = () => {
 
 const initOptions = paths => ({
   dataPath: paths.dataPath,
-  backupDir: paths.backupDir,
+  cacheRoot: paths.cacheRoot,
+  backupsRoot: paths.backupsRoot,
   previousShutdownWasClean: true,
+  targetSchemaVersion: 6,
 })
 
 describe('online backup', () => {
@@ -633,7 +634,7 @@ describe('database startup orchestration', () => {
     assert.deepEqual(result.migratedVersions, [])
     assert.equal(result.backupPath, null)
     assert.equal(backupCalls, 0)
-    assert.equal(fs.existsSync(paths.backupDir), false)
+    assert.equal(fs.existsSync(paths.backupsRoot), false)
     assert.deepEqual(verificationOptions, [{ runQuickCheck: true, runForeignKeyCheck: true }])
     assert.equal(dbService.getAppDB().pragma('foreign_keys', { simple: true }), 1)
     assert.equal(dbService.getAppDB().pragma('journal_mode', { simple: true }), 'wal')
@@ -1146,16 +1147,16 @@ describe('database startup orchestration', () => {
   it('kills backup collision overwrites by selecting the first unused counter', async() => {
     const paths = makePaths('lx-recovery-collision-')
     createV2Database(paths.databasePath).close()
-    fs.mkdirSync(paths.backupDir, { recursive: true })
+    fs.mkdirSync(paths.backupsRoot, { recursive: true })
     const originalNow = Date.now
     Date.now = () => 1234
-    const occupied = path.join(paths.backupDir, `lx.data.db.pre-migration-v2-to-v${currentSchemaVersion}.1234-0.backup`)
+    const occupied = path.join(paths.backupsRoot, `lx.data.db.pre-migration-v2-to-v${currentSchemaVersion}.1234-0.backup`)
     fs.writeFileSync(occupied, 'existing verified artifact')
     try {
       const dbService = loadDbServiceWithBoundaries()
       const result = await dbService.init(initOptions(paths))
       assert.equal(result.backupPath, path.join(
-        path.resolve(paths.backupDir),
+        path.resolve(paths.backupsRoot),
         `lx.data.db.pre-migration-v2-to-v${currentSchemaVersion}.1234-1.backup`,
       ))
       assert.equal(fs.readFileSync(occupied, 'utf8'), 'existing verified artifact')
@@ -1410,7 +1411,7 @@ describe('database startup orchestration', () => {
     }
   })
 
-  it('kills backup-path traversal by rejecting a resolved candidate outside backupDir', async() => {
+  it('kills backup-path traversal by rejecting a resolved candidate outside backupsRoot', async() => {
     const paths = makePaths('lx-recovery-backup-containment-')
     createV2Database(paths.databasePath).close()
     const escaped = path.join(paths.root, 'escaped-backup.db')
@@ -1595,8 +1596,10 @@ describe('database startup orchestration', () => {
     await backupStarted
     const secondPromise = dbService.init({
       dataPath: path.join(paths.dataPath, '.'),
-      backupDir: path.join(paths.backupDir, 'nested', '..'),
+      cacheRoot: path.join(paths.cacheRoot, 'nested', '..'),
+      backupsRoot: path.join(paths.backupsRoot, 'nested', '..'),
       previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
     })
     await new Promise(resolve => setImmediate(resolve))
     releaseBackup()
@@ -1649,6 +1652,21 @@ describe('database startup orchestration', () => {
       error.message == 'database_initialization_conflict' && error.code == 'database_initialization_conflict')
     assert.equal(dbService.getAppDB(), stableHandle)
     assert.equal(fs.existsSync(secondPaths.databasePath), false)
+  })
+
+  it('rejects conflicting cache, backup, and schema-target initialization identities', async() => {
+    const paths = makePaths('lx-recovery-init-storage-identity-')
+    const dbService = loadDbServiceWithBoundaries()
+    assert.equal((await dbService.init(initOptions(paths))).status, 'ready')
+
+    for (const override of [
+      { cacheRoot: path.join(paths.root, 'other-cache') },
+      { backupsRoot: path.join(paths.root, 'other-backups') },
+      { targetSchemaVersion: 5 },
+    ]) {
+      await assert.rejects(dbService.init({ ...initOptions(paths), ...override }), error =>
+        error.message == 'database_initialization_conflict' && error.code == 'database_initialization_conflict')
+    }
   })
 
   it('kills repeated recovery reopen by caching cloned same-key recovery results', async() => {
@@ -1735,8 +1753,10 @@ describe('worker startup API', () => {
     })
     const options = {
       dataPath: 'C:\\profiles\\alice',
-      backupDir: path.join('C:\\profiles\\alice', 'backups'),
+      cacheRoot: path.join('C:\\profiles\\alice-cache'),
+      backupsRoot: path.join('C:\\profiles\\alice', 'backups'),
       previousShutdownWasClean: false,
+      targetSchemaVersion: 6,
     }
 
     assert.deepEqual(await init(options), {
@@ -1756,8 +1776,10 @@ describe('worker startup API', () => {
 
     assert.deepEqual(await init({
       dataPath: 'C:\\profiles\\alice',
-      backupDir: path.join('C:\\profiles\\alice', 'backups'),
+      cacheRoot: path.join('C:\\profiles\\alice-cache'),
+      backupsRoot: path.join('C:\\profiles\\alice', 'backups'),
       previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
     }), { status: 'ready', existed: true, schemaVersion: 3, migratedVersions: [], backupPath: null })
   })
 
@@ -1769,14 +1791,16 @@ describe('worker startup API', () => {
     const handle = require('../../src/main/worker/dbService/db.ts').getAppDB()
     const second = await init({
       dataPath: path.join(paths.dataPath, '.'),
-      backupDir: path.join(paths.backupDir, 'nested', '..'),
+      cacheRoot: path.join(paths.cacheRoot, 'nested', '..'),
+      backupsRoot: path.join(paths.backupsRoot, 'nested', '..'),
       previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
     })
 
     assert.equal(first.status, 'ready')
     assert.equal(first.existed, false)
     assert.deepEqual(second, first)
     assert.equal(require('../../src/main/worker/dbService/db.ts').getAppDB(), handle)
-    assert.equal(fs.existsSync(paths.backupDir), false)
+    assert.equal(fs.existsSync(paths.backupsRoot), false)
   })
 })

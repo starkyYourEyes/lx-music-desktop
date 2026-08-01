@@ -1,6 +1,5 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
-const os = require('node:os')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const Database = require('better-sqlite3')
@@ -21,6 +20,7 @@ process.env.TZ = 'America/New_York'
 
 const dbService = require('../../src/main/worker/dbService/db.ts')
 const repository = require('../../src/main/worker/dbService/modules/playback/index.ts')
+const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const tempDirs = []
 const playbackPipelineClocks = []
@@ -31,16 +31,19 @@ const startAt = Date.parse('2026-03-08T05:00:00.000Z')
 afterEach(() => {
   for (const clock of playbackPipelineClocks.splice(0)) clock.alive = false
   try { dbService.close() } catch {}
-  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+  for (const fixture of tempDirs.splice(0)) fixture.cleanup()
 })
 
 const createStore = async() => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-playback-storage-'))
-  tempDirs.push(root)
+  const fixture = createTestStorageRoot('lx-playback-storage')
+  tempDirs.push(fixture)
+  const root = fixture.path
   const result = await dbService.init({
     dataPath: root,
-    backupDir: path.join(root, 'backups'),
+    cacheRoot: path.join(root, 'cache'),
+    backupsRoot: path.join(root, 'backups'),
     previousShutdownWasClean: true,
+    targetSchemaVersion: 6,
   })
   assert.equal(result.status, 'ready')
   return dbService.getDB()

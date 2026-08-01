@@ -1,6 +1,5 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
-const os = require('node:os')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
@@ -17,6 +16,7 @@ require.extensions['.ts'] = (module, filename) => {
 
 const Database = require('better-sqlite3')
 const dbService = require('../../src/main/worker/dbService/db.ts')
+const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const tempDirs = []
 
@@ -24,16 +24,19 @@ afterEach(() => {
   try {
     dbService.close()
   } catch {}
-  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+  for (const fixture of tempDirs.splice(0)) fixture.cleanup()
 })
 
 const createStore = async(prefix = 'lx-non-activity-') => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
-  tempDirs.push(root)
+  const fixture = createTestStorageRoot(prefix)
+  tempDirs.push(fixture)
+  const root = fixture.path
   const result = await dbService.init({
     dataPath: root,
-    backupDir: path.join(root, 'backups'),
+    cacheRoot: path.join(root, 'cache'),
+    backupsRoot: path.join(root, 'backups'),
     previousShutdownWasClean: true,
+    targetSchemaVersion: 6,
   })
   assert.equal(result.status, 'ready')
   return { root, result, db: dbService.getDB() }
@@ -533,8 +536,10 @@ describe('authoritative non-activity storage', () => {
 
     const result = await dbService.init({
       dataPath: root,
-      backupDir: path.join(root, 'backups'),
+      cacheRoot: path.join(root, 'cache'),
+      backupsRoot: path.join(root, 'backups'),
       previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
     })
 
     assert.equal(result.status, 'recovery')

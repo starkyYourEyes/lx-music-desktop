@@ -41,21 +41,26 @@ const invalidPrerequisite = (): never => {
 }
 
 const parseManifest = (value: unknown): Phase3ManifestV1 => {
-  if (!isPlainRecord(value) || !hasExactKeys(value, ['version', 'checks']) || value.version !== 1 || !Array.isArray(value.checks) ||
-    value.checks.length != manifestChecks.length) invalidPrerequisite()
+  if (!isPlainRecord(value)) invalidPrerequisite()
+  const manifest = value as Record<string, unknown>
+  if (!hasExactKeys(manifest, ['version', 'checks']) || manifest.version !== 1 || !Array.isArray(manifest.checks) ||
+    manifest.checks.length != manifestChecks.length) invalidPrerequisite()
+  const rawChecks = manifest.checks as unknown[]
 
-  const checks = value.checks.map((check, index) => {
-    if (!isPlainRecord(check) || !hasExactKeys(check, ['name', 'version', 'state', 'evidenceSha256']) ||
-      check.name !== manifestChecks[index] || check.version !== 1 ||
-      (check.state != 'complete' && check.state != 'not-applicable') ||
-      typeof check.evidenceSha256 != 'string' || !SHA256_PATTERN.test(check.evidenceSha256)) {
+  const checks: Phase3ManifestCheckV1[] = rawChecks.map((check: unknown, index: number) => {
+    if (!isPlainRecord(check)) invalidPrerequisite()
+    const record = check as Record<string, unknown>
+    if (!hasExactKeys(record, ['name', 'version', 'state', 'evidenceSha256']) ||
+      record.name !== manifestChecks[index] || record.version !== 1 ||
+      (record.state != 'complete' && record.state != 'not-applicable') ||
+      typeof record.evidenceSha256 != 'string' || !SHA256_PATTERN.test(record.evidenceSha256)) {
       invalidPrerequisite()
     }
     return {
       name: manifestChecks[index],
       version: 1,
-      state: check.state as Phase3CheckState,
-      evidenceSha256: check.evidenceSha256,
+      state: record.state as Phase3CheckState,
+      evidenceSha256: record.evidenceSha256 as string,
     }
   })
 
@@ -64,26 +69,31 @@ const parseManifest = (value: unknown): Phase3ManifestV1 => {
 }
 
 export const getCachePhasePrerequisite = (value?: unknown): CachePhasePrerequisiteV1 => {
-  if (!isPlainRecord(value) || !hasExactKeys(value, ['name', 'sourceSha256', 'completedAtMs', 'detailsJson']) ||
-    value.name !== CROSS_ARTIFACT_MARKER_NAME || typeof value.sourceSha256 != 'string' || !SHA256_PATTERN.test(value.sourceSha256) ||
-    !Number.isSafeInteger(value.completedAtMs) || value.completedAtMs < 0 || typeof value.detailsJson != 'string') {
+  if (!isPlainRecord(value)) invalidPrerequisite()
+  const marker = value as Record<string, unknown>
+  if (!hasExactKeys(marker, ['name', 'sourceSha256', 'completedAtMs', 'detailsJson']) ||
+    marker.name !== CROSS_ARTIFACT_MARKER_NAME || typeof marker.sourceSha256 != 'string' || !SHA256_PATTERN.test(marker.sourceSha256) ||
+    !Number.isSafeInteger(marker.completedAtMs) || (marker.completedAtMs as number) < 0 || typeof marker.detailsJson != 'string') {
     invalidPrerequisite()
   }
+  const sourceSha256 = marker.sourceSha256 as string
+  const completedAtMs = marker.completedAtMs as number
+  const detailsJson = marker.detailsJson as string
 
   let parsed: unknown
   try {
-    parsed = JSON.parse(value.detailsJson)
+    parsed = JSON.parse(detailsJson)
   } catch {
     invalidPrerequisite()
   }
   const manifest = parseManifest(parsed)
-  if (phase3ManifestJson(manifest) != value.detailsJson || phase3ManifestSha256(manifest) != value.sourceSha256) {
+  if (phase3ManifestJson(manifest) != detailsJson || phase3ManifestSha256(manifest) != sourceSha256) {
     invalidPrerequisite()
   }
   return {
     version: 1,
     markerName: CROSS_ARTIFACT_MARKER_NAME,
-    sourceSha256: value.sourceSha256,
-    completedAtMs: value.completedAtMs,
+    sourceSha256,
+    completedAtMs,
   }
 }

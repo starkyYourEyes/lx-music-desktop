@@ -42,9 +42,10 @@ export type DatabaseHealth =
 
 export interface DatabaseInitOptions {
   dataPath: string
-  backupDir: string
+  cacheRoot: string
+  backupsRoot: string
   previousShutdownWasClean: boolean
-  targetSchemaVersion?: number
+  targetSchemaVersion: number
 }
 
 let writeDb: Database.Database | null = null
@@ -292,11 +293,11 @@ export const close = (): void => {
 }
 
 const allocateBackupPath = (
-  backupDir: string,
+  backupsRoot: string,
   fromVersion: number,
   toVersion: number,
 ): string => {
-  const resolvedBackupDir = path.resolve(backupDir)
+  const resolvedBackupDir = path.resolve(backupsRoot)
   fs.mkdirSync(resolvedBackupDir, { recursive: true })
   const timestamp = Date.now()
   for (let counter = 0; counter < Number.MAX_SAFE_INTEGER; counter++) {
@@ -409,14 +410,16 @@ const resolveInitialization = (options: DatabaseInitOptions): {
     const normalized = {
       ...options,
       dataPath: path.resolve(options.dataPath),
-      backupDir: path.resolve(options.backupDir),
+      cacheRoot: path.resolve(options.cacheRoot),
+      backupsRoot: path.resolve(options.backupsRoot),
     }
     return {
       key: JSON.stringify([
         normalized.dataPath,
-        normalized.backupDir,
+        normalized.cacheRoot,
+        normalized.backupsRoot,
         normalized.previousShutdownWasClean,
-        normalized.targetSchemaVersion == null ? null : String(normalized.targetSchemaVersion),
+        String(normalized.targetSchemaVersion),
       ]),
       options: normalized,
     }
@@ -437,7 +440,8 @@ const initializeDatabase = async(
   let nativeOptions: { nativeBinding?: string } = {}
   try {
     databasePath = resolveContainedPath(path.resolve(options.dataPath), 'lx.data.db')
-    path.resolve(options.backupDir)
+    path.resolve(options.cacheRoot)
+    path.resolve(options.backupsRoot)
     nativeOptions = getNativeOptions()
   } catch {
     const fallbackPath = typeof options.dataPath == 'string'
@@ -533,7 +537,7 @@ const initializeDatabase = async(
   let backupPath: string | null = null
   if (existed && pending.length > 0) {
     try {
-      backupPath = allocateBackupPath(options.backupDir, fromVersion, pending[pending.length - 1].version)
+      backupPath = allocateBackupPath(options.backupsRoot, fromVersion, pending[pending.length - 1].version)
       await createOnlineBackup(localWriteDb, backupPath, nativeOptions)
     } catch {
       if (!isCurrentAttempt(generation, key)) {

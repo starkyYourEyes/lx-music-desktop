@@ -1,6 +1,5 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
-const os = require('node:os')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
@@ -17,6 +16,7 @@ require.extensions['.ts'] = (module, filename) => {
 const dbService = require('../../src/main/worker/dbService/db.ts')
 const { getSchemaVersion } = require('../../src/main/worker/dbService/migrate.ts')
 const repo = require('../../src/main/worker/dbService/modules/account_profile/index.ts')
+const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const tempDirs = []
 
@@ -24,17 +24,20 @@ afterEach(() => {
   try {
     dbService.close()
   } catch {}
-  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+  for (const fixture of tempDirs.splice(0)) fixture.cleanup()
 })
 
 describe('account profile storage', () => {
   it('bootstraps schema 6 and accepts only public provider profiles', async() => {
-    const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-account-profile-'))
-    tempDirs.push(profileRoot)
+    const fixture = createTestStorageRoot('lx-account-profile')
+    tempDirs.push(fixture)
+    const profileRoot = fixture.path
     const result = await dbService.init({
       dataPath: profileRoot,
-      backupDir: path.join(profileRoot, 'backups'),
+      cacheRoot: path.join(profileRoot, 'cache'),
+      backupsRoot: path.join(profileRoot, 'backups'),
       previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
     })
 
     assert.equal(result.status, 'ready')
@@ -85,12 +88,15 @@ describe('account profile storage', () => {
   })
 
   it('commits legacy profiles and their marker atomically and skips a committed replay', async() => {
-    const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-account-profile-migration-'))
-    tempDirs.push(profileRoot)
+    const fixture = createTestStorageRoot('lx-account-profile-migration')
+    tempDirs.push(fixture)
+    const profileRoot = fixture.path
     await dbService.init({
       dataPath: profileRoot,
-      backupDir: path.join(profileRoot, 'backups'),
+      cacheRoot: path.join(profileRoot, 'cache'),
+      backupsRoot: path.join(profileRoot, 'backups'),
       previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
     })
     const marker = {
       name: 'legacy_data_v1.account_profiles',

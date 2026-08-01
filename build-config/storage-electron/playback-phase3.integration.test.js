@@ -5,11 +5,6 @@ const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
 
-const taskRoot = path.resolve(__dirname, '../../.superpowers/sdd/2026-07-29-playback-activity/tmp/task-11')
-fs.mkdirSync(taskRoot, { recursive: true })
-process.env.TEMP = taskRoot
-process.env.TMP = taskRoot
-
 // Electron ABI tests transpile source modules in-process.
 // eslint-disable-next-line n/no-deprecated-api
 require.extensions['.ts'] = (module, filename) => {
@@ -28,25 +23,29 @@ const playback = require('../../src/main/worker/dbService/modules/playback/index
 const coordinatorPath = '../../src/main/startup/storageCoordinator.ts'
 const phase3Path = '../../src/main/worker/dbService/modules/phase3/index.ts'
 const inputPath = '../../src/main/startup/phase3Attestation.ts'
+const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const tempDirs = []
 const hashes = Object.fromEntries('abcdef0123456789'.split('').map(value => [value, value.repeat(64)]))
 
 afterEach(() => {
   try { dbService.close() } catch {}
-  for (const root of tempDirs.splice(0)) fs.rmSync(root, { recursive: true, force: true })
+  for (const fixture of tempDirs.splice(0)) fixture.cleanup()
   for (const filename of [coordinatorPath, phase3Path, inputPath]) {
     try { delete require.cache[require.resolve(filename)] } catch {}
   }
 })
 
 const createStore = async() => {
-  const root = fs.mkdtempSync(path.join(taskRoot, 'phase3-'))
-  tempDirs.push(root)
+  const fixture = createTestStorageRoot('phase3')
+  tempDirs.push(fixture)
+  const root = fixture.path
   const result = await dbService.init({
     dataPath: root,
-    backupDir: path.join(root, 'backups'),
+    cacheRoot: path.join(root, 'cache'),
+    backupsRoot: path.join(root, 'backups'),
     previousShutdownWasClean: true,
+    targetSchemaVersion: 6,
   })
   assert.equal(result.status, 'ready')
   return dbService.getDB()

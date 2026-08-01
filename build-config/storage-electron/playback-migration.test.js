@@ -2,7 +2,6 @@ const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const Module = require('node:module')
-const os = require('node:os')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
@@ -31,12 +30,13 @@ const playbackRepository = require('../../src/main/worker/dbService/modules/play
 const { migrateLegacyPlaybackActivity } = require('../../src/main/migration/legacyData/activity.ts')
 const { createStorageCoordinator } = require('../../src/main/startup/storageCoordinator.ts')
 const { createDataHandlers } = require('../../src/main/modules/winMain/rendererEvent/data.ts')
+const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const tempDirs = []
 
 afterEach(() => {
   try { dbService.close() } catch {}
-  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+  for (const fixture of tempDirs.splice(0)) fixture.cleanup()
 })
 
 const sha256 = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -85,15 +85,18 @@ const onlineTrack = (id, overrides = {}) => ({
 const initializeDatabase = async(root) => {
   const result = await dbService.init({
     dataPath: root,
-    backupDir: path.join(root, 'backups'),
+    cacheRoot: path.join(root, 'cache'),
+    backupsRoot: path.join(root, 'backups'),
     previousShutdownWasClean: true,
+    targetSchemaVersion: 6,
   })
   assert.equal(result.status, 'ready')
 }
 
 const createFixture = async(parsed, { vaultMode = 'encrypted' } = {}) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-playback-migration-'))
-  tempDirs.push(root)
+  const fixture = createTestStorageRoot('lx-playback-migration')
+  tempDirs.push(fixture)
+  const root = fixture.path
   await initializeDatabase(root)
   let vault
   const openVault = async() => {

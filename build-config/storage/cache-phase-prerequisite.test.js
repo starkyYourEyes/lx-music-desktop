@@ -97,8 +97,10 @@ const createWorkerStore = async() => {
   workerFixtures.push(fixture)
   const result = await dbService.init({
     dataPath: fixture.path,
-    backupDir: path.join(fixture.path, 'backups'),
+    cacheRoot: path.join(fixture.path, 'cache'),
+    backupsRoot: path.join(fixture.path, 'backups'),
     previousShutdownWasClean: true,
+    targetSchemaVersion: 6,
   })
   assert.equal(result.status, 'ready')
   return dbService.getDB()

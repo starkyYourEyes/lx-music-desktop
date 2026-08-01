@@ -2,7 +2,6 @@ const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const Module = require('node:module')
-const os = require('node:os')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
@@ -28,6 +27,7 @@ const {
 } = require('../../src/main/worker/dbService/migrate.ts')
 const { migration3 } = require('../../src/main/worker/dbService/migrations/0003_storage_foundation.ts')
 const { migrations } = require('../../src/main/worker/dbService/migrations/index.ts')
+const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const MIGRATION_3_CHECKSUM = '9243aa510e8355d2c3d0f687c6736654adf584ec6007b1bcf46f374a9d694e41'
 const LEGACY_SCHEMA = new Map([
@@ -52,7 +52,7 @@ afterEach(() => {
   for (const db of databases.splice(0)) {
     if (db.open) db.close()
   }
-  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+  for (const fixture of tempDirs.splice(0)) fixture.cleanup()
 })
 
 const hasObject = (db, name) => Boolean(db.prepare('SELECT 1 FROM sqlite_master WHERE name = ?').get(name))
@@ -419,8 +419,9 @@ describe('database migrations', () => {
   })
 
   it('maps an existing app database open error to recovery without a create fallback', async() => {
-    const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-migration-open-error-'))
-    tempDirs.push(profileRoot)
+    const fixture = createTestStorageRoot('lx-migration-open-error')
+    tempDirs.push(fixture)
+    const profileRoot = fixture.path
     fs.writeFileSync(path.join(profileRoot, 'lx.data.db'), '')
     const openError = new Error('injected existing database open failure')
     const fallbackError = new Error('create fallback must not run')
@@ -435,8 +436,10 @@ describe('database migrations', () => {
 
     const result = await dbService.init({
       dataPath: profileRoot,
-      backupDir: path.join(profileRoot, 'backups'),
+      cacheRoot: path.join(profileRoot, 'cache'),
+      backupsRoot: path.join(profileRoot, 'backups'),
       previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
     })
 
     assert.equal(result.status, 'recovery')
@@ -446,8 +449,9 @@ describe('database migrations', () => {
   })
 
   it('maps app database stat errors to recovery without attempting write open or create', async() => {
-    const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-migration-stat-error-'))
-    tempDirs.push(profileRoot)
+    const fixture = createTestStorageRoot('lx-migration-stat-error')
+    tempDirs.push(fixture)
+    const profileRoot = fixture.path
     const databasePath = path.join(profileRoot, 'lx.data.db')
     const statError = Object.assign(new Error('injected database stat failure'), { code: 'EACCES' })
     let openCalls = 0
@@ -468,8 +472,10 @@ describe('database migrations', () => {
 
     const result = await dbService.init({
       dataPath: profileRoot,
-      backupDir: path.join(profileRoot, 'backups'),
+      cacheRoot: path.join(profileRoot, 'cache'),
+      backupsRoot: path.join(profileRoot, 'backups'),
       previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
     })
 
     assert.equal(result.status, 'recovery')
@@ -479,12 +485,19 @@ describe('database migrations', () => {
   })
 
   it('bootstraps a new app database without migration backup metadata', async() => {
-    const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-migration-init-'))
-    tempDirs.push(profileRoot)
+    const fixture = createTestStorageRoot('lx-migration-init')
+    tempDirs.push(fixture)
+    const profileRoot = fixture.path
     const dbService = require('../../src/main/worker/dbService/db.ts')
 
-    const backupDir = path.join(profileRoot, 'backups')
-    const result = await dbService.init({ dataPath: profileRoot, backupDir, previousShutdownWasClean: true })
+    const backupsRoot = path.join(profileRoot, 'backups')
+    const result = await dbService.init({
+      dataPath: profileRoot,
+      cacheRoot: path.join(profileRoot, 'cache'),
+      backupsRoot,
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
     const db = dbService.getAppDB()
     databases.push(db)
     const latestSchemaVersion = migrations.at(-1).version
@@ -509,7 +522,7 @@ describe('database migrations', () => {
     )
     assert.equal(db.pragma('foreign_keys', { simple: true }), 1)
     assert.equal(db.pragma('journal_mode', { simple: true }), 'wal')
-    assert.equal(fs.existsSync(backupDir), false)
+    assert.equal(fs.existsSync(backupsRoot), false)
     assert.equal(fs.existsSync(path.join(profileRoot, 'lx.data.db')), true)
     assert.equal(fs.existsSync(path.join(profileRoot, 'activity.db')), false)
   })

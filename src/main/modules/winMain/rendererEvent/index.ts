@@ -11,6 +11,7 @@ import party from './party'
 import data from './data'
 import storage from './storage'
 import storageState from './storageState'
+import playback from './playback'
 import music from './music'
 import webdav from './webdav'
 import localMusic from './localMusic'
@@ -46,6 +47,7 @@ export default () => {
   data()
   storage()
   storageState()
+  playback()
   music()
   webdav()
   localMusic()

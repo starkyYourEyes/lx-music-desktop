@@ -33,6 +33,32 @@ const replaceDirectoryWithSameContent = directoryPath => {
   return originalPath
 }
 
+const recordedIdentity = directoryPath => {
+  const identity = fs.lstatSync(directoryPath)
+  return { dev: String(identity.dev), ino: String(identity.ino) }
+}
+
+const legacyJournalFrom = journal => ({
+  version: 1,
+  sourceManifestHash: journal.sourceManifestHash,
+  destinationManifestHash: journal.destinationManifestHash,
+  destinationIdentity: journal.destinationIdentity,
+  promotionRunId: journal.promotionRunId,
+  preparationRunId: journal.preparationRunId,
+  state: journal.state,
+  acknowledgementRunId: journal.acknowledgementRunId,
+})
+
+const legacyReceiptFrom = journal => ({
+  version: 1,
+  sourceManifestHash: journal.sourceManifestHash,
+  destinationManifestHash: journal.destinationManifestHash,
+  destinationIdentity: journal.destinationIdentity,
+  promotionRunId: journal.promotionRunId,
+  preparationRunId: journal.preparationRunId,
+  nonce: '0123456789abcdef0123456789abcdef',
+})
+
 const makeLockMetadata = pid => JSON.stringify({
   version: 1,
   pid,
@@ -318,6 +344,150 @@ describe('portable profile migration journal', () => {
     assert.equal(exists(stagePath), false)
     assert.equal(exists(path.join(fixture.portableRoot, PORTABLE_PROFILE_RECEIPT_FILE)), false)
     assert.equal(JSON.parse(fs.readFileSync(journalPath, 'utf8')).state, 'promoted')
+  })
+
+  it('upgrades a legacy promoted journal before resuming and rejects replacement after rebinding', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const {
+      PORTABLE_PROFILE_JOURNAL_FILE,
+      acknowledgePortableProfileStartup,
+      preparePortableProfile,
+    } = require(migrationModule)
+    assert.equal(preparePortableProfile(fixture).state, 'promoted')
+    const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
+    const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
+    fs.writeFileSync(journalPath, JSON.stringify(legacyJournalFrom(journal), null, 2))
+
+    const resumed = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+
+    assert.equal(resumed.state, 'already-promoted')
+    assert.equal(exists(fixture.sourceRoot), true)
+    const rebound = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
+    assert.deepEqual(rebound.userDataIdentity, recordedIdentity(path.dirname(fixture.sourceRoot)))
+    assert.deepEqual(rebound.sourceIdentity, recordedIdentity(fixture.sourceRoot))
+    assert.equal(rebound.version, 1)
+    assert.equal(rebound.state, 'promoted')
+    const originalSourceRoot = replaceDirectoryWithSameContent(fixture.sourceRoot)
+
+    await assert.rejects(acknowledgePortableProfileStartup(resumed.token), /source identity/i)
+
+    assert.equal(JSON.parse(fs.readFileSync(journalPath, 'utf8')).state, 'promoted')
+    assert.equal(fs.readFileSync(path.join(fixture.sourceRoot, 'lx.data.db'), 'utf8'), 'database-v1')
+    assert.equal(fs.readFileSync(path.join(originalSourceRoot, 'lx.data.db'), 'utf8'), 'database-v1')
+  })
+
+  it('requires fresh acknowledgement after upgrading a legacy typed-only journal', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const {
+      PORTABLE_PROFILE_JOURNAL_FILE,
+      acknowledgePortableProfileStartup,
+      preparePortableProfile,
+      retireAcknowledgedPortableSource,
+    } = require(migrationModule)
+    const promoted = preparePortableProfile(fixture)
+    await acknowledgePortableProfileStartup(promoted.token)
+    const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
+    const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
+    fs.writeFileSync(journalPath, JSON.stringify(legacyJournalFrom(journal), null, 2))
+
+    const firstLaterRun = retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-2' })
+
+    assert.equal(firstLaterRun.state, 'not-acknowledged')
+    assert.equal(exists(fixture.sourceRoot), true)
+    const rebound = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
+    assert.deepEqual(rebound.userDataIdentity, recordedIdentity(path.dirname(fixture.sourceRoot)))
+    assert.deepEqual(rebound.sourceIdentity, recordedIdentity(fixture.sourceRoot))
+    assert.equal(rebound.state, 'promoted')
+    assert.equal(rebound.acknowledgementRunId, null)
+
+    const prepared = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+    assert.equal(prepared.state, 'already-promoted')
+    await acknowledgePortableProfileStartup(prepared.token)
+    assert.equal(retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-2' }).state, 'same-startup')
+    assert.equal(exists(fixture.sourceRoot), true)
+    assert.equal(retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' }).state, 'retired')
+  })
+
+  it('recovers a legacy pending receipt into an identity-bound journal', () => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const {
+      PORTABLE_PROFILE_JOURNAL_FILE,
+      PORTABLE_PROFILE_RECEIPT_FILE,
+      PORTABLE_PROFILE_STAGE_PREFIX,
+      preparePortableProfile,
+    } = require(migrationModule)
+    const { STAGE_MARKER_FILE } = require('../../src/main/migration/guardedDirectoryMigration.js')
+    assert.equal(preparePortableProfile(fixture).state, 'promoted')
+    const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
+    const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
+    fs.unlinkSync(journalPath)
+    const receiptPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_RECEIPT_FILE)
+    fs.writeFileSync(receiptPath, JSON.stringify(legacyReceiptFrom(journal), null, 2))
+    const stagePath = fs.mkdtempSync(path.join(fixture.portableRoot, PORTABLE_PROFILE_STAGE_PREFIX))
+    const stageIdentity = fs.lstatSync(stagePath)
+    fs.writeFileSync(path.join(stagePath, STAGE_MARKER_FILE), JSON.stringify({
+      version: 1,
+      nonce: 'abcdef0123456789abcdef0123456789',
+      runId: journal.promotionRunId,
+      directoryIdentity: { dev: String(stageIdentity.dev), ino: String(stageIdentity.ino) },
+    }))
+
+    const recovered = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+
+    assert.equal(recovered.state, 'already-promoted')
+    assert.equal(exists(fixture.sourceRoot), true)
+    assert.equal(exists(receiptPath), false)
+    assert.equal(exists(stagePath), false)
+    const rebound = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
+    assert.deepEqual(rebound.userDataIdentity, recordedIdentity(path.dirname(fixture.sourceRoot)))
+    assert.deepEqual(rebound.sourceIdentity, recordedIdentity(fixture.sourceRoot))
+    assert.equal(rebound.version, 1)
+    assert.equal(rebound.state, 'promoted')
+  })
+
+  it('fails closed on an ambiguous legacy receipt beside a bound journal', () => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const {
+      PORTABLE_PROFILE_JOURNAL_FILE,
+      PORTABLE_PROFILE_RECEIPT_FILE,
+      preparePortableProfile,
+    } = require(migrationModule)
+    assert.equal(preparePortableProfile(fixture).state, 'promoted')
+    const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
+    const receiptPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_RECEIPT_FILE)
+    const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
+    fs.writeFileSync(receiptPath, JSON.stringify(legacyReceiptFrom(journal), null, 2))
+    fs.rmSync(fixture.profileRoot, { recursive: true, force: false })
+
+    const result = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+
+    assert.equal(result.state, 'failed')
+    assert.equal(exists(fixture.sourceRoot), true)
+    assert.equal(exists(journalPath), true)
+    assert.equal(exists(receiptPath), true)
+  })
+
+  it('does not enrich a legacy journal when its recorded source manifest no longer matches', () => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const { PORTABLE_PROFILE_JOURNAL_FILE, preparePortableProfile } = require(migrationModule)
+    assert.equal(preparePortableProfile(fixture).state, 'promoted')
+    const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
+    const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
+    const legacyRaw = JSON.stringify(legacyJournalFrom(journal), null, 2)
+    fs.writeFileSync(journalPath, legacyRaw)
+    fs.writeFileSync(path.join(fixture.sourceRoot, 'lx.data.db'), 'changed-before-upgrade')
+
+    const result = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+
+    assert.equal(result.state, 'failed')
+    assert.match(result.error.message, /source manifest/i)
+    assert.equal(fs.readFileSync(journalPath, 'utf8'), legacyRaw)
+    assert.equal(exists(fixture.sourceRoot), true)
   })
 
   it('rejects acknowledgement tokens that do not match the recorded promotion', async() => {

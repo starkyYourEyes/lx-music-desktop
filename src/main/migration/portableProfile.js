@@ -21,6 +21,10 @@ const PORTABLE_PROFILE_STAGE_PREFIX = '.portable-profile-migration-stage-'
 const JOURNAL_VERSION = 1
 const TOKEN_VERSION = 1
 const RUN_ID_PATTERN = /^[a-z0-9._-]{1,100}$/i
+const LEGACY_JOURNAL_KEYS = 'acknowledgementRunId,destinationIdentity,destinationManifestHash,preparationRunId,promotionRunId,sourceManifestHash,state,version'
+const IDENTITY_BOUND_JOURNAL_KEYS = 'acknowledgementRunId,destinationIdentity,destinationManifestHash,preparationRunId,promotionRunId,sourceIdentity,sourceManifestHash,state,userDataIdentity,version'
+const LEGACY_RECEIPT_KEYS = 'destinationIdentity,destinationManifestHash,nonce,preparationRunId,promotionRunId,sourceManifestHash,version'
+const IDENTITY_BOUND_RECEIPT_KEYS = 'destinationIdentity,destinationManifestHash,nonce,preparationRunId,promotionRunId,sourceIdentity,sourceManifestHash,userDataIdentity,version'
 
 const assertRunId = (runId, name) => {
   if (typeof runId != 'string' || !RUN_ID_PATTERN.test(runId)) throw new Error(`${name} is invalid`)
@@ -103,16 +107,20 @@ const recordNodeIdentity = identity => ({ dev: String(identity.dev), ino: String
 const recordedIdentityMatches = (recorded, current) =>
   recorded.dev == String(current.dev) && recorded.ino == String(current.ino)
 
+const hasSourceIdentityBinding = record =>
+  isRecordedNodeIdentity(record.userDataIdentity) && isRecordedNodeIdentity(record.sourceIdentity)
+
 const parseJournal = raw => {
   const journal = parseJsonObject(raw, 'Portable profile migration journal is invalid')
-  const keys = Object.keys(journal ?? {}).sort()
+  const keys = Object.keys(journal ?? {}).sort().join(',')
+  const hasLegacySchema = keys == LEGACY_JOURNAL_KEYS
+  const hasIdentityBoundSchema = keys == IDENTITY_BOUND_JOURNAL_KEYS
   if (
-    keys.join(',') != 'acknowledgementRunId,destinationIdentity,destinationManifestHash,preparationRunId,promotionRunId,sourceIdentity,sourceManifestHash,state,userDataIdentity,version' ||
+    (!hasLegacySchema && !hasIdentityBoundSchema) ||
     journal.version != JOURNAL_VERSION ||
     typeof journal.sourceManifestHash != 'string' || !/^[a-f0-9]{64}$/.test(journal.sourceManifestHash) ||
     typeof journal.destinationManifestHash != 'string' || !/^[a-f0-9]{64}$/.test(journal.destinationManifestHash) ||
-    !isRecordedNodeIdentity(journal.userDataIdentity) ||
-    !isRecordedNodeIdentity(journal.sourceIdentity) ||
+    (hasIdentityBoundSchema && !hasSourceIdentityBinding(journal)) ||
     !isRecordedNodeIdentity(journal.destinationIdentity) ||
     !RUN_ID_PATTERN.test(journal.preparationRunId) ||
     !RUN_ID_PATTERN.test(journal.promotionRunId) ||
@@ -127,14 +135,15 @@ const parseJournal = raw => {
 
 const parseReceipt = raw => {
   const receipt = parseJsonObject(raw, 'Portable profile migration receipt is invalid')
-  const keys = Object.keys(receipt).sort()
+  const keys = Object.keys(receipt).sort().join(',')
+  const hasLegacySchema = keys == LEGACY_RECEIPT_KEYS
+  const hasIdentityBoundSchema = keys == IDENTITY_BOUND_RECEIPT_KEYS
   if (
-    keys.join(',') != 'destinationIdentity,destinationManifestHash,nonce,preparationRunId,promotionRunId,sourceIdentity,sourceManifestHash,userDataIdentity,version' ||
+    (!hasLegacySchema && !hasIdentityBoundSchema) ||
     receipt.version != JOURNAL_VERSION ||
     typeof receipt.sourceManifestHash != 'string' || !/^[a-f0-9]{64}$/.test(receipt.sourceManifestHash) ||
     typeof receipt.destinationManifestHash != 'string' || !/^[a-f0-9]{64}$/.test(receipt.destinationManifestHash) ||
-    !isRecordedNodeIdentity(receipt.userDataIdentity) ||
-    !isRecordedNodeIdentity(receipt.sourceIdentity) ||
+    (hasIdentityBoundSchema && !hasSourceIdentityBinding(receipt)) ||
     !isRecordedNodeIdentity(receipt.destinationIdentity) ||
     !RUN_ID_PATTERN.test(receipt.preparationRunId) ||
     !RUN_ID_PATTERN.test(receipt.promotionRunId) ||
@@ -150,12 +159,13 @@ const readJournal = (fsApi, journalPath) => {
   if (before.isSymbolicLink() || !before.isFile()) {
     throw new Error('Portable profile migration journal must be a regular file')
   }
-  const journal = parseJournal(fsApi.readFileSync(journalPath, 'utf8'))
+  const raw = fsApi.readFileSync(journalPath, 'utf8')
+  const journal = parseJournal(raw)
   const after = fsApi.lstatSync(journalPath)
   if (!after.isFile() || after.isSymbolicLink() || !isSameNode(before, after)) {
     throw new Error('Portable profile migration journal changed while inspected')
   }
-  return { journal, identity: after }
+  return { journal, identity: after, raw }
 }
 
 const readReceipt = (fsApi, receiptPath) => {
@@ -251,6 +261,7 @@ const hashDirectory = (fsApi, directoryPath) => hashManifest(createDirectoryMani
 const assertRecordedTrees = (fsApi, paths, journal, {
   sourceRequired = true,
   destinationHashRequired = true,
+  sourceIdentityRequired = true,
 } = {}) => {
   const destinationIdentity = fsApi.lstatSync(paths.destinationPath)
   if (destinationIdentity.isSymbolicLink() || !destinationIdentity.isDirectory()) {
@@ -263,21 +274,32 @@ const assertRecordedTrees = (fsApi, paths, journal, {
   if (destinationHashRequired && destinationManifestHash != journal.destinationManifestHash) {
     throw new Error('Portable profile destination manifest does not match the journal')
   }
+  const destinationAfter = fsApi.lstatSync(paths.destinationPath)
+  if (destinationAfter.isSymbolicLink() || !destinationAfter.isDirectory() ||
+    !isSameNode(destinationIdentity, destinationAfter) ||
+    !recordedIdentityMatches(journal.destinationIdentity, destinationAfter)) {
+    throw new Error('Portable profile destination identity changed while it was verified')
+  }
   if (!fsApi.existsSync(paths.sourcePath)) {
     if (sourceRequired) throw new Error('Portable profile source is missing before retirement')
-    return { destinationIdentity, destinationManifestHash }
+    return { destinationIdentity: destinationAfter, destinationManifestHash }
   }
   const sourceIdentities = assertSourceAncestry(fsApi, paths)
-  if (!recordedIdentityMatches(journal.userDataIdentity, sourceIdentities.userDataIdentity)) {
+  if (sourceIdentityRequired && !recordedIdentityMatches(journal.userDataIdentity, sourceIdentities.userDataIdentity)) {
     throw new Error('Portable profile userData identity does not match the migration record')
   }
-  if (!recordedIdentityMatches(journal.sourceIdentity, sourceIdentities.sourceIdentity)) {
+  if (sourceIdentityRequired && !recordedIdentityMatches(journal.sourceIdentity, sourceIdentities.sourceIdentity)) {
     throw new Error('Portable profile source identity does not match the migration record')
   }
   if (hashDirectory(fsApi, paths.sourcePath) != journal.sourceManifestHash) {
     throw new Error('Portable profile source manifest does not match the journal')
   }
-  return { destinationIdentity, destinationManifestHash, ...sourceIdentities }
+  const sourceAfter = assertSourceAncestry(fsApi, paths)
+  if (!isSameNode(sourceIdentities.userDataIdentity, sourceAfter.userDataIdentity) ||
+    !isSameNode(sourceIdentities.sourceIdentity, sourceAfter.sourceIdentity)) {
+    throw new Error('Portable profile source ownership changed while it was verified')
+  }
+  return { destinationIdentity: destinationAfter, destinationManifestHash, ...sourceAfter }
 }
 
 const createToken = (paths, journal, startupRunId) => Object.freeze({
@@ -302,7 +324,55 @@ const validateToken = token => {
   return token
 }
 
+const assertRecordSnapshotUnchanged = (current, expected, label) => {
+  if (!isSameNode(current.identity, expected.identity) || current.raw != expected.raw) {
+    throw new Error(`Portable profile migration ${label} changed before compatibility upgrade`)
+  }
+}
+
+const upgradeLegacyJournal = (fsApi, paths, snapshot) => {
+  if (hasSourceIdentityBinding(snapshot.journal)) {
+    return { snapshot, requiresFreshPreparation: false }
+  }
+  const requiresFreshPreparation = snapshot.journal.state == 'typed-only-acknowledged'
+  const trees = assertRecordedTrees(fsApi, paths, snapshot.journal, {
+    sourceRequired: true,
+    destinationHashRequired: requiresFreshPreparation,
+    sourceIdentityRequired: false,
+  })
+  assertRecordSnapshotUnchanged(readJournal(fsApi, paths.journalPath), snapshot, 'journal')
+  writeJournal(fsApi, paths, {
+    ...snapshot.journal,
+    userDataIdentity: recordNodeIdentity(trees.userDataIdentity),
+    sourceIdentity: recordNodeIdentity(trees.sourceIdentity),
+    state: requiresFreshPreparation ? 'promoted' : snapshot.journal.state,
+    acknowledgementRunId: requiresFreshPreparation ? null : snapshot.journal.acknowledgementRunId,
+  })
+  return {
+    snapshot: readJournal(fsApi, paths.journalPath),
+    requiresFreshPreparation,
+  }
+}
+
+const upgradeLegacyReceipt = (fsApi, paths, snapshot) => {
+  if (hasSourceIdentityBinding(snapshot.receipt)) return snapshot
+  const trees = assertRecordedTrees(fsApi, paths, snapshot.receipt, {
+    sourceRequired: true,
+    destinationHashRequired: true,
+    sourceIdentityRequired: false,
+  })
+  assertRecordSnapshotUnchanged(readReceipt(fsApi, paths.receiptPath), snapshot, 'receipt')
+  writeReceipt(fsApi, paths, {
+    ...snapshot.receipt,
+    userDataIdentity: recordNodeIdentity(trees.userDataIdentity),
+    sourceIdentity: recordNodeIdentity(trees.sourceIdentity),
+  })
+  return readReceipt(fsApi, paths.receiptPath)
+}
+
 const receiptMatchesJournal = (receipt, journal) =>
+  hasSourceIdentityBinding(receipt) &&
+  hasSourceIdentityBinding(journal) &&
   receipt.promotionRunId == journal.promotionRunId &&
   receipt.sourceManifestHash == journal.sourceManifestHash &&
   receipt.destinationManifestHash == journal.destinationManifestHash &&
@@ -358,6 +428,17 @@ const preparePortableProfile = ({
       } catch (error) {
         return createResult('failed', { error })
       }
+    }
+
+    try {
+      if (journalSnapshot != null) {
+        journalSnapshot = upgradeLegacyJournal(fsApi, paths, journalSnapshot).snapshot
+      }
+      if (receiptSnapshot != null && hasDestination) {
+        receiptSnapshot = upgradeLegacyReceipt(fsApi, paths, receiptSnapshot)
+      }
+    } catch (error) {
+      return createResult('failed', { error })
     }
 
     if (journalSnapshot != null && receiptSnapshot != null) {
@@ -511,7 +592,11 @@ const acknowledgePortableProfileStartup = async(rawToken, {
   const lock = acquireMigrationLock({ fsApi, rootPath: paths.portableRoot, lockPath: paths.lockPath, isProcessAlive, logger })
   if ('error' in lock) throw lock.error
   try {
-    const { journal } = readJournal(fsApi, paths.journalPath)
+    const upgraded = upgradeLegacyJournal(fsApi, paths, readJournal(fsApi, paths.journalPath))
+    if (upgraded.requiresFreshPreparation) {
+      throw new Error('Portable profile requires fresh preparation before acknowledgement')
+    }
+    const { journal } = upgraded.snapshot
     if (journal.state != 'promoted' ||
       journal.promotionRunId != token.promotionRunId ||
       journal.preparationRunId != token.startupRunId ||
@@ -551,7 +636,7 @@ const retireAcknowledgedPortableSource = ({
   try {
     let journal
     try {
-      journal = readJournal(fsApi, paths.journalPath).journal
+      journal = upgradeLegacyJournal(fsApi, paths, readJournal(fsApi, paths.journalPath)).snapshot.journal
     } catch (error) {
       return createResult('failed', { error })
     }

@@ -39,6 +39,37 @@ afterEach(() => {
 })
 
 describe('storage path contract', () => {
+  it('resolves application-local cache parents for supported installed platforms', () => {
+    const { resolveApplicationCacheRoot } = require(storagePathsModule)
+    const appDirectory = PROJECT_IDENTITY.userDataDirName
+
+    assert.equal(resolveApplicationCacheRoot({
+      platform: 'win32',
+      env: { LOCALAPPDATA: 'D:\\LocalData' },
+      homePath: 'C:\\Users\\Alice',
+    }), `D:\\LocalData\\${appDirectory}`)
+    assert.equal(resolveApplicationCacheRoot({
+      platform: 'win32',
+      env: { LOCALAPPDATA: 'relative-local-data' },
+      homePath: 'C:\\Users\\Alice',
+    }), `C:\\Users\\Alice\\AppData\\Local\\${appDirectory}`)
+    assert.equal(resolveApplicationCacheRoot({
+      platform: 'darwin',
+      env: {},
+      homePath: '/Users/alice',
+    }), `/Users/alice/Library/Caches/${appDirectory}`)
+    assert.equal(resolveApplicationCacheRoot({
+      platform: 'linux',
+      env: { XDG_CACHE_HOME: '/var/cache/alice' },
+      homePath: '/home/alice',
+    }), `/var/cache/alice/${appDirectory}`)
+    assert.equal(resolveApplicationCacheRoot({
+      platform: 'linux',
+      env: { XDG_CACHE_HOME: 'relative-cache' },
+      homePath: '/home/alice',
+    }), `/home/alice/.cache/${appDirectory}`)
+  })
+
   it('builds distinct installed roots and keeps backups under the durable profile', () => {
     const { resolveStoragePaths } = require(storagePathsModule)
     const profileRoot = 'C:\\Users\\Alice\\AppData\\Roaming\\starky-lx-music-desktop\\LxDatas'
@@ -126,24 +157,40 @@ describe('storage path contract', () => {
     }
     assert.throws(() => assertContainedPath(root, path.join(linked, 'file.tmp')), /path_link_not_allowed/)
   })
+
+  it('accepts Windows root casing variations for the same contained path', t => {
+    if (process.platform != 'win32') return t.skip('Windows paths are case-insensitive')
+    const root = createFixture('storage-path-case')
+    const child = path.join(root, 'child')
+    fs.mkdirSync(child)
+    const differentlyCasedRoot = `${root[0] == root[0].toUpperCase() ? root[0].toLowerCase() : root[0].toUpperCase()}${root.slice(1)}`
+    const { assertContainedPath } = require(storagePathsModule)
+
+    assert.equal(assertContainedPath(differentlyCasedRoot, path.join(child, 'file.tmp')), path.join(child, 'file.tmp'))
+  })
 })
 
 describe('early Electron bootstrap', () => {
   it('sets userData and sessionData before loading application modules', async() => {
     const root = createFixture('storage-bootstrap')
     const appData = path.join(root, 'roaming')
-    const applicationCacheRoot = path.join(root, 'application-cache')
+    const sessionDataTrap = path.join(appData, 'stale-session-data')
+    const cacheBase = path.join(root, 'local-cache')
+    const applicationCacheRoot = path.join(cacheBase, PROJECT_IDENTITY.userDataDirName)
+    const homePath = path.join(root, 'home')
     const tempBase = path.join(root, 'temp')
     fs.mkdirSync(appData)
-    fs.mkdirSync(applicationCacheRoot)
+    fs.mkdirSync(cacheBase)
     fs.mkdirSync(tempBase)
     const calls = []
     const fakeElectron = {
       getPath(name) {
         calls.push(`getPath:${name}`)
+        if (name == 'cache') throw new Error('unsupported cache path name')
         return {
           appData,
-          sessionData: applicationCacheRoot,
+          home: homePath,
+          sessionData: sessionDataTrap,
           temp: tempBase,
           exe: path.join(root, 'app.exe'),
         }[name]
@@ -157,7 +204,10 @@ describe('early Electron bootstrap', () => {
     const importApplication = async() => { calls.push('import:application') }
     const { bootstrap } = require(bootstrapModule)
 
-    await bootstrap(fakeElectron, importApplication)
+    await bootstrap(fakeElectron, importApplication, {
+      platform: 'win32',
+      env: { LOCALAPPDATA: cacheBase },
+    })
 
     const relevantCalls = calls.filter(call => call.startsWith('setPath:') || call.startsWith('import:'))
     assert.deepEqual(relevantCalls.slice(0, 3), [
@@ -168,5 +218,12 @@ describe('early Electron bootstrap', () => {
     assert.equal(global.lxDataPath, global.storagePaths.profileRoot)
     assert.equal(global.lxOldDataPath, path.dirname(global.storagePaths.profileRoot))
     assert.equal(Object.isFrozen(global.storagePaths), true)
+    assert.equal(calls.includes('getPath:home'), true)
+    assert.equal(calls.includes('getPath:cache'), false)
+    assert.equal(calls.includes('getPath:sessionData'), false)
+    assert.equal(global.storagePaths.cacheRoot, path.join(applicationCacheRoot, 'cache'))
+    assert.equal(global.storagePaths.runtimeRoot, path.join(applicationCacheRoot, 'runtime'))
+    assert.equal(global.storagePaths.sessionDataRoot, path.join(applicationCacheRoot, 'runtime', 'session-data'))
+    assert.equal(fs.existsSync(global.storagePaths.cacheRoot), false)
   })
 })

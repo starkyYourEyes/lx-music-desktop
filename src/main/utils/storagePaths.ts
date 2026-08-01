@@ -20,7 +20,42 @@ export interface StoragePathResolutionInput {
   portableRoot: string | null
 }
 
+export interface ApplicationCacheRootInput {
+  platform: NodeJS.Platform
+  env: Readonly<Record<string, string | undefined>>
+  homePath: string
+}
+
 type ResolvedStoragePaths = Omit<StoragePaths, 'runTempRoot'>
+
+export const resolveApplicationCacheRoot = (input: ApplicationCacheRootInput): string => {
+  const pathApi = input.platform == 'win32' ? path.win32 : path.posix
+  if (!pathApi.isAbsolute(input.homePath)) throw new Error('local_cache_home_invalid')
+
+  let basePath: string
+  switch (input.platform) {
+    case 'win32': {
+      const localAppData = input.env.LOCALAPPDATA
+      basePath = localAppData != null && pathApi.isAbsolute(localAppData)
+        ? localAppData
+        : pathApi.join(input.homePath, 'AppData', 'Local')
+      break
+    }
+    case 'darwin':
+      basePath = pathApi.join(input.homePath, 'Library', 'Caches')
+      break
+    case 'linux': {
+      const xdgCacheHome = input.env.XDG_CACHE_HOME
+      basePath = xdgCacheHome != null && pathApi.isAbsolute(xdgCacheHome)
+        ? xdgCacheHome
+        : pathApi.join(input.homePath, '.cache')
+      break
+    }
+    default:
+      throw new Error('local_cache_platform_unsupported')
+  }
+  return pathApi.join(basePath, PROJECT_IDENTITY.userDataDirName)
+}
 
 const isOutsideRoot = (root: string, candidate: string): boolean => {
   const relative = path.relative(root, candidate)
@@ -39,7 +74,7 @@ export const assertContainedPath = (rootPath: string, candidatePath: string): st
     } catch (error) {
       if (!(error instanceof Error && 'code' in error && error.code == 'ENOENT')) throw error
     }
-    if (current == root) break
+    if (path.relative(root, current) == '') break
     const parent = path.dirname(current)
     if (parent == current) throw new Error('path_outside_root')
     current = parent

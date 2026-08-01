@@ -111,6 +111,15 @@ const writeRawCrossMarker = (db, marker) => db.prepare(`
   VALUES (?, ?, ?, ?)
 `).run(marker.name, marker.sourceSha256, marker.completedAtMs, marker.detailsJson)
 
+const unlinkVerifiedLink = ({ linkPath, parentPath, identity }) => {
+  const current = fs.lstatSync(linkPath, { bigint: true })
+  if (path.dirname(linkPath) != parentPath || !current.isSymbolicLink() ||
+    current.dev !== identity.dev || current.ino !== identity.ino) {
+    throw new Error('Fixture root link ownership changed')
+  }
+  fs.unlinkSync(linkPath)
+}
+
 describe('cache Phase 3 prerequisite', () => {
   it('accepts only a canonical marker with complete typed playback checks', () => {
     const { getCachePhasePrerequisite } = require(cachePhasePath)
@@ -191,7 +200,7 @@ describe('cache Phase 3 prerequisite', () => {
     assert.equal(repository.getCachePhasePrerequisite().sourceSha256, canonicalMarker.sourceSha256)
 
     for (const detailsJson of [prettyDetails, duplicateKeyDetails]) {
-      db.prepare(`UPDATE migration_markers SET details_json = ?, source_sha256 = ? WHERE name = ?`).run(
+      db.prepare('UPDATE migration_markers SET details_json = ?, source_sha256 = ? WHERE name = ?').run(
         detailsJson,
         canonicalMarker.sourceSha256,
         canonicalMarker.name,
@@ -199,7 +208,7 @@ describe('cache Phase 3 prerequisite', () => {
       assert.throws(() => repository.getCachePhasePrerequisite(), /cache_phase3_prerequisite_invalid/)
     }
 
-    db.prepare(`UPDATE migration_markers SET details_json = ?, source_sha256 = ? WHERE name = ?`).run(
+    db.prepare('UPDATE migration_markers SET details_json = ?, source_sha256 = ? WHERE name = ?').run(
       canonicalMarker.detailsJson,
       canonicalMarker.sourceSha256,
       canonicalMarker.name,
@@ -212,9 +221,11 @@ describe('cache Phase 3 prerequisite', () => {
     const baseRoot = fs.realpathSync(process.env.LX_TEST_STORAGE_ROOT)
     const target = createTestStorageRoot('reparse-target')
     const alias = path.join(baseRoot, 'cache-phase-reparse-root')
+    let aliasIdentity = null
     let created = null
     try {
       fs.symlinkSync(target.path, alias, process.platform == 'win32' ? 'junction' : 'dir')
+      aliasIdentity = fs.lstatSync(alias, { bigint: true })
       const previous = process.env.LX_TEST_STORAGE_ROOT
       process.env.LX_TEST_STORAGE_ROOT = alias
       try {
@@ -224,7 +235,9 @@ describe('cache Phase 3 prerequisite', () => {
       }
     } finally {
       created?.cleanup()
-      fs.rmSync(alias, { recursive: true, force: true })
+      if (aliasIdentity != null) {
+        unlinkVerifiedLink({ linkPath: alias, parentPath: baseRoot, identity: aliasIdentity })
+      }
       target.cleanup()
     }
   })
@@ -233,16 +246,28 @@ describe('cache Phase 3 prerequisite', () => {
     const { createTestStorageRoot } = require(testStorageRootPath)
     const baseRoot = fs.realpathSync(process.env.LX_TEST_STORAGE_ROOT)
     const child = createTestStorageRoot('replacement-child')
-    const parkedChild = path.join(baseRoot, 'replacement-owned-child')
+    const replacement = createTestStorageRoot('replacement-child-participant')
+    const parkedChild = path.join(baseRoot, `.${path.basename(child.path)}.parking`)
+    const childMarker = fs.readFileSync(child.ownershipMarkerPath, 'utf8')
+    const replacementMarker = fs.readFileSync(replacement.ownershipMarkerPath, 'utf8')
+    let childParked = false
+    let replacementMoved = false
     try {
+      assert.equal(fs.existsSync(parkedChild), false)
       fs.renameSync(child.path, parkedChild)
-      fs.mkdirSync(child.path)
-      fs.writeFileSync(path.join(child.path, 'unowned.txt'), 'keep')
+      childParked = true
+      fs.renameSync(replacement.path, child.path)
+      replacementMoved = true
+      fs.writeFileSync(path.join(child.path, 'replacement.txt'), 'keep')
       assert.throws(() => child.cleanup(), /ownership changed/)
-      assert.equal(fs.readFileSync(path.join(child.path, 'unowned.txt'), 'utf8'), 'keep')
+      assert.equal(fs.readFileSync(path.join(child.path, 'replacement.txt'), 'utf8'), 'keep')
     } finally {
-      fs.rmSync(child.path, { recursive: true, force: true })
-      fs.rmSync(parkedChild, { recursive: true, force: true })
+      if (replacementMoved) fs.renameSync(child.path, replacement.path)
+      if (childParked) fs.renameSync(parkedChild, child.path)
+      assert.equal(fs.readFileSync(child.ownershipMarkerPath, 'utf8'), childMarker)
+      assert.equal(fs.readFileSync(replacement.ownershipMarkerPath, 'utf8'), replacementMarker)
+      child.cleanup()
+      replacement.cleanup()
     }
 
     const marker = createTestStorageRoot('replacement-marker')

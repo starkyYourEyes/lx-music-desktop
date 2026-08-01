@@ -171,20 +171,54 @@ const createDatabaseSymlinkOrSkip = (testContext, {
   link,
   dangling,
   contents,
-}) => {
-  if (!dangling) fs.writeFileSync(target, contents)
+}, fsApi = fs) => {
+  const resolvedTarget = path.resolve(target)
+  const resolvedLink = path.resolve(link)
+  const fixtureRoot = path.dirname(path.dirname(resolvedLink))
+  if (path.relative(fixtureRoot, path.dirname(resolvedTarget)) != '' || resolvedTarget == fixtureRoot) {
+    throw new Error('Database link target must be a direct fixture child')
+  }
+
+  let targetIdentity = null
+  if (!dangling) {
+    fsApi.writeFileSync(resolvedTarget, contents)
+    targetIdentity = fsApi.lstatSync(resolvedTarget, { bigint: true })
+    if (targetIdentity.isSymbolicLink() || !targetIdentity.isFile()) {
+      throw new Error('Database link target must be a regular file')
+    }
+  }
   try {
-    fs.symlinkSync(target, link, 'file')
-    return { targetArtifact: target }
+    fsApi.symlinkSync(resolvedTarget, resolvedLink, 'file')
+    return { targetArtifact: resolvedTarget }
   } catch (error) {
     if (!['EPERM', 'EACCES', 'ENOSYS'].includes(error?.code) || process.platform != 'win32') throw error
     try {
-      fs.rmSync(target, { recursive: true, force: true })
-      fs.mkdirSync(target, { recursive: true })
-      const targetArtifact = path.join(target, 'sentinel')
-      if (!dangling) fs.writeFileSync(targetArtifact, contents)
-      fs.symlinkSync(target, link, 'junction')
-      if (dangling) fs.rmSync(target, { recursive: true, force: true })
+      if (targetIdentity != null) {
+        const current = fsApi.lstatSync(resolvedTarget, { bigint: true })
+        if (current.isSymbolicLink() || !current.isFile() ||
+          current.dev !== targetIdentity.dev || current.ino !== targetIdentity.ino) {
+          throw new Error('Database link target ownership changed')
+        }
+        fsApi.unlinkSync(resolvedTarget)
+      } else {
+        assert.throws(() => fsApi.lstatSync(resolvedTarget), error => error?.code == 'ENOENT')
+      }
+      fsApi.mkdirSync(resolvedTarget)
+      const directoryIdentity = fsApi.lstatSync(resolvedTarget, { bigint: true })
+      if (directoryIdentity.isSymbolicLink() || !directoryIdentity.isDirectory()) {
+        throw new Error('Database junction target must be a non-link directory')
+      }
+      const targetArtifact = path.join(resolvedTarget, 'sentinel')
+      if (!dangling) fsApi.writeFileSync(targetArtifact, contents)
+      fsApi.symlinkSync(resolvedTarget, resolvedLink, 'junction')
+      if (dangling) {
+        const current = fsApi.lstatSync(resolvedTarget, { bigint: true })
+        if (current.isSymbolicLink() || !current.isDirectory() ||
+          current.dev !== directoryIdentity.dev || current.ino !== directoryIdentity.ino) {
+          throw new Error('Database junction target ownership changed')
+        }
+        fsApi.rmdirSync(resolvedTarget)
+      }
       return { targetArtifact }
     } catch (junctionError) {
       if (['EPERM', 'EACCES', 'ENOSYS'].includes(junctionError?.code)) {
@@ -1652,6 +1686,48 @@ describe('database startup orchestration', () => {
       error.message == 'database_initialization_conflict' && error.code == 'database_initialization_conflict')
     assert.equal(dbService.getAppDB(), stableHandle)
     assert.equal(fs.existsSync(secondPaths.databasePath), false)
+  })
+
+  it('uses only verified non-recursive cleanup when file symlinks fall back to junctions', t => {
+    if (process.platform != 'win32') return t.skip('Junction fallback is Windows-specific')
+
+    for (const dangling of [false, true]) {
+      const paths = makePaths(`lx-recovery-junction-cleanup-${dangling ? 'dangling' : 'existing'}-`)
+      const target = path.join(paths.root, dangling ? 'missing-target.db' : 'existing-target.db')
+      const link = path.join(paths.dataPath, dangling ? 'dangling-link.db' : 'existing-link.db')
+      const calls = []
+      const fsApi = {
+        ...fs,
+        symlinkSync(source, destination, type) {
+          calls.push(`symlink:${type}`)
+          if (type == 'file') throw Object.assign(new Error('file symlink unavailable'), { code: 'EPERM' })
+          return fs.symlinkSync(source, destination, type)
+        },
+        unlinkSync(targetPath) {
+          calls.push(`unlink:${targetPath}`)
+          return fs.unlinkSync(targetPath)
+        },
+        rmdirSync(targetPath) {
+          calls.push(`rmdir:${targetPath}`)
+          return fs.rmdirSync(targetPath)
+        },
+        rmSync() {
+          throw new Error('recursive target cleanup is forbidden')
+        },
+      }
+
+      const result = createDatabaseSymlinkOrSkip(t, {
+        target,
+        link,
+        dangling,
+        contents: 'SAFE_TARGET_CONTENTS',
+      }, fsApi)
+
+      assert.notEqual(result, null)
+      assert.deepEqual(calls.filter(call => call.startsWith('symlink:')), ['symlink:file', 'symlink:junction'])
+      assert.deepEqual(calls.filter(call => call.startsWith('unlink:')), dangling ? [] : [`unlink:${target}`])
+      assert.deepEqual(calls.filter(call => call.startsWith('rmdir:')), dangling ? [`rmdir:${target}`] : [])
+    }
   })
 
   it('rejects conflicting cache, backup, and schema-target initialization identities', async() => {

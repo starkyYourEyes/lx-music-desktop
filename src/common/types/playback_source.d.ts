@@ -26,5 +26,54 @@ declare namespace LX {
         qualitys: LX.Quality[]
       }>>
     }
+
+    interface PlaybackUrlCandidate {
+      sessionId: string
+      candidateId: string
+      songIdentity: string
+      origin: 'cache' | 'source'
+      apiId?: string
+      platform?: LX.OnlineSource
+      quality: LX.Quality
+      url: string
+      cacheKey: string
+      deadlineAt: number
+    }
+
+    interface PlaybackClock {
+      now: () => number
+      setTimeout: (handler: () => void, delay: number) => ReturnType<typeof setTimeout>
+      clearTimeout: (timer: ReturnType<typeof setTimeout>) => void
+    }
+
+    type CandidateSettlement = 'accepted' | 'resumed' | 'expired' | 'stale'
+    type PlaybackCancelReason =
+      | 'songChanged' | 'stop' | 'forceRefresh' | 'preloadReplaced' | 'shutdown'
+    type ForegroundCancelReason = Exclude<PlaybackCancelReason, 'preloadReplaced' | 'shutdown'>
+    type PreloadCancelReason = Exclude<PlaybackCancelReason, 'shutdown'>
+
+    interface PlaybackResolveSession {
+      readonly id: string
+      readonly songIdentity: string
+      readonly sourceIds: readonly string[]
+      nextCandidate: () => Promise<PlaybackUrlCandidate>
+      accept: (candidateId: string) => CandidateSettlement
+      rejectMedia: (candidateId: string, failure?: SourceFailureData) => CandidateSettlement
+      expireCandidate: (candidateId: string) => CandidateSettlement
+      cancel: (reason: PlaybackCancelReason) => void
+    }
+
+    interface SourceAttemptDiagnostic {
+      sessionId: string
+      songIdentity: string
+      apiId: string
+      sourceRank: number
+      platform?: LX.OnlineSource
+      requestedQuality: LX.Quality
+      resolvedQuality?: LX.Quality
+      elapsedMs: number
+      scope: SourceFailureScope
+      kind: SourceFailureKind
+    }
   }
 }

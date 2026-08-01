@@ -201,8 +201,7 @@ const createFakeClock = (start = 0) => {
       now = value
     },
     async flush() {
-      await Promise.resolve()
-      await Promise.resolve()
+      for (let index = 0; index < 20; index++) await Promise.resolve()
     },
   }
   return clock
@@ -839,6 +838,254 @@ const createOnlineProvider = (...args) => loadCandidates().createOnlineCandidate
 const createLocalProvider = (...args) => loadCandidates().createLocalCandidateProvider(...args)
 const selectPlaybackQuality = (...args) => loadCandidates().selectPlaybackQuality(...args)
 
+const loadPlaybackCache = () => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  return loadTsModule(path.join(__dirname, '../../src/renderer/core/music/playback/cache.ts'), {
+    '@renderer/utils/ipc': {},
+  })
+}
+
+const loadPlaybackSourceAdapter = () => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  return loadTsModule(
+    path.join(__dirname, '../../src/renderer/core/music/playback/sourceAdapter.ts'),
+    {
+      '@common/utils/playbackSourceError': loadTsModule(
+        path.join(__dirname, '../../src/common/utils/playbackSourceError.ts'),
+      ),
+      '@renderer/utils/ipc': {},
+      '@renderer/utils/message': { requestMsg: {} },
+      '@renderer/utils/musicSdk/api-source': {},
+    },
+  )
+}
+
+const loadPlaybackSession = () => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  return loadTsModule(
+    path.join(__dirname, '../../src/renderer/core/music/playback/session.ts'),
+    {
+      './candidates': loadCandidates(),
+      './cache': loadPlaybackCache(),
+      '@common/utils/playbackSourceError': loadTsModule(
+        path.join(__dirname, '../../src/common/utils/playbackSourceError.ts'),
+      ),
+    },
+  )
+}
+
+const createResolveSessionHarness = (options, musicInfo, candidateProvider) => {
+  const clock = options.clock ?? createFakeClock(0)
+  const sourceIds = options.sourceIds ?? ['primary']
+  const requestedSourceIds = []
+  const sourceStarts = []
+  const diagnostics = []
+  const cacheCommits = []
+  const leaseEvents = []
+  const persistenceFailures = []
+  const sourceWaiters = new Map()
+  const sourceGates = new Map()
+  const persistenceWaiters = new Map()
+  const startedSources = new Set()
+
+  const getSourceGate = apiId => {
+    let gate = sourceGates.get(apiId)
+    if (!gate) sourceGates.set(apiId, gate = deferred())
+    return gate
+  }
+  const markSourceStarted = apiId => {
+    if (startedSources.has(apiId)) return
+    startedSources.add(apiId)
+    requestedSourceIds.push(apiId)
+    sourceStarts.push({ apiId, at: clock.now() })
+  }
+  const markSourceRequested = apiId => {
+    sourceWaiters.get(apiId)?.resolve()
+  }
+  const capabilities = options.capabilities ?? {
+    sources: {
+      wy: { actions: ['musicUrl'], qualitys: ['128k', '320k', 'flac'] },
+      tx: { actions: ['musicUrl'], qualitys: ['128k', '320k', 'flac'] },
+      kg: { actions: ['musicUrl'], qualitys: ['128k', '320k', 'flac'] },
+      local: { actions: ['musicUrl'], qualitys: ['128k'] },
+    },
+  }
+  const requestDirect = request => {
+    markSourceRequested(request.apiId)
+    if (options.request) return options.request(request)
+    if (Object.prototype.hasOwnProperty.call(options.urls ?? {}, request.apiId)) {
+      return Promise.resolve({
+        url: options.urls[request.apiId],
+        quality: request.quality ?? '128k',
+      })
+    }
+    return getSourceGate(request.apiId).promise.then(url => ({
+      url,
+      quality: request.quality ?? '128k',
+    }))
+  }
+
+  let adapter
+  if (options.useRealAdapter) {
+    const realAdapter = loadPlaybackSourceAdapter().createPlaybackSourceAdapter({
+      isCustomApi: () => true,
+      ensureUserApi: async apiId => ({
+        ok: true,
+        value: { apiId, status: true, apiInfo: { id: apiId, sources: capabilities.sources } },
+      }),
+      requestUserApi: params => {
+        markSourceRequested(params.apiId)
+        if (options.request) return options.request(params)
+        return getSourceGate(params.apiId).promise.then(url => ({
+          ok: true,
+          value: { data: { type: params.data.info.type, url } },
+        }))
+      },
+      cancelUserApi: () => {},
+      acquireRuntime: ({ apiIds }) => apiIds.forEach(apiId => leaseEvents.push(`retain:${apiId}`)),
+      releaseRuntime: ({ apiIds }) => apiIds.forEach(apiId => leaseEvents.push(`release:${apiId}`)),
+      getBuiltinCapabilities: () => undefined,
+      getBuiltinApi: () => { throw new Error('unexpected built-in playback source') },
+      serverBusyMessages: new Set(),
+    })
+    adapter = {
+      ...realAdapter,
+      getCapabilities(apiId, signal) {
+        markSourceStarted(apiId)
+        return realAdapter.getCapabilities(apiId, signal)
+      },
+    }
+  } else {
+    adapter = {
+      retainSources(apiIds) {
+        apiIds.forEach(apiId => leaseEvents.push(`retain:${apiId}`))
+      },
+      releaseSources(apiIds) {
+        apiIds.forEach(apiId => leaseEvents.push(`release:${apiId}`))
+      },
+      async getCapabilities(apiId) {
+        markSourceStarted(apiId)
+        return capabilities
+      },
+      getMusicUrl: requestDirect,
+      getLocalMusicUrl: requestDirect,
+    }
+  }
+
+  const rows = new Map()
+  if (options.cachedUrl) rows.set(`${musicInfo.id}_${options.requestedQuality ?? '128k'}`, options.cachedUrl)
+  const cache = createCacheHarness({
+    rows,
+    save: options.cacheCommit,
+    remove: options.cacheDelete,
+  })
+  const observedCache = {
+    ...cache,
+    commit(originalMusic, quality, url) {
+      cacheCommits.push({ musicInfo: originalMusic, quality, url })
+      return cache.commit(originalMusic, quality, url)
+    },
+  }
+  const reportPersistenceFailure = value => {
+    persistenceFailures.push(value)
+    persistenceWaiters.get(value.operation)?.resolve(value)
+    if (options.throwPersistenceReporter) throw new Error('persistence reporter failed')
+  }
+  let id = 0
+  const session = loadPlaybackSession().createPlaybackResolveSession({
+    musicInfo,
+    sourceIds,
+    requestedQuality: options.requestedQuality ?? '128k',
+    cacheMode: options.cacheMode ?? (options.cachedUrl ? 'lookup' : 'bypass'),
+    adapter,
+    cache: observedCache,
+    candidateProvider,
+    clock,
+    createId: () => `playback-${++id}`,
+    diagnostics: { record: value => diagnostics.push(value) },
+    reportPersistenceFailure,
+  })
+
+  return {
+    sourceIds: session.sourceIds,
+    nextCandidate: () => session.nextCandidate(),
+    accept: candidateId => session.accept(candidateId),
+    rejectMedia: (candidateId, failure) => session.rejectMedia(candidateId, failure),
+    expireCandidate: candidateId => session.expireCandidate(candidateId),
+    cancel: reason => session.cancel(reason),
+    requestedSourceIds,
+    sourceStarts,
+    diagnostics,
+    cacheCommits,
+    leaseEvents,
+    persistenceFailures,
+    waitForSource(apiId) {
+      if (requestedSourceIds.includes(apiId)) return Promise.resolve()
+      let waiter = sourceWaiters.get(apiId)
+      if (!waiter) sourceWaiters.set(apiId, waiter = deferred())
+      return waiter.promise
+    },
+    succeed(apiId, url) {
+      getSourceGate(apiId).resolve(url)
+    },
+    waitForPersistenceFailure(operation) {
+      const existing = persistenceFailures.find(value => value.operation == operation)
+      if (existing) return Promise.resolve(existing)
+      let waiter = persistenceWaiters.get(operation)
+      if (!waiter) persistenceWaiters.set(operation, waiter = deferred())
+      return waiter.promise
+    },
+    async flush() {
+      await new Promise(resolve => setImmediate(resolve))
+      await Promise.resolve()
+    },
+  }
+}
+
+const createSessionHarness = (options = {}) => createResolveSessionHarness(
+  options,
+  options.musicInfo ?? onlineMusic,
+  createOnlineProvider(options.musicInfo ?? onlineMusic, async() => options.matched ?? []),
+)
+
+const createLocalSessionHarness = (options = {}) => {
+  const batchIndexes = []
+  let batchIndex = 0
+  const provider = createLocalProvider(options.musicInfo ?? localMusic, async query => {
+    const currentBatch = batchIndex++
+    const result = options.findCandidates
+      ? await options.findCandidates(query, currentBatch)
+      : options.batches?.[currentBatch] ?? []
+    for (const candidate of result) {
+      Object.defineProperty(candidate, '__playbackBatchIndex', {
+        configurable: true,
+        value: currentBatch,
+      })
+    }
+    return result
+  })
+  const request = options.request
+  const harness = createResolveSessionHarness(
+    {
+      ...options,
+      request: request
+        ? value => {
+            if (value.musicInfo?.__playbackBatchIndex != null) {
+              batchIndexes.push(value.musicInfo.__playbackBatchIndex)
+            }
+            return request(value)
+          }
+        : request,
+    },
+    options.musicInfo ?? localMusic,
+    provider,
+  )
+  return Object.assign(harness, { batchIndexes })
+}
+
 const createCacheHarness = ({ rows = new Map(), read, save, remove } = {}) => {
   const path = require('node:path')
   const loadTsModule = require('../../scripts/test-utils/load-ts-module')
@@ -927,6 +1174,8 @@ module.exports = {
   deriveQualityListFromCapabilities,
   createOnlineProvider,
   createLocalProvider,
+  createSessionHarness,
+  createLocalSessionHarness,
   selectPlaybackQuality,
   toPlaybackCachePersistenceFailure: (...args) => {
     const path = require('node:path')

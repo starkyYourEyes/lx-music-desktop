@@ -11,6 +11,10 @@ const {
   canStartPlaybackWithRegistry,
   canOpenPrimaryDownloadWithRegistry,
   deferred,
+  playbackError,
+  createFakeClock,
+  createSessionHarness,
+  createLocalSessionHarness,
   onlineMusic,
   matchedTx,
   matchedKg,
@@ -379,4 +383,217 @@ test('built-in legacy rate-limit and busy errors normalize at the adapter bounda
     busy.getMusicUrl({ apiId: 'builtin', requestId: 'r2', musicInfo: onlineMusic, quality: '128k', signal: new AbortController().signal }),
     err => err.scope == 'source' && err.kind == 'serverBusy',
   )
+})
+
+test('serial resolution exhausts platforms before advancing API source', async() => {
+  const calls = []
+  const session = createSessionHarness({
+    sourceIds: ['primary', 'fallback'],
+    request: async({ apiId, musicInfo }) => {
+      calls.push(`${apiId}:${musicInfo.source}`)
+      if (apiId == 'fallback' && musicInfo.source == 'tx') return { url: 'https://ok', quality: '128k' }
+      throw playbackError('candidate', 'request', apiId)
+    },
+    matched: [matchedTx, matchedKg],
+  })
+  const candidate = await session.nextCandidate()
+  assert.equal(candidate.url, 'https://ok')
+  assert.deepEqual(calls, [
+    'primary:wy', 'primary:tx', 'primary:kg',
+    'fallback:wy', 'fallback:tx',
+  ])
+})
+
+test('source failure skips remaining platforms in that source', async() => {
+  const calls = []
+  const session = createSessionHarness({
+    sourceIds: ['primary', 'fallback'],
+    request: async({ apiId, musicInfo }) => {
+      calls.push(`${apiId}:${musicInfo.source}`)
+      if (apiId == 'primary') throw playbackError('source', 'rateLimit', apiId)
+      return { url: 'https://ok', quality: '128k' }
+    },
+    matched: [matchedTx],
+  })
+  await session.nextCandidate()
+  assert.deepEqual(calls, ['primary:wy', 'fallback:wy'])
+})
+
+test('empty URL advances to the next candidate inside the same source', async() => {
+  const session = createSessionHarness({
+    sourceIds: ['primary', 'fallback'],
+    request: async({ apiId, musicInfo }) => {
+      if (apiId == 'primary' && musicInfo.source == 'wy') throw playbackError('candidate', 'emptyUrl', apiId)
+      return { url: 'https://ok', quality: '128k' }
+    },
+    matched: [matchedTx],
+  })
+  const candidate = await session.nextCandidate()
+  assert.equal(candidate.apiId, 'primary')
+  assert.equal(candidate.platform, 'tx')
+})
+
+test('session cancellation never advances to a fallback', async() => {
+  const session = createSessionHarness({ sourceIds: ['primary', 'fallback'] })
+  session.cancel('songChanged')
+  await assert.rejects(session.nextCandidate(), err => err.kind == 'cancelled' && err.scope == 'session')
+  assert.deepEqual(session.requestedSourceIds, [])
+})
+
+test('one source receives one cumulative ten-second deadline', async() => {
+  const clock = createFakeClock(0)
+  const session = createSessionHarness({
+    clock,
+    sourceIds: ['primary', 'fallback'],
+    request: async({ apiId }) => {
+      if (apiId == 'primary') {
+        clock.advance(6000)
+        throw playbackError('candidate', 'request', apiId)
+      }
+      return { url: 'https://fallback', quality: '128k' }
+    },
+    matched: [matchedTx],
+  })
+  const first = session.nextCandidate()
+  clock.advance(4000)
+  await clock.flush()
+  const candidate = await first
+  assert.equal(candidate.apiId, 'fallback')
+  assert.equal(session.diagnostics[0].elapsedMs, 10000)
+})
+
+test('a hanging primary request times out as source failure and starts fallback', async() => {
+  const clock = createFakeClock(0)
+  const session = createSessionHarness({
+    clock,
+    useRealAdapter: true,
+    sourceIds: ['primary', 'fallback'],
+    request: ({ apiId }) => apiId == 'primary'
+      ? new Promise(() => {})
+      : Promise.resolve({ ok: true, value: { data: { type: '128k', url: 'https://fallback' } } }),
+  })
+  const resolving = session.nextCandidate()
+  clock.advance(9999)
+  await clock.flush()
+  assert.deepEqual(session.requestedSourceIds, ['primary'])
+  clock.advance(1)
+  await clock.flush()
+  assert.equal((await resolving).apiId, 'fallback')
+  assert.equal(session.diagnostics[0].kind, 'timeout')
+})
+
+test('an operation rejection observed at the exact deadline is a source timeout', async() => {
+  const clock = createFakeClock(0)
+  const primary = deferred()
+  const session = createSessionHarness({
+    clock,
+    sourceIds: ['primary', 'fallback'],
+    request: ({ apiId }) => apiId == 'primary'
+      ? primary.promise
+      : Promise.resolve({ url: 'https://fallback', quality: '128k' }),
+  })
+  const resolving = session.nextCandidate()
+  await session.waitForSource('primary')
+  clock.setNow(10_000)
+  primary.reject(playbackError('candidate', 'request', 'primary'))
+  await clock.flush()
+  const candidate = await resolving
+  assert.equal(candidate.apiId, 'fallback')
+  assert.equal(session.diagnostics[0].scope, 'source')
+  assert.equal(session.diagnostics[0].kind, 'timeout')
+})
+
+test('fallback budget starts only when fallback becomes active', async() => {
+  const clock = createFakeClock(0)
+  const session = createSessionHarness({ clock, sourceIds: ['primary', 'fallback'] })
+  const resolving = session.nextCandidate()
+  clock.advance(10000)
+  await clock.flush()
+  await session.waitForSource('fallback')
+  assert.deepEqual(session.sourceStarts[1], { apiId: 'fallback', at: 10000 })
+  session.succeed('fallback', 'https://fallback')
+  const candidate = await resolving
+  assert.equal(candidate.deadlineAt, 20000)
+})
+
+test('source order is a creation-time snapshot', async() => {
+  const settings = { primary: 'a', fallbacks: ['b'] }
+  const session = createSessionHarness({ sourceIds: [settings.primary, ...settings.fallbacks] })
+  settings.primary = 'c'
+  settings.fallbacks.splice(0, 1, 'd')
+  assert.deepEqual(session.sourceIds, ['a', 'b'])
+})
+
+test('canplay at the exact source deadline expires instead of committing', async() => {
+  const clock = createFakeClock(0)
+  const session = createSessionHarness({
+    clock,
+    sourceIds: ['primary', 'fallback'],
+    urls: { primary: 'https://primary', fallback: 'https://fallback' },
+  })
+  const first = await session.nextCandidate()
+  clock.advance(10000)
+  assert.equal(await session.accept(first.candidateId), 'expired')
+  const second = await session.nextCandidate()
+  assert.equal(second.apiId, 'fallback')
+  assert.deepEqual(session.cacheCommits, [])
+})
+
+test('a retained cache commit is observed without delaying accepted playback', async() => {
+  const commitGate = deferred()
+  const session = createSessionHarness({
+    sourceIds: ['primary'],
+    urls: { primary: 'https://valid' },
+    cacheCommit: () => commitGate.promise,
+  })
+  const candidate = await session.nextCandidate()
+  assert.equal(session.accept(candidate.candidateId), 'accepted')
+  assert.deepEqual(session.leaseEvents, ['retain:primary', 'release:primary'])
+  assert.deepEqual(session.persistenceFailures, [])
+  const reported = session.waitForPersistenceFailure('commit')
+  commitGate.reject(Object.assign(new Error('db down with private details'), { code: 'SQLITE_BUSY' }))
+  assert.deepEqual(await reported, {
+    operation: 'commit', errorName: 'Error', errorCode: 'SQLITE_BUSY',
+  })
+  assert.equal(JSON.stringify(session.persistenceFailures).includes('private details'), false)
+})
+
+test('a throwing persistence reporter cannot escape the retained commit observer', async() => {
+  const commitGate = deferred()
+  const session = createSessionHarness({
+    sourceIds: ['primary'],
+    urls: { primary: 'https://valid' },
+    cacheCommit: () => commitGate.promise,
+    throwPersistenceReporter: true,
+  })
+  const candidate = await session.nextCandidate()
+  assert.equal(session.accept(candidate.candidateId), 'accepted')
+  const reported = session.waitForPersistenceFailure('commit')
+  commitGate.reject(new Error('db down'))
+  await reported
+  await session.flush()
+  assert.deepEqual(session.leaseEvents, ['retain:primary', 'release:primary'])
+})
+
+test('cache media rejection and timeout both observe tombstone persistence failure', async() => {
+  for (const settlement of ['rejectMedia', 'expireCandidate']) {
+    const clock = createFakeClock(0)
+    const deleteGate = deferred()
+    const session = createSessionHarness({
+      clock,
+      sourceIds: ['primary'],
+      cachedUrl: 'https://cached',
+      cacheDelete: () => deleteGate.promise,
+    })
+    const candidate = await session.nextCandidate()
+    const reported = session.waitForPersistenceFailure('delete')
+    if (settlement == 'expireCandidate') clock.advance(10_000)
+    session[settlement](candidate.candidateId)
+    deleteGate.reject(Object.assign(new Error('delete failed with private details'), {
+      code: 'SQLITE_IOERR',
+    }))
+    assert.deepEqual(await reported, {
+      operation: 'delete', errorName: 'Error', errorCode: 'SQLITE_IOERR',
+    })
+  }
 })

@@ -21,7 +21,10 @@ require.extensions['.ts'] = (module, filename) => {
 
 const cachePhasePath = '../../src/common/storage/cachePhase.ts'
 const phase3WorkerPath = '../../src/main/worker/dbService/modules/phase3/index.ts'
+const dbService = require('../../src/main/worker/dbService/db.ts')
 const testStorageRootPath = './helpers/test-storage-root.js'
+const workerFixtures = []
+const supportsWorkerDatabase = typeof process.versions.electron == 'string'
 
 const canonical = value => {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
@@ -69,10 +72,30 @@ const markerWith = update => {
 }
 
 afterEach(() => {
+  try { dbService.close() } catch {}
+  for (const fixture of workerFixtures.splice(0)) fixture.cleanup()
   try { delete require.cache[require.resolve(cachePhasePath)] } catch {}
   try { delete require.cache[require.resolve(phase3WorkerPath)] } catch {}
   try { delete require.cache[require.resolve(testStorageRootPath)] } catch {}
 })
+
+const createWorkerStore = async() => {
+  const { createTestStorageRoot } = require(testStorageRootPath)
+  const fixture = createTestStorageRoot('cache-worker')
+  workerFixtures.push(fixture)
+  const result = await dbService.init({
+    dataPath: fixture.path,
+    backupDir: path.join(fixture.path, 'backups'),
+    previousShutdownWasClean: true,
+  })
+  assert.equal(result.status, 'ready')
+  return dbService.getDB()
+}
+
+const writeRawCrossMarker = (db, marker) => db.prepare(`
+  INSERT INTO migration_markers(name, source_sha256, completed_at_ms, details_json)
+  VALUES (?, ?, ?, ?)
+`).run(marker.name, marker.sourceSha256, marker.completedAtMs, marker.detailsJson)
 
 describe('cache Phase 3 prerequisite', () => {
   it('accepts only a canonical marker with complete typed playback checks', () => {
@@ -138,5 +161,119 @@ describe('cache Phase 3 prerequisite', () => {
     const { getCachePhasePrerequisite } = require(phase3WorkerPath)
 
     assert.throws(() => getCachePhasePrerequisite('legacy_data_v1.local_state'), /cache_phase3_prerequisite_invalid/)
+  })
+
+  it('reads raw worker marker bytes instead of normalized migration marker details', { skip: !supportsWorkerDatabase }, async() => {
+    const db = await createWorkerStore()
+    const repository = require(phase3WorkerPath)
+    const canonicalMarker = completeMarker()
+    const prettyDetails = JSON.stringify(JSON.parse(canonicalMarker.detailsJson), null, 2)
+    const duplicateKeyDetails = canonicalMarker.detailsJson.replace(
+      /,"version":1}$/, ',"version":1,"version":1}',
+    )
+
+    writeRawCrossMarker(db, canonicalMarker)
+    assert.equal(repository.getCachePhasePrerequisite().sourceSha256, canonicalMarker.sourceSha256)
+
+    for (const detailsJson of [prettyDetails, duplicateKeyDetails]) {
+      db.prepare(`UPDATE migration_markers SET details_json = ?, source_sha256 = ? WHERE name = ?`).run(
+        detailsJson,
+        canonicalMarker.sourceSha256,
+        canonicalMarker.name,
+      )
+      assert.throws(() => repository.getCachePhasePrerequisite(), /cache_phase3_prerequisite_invalid/)
+    }
+
+    db.prepare(`UPDATE migration_markers SET details_json = ?, source_sha256 = ? WHERE name = ?`).run(
+      canonicalMarker.detailsJson,
+      canonicalMarker.sourceSha256,
+      canonicalMarker.name,
+    )
+    assert.equal(repository.getCachePhasePrerequisite().sourceSha256, canonicalMarker.sourceSha256)
+  })
+
+  it('rejects a reparse-point fixture root instead of resolving it as the supplied root', () => {
+    const { createTestStorageRoot } = require(testStorageRootPath)
+    const baseRoot = fs.realpathSync(process.env.LX_TEST_STORAGE_ROOT)
+    const target = createTestStorageRoot('reparse-target')
+    const alias = path.join(baseRoot, 'cache-phase-reparse-root')
+    let created = null
+    try {
+      fs.symlinkSync(target.path, alias, process.platform == 'win32' ? 'junction' : 'dir')
+      const previous = process.env.LX_TEST_STORAGE_ROOT
+      process.env.LX_TEST_STORAGE_ROOT = alias
+      try {
+        assert.throws(() => { created = createTestStorageRoot('reparse-rejected') }, /non-link/)
+      } finally {
+        process.env.LX_TEST_STORAGE_ROOT = previous
+      }
+    } finally {
+      created?.cleanup()
+      fs.rmSync(alias, { recursive: true, force: true })
+      target.cleanup()
+    }
+  })
+
+  it('rejects child and marker replacement without deleting the replacement', () => {
+    const { createTestStorageRoot } = require(testStorageRootPath)
+    const baseRoot = fs.realpathSync(process.env.LX_TEST_STORAGE_ROOT)
+    const child = createTestStorageRoot('replacement-child')
+    const parkedChild = path.join(baseRoot, 'replacement-owned-child')
+    try {
+      fs.renameSync(child.path, parkedChild)
+      fs.mkdirSync(child.path)
+      fs.writeFileSync(path.join(child.path, 'unowned.txt'), 'keep')
+      assert.throws(() => child.cleanup(), /ownership changed/)
+      assert.equal(fs.readFileSync(path.join(child.path, 'unowned.txt'), 'utf8'), 'keep')
+    } finally {
+      fs.rmSync(child.path, { recursive: true, force: true })
+      fs.rmSync(parkedChild, { recursive: true, force: true })
+    }
+
+    const marker = createTestStorageRoot('replacement-marker')
+    const parkedMarker = path.join(marker.path, 'original-owner-marker')
+    try {
+      fs.renameSync(marker.ownershipMarkerPath, parkedMarker)
+      fs.writeFileSync(marker.ownershipMarkerPath, 'replacement')
+      assert.throws(() => marker.cleanup(), /ownership marker changed/)
+      assert.equal(fs.readFileSync(marker.ownershipMarkerPath, 'utf8'), 'replacement')
+    } finally {
+      fs.rmSync(marker.ownershipMarkerPath, { force: true })
+      if (fs.existsSync(parkedMarker)) fs.renameSync(parkedMarker, marker.ownershipMarkerPath)
+      marker.cleanup()
+    }
+  })
+
+  it('quarantines a target swapped after verification and never deletes the swapped directory', () => {
+    const { createTestStorageRoot } = require(testStorageRootPath)
+    const baseRoot = fs.realpathSync(process.env.LX_TEST_STORAGE_ROOT)
+    const fixture = createTestStorageRoot('swap-owned')
+    const ownedParking = path.join(baseRoot, 'swap-owned-parking')
+    const unowned = fs.mkdtempSync(path.join(baseRoot, 'swap-unowned-'))
+    fs.writeFileSync(path.join(unowned, 'unowned.txt'), 'keep')
+    const rename = fs.renameSync
+    let swapped = false
+    let quarantined
+    try {
+      fs.renameSync = (source, target) => {
+        if (!swapped && source == fixture.path) {
+          swapped = true
+          rename(source, ownedParking)
+          rename(unowned, source)
+        }
+        return rename(source, target)
+      }
+      assert.throws(() => fixture.cleanup(), /ownership changed/)
+      quarantined = fs.readdirSync(baseRoot)
+        .map(name => path.join(baseRoot, name))
+        .find(candidate => fs.existsSync(path.join(candidate, 'unowned.txt')))
+      assert.ok(quarantined)
+      assert.equal(fs.readFileSync(path.join(quarantined, 'unowned.txt'), 'utf8'), 'keep')
+    } finally {
+      fs.renameSync = rename
+      fs.rmSync(ownedParking, { recursive: true, force: true })
+      fs.rmSync(unowned, { recursive: true, force: true })
+      if (quarantined != null && quarantined != unowned) fs.rmSync(quarantined, { recursive: true, force: true })
+    }
   })
 })

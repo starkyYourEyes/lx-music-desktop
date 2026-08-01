@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const fs = require('node:fs')
 const Module = require('node:module')
 const path = require('node:path')
@@ -24,8 +25,12 @@ const coordinatorPath = '../../src/main/startup/storageCoordinator.ts'
 const runStatePath = '../../src/main/startup/runState.ts'
 const recoveryPath = '../../src/main/startup/recovery.ts'
 const workerAdapterPath = '../../src/main/worker/dbService/index.ts'
+const workerDbService = require('../../src/main/worker/dbService/db.ts')
+const phase3Worker = require('../../src/main/worker/dbService/modules/phase3/index.ts')
 const { createTestStorageRoot } = require('./helpers/test-storage-root.js')
 const tempDirectories = []
+const appDbFixtures = []
+const supportsWorkerDatabase = typeof process.versions.electron == 'string'
 
 const compileCoordinatorTypeFixture = source => {
   const fixturePath = path.resolve(__dirname, 'storage-coordinator-type-fixture.ts')
@@ -63,6 +68,7 @@ const tempDirectory = prefix => {
 }
 
 afterEach(() => {
+  try { workerDbService.close() } catch {}
   try { delete require.cache[require.resolve(coordinatorPath)] } catch {}
   try { delete require.cache[require.resolve(runStatePath)] } catch {}
   try { delete require.cache[require.resolve(recoveryPath)] } catch {}
@@ -70,6 +76,7 @@ afterEach(() => {
   for (const fixture of tempDirectories.splice(0)) {
     fixture.cleanup()
   }
+  for (const fixture of appDbFixtures.splice(0)) fixture.cleanup()
 })
 
 const readyResult = {
@@ -86,6 +93,65 @@ const recoveryResult = {
   databasePath: 'C:\\profiles\\alice\\LxDatas\\lx.data.db',
   backupPath: 'C:\\profiles\\alice\\LxDatas\\backups\\migration.backup',
   diagnostics: ['schema.table_missing:my_list'],
+}
+
+const canonical = value => {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
+  if (value != null && typeof value == 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+const sha256File = filename => crypto.createHash('sha256').update(fs.readFileSync(filename)).digest('hex')
+const sha256 = value => crypto.createHash('sha256').update(value, 'utf8').digest('hex')
+const cacheChecks = () => [
+  { name: 'credentials', version: 1, state: 'complete', evidenceSha256: 'a'.repeat(64) },
+  { name: 'account-profile', version: 1, state: 'complete', evidenceSha256: 'b'.repeat(64) },
+  { name: 'phase2-storage', version: 1, state: 'complete', evidenceSha256: 'c'.repeat(64) },
+  { name: 'playback-activity', version: 1, state: 'complete', evidenceSha256: 'd'.repeat(64) },
+  { name: 'quarantine', version: 1, state: 'complete', evidenceSha256: 'e'.repeat(64) },
+  { name: 'playback-writer', version: 1, state: 'complete', evidenceSha256: 'f'.repeat(64) },
+  { name: 'playback-reader', version: 1, state: 'complete', evidenceSha256: '0'.repeat(64) },
+]
+
+const cacheMarker = checks => {
+  const detailsJson = canonical({ version: 1, checks })
+  return {
+    name: 'legacy_data_v1.cross_artifact_complete',
+    sourceSha256: sha256(detailsJson),
+    completedAtMs: 1,
+    detailsJson,
+  }
+}
+
+const createAppDbFixture = async() => {
+  const fixture = createTestStorageRoot('cache-coordinator')
+  appDbFixtures.push(fixture)
+  const options = {
+    dataPath: fixture.path,
+    backupDir: path.join(fixture.path, 'backups'),
+    previousShutdownWasClean: true,
+  }
+  const startup = await workerDbService.init(options)
+  assert.equal(startup.status, 'ready')
+  return {
+    db: workerDbService.getDB(),
+    options,
+    appDbPath: path.join(fixture.path, 'lx.data.db'),
+  }
+}
+
+const insertRawCacheMarker = (db, marker, allowInvalidJson = false) => {
+  if (allowInvalidJson) db.pragma('ignore_check_constraints = ON')
+  try {
+    db.prepare(`
+      INSERT INTO migration_markers(name, source_sha256, completed_at_ms, details_json)
+      VALUES (?, ?, ?, ?)
+    `).run(marker.name, marker.sourceSha256, marker.completedAtMs, marker.detailsJson)
+  } finally {
+    if (allowInvalidJson) db.pragma('ignore_check_constraints = OFF')
+  }
 }
 
 const createDeps = (overrides = {}) => {
@@ -160,27 +226,40 @@ const loadWorkerAdapter = databaseInit => {
 }
 
 describe('storage startup coordinator', () => {
-  it('rejects a missing marker before cache initialization without changing the app database fixture', async() => {
-    const fixture = createTestStorageRoot('cache-prerequisite')
-    try {
-      const appDbPath = path.join(fixture.path, 'app.db')
-      fs.writeFileSync(appDbPath, 'schema-6-before')
-      const beforeHash = require('node:crypto').createHash('sha256').update(fs.readFileSync(appDbPath)).digest('hex')
+  it('rejects invalid raw worker markers before Phase 4 can mutate the app database', { skip: !supportsWorkerDatabase }, async() => {
+    const valid = cacheMarker(cacheChecks())
+    const incompleteWriter = cacheChecks()
+    incompleteWriter[5].state = 'not-applicable'
+    const incompleteReader = cacheChecks()
+    incompleteReader[6].state = 'not-applicable'
+    const cases = [
+      { name: 'missing', marker: null, allowInvalidJson: false },
+      { name: 'malformed JSON', marker: { ...valid, detailsJson: '{' }, allowInvalidJson: true },
+      { name: 'hash mismatch', marker: { ...valid, sourceSha256: 'f'.repeat(64) }, allowInvalidJson: false },
+      { name: 'incomplete writer', marker: cacheMarker(incompleteWriter), allowInvalidJson: false },
+      { name: 'incomplete reader', marker: cacheMarker(incompleteReader), allowInvalidJson: false },
+    ]
+
+    for (const testCase of cases) {
+      const { db, options, appDbPath } = await createAppDbFixture()
+      if (testCase.marker != null) insertRawCacheMarker(db, testCase.marker, testCase.allowInvalidJson)
+      const beforeHash = sha256File(appDbPath)
       const { calls, deps } = createDeps({
-        getCachePhasePrerequisite: async() => {
-          calls.push('cache:prerequisite')
-          throw Object.assign(new Error('marker missing'), { code: 'cache_phase3_prerequisite_invalid' })
+        initDatabase: async() => workerDbService.init(options),
+        getCachePhasePrerequisite: () => phase3Worker.getCachePhasePrerequisite(),
+        initializePhase4: async() => {
+          calls.push('phase4:initialize')
+          db.exec('CREATE TABLE phase4_mutation_sentinel(value TEXT)')
+          return { schemaVersion: 7 }
         },
-        initializePhase4: async() => { calls.push('phase4:initialize'); return { schemaVersion: 7 } },
       })
 
       const result = await createCoordinator(deps).start()
 
-      assert.deepEqual(result, { status: 'fatal', reason: 'cache_phase3_prerequisite_invalid' })
-      assert.equal(calls.includes('phase4:initialize'), false)
-      assert.equal(require('node:crypto').createHash('sha256').update(fs.readFileSync(appDbPath)).digest('hex'), beforeHash)
-    } finally {
-      fixture.cleanup()
+      assert.deepEqual(result, { status: 'fatal', reason: 'cache_phase3_prerequisite_invalid' }, testCase.name)
+      assert.equal(calls.includes('phase4:initialize'), false, testCase.name)
+      assert.equal(sha256File(appDbPath), beforeHash, testCase.name)
+      workerDbService.close()
     }
   })
 

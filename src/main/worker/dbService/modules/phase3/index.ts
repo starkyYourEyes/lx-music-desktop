@@ -60,7 +60,7 @@ export const getPhase3AttestationPrerequisites = (value?: unknown): Phase3Attest
 export const getCachePhasePrerequisite = (value?: unknown): CachePhasePrerequisiteV1 => {
   if (value !== undefined) throw phase3Error('cache_phase3_prerequisite_invalid', 'cache_phase3_prerequisite_invalid')
   try {
-    return parseCachePhasePrerequisite(getMigrationMarker(getDB(), CROSS_ARTIFACT_MARKER_NAME))
+    return parseCachePhasePrerequisite(readCrossMarker(getDB()))
   } catch {
     throw phase3Error('cache_phase3_prerequisite_invalid', 'cache_phase3_prerequisite_invalid')
   }

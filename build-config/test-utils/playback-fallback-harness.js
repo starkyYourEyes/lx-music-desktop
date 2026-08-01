@@ -1090,6 +1090,358 @@ const createLocalSessionHarness = (options = {}) => {
   return Object.assign(harness, { batchIndexes })
 }
 
+const loadPlaybackCoordinator = () => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  return loadTsModule(path.join(__dirname, '../../src/renderer/core/music/playback/coordinator.ts'))
+}
+
+const createCoordinatorHarness = (options = {}) => {
+  const clock = options.clock ?? createFakeClock(0)
+  const coordinatorModule = loadPlaybackCoordinator()
+  const deletedCacheKeys = []
+  const sessionCancelReasons = []
+  const publishedForegroundUrls = []
+  const foregroundFailures = []
+  const foregroundLifecycle = []
+  const detachedForegroundUrls = []
+  const requestedSourceIds = []
+  const createdReasons = []
+  const candidateByUrl = new Map()
+  const candidateGates = new Map()
+  const foregroundCandidates = []
+  const foregroundCandidateWaiters = []
+  const foregroundFailureWaiters = []
+  const preloadPhaseEvents = []
+  const preloadPhaseWaiters = []
+  let futureSourceIds = [...(options.sourceIds ?? ['primary'])]
+  let createRequestCount = 0
+  let nextCandidateCount = 0
+  let sessionCreateCount = 0
+  let cacheCommitCount = 0
+  let releaseSourcesCount = 0
+  let candidateOrdinal = 0
+  let sessionOrdinal = 0
+  let sourceUrlCursor = 0
+  let lastForegroundCandidate = null
+  let lastPreloadCandidate = null
+  let lazySession = null
+
+  const notifyPreloadPhase = phase => {
+    const waiterIndex = preloadPhaseWaiters.findIndex(waiter => waiter.phase == phase)
+    if (waiterIndex >= 0) preloadPhaseWaiters.splice(waiterIndex, 1)[0].gate.resolve()
+    else preloadPhaseEvents.push(phase)
+  }
+  const makeSourceError = (scope, kind) => playbackError(scope, kind)
+  const releaseSession = session => {
+    if (session.released) return
+    session.released = true
+    releaseSourcesCount++
+  }
+  const getSourceUrl = apiId => {
+    if (options.sourceUrls) return options.sourceUrls[sourceUrlCursor++] ?? `https://${apiId}`
+    if (options.sourceUrl) return options.sourceUrl
+    return `https://${apiId}`
+  }
+  const makeCandidate = (session, origin, url, apiId, deadlineAt) => {
+    const candidate = {
+      sessionId: session.id,
+      candidateId: `${session.id}:candidate:${++candidateOrdinal}`,
+      songIdentity: session.songIdentity,
+      origin,
+      ...(apiId ? { apiId } : {}),
+      quality: '128k',
+      url,
+      cacheKey: `${session.musicInfo.id}_128k`,
+      deadlineAt,
+    }
+    candidateByUrl.set(url, candidate)
+    return candidate
+  }
+  const createFakeSession = (musicInfo, sourceIds = futureSourceIds) => {
+    sessionCreateCount++
+    const sessionRecord = {
+      id: `session-${++sessionOrdinal}`,
+      songIdentity: `${musicInfo.source}:${musicInfo.id}`,
+      sourceIds: Object.freeze([...sourceIds]),
+      musicInfo,
+      activeCandidate: null,
+      cachePending: Boolean(options.cachedUrl),
+      sourceIndex: 0,
+      sourceDeadlineAt: null,
+      mediaRejected: false,
+      state: 'active',
+      released: false,
+    }
+    const expire = candidate => {
+      sessionRecord.activeCandidate = null
+      if (candidate.origin == 'cache') deletedCacheKeys.push(candidate.cacheKey)
+      else {
+        if (sessionRecord.sourceIds.length > 1) sessionRecord.sourceIndex++
+        sessionRecord.sourceDeadlineAt = null
+      }
+      return 'expired'
+    }
+    return {
+      id: sessionRecord.id,
+      songIdentity: sessionRecord.songIdentity,
+      sourceIds: sessionRecord.sourceIds,
+      async nextCandidate() {
+        nextCandidateCount++
+        notifyPreloadPhase('resolving')
+        if (sessionRecord.state != 'active') throw makeSourceError('session', 'cancelled')
+        if (sessionRecord.activeCandidate) return sessionRecord.activeCandidate
+        if (sessionRecord.mediaRejected && options.exhaustAfterMediaError) {
+          sessionRecord.state = 'failed'
+          releaseSession(sessionRecord)
+          throw makeSourceError('session', 'request')
+        }
+        let candidate
+        if (sessionRecord.cachePending) {
+          sessionRecord.cachePending = false
+          candidate = makeCandidate(
+            sessionRecord,
+            'cache',
+            options.cachedUrl,
+            undefined,
+            clock.now() + 10_000,
+          )
+        } else {
+          const apiId = sessionRecord.sourceIds[
+            Math.min(sessionRecord.sourceIndex, sessionRecord.sourceIds.length - 1)
+          ] ?? 'primary'
+          requestedSourceIds.push(apiId)
+          sessionRecord.sourceDeadlineAt ??= clock.now() + 10_000
+          candidate = makeCandidate(
+            sessionRecord,
+            'source',
+            getSourceUrl(apiId),
+            apiId,
+            sessionRecord.sourceDeadlineAt,
+          )
+        }
+        sessionRecord.activeCandidate = candidate
+        if (options.blockCandidateNumber == candidateOrdinal) {
+          let gate = candidateGates.get(candidateOrdinal)
+          if (!gate) candidateGates.set(candidateOrdinal, gate = deferred())
+          await gate.promise
+          if (sessionRecord.state != 'active') throw makeSourceError('session', 'cancelled')
+        }
+        return candidate
+      },
+      accept(candidateId) {
+        const candidate = sessionRecord.activeCandidate
+        if (sessionRecord.state != 'active' || candidate?.candidateId != candidateId) return 'stale'
+        if (clock.now() >= candidate.deadlineAt) return expire(candidate)
+        sessionRecord.activeCandidate = null
+        sessionRecord.state = 'accepted'
+        cacheCommitCount++
+        releaseSession(sessionRecord)
+        return 'accepted'
+      },
+      rejectMedia(candidateId) {
+        const candidate = sessionRecord.activeCandidate
+        if (sessionRecord.state != 'active' || candidate?.candidateId != candidateId) return 'stale'
+        if (clock.now() >= candidate.deadlineAt) return expire(candidate)
+        sessionRecord.activeCandidate = null
+        sessionRecord.mediaRejected = true
+        if (candidate.origin == 'cache') deletedCacheKeys.push(candidate.cacheKey)
+        else if (sessionRecord.sourceIds.length > 1) sessionRecord.sourceIndex++
+        return 'resumed'
+      },
+      expireCandidate(candidateId) {
+        const candidate = sessionRecord.activeCandidate
+        if (sessionRecord.state != 'active' || candidate?.candidateId != candidateId) return 'stale'
+        return expire(candidate)
+      },
+      cancel(reason) {
+        if (sessionRecord.state != 'active') return
+        sessionRecord.state = 'cancelled'
+        sessionRecord.activeCandidate = null
+        sessionCancelReasons.push(reason)
+        releaseSession(sessionRecord)
+      },
+    }
+  }
+
+  class FakePreloadAudio {
+    constructor() {
+      this.listeners = new Map()
+      this.bindings = new Map()
+      this.boundUrls = []
+      this.bound = false
+      this.detached = false
+      this.muted = false
+      this._src = ''
+    }
+
+    addEventListener(name, handler) {
+      this.listeners.set(name, handler)
+    }
+
+    removeEventListener(name, handler) {
+      if (this.listeners.get(name) == handler) this.listeners.delete(name)
+    }
+
+    pause() {}
+
+    removeAttribute(name) {
+      if (name != 'src') return
+      this._src = ''
+      this.bound = false
+      this.detached = true
+    }
+
+    load() {}
+
+    set src(url) {
+      this._src = url
+      this.bound = true
+      this.detached = false
+      this.boundUrls.push(url)
+      this.bindings.set(url, {
+        canplay: this.listeners.get('canplay'),
+        error: this.listeners.get('error'),
+      })
+      const candidate = candidateByUrl.get(url)
+      if (candidate) lastPreloadCandidate = candidate
+    }
+
+    get src() {
+      return this._src
+    }
+
+    emitFor(resource, name) {
+      return this.bindings.get(resource.url)?.[name]?.() ?? 'stale'
+    }
+  }
+
+  const preloadAudio = new FakePreloadAudio()
+  const getDefaultSession = () => lazySession ??= createFakeSession(options.musicInfo ?? song)
+  const createRequest = async input => {
+    createRequestCount++
+    createdReasons.push(input.reason)
+    notifyPreloadPhase('resolving')
+    if (options.createRequest) return options.createRequest(input)
+    if (options.directUrl) {
+      return {
+        kind: 'direct',
+        resource: {
+          kind: 'direct',
+          songIdentity: `${input.musicInfo.source}:${input.musicInfo.id}`,
+          url: options.directUrl,
+        },
+      }
+    }
+    return {
+      kind: 'session',
+      session: createFakeSession(input.musicInfo, [...futureSourceIds]),
+    }
+  }
+  const coordinator = coordinatorModule.createPlaybackResolutionCoordinator({
+    createRequest,
+    createPreloadAudio: () => preloadAudio,
+    detachForegroundResource(resource) {
+      detachedForegroundUrls.push(resource.url)
+      foregroundLifecycle.push(`detach:${resource.url}`)
+    },
+    clock,
+  })
+  coordinator.setForegroundHandlers({
+    resource(resource) {
+      lastForegroundCandidate = resource
+      publishedForegroundUrls.push(resource.url)
+      foregroundCandidates.push(resource)
+      foregroundCandidateWaiters.shift()?.resolve(resource)
+    },
+    failure({ error }) {
+      foregroundFailures.push(error)
+      foregroundLifecycle.push('failure')
+      foregroundFailureWaiters.shift()?.resolve(error)
+    },
+  })
+
+  const identity = musicInfo => `${musicInfo.source}:${musicInfo.id}`
+  return {
+    async startForeground(musicInfo = song, reason = 'initial') {
+      const resource = await coordinator.startForeground({ musicInfo, reason })
+      if (resource.kind == 'candidate') lastForegroundCandidate = resource
+      return resource
+    },
+    async startPreload(musicInfo = song) {
+      const resource = await coordinator.startPreload(musicInfo)
+      if (resource.kind == 'candidate') lastPreloadCandidate = resource
+      preloadPhaseEvents.length = 0
+      return resource
+    },
+    async promote(musicInfo = song) {
+      const resource = await coordinator.promotePreload(identity(musicInfo))
+      if (resource?.kind == 'candidate') lastForegroundCandidate = resource
+      return resource
+    },
+    handleForegroundCanplay: resource => coordinator.handleForegroundCanplay(resource),
+    handleForegroundError: resource => coordinator.handleForegroundError(resource),
+    cancelForeground: reason => coordinator.cancelForeground(reason),
+    cancelPreload: reason => coordinator.cancelPreload(reason),
+    dispose: () => coordinator.dispose(),
+    preloadCanplay: resource => preloadAudio.emitFor(resource, 'canplay'),
+    preloadError: resource => preloadAudio.emitFor(resource, 'error'),
+    currentCandidate: () => lastForegroundCandidate,
+    currentPreloadCandidate: () => lastPreloadCandidate,
+    waitForForegroundCandidate() {
+      if (foregroundCandidates.length) return Promise.resolve(foregroundCandidates.shift())
+      const gate = deferred()
+      foregroundCandidateWaiters.push(gate)
+      return gate.promise
+    },
+    waitForForegroundFailure() {
+      if (foregroundFailures.length) return Promise.resolve(foregroundFailures[0])
+      const gate = deferred()
+      foregroundFailureWaiters.push(gate)
+      return gate.promise
+    },
+    waitForPreloadPhase(phase) {
+      const eventIndex = preloadPhaseEvents.indexOf(phase)
+      if (eventIndex >= 0) {
+        preloadPhaseEvents.splice(eventIndex, 1)
+        return Promise.resolve()
+      }
+      const gate = deferred()
+      preloadPhaseWaiters.push({ phase, gate })
+      return gate.promise
+    },
+    releaseCandidate(number) {
+      let gate = candidateGates.get(number)
+      if (!gate) candidateGates.set(number, gate = deferred())
+      gate.resolve()
+    },
+    changeFutureSourceIds(ids) {
+      futureSourceIds = [...ids]
+    },
+    async flush() {
+      await clock.flush()
+      await new Promise(resolve => setImmediate(resolve))
+      await clock.flush()
+    },
+    get session() { return getDefaultSession() },
+    get createRequestCount() { return createRequestCount },
+    get nextCandidateCount() { return nextCandidateCount },
+    get sessionCreateCount() { return sessionCreateCount },
+    get cacheCommitCount() { return cacheCommitCount },
+    get releaseSourcesCount() { return releaseSourcesCount },
+    sessionCancelReasons,
+    publishedForegroundUrls,
+    foregroundFailures,
+    foregroundLifecycle,
+    detachedForegroundUrls,
+    deletedCacheKeys,
+    requestedSourceIds,
+    createdReasons,
+    preloadValidator: preloadAudio,
+    visibleErrorCount: 0,
+  }
+}
+
 const createCacheHarness = ({ rows = new Map(), read, save, remove } = {}) => {
   const path = require('node:path')
   const loadTsModule = require('../../scripts/test-utils/load-ts-module')
@@ -1180,7 +1532,9 @@ module.exports = {
   createLocalProvider,
   createSessionHarness,
   createLocalSessionHarness,
+  createCoordinatorHarness,
   selectPlaybackQuality,
+  cancelReasonForResolveReason: (...args) => loadPlaybackCoordinator().cancelReasonForResolveReason(...args),
   toPlaybackCachePersistenceFailure: (...args) => {
     const path = require('node:path')
     const loadTsModule = require('../../scripts/test-utils/load-ts-module')

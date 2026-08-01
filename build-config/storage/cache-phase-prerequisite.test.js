@@ -261,9 +261,12 @@ describe('cache Phase 3 prerequisite', () => {
     const { createTestStorageRoot } = require(testStorageRootPath)
     const baseRoot = fs.realpathSync(process.env.LX_TEST_STORAGE_ROOT)
     const fixture = createTestStorageRoot('swap-owned')
-    const ownedParking = path.join(baseRoot, 'swap-owned-parking')
-    const unowned = fs.mkdtempSync(path.join(baseRoot, 'swap-unowned-'))
-    fs.writeFileSync(path.join(unowned, 'unowned.txt'), 'keep')
+    const replacement = createTestStorageRoot('swap-replacement')
+    const ownedParking = path.join(baseRoot, `.${path.basename(fixture.path)}.parking`)
+    assert.equal(fs.existsSync(ownedParking), false)
+    fs.writeFileSync(path.join(replacement.path, 'unowned.txt'), 'keep')
+    const fixtureMarker = fs.readFileSync(fixture.ownershipMarkerPath, 'utf8')
+    const replacementMarker = fs.readFileSync(replacement.ownershipMarkerPath, 'utf8')
     const rename = fs.renameSync
     let swapped = false
     try {
@@ -271,7 +274,7 @@ describe('cache Phase 3 prerequisite', () => {
         if (!swapped && source == fixture.path) {
           swapped = true
           rename(source, ownedParking)
-          rename(unowned, source)
+          rename(replacement.path, source)
         }
         return rename(source, target)
       }
@@ -279,13 +282,16 @@ describe('cache Phase 3 prerequisite', () => {
       assert.equal(fs.readFileSync(path.join(fixture.path, 'unowned.txt'), 'utf8'), 'keep')
     } finally {
       fs.renameSync = rename
-      fs.rmSync(ownedParking, { recursive: true, force: true })
-      fs.rmSync(unowned, { recursive: true, force: true })
-      fs.rmSync(fixture.path, { recursive: true, force: true })
-      for (const name of fs.readdirSync(baseRoot)) {
-        const candidate = path.join(baseRoot, name)
-        if (fs.existsSync(path.join(candidate, 'unowned.txt'))) fs.rmSync(candidate, { recursive: true, force: true })
+      if (swapped) {
+        assert.equal(fs.existsSync(ownedParking), true)
+        assert.equal(fs.existsSync(replacement.path), false)
+        rename(fixture.path, replacement.path)
+        rename(ownedParking, fixture.path)
+        assert.equal(fs.readFileSync(fixture.ownershipMarkerPath, 'utf8'), fixtureMarker)
+        assert.equal(fs.readFileSync(replacement.ownershipMarkerPath, 'utf8'), replacementMarker)
       }
+      fixture.cleanup()
+      replacement.cleanup()
     }
   })
 })

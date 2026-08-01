@@ -1,3 +1,4 @@
+import { QUALITYS } from '@common/constants'
 import { createPlaybackSourceError, isPlaybackSourceError, toPlaybackSourceError } from '@common/utils/playbackSourceError'
 import {
   acquireUserApiRuntime,
@@ -75,6 +76,10 @@ const validateUrl = (apiId: string, platform: LX.OnlineSource | undefined, resul
   return value.url
 }
 
+const isPlaybackQuality = (value: unknown): value is LX.Quality => (
+  typeof value == 'string' && (QUALITYS as readonly string[]).includes(value)
+)
+
 export const createPlaybackSourceAdapter = (
   deps: PlaybackSourceAdapterDependencies,
 ): PlaybackSourceAdapter => {
@@ -144,7 +149,11 @@ export const createPlaybackSourceAdapter = (
     })()
     try {
       const result = await Promise.race([invoking, aborted])
-      return validateUrl(request.apiId, request.musicInfo.source == 'local' ? undefined : request.musicInfo.source, result.data)
+      const data = result.data as { type?: unknown }
+      return {
+        url: validateUrl(request.apiId, request.musicInfo.source == 'local' ? undefined : request.musicInfo.source, data),
+        quality: isPlaybackQuality(data.type) ? data.type : quality,
+      }
     } catch (error) {
       if (isPlaybackSourceError(error)) throw error
       throw normalize(error, request.apiId, request.musicInfo.source == 'local' ? undefined : request.musicInfo.source)
@@ -223,12 +232,12 @@ export const createPlaybackSourceAdapter = (
     },
     async getMusicUrl(request) {
       if (!deps.isCustomApi(request.apiId)) return builtInRequest(request)
-      const url = await customRequest(request, request.quality)
-      return { url, quality: request.quality }
+      const result = await customRequest(request, request.quality)
+      return { url: result.url, quality: result.quality ?? request.quality }
     },
     async getLocalMusicUrl(request) {
-      const url = await customRequest(request, null)
-      return { url, quality: '128k' }
+      const result = await customRequest(request, null)
+      return { url: result.url, quality: '128k' }
     },
   }
 }

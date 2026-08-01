@@ -73,14 +73,18 @@ const addSource = (source: ApiSourceOption | null) => {
   if (!source) return
   emit('update:fallbackIds', addPlaybackFallback(props.fallbackIds, source.id))
 }
-const moveSource = (apiId: string, offset: -1 | 1) => emit(
-  'update:fallbackIds',
-  movePlaybackFallback(props.fallbackIds, apiId, offset),
-)
-const removeSource = (apiId: string) => emit(
-  'update:fallbackIds',
-  removePlaybackFallback(props.fallbackIds, apiId),
-)
+const moveSource = (apiId: string, offset: -1 | 1) => {
+  emit(
+    'update:fallbackIds',
+    movePlaybackFallback(props.fallbackIds, apiId, offset),
+  )
+}
+const removeSource = (apiId: string) => {
+  emit(
+    'update:fallbackIds',
+    removePlaybackFallback(props.fallbackIds, apiId),
+  )
+}
 const showAddMenu = (event: MouseEvent) => {
   addMenuLocation.x = event.pageX
   addMenuLocation.y = event.pageY

@@ -2,6 +2,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const {
   createCacheHarness,
+  createIntegrationHarness,
   createCoordinatorHarness,
   createPlayerHarness,
   createPreloadSchedulingHarness,
@@ -10,6 +11,7 @@ const {
   deferred,
   playbackError,
   onlineMusic,
+  matchedTx,
   localMusic,
   song,
   songA,
@@ -824,4 +826,86 @@ test('force refresh invalidates requested and lower qualities only', async () =>
   ]) })
   await cache.invalidateQualityRange(onlineMusic, 'flac')
   assert.deepEqual(cache.removed, ['song_flac', 'song_320k', 'song_128k'])
+})
+
+test('validated lower-quality fallback URL is reused for a later higher-quality replay', async () => {
+  const harness = createIntegrationHarness({
+    sourceIds: ['primary', 'fallback'], requestedQuality: 'flac',
+  })
+  const first = harness.play()
+  const primary = await harness.waitForRequest({ apiId: 'primary', platform: 'wy' })
+  harness.fail(primary, new Error('primary failed'))
+  const fallback = await harness.waitForRequest({ apiId: 'fallback', platform: 'wy' })
+  harness.succeed(fallback, 'https://fallback-128', '128k')
+  const firstBinding = await harness.waitForBoundForeground('https://fallback-128', 1)
+  assert.equal(firstBinding.origin, 'source')
+  assert.equal(firstBinding.quality, '128k')
+  assert.equal(firstBinding.cacheKey, 'song_128k')
+  harness.emitForegroundCanplay()
+  await first
+
+  const replay = harness.play()
+  const cachedBinding = await harness.waitForBoundForeground('https://fallback-128', 2)
+  assert.equal(cachedBinding.origin, 'cache')
+  assert.equal(cachedBinding.quality, '128k')
+  assert.equal(cachedBinding.cacheKey, 'song_128k')
+  harness.emitForegroundCanplay()
+  await replay
+  assert.deepEqual(harness.adapterRequestOrder, ['primary:wy', 'fallback:wy'])
+})
+
+test('media rejection advances platform inside the source before fallback source', async () => {
+  const harness = createIntegrationHarness({
+    sourceIds: ['primary', 'fallback'],
+    matchedCandidates: [matchedTx],
+  })
+  const playback = harness.play()
+  const original = await harness.waitForRequest({ apiId: 'primary', platform: 'wy' })
+  harness.succeed(original, 'https://bad')
+  await harness.waitForBoundForeground('https://bad')
+  harness.emitForegroundError(4)
+  const matched = await harness.waitForRequest({ apiId: 'primary', platform: 'tx' })
+  harness.succeed(matched, 'https://good')
+  await harness.waitForBoundForeground('https://good')
+  harness.emitForegroundCanplay()
+  await playback
+  assert.deepEqual(harness.adapterRequestOrder, ['primary:wy', 'primary:tx'])
+})
+
+test('all sources fail without rerunning the chain', { timeout: 1000 }, async () => {
+  for (const autoSkip of [true, false]) {
+    const harness = createIntegrationHarness({
+      sourceIds: ['primary', 'fallback'], autoSkip,
+    })
+    const playback = harness.play()
+    for (const apiId of ['primary', 'fallback']) {
+      const request = await harness.waitForRequest({ apiId, platform: 'wy' })
+      harness.fail(request, new Error(`${apiId} failed`))
+    }
+    await playback
+    assert.deepEqual(harness.sourceOrder, ['primary', 'fallback'])
+    assert.deepEqual(harness.adapterRequestOrder, ['primary:wy', 'fallback:wy'])
+    assert.equal(harness.sessionCreateCount, 1)
+    assert.equal(harness.visibleErrorCount, 1)
+    assert.equal(harness.autoSkipCalls, autoSkip ? 1 : 0)
+  }
+})
+
+test('foreground promotes an in-flight validating preload without a second request', async () => {
+  const harness = createIntegrationHarness()
+  const preload = harness.preload(songA)
+  const request = await harness.waitForRequest({
+    apiId: 'primary', songIdentity: 'wy:song', platform: 'wy',
+  })
+  harness.succeed(request, 'https://preloaded')
+  await harness.waitForBoundPreload('wy:song', 'https://preloaded')
+  await preload
+
+  const foreground = harness.play(songA)
+  await harness.waitForBoundForeground('https://preloaded')
+  harness.emitPreloadCanplay('wy:song')
+  harness.emitForegroundCanplay()
+  await foreground
+  assert.deepEqual(harness.adapterRequestOrder, ['primary:wy'])
+  assert.deepEqual(harness.foregroundBoundUrls, ['https://preloaded'])
 })

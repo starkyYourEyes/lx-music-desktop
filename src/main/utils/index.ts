@@ -143,7 +143,7 @@ export const mergeSetting = (originSetting: LX.AppSetting, targetSetting?: Parti
 const normalizePlaybackSettingResult = (result: ReturnType<typeof mergeSetting>) => {
   const normalized = normalizePlaybackSourceSetting(result.setting)
   for (const [key, value] of Object.entries(normalized) as Array<
-    [keyof typeof normalized, (typeof normalized)[keyof typeof normalized]]
+  [keyof typeof normalized, (typeof normalized)[keyof typeof normalized]]
   >) {
     if (checkSameSettingValue(value, result.setting[key])) continue
     result.setting[key] = value as never

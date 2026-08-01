@@ -8,7 +8,7 @@ const LEGACY_SERVER_BUSY_MESSAGES = new Set(['server busy'])
 
 export const normalizeRuntimeFailure = (
   err: unknown,
-  context: { apiId: string; kind?: LX.Playback.SourceFailureKind; cancelled?: boolean },
+  context: { apiId: string, kind?: LX.Playback.SourceFailureKind, cancelled?: boolean },
 ): LX.Playback.SourceFailureData => {
   const value = err != null && typeof err == 'object' ? err as Record<string, unknown> : {}
   const statusCode = typeof value.statusCode == 'number' ? value.statusCode : undefined

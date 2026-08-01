@@ -1,6 +1,6 @@
 type PlaybackSourceSetting = Pick<
-  LX.AppSetting,
-  'common.apiSource' | 'common.apiFallbackSources' | 'common.apiFallbackMode'
+LX.AppSetting,
+'common.apiSource' | 'common.apiFallbackSources' | 'common.apiFallbackMode'
 >
 
 export const normalizePlaybackSourceSetting = (

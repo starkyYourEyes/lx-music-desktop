@@ -2,6 +2,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const {
   createAdapterHarness,
+  createIntegrationHarness,
   createColdUserApiRegistryHarness,
   createPrimaryCapabilityHarness,
   createColdPrimaryMusicEntryHarness,
@@ -25,6 +26,7 @@ const {
   localMusic,
   webdavMusic,
   downloadItem,
+  songB,
 } = require('./test-utils/playback-fallback-harness')
 
 test('a missing local file tries direct local action for every source before that source batches', async() => {
@@ -280,6 +282,34 @@ test('custom source requests carry explicit API and request IDs', async() => {
   assert.equal(calls[0].apiId, 'user_api_a')
   assert.equal(calls[0].requestId, 'session:1')
   assert.deepEqual(result, { url: 'https://audio/a', quality: '320k' })
+})
+
+test('custom source uses a trusted lower quality returned by its runtime', async() => {
+  const adapter = createAdapterHarness({
+    request: async() => ({
+      ok: true,
+      value: { data: { type: '128k', url: 'https://audio/lower' } },
+    }),
+  })
+  const result = await adapter.getMusicUrl({
+    apiId: 'user_api_a', requestId: 'session:lower', musicInfo: onlineMusic,
+    quality: 'flac', signal: new AbortController().signal,
+  })
+  assert.deepEqual(result, { url: 'https://audio/lower', quality: '128k' })
+})
+
+test('custom source ignores an untrusted runtime quality value', async() => {
+  const adapter = createAdapterHarness({
+    request: async() => ({
+      ok: true,
+      value: { data: { type: 'not-a-quality', url: 'https://audio/untrusted' } },
+    }),
+  })
+  const result = await adapter.getMusicUrl({
+    apiId: 'user_api_a', requestId: 'session:untrusted', musicInfo: onlineMusic,
+    quality: 'flac', signal: new AbortController().signal,
+  })
+  assert.deepEqual(result, { url: 'https://audio/untrusted', quality: 'flac' })
 })
 
 test('custom local playback keeps the existing 128k cache-bucket convention', async() => {
@@ -931,4 +961,115 @@ test('cache lookup rejection continues through sources and releases leases on su
     'release:primary', 'release:fallback',
   ])
   assert.equal(JSON.stringify(session.diagnostics).includes('private details'), false)
+})
+
+test('primary failure followed by first fallback success is silent', async () => {
+  const harness = createIntegrationHarness()
+  const playback = harness.play()
+  const primary = await harness.waitForRequest({ apiId: 'primary', platform: 'wy' })
+  harness.fail(primary, new Error('ordinary request'))
+  const fallback = await harness.waitForRequest({ apiId: 'fallback', platform: 'wy' })
+  harness.succeed(fallback, 'https://valid')
+  await harness.waitForBoundForeground('https://valid')
+  harness.emitForegroundCanplay()
+  await playback
+  assert.deepEqual(harness.sourceOrder, ['primary', 'fallback'])
+  assert.equal(harness.visibleErrorCount, 0)
+  assert.equal(harness.persistedPrimary, 'primary')
+})
+
+test('multiple source failures can reach a later fallback', async () => {
+  const harness = createIntegrationHarness({ sourceIds: ['primary', 'first', 'second'] })
+  const playback = harness.play()
+  for (const apiId of ['primary', 'first']) {
+    const request = await harness.waitForRequest({ apiId, platform: 'wy' })
+    harness.fail(request, new Error(`${apiId} failed`))
+  }
+  const second = await harness.waitForRequest({ apiId: 'second', platform: 'wy' })
+  harness.succeed(second, 'https://valid')
+  await harness.waitForBoundForeground('https://valid')
+  harness.emitForegroundCanplay()
+  await playback
+  assert.deepEqual(harness.sourceOrder, ['primary', 'first', 'second'])
+})
+
+test('a ten-second source deadline cancels the exact broker request before fallback starts', async () => {
+  const harness = createIntegrationHarness({ sourceIds: ['primary', 'fallback'] })
+  const playback = harness.play()
+  const primary = await harness.waitForRequest({ apiId: 'primary', platform: 'wy' })
+  await harness.advance(9_999)
+  assert.deepEqual(harness.cancelledRequests, [])
+  assert.deepEqual(harness.adapterRequestOrder, ['primary:wy'])
+  const fallbackPending = harness.waitForRequest({ apiId: 'fallback', platform: 'wy' })
+  await harness.advance(1)
+  assert.deepEqual(harness.cancelledRequests, [{
+    apiId: 'primary', requestId: primary.requestId, reason: 'timeout',
+  }])
+  const fallback = await fallbackPending
+  harness.succeed(fallback, 'https://fallback')
+  await harness.waitForBoundForeground('https://fallback')
+  harness.emitForegroundCanplay()
+  await playback
+  assert.deepEqual(harness.adapterRequestOrder, ['primary:wy', 'fallback:wy'])
+})
+
+test('foreground setting edits affect only the next resolution session', async () => {
+  const harness = createIntegrationHarness({ sourceIds: ['old-primary', 'old-fallback'] })
+  const first = harness.play()
+  const oldPrimary = await harness.waitForRequest({ apiId: 'old-primary', platform: 'wy' })
+  await harness.changeSettings({ primary: 'new-primary', fallbacks: ['new-fallback'] })
+  harness.fail(oldPrimary, new Error('old primary failed'))
+  const oldFallback = await harness.waitForRequest({ apiId: 'old-fallback', platform: 'wy' })
+  harness.succeed(oldFallback, 'https://old-session')
+  await harness.waitForBoundForeground('https://old-session')
+  harness.emitForegroundCanplay()
+  await first
+  const second = harness.playAnother(songB)
+  const newPrimary = await harness.waitForRequest({
+    apiId: 'new-primary', songIdentity: 'wy:song-b', platform: 'wy',
+  })
+  harness.succeed(newPrimary, 'https://new-session')
+  await harness.waitForBoundForeground('https://new-session')
+  harness.emitForegroundCanplay()
+  await second
+  assert.deepEqual(harness.sessionSourceSnapshots, [
+    ['old-primary', 'old-fallback'],
+    ['new-primary', 'new-fallback'],
+  ])
+})
+
+test('force refresh keeps one settings snapshot while cache invalidation is pending', async () => {
+  const harness = createIntegrationHarness({
+    sourceIds: ['old-primary', 'old-fallback'],
+    requestedQuality: 'flac',
+    holdCacheInvalidation: true,
+  })
+  const playback = harness.play(onlineMusic, { reason: 'forceRefresh' })
+  await harness.waitForCacheInvalidation()
+  await harness.changeSettings({
+    primary: 'new-primary', fallbacks: ['new-fallback'], requestedQuality: '128k',
+  })
+  harness.releaseCacheInvalidation()
+  const oldPrimary = await harness.waitForRequest({ apiId: 'old-primary', platform: 'wy' })
+  harness.succeed(oldPrimary, 'https://old-session', 'flac')
+  await harness.waitForBoundForeground('https://old-session')
+  harness.emitForegroundCanplay()
+  await playback
+  assert.deepEqual(harness.sessionSourceSnapshots, [['old-primary', 'old-fallback']])
+  assert.deepEqual(harness.sessionQualitySnapshots, ['flac'])
+  assert.deepEqual(harness.invalidatedQualities, ['flac', '320k', '128k'])
+  assert.deepEqual(harness.invalidatedCacheKeys, [
+    'song_flac', 'song_320k', 'song_128k',
+  ])
+})
+
+test('session cancellation tries no fallback and emits no visible error', async () => {
+  const harness = createIntegrationHarness({ sourceIds: ['primary', 'fallback'] })
+  const playback = harness.play()
+  await harness.waitForRequest({ apiId: 'primary', platform: 'wy' })
+  harness.cancelForeground('songChanged')
+  await playback
+  assert.deepEqual(harness.sourceOrder, ['primary'])
+  assert.equal(harness.visibleErrorCount, 0)
+  assert.equal(harness.autoSkipCalls, 0)
 })

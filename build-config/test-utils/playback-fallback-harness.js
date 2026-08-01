@@ -535,6 +535,7 @@ const createAdapterHarness = (options = {}) => {
   const module = loadTsModule(
     path.join(__dirname, '../../src/renderer/core/music/playback/sourceAdapter.ts'),
     {
+      '@common/constants': { QUALITYS: ['flac24bit', 'flac', 'wav', 'ape', '320k', '192k', '128k'] },
       '@common/utils/playbackSourceError': loadTsModule(
         path.join(__dirname, '../../src/common/utils/playbackSourceError.ts'),
       ),
@@ -852,6 +853,7 @@ const loadPlaybackSourceAdapter = () => {
   return loadTsModule(
     path.join(__dirname, '../../src/renderer/core/music/playback/sourceAdapter.ts'),
     {
+      '@common/constants': { QUALITYS: ['flac24bit', 'flac', 'wav', 'ape', '320k', '192k', '128k'] },
       '@common/utils/playbackSourceError': loadTsModule(
         path.join(__dirname, '../../src/common/utils/playbackSourceError.ts'),
       ),
@@ -2028,9 +2030,10 @@ class FakePlayerAudio {
 }
 
 class FakeCoordinatorPreloadAudio {
-  constructor() {
+  constructor(onBind) {
     this.listeners = new Map()
     this.bindings = new Map()
+    this.onBind = onBind
     this._src = ''
     this.muted = false
     this.preload = 'auto'
@@ -2049,6 +2052,7 @@ class FakeCoordinatorPreloadAudio {
       canplay: this.listeners.get('canplay'),
       error: this.listeners.get('error'),
     })
+    this.onBind?.(value)
   }
   get src() { return this._src }
   emitFor(resource, name) { return this.bindings.get(resource.url)?.[name]?.() ?? 'stale' }
@@ -2566,6 +2570,541 @@ const createPreloadSchedulingHarness = () => {
   }
 }
 
+let integrationFactoryCache
+const loadIntegrationFactories = () => {
+  if (integrationFactoryCache) return integrationFactoryCache
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  const runtimeError = loadTsModule(
+    path.join(__dirname, '../../src/main/modules/userApi/runtimeError.ts'),
+  )
+  const runtimeWindow = loadTsModule(
+    path.join(__dirname, '../../src/main/modules/userApi/runtimeWindow.ts'),
+    {
+      electron: { BrowserWindow: class {}, session: { fromPartition() {} } },
+      '@common/mainIpc': { mainSend() {} },
+      '@common/projectIdentity': { PROJECT_IDENTITY: { userApiPartition: 'starky-lx-user-api' } },
+      '@common/utils': { log: { error() {} } },
+      './main': { getProxy: () => ({ host: '127.0.0.1', port: '1080' }) },
+      './utils': { getScript: async id => `script:${id}` },
+    },
+  )
+  const runtimePool = loadTsModule(
+    path.join(__dirname, '../../src/main/modules/userApi/runtimePool.ts'),
+    {
+      './runtimeWindow': runtimeWindow,
+      './runtimeError': runtimeError,
+      './rendererEvent/name': {
+        initEnv: 'userApi_initEnv',
+        request: 'userApi_request',
+        proxyUpdate: 'userApi_proxyUpdate',
+      },
+    },
+  )
+  integrationFactoryCache = {
+    player: loadPlayerIntegrationFactories(),
+    sourceAdapter: loadPlaybackSourceAdapter(),
+    candidates: loadCandidates(),
+    runtimePool,
+    runtimeWindow,
+    sourceSetting: loadTsModule(
+      path.join(__dirname, '../../src/common/utils/playbackSourceSetting.ts'),
+    ),
+  }
+  return integrationFactoryCache
+}
+
+const createIntegrationObserver = () => {
+  const values = []
+  const waiters = []
+  const find = (predicate, occurrence) => values.filter(predicate)[occurrence - 1]
+  return {
+    values,
+    emit(value) {
+      values.push(value)
+      for (let index = waiters.length - 1; index >= 0; index--) {
+        const waiter = waiters[index]
+        const found = find(waiter.predicate, waiter.occurrence)
+        if (found === undefined) continue
+        waiters.splice(index, 1)
+        waiter.resolve(found)
+      }
+    },
+    wait(predicate, occurrence = 1) {
+      const found = find(predicate, occurrence)
+      if (found !== undefined) return Promise.resolve(found)
+      return new Promise(resolve => { waiters.push({ predicate, occurrence, resolve }) })
+    },
+  }
+}
+
+const createIntegrationHarness = (options = {}) => {
+  const factories = loadIntegrationFactories()
+  const clock = createFakeClock(0)
+  const sourceIds = [...(options.sourceIds ?? ['primary', 'fallback'])]
+  const settings = {
+    'common.apiSource': sourceIds[0],
+    'common.apiFallbackSources': sourceIds.slice(1),
+    'common.apiFallbackMode': 'serial',
+    'player.playQuality': options.requestedQuality ?? 'flac',
+  }
+  const registry = new Map()
+  const ensureRegistryEntry = apiId => {
+    if (!registry.has(apiId)) {
+      registry.set(apiId, {
+        id: apiId,
+        name: apiId,
+        description: '',
+        allowShowUpdateAlert: false,
+        sources: {},
+      })
+    }
+  }
+  for (const apiId of sourceIds) ensureRegistryEntry(apiId)
+
+  const sourceOrder = []
+  const adapterRequestOrder = []
+  const cancelledRequests = []
+  const foregroundBoundUrls = []
+  const preloadBoundUrls = []
+  const sessionSourceSnapshots = []
+  const sessionQualitySnapshots = []
+  const invalidatedQualities = []
+  const invalidatedCacheKeys = []
+  const requestObserver = createIntegrationObserver()
+  const initializationObserver = createIntegrationObserver()
+  const foregroundObserver = createIntegrationObserver()
+  const preloadObserver = createIntegrationObserver()
+  const cacheInvalidationObserver = createIntegrationObserver()
+  const requestMetadata = new WeakMap()
+  const runtimesByApiId = new Map()
+  const urlIdentities = new Map()
+  const runtimeSessions = new Map()
+  const proxyListeners = new Set()
+  const durableCache = new Map()
+  const cacheInvalidationGate = deferred()
+  let pool
+  let currentMusicInfo = onlineMusic
+  let playedStop = false
+  let visibleErrorCount = 0
+  let autoSkipCalls = 0
+  let sessionCreateCount = 0
+  let nextId = 0
+  let playHandlers
+
+  const createEventTarget = () => {
+    const listeners = new Map()
+    return {
+      on(name, listener) {
+        let entries = listeners.get(name)
+        if (!entries) listeners.set(name, entries = new Set())
+        entries.add(listener)
+      },
+      removeListener(name, listener) { listeners.get(name)?.delete(listener) },
+      emit(name, ...args) {
+        for (const listener of [...(listeners.get(name) ?? [])]) listener(...args)
+      },
+    }
+  }
+  let nextWebContentsId = 100
+  class FakeIntegrationWindow {
+    constructor(windowOptions) {
+      this.destroyed = false
+      this.events = createEventTarget()
+      this.webContents = {
+        id: ++nextWebContentsId,
+        ...createEventTarget(),
+        session: windowOptions.webPreferences.session,
+        setWindowOpenHandler() {},
+      }
+    }
+
+    on(name, listener) { this.events.on(name, listener) }
+    removeListener(name, listener) { this.events.removeListener(name, listener) }
+    async loadURL() {}
+    isDestroyed() { return this.destroyed }
+    destroy() {
+      if (this.destroyed) return
+      this.destroyed = true
+      this.events.emit('closed')
+    }
+  }
+  const getRuntimeSession = partition => {
+    let session = runtimeSessions.get(partition)
+    if (session) return session
+    session = {
+      async clearAuthCache() {},
+      async clearStorageData() {},
+      async clearCache() {},
+      setPermissionRequestHandler(handler) { this.permissionHandler = handler },
+    }
+    runtimeSessions.set(partition, session)
+    return session
+  }
+  const capabilities = {
+    wy: { actions: ['musicUrl'], qualitys: ['flac', '320k', '128k'] },
+    tx: { actions: ['musicUrl'], qualitys: ['flac', '320k', '128k'] },
+    kg: { actions: ['musicUrl'], qualitys: ['flac', '320k', '128k'] },
+    local: { actions: ['musicUrl'], qualitys: ['128k'] },
+  }
+  const settleInitialization = (entry, status, message) => {
+    if (!entry || entry.settled) return false
+    const accepted = pool.acceptInit(entry.runtime.webContentsId, {
+      identity: entry.envelope.identity,
+      status,
+      ...(status
+        ? { data: { sources: capabilities } }
+        : { message, data: { sources: {} } }),
+    })
+    if (accepted) entry.settled = true
+    return accepted
+  }
+  const runtimeWindowDeps = {
+    createWindow: windowOptions => new FakeIntegrationWindow(windowOptions),
+    fromPartition: getRuntimeSession,
+    readRuntimeHtml: async() => '<html></html>',
+    getScript: async apiId => `script:${apiId}`,
+    getProxy: () => ({ host: '127.0.0.1', port: '1080' }),
+    send(runtime, name, payload) {
+      if (runtime.window.isDestroyed()) return false
+      if (name == 'userApi_initEnv') {
+        const entry = { apiId: payload.identity.apiId, generation: payload.identity.generation, runtime, envelope: payload, settled: false }
+        initializationObserver.emit(entry)
+        if (options.autoInitialize !== false) queueMicrotask(() => settleInitialization(entry, true))
+      } else if (name == 'userApi_request') {
+        const musicInfo = payload.data.info.musicInfo
+        const token = Object.freeze({
+          apiId: payload.apiId,
+          requestId: payload.requestId,
+          songIdentity: `${musicInfo.source}:${musicInfo.id}`,
+          platform: payload.data.source,
+        })
+        adapterRequestOrder.push(`${token.apiId}:${token.platform}`)
+        requestMetadata.set(token, { runtime, payload })
+        requestObserver.emit(token)
+      }
+      return true
+    },
+    logError() {},
+  }
+  const poolDeps = {
+    async createRuntimeWindow(input) {
+      const runtime = await factories.runtimeWindow.createRuntimeWindow({ ...input, deps: runtimeWindowDeps })
+      runtimesByApiId.set(input.apiInfo.id, runtime)
+      return runtime
+    },
+    initializeRuntimeWindow: (runtime, apiInfo) => factories.runtimeWindow.initializeRuntimeWindow(runtime, apiInfo, runtimeWindowDeps),
+    disposeRuntimeWindow: (runtime, input) => factories.runtimeWindow.disposeRuntimeWindow(runtime, input, runtimeWindowDeps),
+    clearRuntimeSession: apiId => factories.runtimeWindow.clearRuntimeSession(apiId, runtimeWindowDeps),
+    getApiInfo: apiId => registry.get(apiId),
+    send: runtimeWindowDeps.send,
+    onProxyUpdate(handler) {
+      proxyListeners.add(handler)
+      return () => { proxyListeners.delete(handler) }
+    },
+    getProxy: runtimeWindowDeps.getProxy,
+    openDevTools() {},
+    showUpdateAlert() {},
+    publishStatus() {},
+    initialConfiguredApiIds: new Set(sourceIds),
+    logError() {},
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+  }
+  pool = factories.runtimePool.createUserApiRuntimePool(poolDeps)
+
+  const cache = factories.player.cache.createPlaybackUrlCache({
+    read: async key => durableCache.get(key) ?? null,
+    save: async(musicInfo, quality, url) => { durableCache.set(`${musicInfo.id}_${quality}`, url) },
+    remove: async key => {
+      invalidatedCacheKeys.push(key)
+      invalidatedQualities.push(key.slice(key.lastIndexOf('_') + 1))
+      cacheInvalidationObserver.emit(key)
+      if (options.holdCacheInvalidation) await cacheInvalidationGate.promise
+      durableCache.delete(key)
+    },
+  })
+  const adapter = factories.sourceAdapter.createPlaybackSourceAdapter({
+    isCustomApi: apiId => registry.has(apiId),
+    async ensureUserApi(apiId) {
+      if (!sourceOrder.includes(apiId)) sourceOrder.push(apiId)
+      try {
+        const apiInfo = await pool.ensure(apiId)
+        return { ok: true, value: { apiId, status: true, apiInfo } }
+      } catch (error) {
+        return { ok: false, error }
+      }
+    },
+    requestUserApi: params => pool.request(params, 1),
+    cancelUserApi(params) {
+      cancelledRequests.push(structuredClone(params))
+      pool.cancel(params, 1)
+    },
+    acquireRuntime: params => pool.acquireLease(params, 1),
+    releaseRuntime: params => { void pool.releaseLease(params, 1) },
+    getBuiltinCapabilities: () => undefined,
+    getBuiltinApi() { throw new Error('integration sources are custom') },
+    serverBusyMessages: new Set(),
+  })
+  const observedCreateResolveSession = input => {
+    sessionCreateCount++
+    sessionSourceSnapshots.push([...input.sourceIds])
+    sessionQualitySnapshots.push(input.requestedQuality)
+    return factories.player.playback.createPlaybackResolveSession(input)
+  }
+  const sessionFactories = factories.player.playback.createPlaybackSessionFactories({
+    readSettings: () => ({
+      primaryId: settings['common.apiSource'],
+      fallbackIds: [...settings['common.apiFallbackSources']],
+      requestedQuality: settings['player.playQuality'],
+    }),
+    cache,
+    adapter,
+    clock,
+    createId: () => `integration-${++nextId}`,
+    diagnostics: { record() {} },
+    reportPersistenceFailure() {},
+    createResolveSession: observedCreateResolveSession,
+    createOnlineCandidateProvider: info => factories.candidates.createOnlineCandidateProvider(
+      info,
+      async() => [...(options.matchedCandidates ?? [])],
+    ),
+    createLocalCandidateProvider: info => factories.candidates.createLocalCandidateProvider(
+      info,
+      async() => [...(options.matchedCandidates ?? [])],
+    ),
+  })
+  const facade = factories.player.playback.createPlaybackMusicFacade({
+    getDownloadFilePath: async() => null,
+    buildSavePath: () => '',
+    getLocalFilePath: async() => null,
+    encodePath: value => value,
+    getWebDAVMusicUrl: async() => 'https://webdav/song.mp3',
+    ...sessionFactories,
+  })
+
+  const audioOperations = []
+  const currentTimeWrites = []
+  const mainAudio = new FakePlayerAudio(audioOperations, currentTimeWrites)
+  const baseResource = factories.player.player.createPlayerResourceController({
+    audio: mainAudio,
+    canonicalizeUrl: value => value,
+  })
+  const resource = {
+    ...baseResource,
+    setResource(url, input) {
+      const context = baseResource.setResource(url, input)
+      mainAudio.attachContext(context)
+      foregroundBoundUrls.push(url)
+      foregroundObserver.emit(context)
+      return context
+    },
+  }
+  const preloadAudio = new FakeCoordinatorPreloadAudio(url => {
+    const songIdentity = urlIdentities.get(url)
+    if (!songIdentity) return
+    const binding = { songIdentity, url }
+    preloadBoundUrls.push(url)
+    preloadObserver.emit(binding)
+  })
+  const coordinator = factories.player.coordinator.createPlaybackResolutionCoordinator({
+    createRequest: facade.createPlaybackRequest,
+    createPreloadAudio: () => preloadAudio,
+    detachForegroundResource: expected => resource.clearResourceIf(expected),
+    clock,
+  })
+  const action = factories.player.action.createPlaybackActionController({
+    coordinator,
+    resource,
+    getCurrentMusicInfo: () => currentMusicInfo,
+    isPlayedStop: () => playedStop,
+    autoSkipOnError: () => options.autoSkip ?? false,
+    setAllStatus() {},
+    emitVisibleError: () => { visibleErrorCount++ },
+    scheduleAutoSkip: () => { autoSkipCalls++ },
+    clearLoadTimeout() {},
+  })
+  const mediaHandlers = factories.player.media.createPlayerMediaEventHandlers({
+    resource,
+    coordinator,
+    cache,
+    getErrorCode: () => mainAudio.error?.code,
+    setLoadedMusicIdentity: identity => action.setLoadedMusicIdentity(identity),
+    appEvent: {
+      error() { visibleErrorCount++ },
+      playerError(code) { playHandlers?.error(code) },
+      playerCanplay() {},
+      playerLoadstart() { playHandlers?.loadstart() },
+      playerLoadeddata() { playHandlers?.loadeddata() },
+      playerWaiting() { playHandlers?.waiting() },
+    },
+    reportPersistenceFailure() {},
+  })
+  resource.onCanplay(mediaHandlers.canplay)
+  resource.onError(mediaHandlers.error)
+  resource.onLoadstart(mediaHandlers.loadstart)
+  resource.onLoadeddata(mediaHandlers.loadeddata)
+  resource.onWaiting(mediaHandlers.waiting)
+  playHandlers = factories.player.play.createValidationAwarePlayEventHandlers({
+    coordinator,
+    isPlayedStop: () => playedStop,
+    currentMusicId: () => currentMusicInfo?.id ?? '',
+    currentMusicInfo: () => currentMusicInfo,
+    autoSkipOnError: () => options.autoSkip ?? false,
+    isDocumentHidden: () => false,
+    isPlayerEmpty: () => resource.getResourceContext() == null,
+    setStop: () => resource.setStop(),
+    setMusicUrl(info, input) { void action.setMusicUrl(info, input) },
+    playNext: async() => { autoSkipCalls++ },
+    setAllStatus() {},
+    translate: key => key,
+    clock,
+  })
+  const preloadController = factories.player.preload.createNextMusicPreloadController({
+    coordinator,
+    setLoading() {},
+    recordFailure() {},
+  })
+
+  const settleResponse = (request, status, value) => {
+    const metadata = requestMetadata.get(request)
+    if (!metadata) return false
+    return pool.acceptResponse(metadata.runtime.webContentsId, {
+      identity: metadata.runtime.identity,
+      status,
+      ...(status
+        ? { data: { requestId: request.requestId, result: value } }
+        : { message: value, data: { requestId: request.requestId, result: null } }),
+    })
+  }
+  const play = async(info = onlineMusic, input = {}) => {
+    currentMusicInfo = info
+    playedStop = false
+    await action.setMusicUrl(info, input)
+  }
+  const flush = async() => {
+    await clock.flush()
+    await new Promise(resolve => setImmediate(resolve))
+    await clock.flush()
+  }
+  const changeSettings = async value => {
+    ensureRegistryEntry(value.primary)
+    for (const apiId of value.fallbacks) ensureRegistryEntry(apiId)
+    const candidate = {
+      ...settings,
+      'common.apiSource': value.primary,
+      'common.apiFallbackSources': [...value.fallbacks],
+      ...(value.requestedQuality == null ? {} : { 'player.playQuality': value.requestedQuality }),
+    }
+    Object.assign(
+      settings,
+      candidate,
+      factories.sourceSetting.normalizePlaybackSourceSetting(candidate),
+    )
+    await pool.markConfigured(new Set([
+      settings['common.apiSource'],
+      ...settings['common.apiFallbackSources'],
+    ]))
+  }
+
+  return {
+    play,
+    playAnother: play,
+    preload: info => preloadController.start(info),
+    waitForRequest(input) {
+      return requestObserver.wait(request => (
+        request.apiId == input.apiId &&
+        (input.songIdentity == null || request.songIdentity == input.songIdentity) &&
+        (input.platform == null || request.platform == input.platform)
+      ), input.occurrence ?? 1)
+    },
+    waitForInitialization(apiId, generation) {
+      return initializationObserver.wait(entry => (
+        entry.apiId == apiId && (generation == null || entry.generation == generation)
+      )).then(() => {})
+    },
+    async acceptInitialization(apiId) {
+      const entry = [...initializationObserver.values].reverse().find(item => item.apiId == apiId && !item.settled)
+      return settleInitialization(entry, true)
+    },
+    async failInitialization(apiId, message) {
+      const entry = [...initializationObserver.values].reverse().find(item => item.apiId == apiId && !item.settled)
+      return settleInitialization(entry, false, message)
+    },
+    succeed(request, url, quality) {
+      const metadata = requestMetadata.get(request)
+      if (!metadata) return false
+      urlIdentities.set(url, request.songIdentity)
+      return settleResponse(request, true, {
+        source: request.platform,
+        action: 'musicUrl',
+        data: { type: quality ?? metadata.payload.data.info.type, url },
+      })
+    },
+    fail(request, error = new Error('request failed')) {
+      const message = error instanceof Error ? error.message : String(error)
+      return settleResponse(request, false, message)
+    },
+    crash(apiId) {
+      const runtime = runtimesByApiId.get(apiId)
+      runtime?.window.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 })
+    },
+    async deleteSource(apiId) {
+      registry.delete(apiId)
+      await pool.dispose(apiId, { clearSession: true })
+      await changeSettings({
+        primary: settings['common.apiSource'],
+        fallbacks: factories.sourceSetting.removePlaybackFallback(
+          settings['common.apiFallbackSources'],
+          apiId,
+        ),
+      })
+    },
+    changeSettings,
+    async advance(ms) {
+      clock.advance(ms)
+      await flush()
+    },
+    waitForBoundForeground(url, occurrence = 1) {
+      return foregroundObserver.wait(context => url == null || context.url == url, occurrence)
+    },
+    emitForegroundCanplay() {
+      const context = resource.getResourceContext()
+      if (context) mainAudio.emitFor(context, 'canplay')
+    },
+    emitForegroundError(code = 4) {
+      const context = resource.getResourceContext()
+      if (context) mainAudio.emitFor(context, 'error', code)
+    },
+    waitForBoundPreload(songIdentity, url) {
+      return preloadObserver.wait(binding => (
+        binding.songIdentity == songIdentity && (url == null || binding.url == url)
+      )).then(() => {})
+    },
+    emitPreloadCanplay(songIdentity) {
+      const binding = [...preloadObserver.values].reverse().find(item => item.songIdentity == songIdentity)
+      if (binding) preloadAudio.emitFor({ url: binding.url }, 'canplay')
+    },
+    waitForCacheInvalidation: () => cacheInvalidationObserver.wait(() => true).then(() => {}),
+    releaseCacheInvalidation: () => cacheInvalidationGate.resolve(),
+    cancelForeground: reason => action.cancel(reason),
+    get sourceOrder() { return [...sourceOrder] },
+    get adapterRequestOrder() { return [...adapterRequestOrder] },
+    get cancelledRequests() { return structuredClone(cancelledRequests) },
+    get foregroundBoundUrls() { return [...foregroundBoundUrls] },
+    get preloadBoundUrls() { return [...preloadBoundUrls] },
+    get persistedPrimary() { return settings['common.apiSource'] },
+    get persistedFallbackIds() { return [...settings['common.apiFallbackSources']] },
+    get sessionSourceSnapshots() { return sessionSourceSnapshots.map(ids => [...ids]) },
+    get sessionQualitySnapshots() { return [...sessionQualitySnapshots] },
+    get invalidatedQualities() { return [...invalidatedQualities] },
+    get invalidatedCacheKeys() { return [...invalidatedCacheKeys] },
+    get sessionCreateCount() { return sessionCreateCount },
+    get visibleErrorCount() { return visibleErrorCount },
+    get autoSkipCalls() { return autoSkipCalls },
+  }
+}
+
 const createCacheHarness = ({ rows = new Map(), read, save, remove } = {}) => {
   const path = require('node:path')
   const loadTsModule = require('../../scripts/test-utils/load-ts-module')
@@ -2660,6 +3199,7 @@ module.exports = {
   resolvePolicyForReason,
   createCoordinatorHarness,
   createPlayerHarness,
+  createIntegrationHarness,
   createPreloadSchedulingHarness,
   selectPlaybackQuality,
   cancelReasonForResolveReason: (...args) => loadPlaybackCoordinator().cancelReasonForResolveReason(...args),

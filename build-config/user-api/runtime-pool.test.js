@@ -2,9 +2,12 @@ const assert = require('node:assert/strict')
 const test = require('node:test')
 const {
   createFakeClock,
+  createIntegrationHarness,
   createPoolHarness,
   createRuntimeWindowHarness,
   deferred,
+  songA,
+  songB,
 } = require('../test-utils/playback-fallback-harness')
 
 test('different source IDs receive different in-memory partitions', async() => {
@@ -466,4 +469,76 @@ test('disposeAll destroys every live runtime', async() => {
   await harness.pool.disposeAll()
   assert.deepEqual(harness.disposedIds.sort(), ['a', 'b'])
   assert.equal(harness.proxyUnsubscribeCount, 1)
+})
+
+test('custom-source initialization failure advances to fallback', async () => {
+  const harness = createIntegrationHarness({
+    sourceIds: ['primary', 'fallback'],
+    autoInitialize: false,
+  })
+  const playback = harness.play()
+  await harness.waitForInitialization('primary')
+  await harness.failInitialization('primary', 'temporary initialization failure')
+  await harness.waitForInitialization('fallback')
+  await harness.acceptInitialization('fallback')
+  const fallback = await harness.waitForRequest({ apiId: 'fallback', platform: 'wy' })
+  harness.succeed(fallback, 'https://valid')
+  await harness.waitForBoundForeground('https://valid')
+  harness.emitForegroundCanplay()
+  await playback
+  assert.deepEqual(harness.sourceOrder, ['primary', 'fallback'])
+  assert.equal(harness.visibleErrorCount, 0)
+})
+
+test('foreground and preload requests cannot consume each other responses', async () => {
+  const harness = createIntegrationHarness()
+  const foreground = harness.play(songA)
+  const preload = harness.preload(songB)
+  const foregroundRequest = await harness.waitForRequest({
+    apiId: 'primary', songIdentity: 'wy:song', platform: 'wy',
+  })
+  const preloadRequest = await harness.waitForRequest({
+    apiId: 'primary', songIdentity: 'wy:song-b', platform: 'wy',
+  })
+  harness.succeed(preloadRequest, 'https://b')
+  harness.succeed(foregroundRequest, 'https://a')
+  await Promise.all([
+    harness.waitForBoundPreload('wy:song-b', 'https://b'),
+    harness.waitForBoundForeground('https://a'),
+  ])
+  harness.emitPreloadCanplay('wy:song-b')
+  harness.emitForegroundCanplay()
+  await Promise.all([foreground, preload])
+  assert.deepEqual(harness.foregroundBoundUrls, ['https://a'])
+  assert.deepEqual(harness.preloadBoundUrls, ['https://b'])
+})
+
+test('source deletion during resolution advances without mutating session snapshot', async () => {
+  const harness = createIntegrationHarness({ sourceIds: ['primary', 'deleted', 'last'] })
+  const playback = harness.play()
+  const primary = await harness.waitForRequest({ apiId: 'primary', platform: 'wy' })
+  harness.fail(primary, new Error('primary failed'))
+  await harness.waitForRequest({ apiId: 'deleted', platform: 'wy' })
+  await harness.deleteSource('deleted')
+  const last = await harness.waitForRequest({ apiId: 'last', platform: 'wy' })
+  harness.succeed(last, 'https://valid')
+  await harness.waitForBoundForeground('https://valid')
+  harness.emitForegroundCanplay()
+  await playback
+  assert.deepEqual(harness.sessionSourceSnapshots[0], ['primary', 'deleted', 'last'])
+  assert.deepEqual(harness.persistedFallbackIds, ['last'])
+})
+
+test('runtime crash advances the affected playback session to its next source', async () => {
+  const harness = createIntegrationHarness({ sourceIds: ['primary', 'fallback'] })
+  const playback = harness.play()
+  await harness.waitForRequest({ apiId: 'primary', platform: 'wy' })
+  harness.crash('primary')
+  const fallback = await harness.waitForRequest({ apiId: 'fallback', platform: 'wy' })
+  harness.succeed(fallback, 'https://valid')
+  await harness.waitForBoundForeground('https://valid')
+  harness.emitForegroundCanplay()
+  await playback
+  assert.deepEqual(harness.sourceOrder, ['primary', 'fallback'])
+  assert.equal(harness.visibleErrorCount, 0)
 })

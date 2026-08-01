@@ -977,6 +977,138 @@ describe('reliable playback command delivery', () => {
     ])
   })
 
+  it('allows same-UUID reuse after the prior group and response fully drain', async() => {
+    const requests = []
+    const recorder = createRecorder({
+      transport: async command => {
+        requests.push(command)
+        if (command.kind == 'start') {
+          const resumeOnly = !command.request.consent.recentAllowed && !command.request.consent.statsAllowed
+          return resumeOnly
+            ? { mode: 'resume-only', ack: resumeAck(0) }
+            : { mode: 'activity', ack: activityAck(1) }
+        }
+        if (command.kind == 'commit') return activityAck(command.request.checkpoint.checkpointSeq)
+        throw new Error(`Unexpected command: ${command.kind}`)
+      },
+      retry: { initialMs: 1, maxMs: 2 },
+    })
+
+    recorder.dispatch({ type: 'start-requested', request: start() })
+    recorder.dispatch({ type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1, occurredAtMs: 100 })
+    assert.equal(await recorder.flush({ timeoutMs: 100 }), true)
+    recorder.dispatch({ type: 'natural-end', monotonicMs: 1000, positionMs: 1000, occurredAtMs: 1100 })
+    assert.equal(await recorder.flush({ timeoutMs: 100 }), true)
+    assert.deepEqual(requests.map(command => command.kind), ['start', 'commit'])
+    assert.equal(recorder.getState().outbox.length, 0)
+
+    const reusedStart = start({
+      occurredAtMs: 1200,
+      consent: { recentAllowed: false, statsAllowed: false, privateMode: false },
+      track: { ...start().track, sourceTrackId: 'reused-track' },
+    })
+    recorder.dispatch({ type: 'start-requested', request: reusedStart })
+    recorder.dispatch({ type: 'native-playing', monotonicMs: 1200, positionMs: 0, playbackRate: 1, occurredAtMs: 1200 })
+    assert.equal(await recorder.flush({ timeoutMs: 100 }), true)
+    assert.deepEqual(requests.map(command => command.kind), ['start', 'commit', 'start'])
+    assert.equal(requests[2].request, reusedStart)
+    assert.equal(recorder.getState().outbox.length, 0)
+  })
+
+  it('releases completed private start delivery metadata while playback remains active', async() => {
+    const v8 = require('node:v8')
+    const vm = require('node:vm')
+    v8.setFlagsFromString('--expose_gc')
+    const collectGarbage = vm.runInNewContext('gc')
+    let commandReference
+    const recorder = createRecorder({
+      transport: async command => {
+        assert.equal(command.kind, 'start')
+        commandReference = new WeakRef(command)
+        return { mode: 'private', playbackGroupUuid: command.request.playbackGroupUuid, checkpointSeq: 0 }
+      },
+      retry: { initialMs: 1, maxMs: 2 },
+    })
+
+    recorder.dispatch({
+      type: 'start-requested',
+      request: start({ consent: { recentAllowed: true, statsAllowed: true, privateMode: true } }),
+    })
+    recorder.dispatch({ type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1, occurredAtMs: 100 })
+    assert.equal(await recorder.flush({ timeoutMs: 100 }), true)
+    assert.equal(recorder.getState().phase, 'playing')
+    assert.equal(recorder.getState().outbox.length, 0)
+    assert.ok(commandReference != null)
+
+    await settle()
+    let collected = false
+    for (let attempt = 0; attempt < 12 && !collected; attempt++) {
+      collectGarbage()
+      await new Promise(resolve => setImmediate(resolve))
+      collected = commandReference.deref() === undefined
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.equal(collected, true, 'completed private start command remained strongly reachable')
+  })
+
+  it('releases completed start metadata after recorder state advances to a new UUID', async() => {
+    const v8 = require('node:v8')
+    const vm = require('node:vm')
+    v8.setFlagsFromString('--expose_gc')
+    const collectGarbage = vm.runInNewContext('gc')
+    const recorder = createRecorder({
+      transport: async command => {
+        if (command.kind == 'start') {
+          return {
+            mode: 'activity',
+            ack: activityAck(1, { playbackGroupUuid: command.request.playbackGroupUuid }),
+          }
+        }
+        if (command.kind == 'commit') {
+          return activityAck(command.request.checkpoint.checkpointSeq, {
+            playbackGroupUuid: command.request.checkpoint.playbackGroupUuid,
+          })
+        }
+        throw new Error(`Unexpected command: ${command.kind}`)
+      },
+      retry: { initialMs: 1, maxMs: 2 },
+    })
+
+    const expiredPayload = await (async() => {
+      let payload = { marker: 'expired-playable-payload' }
+      const reference = new WeakRef(payload)
+      const firstStart = start({
+        track: { ...start().track, playablePayload: payload },
+      })
+      recorder.dispatch({ type: 'start-requested', request: firstStart })
+      recorder.dispatch({ type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1, occurredAtMs: 100 })
+      assert.equal(await recorder.flush({ timeoutMs: 100 }), true)
+
+      const replacementStart = start({
+        playbackGroupUuid: UUID_3,
+        occurredAtMs: 1200,
+        track: { ...start().track, sourceTrackId: 'replacement-track' },
+      })
+      recorder.dispatch({ type: 'repeat', request: replacementStart, monotonicMs: 1000, positionMs: 1000, occurredAtMs: 1100 })
+      recorder.dispatch({ type: 'native-playing', monotonicMs: 1100, positionMs: 0, playbackRate: 1, occurredAtMs: 1200 })
+      assert.equal(await recorder.flush({ timeoutMs: 100 }), true)
+      payload = null
+      return reference
+    })()
+
+    assert.equal(recorder.getState().playbackGroupUuid, UUID_3)
+    assert.equal(recorder.getState().outbox.length, 0)
+    await settle()
+    let collected = false
+    for (let attempt = 0; attempt < 12 && !collected; attempt++) {
+      collectGarbage()
+      await new Promise(resolve => setImmediate(resolve))
+      collected = expiredPayload.deref() === undefined
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.equal(collected, true, 'completed start payload remained strongly reachable')
+  })
+
   it('never logs request bodies or music payloads on validation and delivery failure', async() => {
     const logged = []
     const originals = { log: console.log, warn: console.warn, error: console.error }

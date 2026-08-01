@@ -90,6 +90,25 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
   let retryTimer: unknown | null = null
   let failures = 0
 
+  const releaseDrainedGroups = (): void => {
+    if (inFlight != null) return
+    const retainedGroups = new Set<string>()
+    try {
+      for (const command of state.outbox) retainedGroups.add(commandGroup(command))
+    } catch {
+      return
+    }
+    if (state.playbackGroupUuid != null && state.deliveryMode != 'private' &&
+      (state.phase == 'playing' || state.phase == 'paused' || state.phase == 'buffering')) {
+      retainedGroups.add(state.playbackGroupUuid)
+    }
+    for (const group of groupModes.keys()) {
+      if (retainedGroups.has(group)) continue
+      groupModes.delete(group)
+      groupStartOwners.delete(group)
+    }
+  }
+
   const notify = (): void => {
     const pending = [...waiters]
     waiters.clear()
@@ -188,6 +207,7 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
       })
       .then(delivered => {
         inFlight = null
+        releaseDrainedGroups()
         if (delivered) {
           failures = 0
           notify()
@@ -221,6 +241,7 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
   return {
     dispatch(action) {
       state = reduce(state, action)
+      releaseDrainedGroups()
       notify()
       kick()
       return state

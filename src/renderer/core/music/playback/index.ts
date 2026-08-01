@@ -114,8 +114,14 @@ export const createPlaybackSessionFactories: CreatePlaybackSessionFactories = de
       ? [setting.primaryId]
       : [setting.primaryId, ...setting.fallbackIds]
     if (cacheMode == 'bypass' && policy == 'fallback') {
+      let invalidation: Promise<void>
+      try {
+        invalidation = deps.cache.invalidateQualityRange(musicInfo, requestedQuality)
+      } catch (error) {
+        invalidation = Promise.reject(error)
+      }
       await observePlaybackCachePersistence(
-        deps.cache.invalidateQualityRange(musicInfo, requestedQuality),
+        invalidation,
         'delete',
         deps.reportPersistenceFailure,
       )

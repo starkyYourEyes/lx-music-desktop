@@ -108,6 +108,56 @@ test('force refresh continues after rejecting cache invalidation and a throwing 
   }])
 })
 
+test('force refresh observes synchronous invalidation failure and a throwing reporter', async() => {
+  const harness = createMusicFacadeHarness({
+    throwCacheInvalidationSynchronously: Object.assign(new Error('private synchronous failure'), {
+      code: 'SQLITE_IOERR',
+    }),
+    throwPersistenceReporter: true,
+  })
+  const session = await harness.createOnlinePlaybackSession({
+    musicInfo: onlineMusic,
+    policy: 'fallback',
+    cacheMode: 'bypass',
+  })
+  assert.equal(session.songIdentity, 'wy:song')
+  assert.equal(harness.sessionCreateCount, 1)
+  assert.deepEqual(harness.persistenceFailures, [{
+    operation: 'delete', errorName: 'Error', errorCode: 'SQLITE_IOERR',
+  }])
+  assert.equal(JSON.stringify(harness.persistenceFailures).includes('private synchronous failure'), false)
+})
+
+test('force refresh holds one settings snapshot until invalidation settles', async() => {
+  const cacheInvalidationGate = deferred()
+  const harness = createMusicFacadeHarness({
+    primary: 'old-primary',
+    fallbacks: ['old-fallback'],
+    requestedQuality: '320k',
+    cacheInvalidationGate,
+  })
+  const creating = harness.createOnlinePlaybackSession({
+    musicInfo: onlineMusic,
+    policy: 'fallback',
+    cacheMode: 'bypass',
+  })
+  assert.equal(harness.readSettingsCount, 1)
+  assert.equal(harness.sessionCreateCount, 0)
+  harness.updateSessionSettings({
+    primaryId: 'new-primary',
+    fallbackIds: ['new-fallback'],
+    requestedQuality: '128k',
+  })
+  cacheInvalidationGate.resolve()
+  await creating
+  assert.equal(harness.readSettingsCount, 1)
+  assert.deepEqual(harness.sessionCreateInputs, [{
+    sourceIds: ['old-primary', 'old-fallback'],
+    requestedQuality: '320k',
+    cacheMode: 'bypass',
+  }])
+})
+
 test('playing a downloaded item with a missing file uses online fallback resolution', async() => {
   const harness = createMusicFacadeHarness({ downloadedFileExists: false })
   const result = await harness.createPlaybackRequest({ musicInfo: downloadItem, reason: 'initial' })
@@ -124,6 +174,13 @@ test('lyrics and covers never request a fallback API source', async() => {
   assert.deepEqual(harness.apiActionCalls, [
     'a:wy:lyric', 'a:wy:pic', 'a:local:lyric', 'a:local:pic',
   ])
+})
+
+test('missing local network resolution does not persist an unvalidated URL', async() => {
+  const harness = createMusicFacadeHarness()
+  const url = await harness.getLocalUrl(localMusic)
+  assert.equal(url, 'https://audio.test/local.mp3')
+  assert.equal(harness.localMusicUrlSaves, 0)
 })
 
 test('WebDAV lyrics and covers stay on WebDAV IPC', async() => {

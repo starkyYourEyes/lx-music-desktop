@@ -1,6 +1,6 @@
 import { encodePath } from '@common/utils/common'
 import { updateListMusics } from '@renderer/store/list/action'
-import { saveLyric, saveMusicUrl } from '@renderer/utils/ipc'
+import { saveLyric } from '@renderer/utils/ipc'
 import { getLocalFilePath } from '@renderer/utils/music'
 
 import {
@@ -79,10 +79,7 @@ export const getPrimaryMusicUrl = async({ musicInfo, isRefresh, allowToggleSourc
   }
 
   try {
-    return await getOnlineOtherSourceMusicUrlByLocal(musicInfo, isRefresh).then(({ url, quality, isFromCache }) => {
-      if (!isFromCache) void saveMusicUrl(musicInfo, quality, url)
-      return url
-    })
+    return await getOnlineOtherSourceMusicUrlByLocal(musicInfo, isRefresh).then(({ url }) => url)
   } catch {}
 
   if (!allowToggleSource) throw new Error('failed')
@@ -93,13 +90,11 @@ export const getPrimaryMusicUrl = async({ musicInfo, isRefresh, allowToggleSourc
     const otherSource = await candidateProvider.getBatch(index)
     if (!otherSource.length) continue
     try {
-      return await getOnlineOtherSourceMusicUrl({ musicInfos: [...otherSource], onToggleSource, isRefresh }).then(({ url, quality: targetQuality, musicInfo: targetMusicInfo, isFromCache }) => {
-        // saveLyric(musicInfo, data.lyricInfo)
-        if (!isFromCache) void saveMusicUrl(targetMusicInfo, targetQuality, url)
-
-        // TODO: save url ?
-        return url
-      })
+      return await getOnlineOtherSourceMusicUrl({
+        musicInfos: [...otherSource],
+        onToggleSource,
+        isRefresh,
+      }).then(({ url }) => url)
     } catch {}
   }
   throw new Error('source not found')

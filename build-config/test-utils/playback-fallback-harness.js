@@ -1119,7 +1119,15 @@ const createMusicFacadeHarness = (options = {}) => {
   const apiActionCalls = []
   const webdavActions = []
   const persistenceFailures = []
+  const sessionCreateInputs = []
+  let sessionSettings = {
+    primaryId: primary,
+    fallbackIds: [...fallbacks],
+    requestedQuality,
+  }
+  let readSettingsCount = 0
   let sessionCreateCount = 0
+  let localMusicUrlSaves = 0
   let webdavCalls = 0
   let downloadPlatformSwitches = 0
   let downloadRequestCount = 0
@@ -1128,16 +1136,20 @@ const createMusicFacadeHarness = (options = {}) => {
   const candidatesModule = loadCandidates()
   const coordinatorModule = loadPlaybackCoordinator()
   const sessionModule = loadPlaybackSession()
+  const invalidateQualityRange = options.throwCacheInvalidationSynchronously !== undefined
+    ? () => { throw options.throwCacheInvalidationSynchronously }
+    : async() => {
+        if (options.rejectCacheInvalidation !== undefined) {
+          throw options.rejectCacheInvalidation
+        }
+        if (options.cacheInvalidationGate) await options.cacheInvalidationGate.promise
+      }
   const cache = {
     lookup: async() => null,
     tombstone: async() => {},
     tombstoneKey: async() => {},
     commit: async() => {},
-    invalidateQualityRange: async() => {
-      if (options.rejectCacheInvalidation !== undefined) {
-        throw options.rejectCacheInvalidation
-      }
-    },
+    invalidateQualityRange,
     getPlaybackQualityOrder: cacheModule.getPlaybackQualityOrder,
   }
   const adapter = {
@@ -1191,7 +1203,10 @@ const createMusicFacadeHarness = (options = {}) => {
     if (options.throwPersistenceReporter) throw new Error('persistence reporter failed')
   }
   const sessionFactories = playbackModule.createPlaybackSessionFactories({
-    readSettings: () => ({ primaryId: primary, fallbackIds: [...fallbacks], requestedQuality }),
+    readSettings: () => {
+      readSettingsCount++
+      return sessionSettings
+    },
     cache,
     adapter,
     clock: createFakeClock(),
@@ -1200,6 +1215,11 @@ const createMusicFacadeHarness = (options = {}) => {
     reportPersistenceFailure,
     createResolveSession(input) {
       sessionCreateCount++
+      sessionCreateInputs.push({
+        sourceIds: [...input.sourceIds],
+        requestedQuality: input.requestedQuality,
+        cacheMode: input.cacheMode,
+      })
       return sessionModule.createPlaybackResolveSession(input)
     },
     createOnlineCandidateProvider: musicInfo => candidatesModule.createOnlineCandidateProvider(
@@ -1271,7 +1291,10 @@ const createMusicFacadeHarness = (options = {}) => {
     {
       '@common/utils/common': { encodePath: value => value },
       '@renderer/store/list/action': { updateListMusics() {} },
-      '@renderer/utils/ipc': { saveLyric() {}, saveMusicUrl() {} },
+      '@renderer/utils/ipc': {
+        saveLyric() {},
+        saveMusicUrl() { localMusicUrlSaves++ },
+      },
       '@renderer/utils/music': { getLocalFilePath: async() => null },
       './utils': {
         buildLyricInfo: value => value,
@@ -1285,7 +1308,13 @@ const createMusicFacadeHarness = (options = {}) => {
           apiActionCalls.push(`${primary}:local:pic`)
           return { url: 'https://image.test/local.jpg' }
         },
-        async getOnlineOtherSourceMusicUrlByLocal() { throw new Error('not used') },
+        async getOnlineOtherSourceMusicUrlByLocal() {
+          return {
+            url: 'https://audio.test/local.mp3',
+            quality: '128k',
+            isFromCache: false,
+          }
+        },
         async getOnlineOtherSourceMusicUrl() { throw new Error('not used') },
         async getOnlineOtherSourcePicUrl() { throw new Error('not used') },
         async getOnlineOtherSourceLyricInfo() { throw new Error('not used') },
@@ -1342,6 +1371,8 @@ const createMusicFacadeHarness = (options = {}) => {
 
   return {
     ...facade,
+    createOnlinePlaybackSession: sessionFactories.createOnlinePlaybackSession,
+    updateSessionSettings(value) { sessionSettings = value },
     getDownloadUrl(item) {
       if (!options.failFirstDownloadRequest) return actionModule.getDownloadUrl(item)
       const toggleMusicInfo = {
@@ -1363,9 +1394,16 @@ const createMusicFacadeHarness = (options = {}) => {
     getOnlinePic: info => onlineModule.getPicUrl({ musicInfo: info, isRefresh: true }),
     getLocalLyric: info => localModule.getLyricInfo({ musicInfo: info, isRefresh: true }),
     getLocalPic: info => localModule.getPicUrl({ musicInfo: info, isRefresh: true }),
+    getLocalUrl: info => localModule.getPrimaryMusicUrl({
+      musicInfo: info,
+      isRefresh: true,
+      allowToggleSource: false,
+    }),
     getWebdavLyric: info => webdavModule.getLyricInfo({ musicInfo: info, isRefresh: true }),
     getWebdavPic: info => webdavModule.getPicUrl({ musicInfo: info, isRefresh: true }),
     get sessionCreateCount() { return sessionCreateCount },
+    get readSettingsCount() { return readSettingsCount },
+    get localMusicUrlSaves() { return localMusicUrlSaves },
     get webdavCalls() { return webdavCalls },
     requestedApiIds,
     cacheLookups,
@@ -1373,6 +1411,7 @@ const createMusicFacadeHarness = (options = {}) => {
     webdavActions,
     get downloadPlatformSwitches() { return downloadPlatformSwitches },
     persistenceFailures,
+    sessionCreateInputs,
   }
 }
 

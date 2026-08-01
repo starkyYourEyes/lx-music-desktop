@@ -239,7 +239,9 @@ export default {
         if (!backApi) backApi = userApi.list.find(item => item.id != api.id)
         setApiSource(backApi?.id ?? '')
       }
-      userApi.list = await removeUserApi([api.id])
+      await removeUserApi([api.id], apiList => {
+        userApi.list = apiList
+      })
     },
     handleClose() {
       if (this.githubAction) return

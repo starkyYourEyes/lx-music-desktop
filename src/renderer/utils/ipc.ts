@@ -114,8 +114,26 @@ export const replaceUserApisFromGitHub = async(items: LX.UserApi.GitHubImportIte
 export const setUserApi = async(source: LX.UserApi.UserApiSetApiParams): Promise<void> => {
   return rendererInvoke<LX.UserApi.UserApiSetApiParams>(WIN_MAIN_RENDERER_EVENT_NAME.set_user_api, source)
 }
-export const removeUserApi = async(ids: string[]) => {
-  return rendererInvoke<string[], LX.UserApi.UserApiInfo[]>(WIN_MAIN_RENDERER_EVENT_NAME.remove_user_api, ids)
+export const removeUserApi = async(
+  ids: string[],
+  onCommittedList?: (apiList: LX.UserApi.UserApiInfo[]) => void,
+) => {
+  const result = await rendererInvoke<string[], LX.UserApi.UserApiRemoveResult>(
+    WIN_MAIN_RENDERER_EVENT_NAME.remove_user_api,
+    ids,
+  )
+  onCommittedList?.(result.apiList)
+  if (result.success) return result.apiList
+
+  const error = new Error(result.error.message) as Error & {
+    code?: string
+    detail?: string
+    apiList: LX.UserApi.UserApiInfo[]
+  }
+  if (result.error.code != null) error.code = result.error.code
+  if (result.error.detail != null) error.detail = result.error.detail
+  error.apiList = result.apiList
+  throw error
 }
 export const onShowUserApiUpdateAlert = (listener: LX.IpcRendererEventListenerParams<LX.UserApi.UserApiUpdateInfo>): RemoveListener => {
   rendererOn(WIN_MAIN_RENDERER_EVENT_NAME.user_api_show_update_alert, listener)

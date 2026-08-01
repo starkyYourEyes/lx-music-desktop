@@ -33,6 +33,15 @@ declare namespace LX {
       error: GitHubReplaceError
     }
 
+    type UserApiRemoveResult = {
+      success: true
+      apiList: UserApiInfo[]
+    } | {
+      success: false
+      apiList: UserApiInfo[]
+      error: GitHubReplaceError
+    }
+
     interface UserApiSourceInfo {
       name: string
       type: UserApiSourceInfoType

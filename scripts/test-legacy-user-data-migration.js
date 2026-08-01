@@ -2,10 +2,10 @@ const assert = require('node:assert/strict')
 const { spawn } = require('node:child_process')
 const { once } = require('node:events')
 const fs = require('node:fs')
-const os = require('node:os')
 const path = require('node:path')
 const test = require('node:test')
 const loadTsModule = require('./test-utils/load-ts-module')
+const { createTestStorageRoot } = require('../build-config/storage/helpers/test-storage-root.js')
 
 const {
   MIGRATION_MARKER_FILE,
@@ -13,92 +13,52 @@ const {
   migrateLegacyUserData,
 } = require('../src/main/migration/legacyUserData')
 
-const makeRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'starky-user-data-test-'))
+const fixtureByPath = new Map()
+const makeRoot = () => {
+  const fixture = createTestStorageRoot('legacy-user-data')
+  fixtureByPath.set(fixture.path, fixture)
+  return fixture.path
+}
+const cleanupRoot = rootPath => {
+  const fixture = fixtureByPath.get(rootPath)
+  if (fixture == null) throw new Error('Legacy migration test fixture is not owned')
+  fixture.cleanup()
+  fixtureByPath.delete(rootPath)
+}
 const silentLogger = { info() {}, warn() {}, error() {} }
 
-const runMainStartup = ({ appDataPath, lockCreatesDefaultUserData, mutateLegacyDuringCopy = false }) => {
+const runMainStartup = async({ appDataPath, materializeApplicationData, mutateLegacyDuringCopy = false }) => {
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   let exitCode
+  let applicationLoaded = false
   const paths = {
     appData: appDataPath,
     exe: path.join(appDataPath, 'LX Music.exe'),
-    userData: currentPath,
+    home: path.join(appDataPath, 'home'),
+    temp: path.join(appDataPath, 'temp'),
   }
+  const localAppData = path.join(appDataPath, 'local')
+  fs.mkdirSync(paths.temp)
+  fs.mkdirSync(localAppData)
   const electronApp = {
-    commandLine: { appendSwitch() {} },
-    disableHardwareAcceleration() {},
     exit(code) {
       exitCode = code
     },
     getPath(name) {
       return paths[name]
     },
-    on() {},
-    quit() {},
-    requestSingleInstanceLock() {
-      if (lockCreatesDefaultUserData) fs.mkdirSync(paths.userData, { recursive: true })
-      return true
-    },
     setPath(name, value) {
       paths[name] = value
     },
-    whenReady() {
-      return new Promise(() => {})
-    },
   }
-  const electron = {
-    app: electronApp,
-    dialog: {},
-    nativeTheme: {
-      addListener() {},
-      shouldUseDarkColors: false,
-    },
-    screen: {},
-    shell: {},
-  }
-  const writeFileLog = message => {
-    const logPath = path.join(electronApp.getPath('userData'), 'logs', 'main.log')
-    fs.mkdirSync(path.dirname(logPath), { recursive: true })
-    fs.appendFileSync(logPath, `${message}\n`)
-  }
-  const fileLogger = {
-    error: () => writeFileLog('error'),
-    info: () => writeFileLog('info'),
-    warn: () => writeFileLog('warn'),
-  }
-  const appModule = loadTsModule(path.join(__dirname, '../src/main/app.ts'), {
-    electron,
-    '@common/config': { navigationUrlWhiteList: [] },
-    '@common/constants': { URL_SCHEME_RXP: /^starkylx:\/\// },
-    '@common/defaultSetting': {},
-    '@common/projectIdentity': require('../src/common/projectIdentity'),
-    '@common/utils': { isMac: false, log: fileLogger },
-    '@common/utils/electron': { openDirInExplorer() {} },
-    '@common/utils/request': { setProxyByHost() {} },
-    '@main/event': {
-      createAppEvent: () => ({}),
-      createDislikeEvent: () => ({}),
-      createListEvent: () => ({}),
-    },
-    '@main/utils/webContentsNavigationGuard': { getWebContentsNavigationDecision() {} },
-    './modules/winMain': { isExistWindow: () => false, showWindow() {} },
-    './utils': {
-      getProxy() {},
-      getTheme() {},
-      initHotKey: async() => ({}),
-      initSetting: async() => ({}),
-      parseEnvParams: () => ({ cmdParams: {}, deeplink: null }),
-    },
-    './utils/migrate': { migrateDBData: async() => {} },
-    './worker': () => ({}),
+  const storagePaths = loadTsModule(path.join(__dirname, '../src/main/utils/storagePaths.ts'))
+  const { bootstrap } = loadTsModule(path.join(__dirname, '../src/main/bootstrap.ts'), {
+    electron: { app: {} },
+    './utils/storagePaths': storagePaths,
   })
 
   const originalCpSync = fs.cpSync
-  const originalConsole = {
-    error: console.error,
-    info: console.info,
-    warn: console.warn,
-  }
+  const originalConsole = { error: console.error, info: console.info, warn: console.warn }
   if (mutateLegacyDuringCopy) {
     fs.cpSync = (source, destination, options) => {
       originalCpSync(source, destination, options)
@@ -109,35 +69,25 @@ const runMainStartup = ({ appDataPath, lockCreatesDefaultUserData, mutateLegacyD
   console.info = () => {}
   console.warn = () => {}
   try {
-    loadTsModule(path.join(__dirname, '../src/main/index.ts'), {
-      electron,
-      './utils/logInit': {
-        initLog() {
-          const logPath = path.join(electronApp.getPath('userData'), 'logs', 'startup.log')
-          fs.mkdirSync(path.dirname(logPath), { recursive: true })
-          fs.writeFileSync(logPath, 'started')
-        },
-      },
-      '@common/error': {},
-      '@common/utils': { isLinux: false, log: fileLogger },
-      '@main/app': { initAppSetting: async() => {} },
-      '@main/modules': () => {},
-      './app': {
-        ...appModule,
-        applyElectronEnvParams() {},
-        initGlobalData() {},
-        listenerAppEvent() {},
-        registerDeeplink() {},
-      },
+    await bootstrap(electronApp, async() => {
+      applicationLoaded = true
+      await materializeApplicationData?.({ currentPath, paths })
+    }, {
+      platform: 'win32',
+      env: { LOCALAPPDATA: localAppData },
     })
   } finally {
     fs.cpSync = originalCpSync
     console.error = originalConsole.error
     console.info = originalConsole.info
     console.warn = originalConsole.warn
+    delete global.storagePaths
+    delete global.lxDataPath
+    delete global.lxOldDataPath
+    delete global.portableProfileStartup
   }
 
-  return { currentPath, exitCode, paths }
+  return { applicationLoaded, currentPath, exitCode, paths }
 }
 
 const makeLockMetadata = (pid, createdAt = new Date().toISOString()) => JSON.stringify({
@@ -193,7 +143,7 @@ const startLockHolder = lockPath => new Promise((resolve, reject) => {
 
 test('copies legacy data atomically and leaves the source unchanged', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(path.join(legacyPath, 'LxDatas'), { recursive: true })
   fs.writeFileSync(path.join(legacyPath, 'LxDatas', 'config.json'), 'legacy')
@@ -207,7 +157,7 @@ test('copies legacy data atomically and leaves the source unchanged', t => {
 
 test('does not copy or overwrite when the new directory already exists', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   fs.mkdirSync(legacyPath)
@@ -223,7 +173,7 @@ test('does not copy or overwrite when the new directory already exists', t => {
 
 test('uses a valid current directory without touching a stale lock', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   const lockPath = `${currentPath}.migration.lock`
   const lockContents = makeLockMetadata(2147483647)
@@ -240,7 +190,7 @@ test('uses a valid current directory without touching a stale lock', t => {
 
 test('creates an empty current directory when no legacy data exists', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const result = migrateLegacyUserData({ appDataPath, logger: silentLogger })
   assert.equal(result.status, 'legacy-missing')
   assert.equal(fs.existsSync(result.userDataPath), true)
@@ -248,7 +198,7 @@ test('creates an empty current directory when no legacy data exists', t => {
 
 test('fresh install does not require hard-link support', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const fsApi = {
     ...fs,
     linkSync() {
@@ -266,7 +216,7 @@ test('fresh install does not require hard-link support', t => {
 
 test('cleans only its temporary directory after a copy failure', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(legacyPath)
   fs.writeFileSync(path.join(legacyPath, 'value'), 'old')
@@ -281,7 +231,7 @@ test('cleans only its temporary directory after a copy failure', t => {
 
 test('preserves a replacement that appears at the owned temporary-directory path', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(legacyPath)
   fs.writeFileSync(path.join(legacyPath, 'value'), 'old')
@@ -321,7 +271,7 @@ test('preserves a replacement that appears at the owned temporary-directory path
 
 test('does not delete a pre-existing deterministic temporary-path occupant', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   const collisionPath = `${currentPath}.migration-tmp`
@@ -338,7 +288,7 @@ test('does not delete a pre-existing deterministic temporary-path occupant', t =
 
 test('rejects a linked legacy root without writing through it', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const externalPath = path.join(appDataPath, 'external')
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(externalPath)
@@ -355,7 +305,7 @@ test('rejects a linked legacy root without writing through it', t => {
 
 test('rejects linked entries inside the legacy tree', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const externalPath = path.join(appDataPath, 'external')
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(externalPath)
@@ -371,7 +321,7 @@ test('rejects linked entries inside the legacy tree', t => {
 
 test('rejects an incomplete nested copy instead of promoting it', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(path.join(legacyPath, 'nested'), { recursive: true })
   fs.writeFileSync(path.join(legacyPath, 'nested', 'kept'), 'kept')
@@ -392,7 +342,7 @@ test('rejects an incomplete nested copy instead of promoting it', t => {
 
 test('rejects a same-size torn copy using content hashes', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(path.join(legacyPath, 'LxDatas'), { recursive: true })
   fs.writeFileSync(path.join(legacyPath, 'LxDatas', 'lx_data.db-wal'), 'before')
@@ -412,7 +362,7 @@ test('rejects a same-size torn copy using content hashes', t => {
 
 test('leaves no destination when live legacy data changes during migration', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const walPath = path.join(legacyPath, 'LxDatas', 'lx_data.db-wal')
   fs.mkdirSync(path.dirname(walPath), { recursive: true })
@@ -434,7 +384,7 @@ test('leaves no destination when live legacy data changes during migration', t =
 
 test('leaves no destination when a WAL disappears during the initial scan', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const walPath = path.join(legacyPath, 'LxDatas', 'lx_data.db-wal')
   fs.mkdirSync(path.dirname(walPath), { recursive: true })
@@ -459,7 +409,7 @@ test('leaves no destination when a WAL disappears during the initial scan', t =>
 
 test('does not promote data when writing the marker fails', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(legacyPath)
   fs.writeFileSync(path.join(legacyPath, 'value'), 'legacy')
@@ -479,7 +429,7 @@ test('does not promote data when writing the marker fails', t => {
 
 test('cleanup failure does not prevent the empty-directory fallback', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(legacyPath)
   fs.writeFileSync(path.join(legacyPath, 'value'), 'legacy')
@@ -498,7 +448,7 @@ test('cleanup failure does not prevent the empty-directory fallback', t => {
 
 test('a cooperating process lock blocks migration without creating the destination', async t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   const lockPath = `${currentPath}.migration.lock`
@@ -520,7 +470,7 @@ test('a cooperating process lock blocks migration without creating the destinati
 
 test('reclaims a dead owner lock and migrates', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   const lockPath = `${currentPath}.migration.lock`
@@ -544,7 +494,7 @@ test('reclaims a dead owner lock and migrates', t => {
 
 test('does not reclaim an invalid lock solely because it is old', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   const lockPath = `${currentPath}.migration.lock`
@@ -561,7 +511,7 @@ test('does not reclaim an invalid lock solely because it is old', t => {
 
 test('does not reclaim an old lock while its validated owner is alive', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   const lockPath = `${currentPath}.migration.lock`
@@ -581,7 +531,7 @@ test('does not reclaim an old lock while its validated owner is alive', t => {
 
 test('rejects a linked lock path without mutating its target', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const externalPath = path.join(appDataPath, 'external-lock-target')
   const lockPath = path.join(appDataPath, 'starky-lx-music-desktop.migration.lock')
@@ -599,7 +549,7 @@ test('rejects a linked lock path without mutating its target', t => {
 
 test('rejects a non-regular lock path', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const lockPath = path.join(appDataPath, 'starky-lx-music-desktop.migration.lock')
   fs.mkdirSync(legacyPath)
@@ -613,7 +563,7 @@ test('rejects a non-regular lock path', t => {
 
 test('closes an exclusively created lock if reading its identity fails', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(legacyPath)
   fs.writeFileSync(path.join(legacyPath, 'value'), 'legacy')
@@ -651,7 +601,7 @@ test('closes an exclusively created lock if reading its identity fails', t => {
 
 test('removes its candidate when writing lock metadata fails', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(legacyPath)
   const fsApi = {
@@ -668,7 +618,7 @@ test('removes its candidate when writing lock metadata fails', t => {
 
 test('removes its candidate when syncing lock metadata fails', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(legacyPath)
   const fsApi = {
@@ -685,7 +635,7 @@ test('removes its candidate when syncing lock metadata fails', t => {
 
 test('recovers a failed lock release after the owner process exits', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const valuePath = path.join(legacyPath, 'value')
   fs.mkdirSync(legacyPath)
@@ -726,7 +676,7 @@ test('recovers a failed lock release after the owner process exits', t => {
 
 test('reports an error when the empty-directory fallback cannot be created', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   const fsApi = {
     ...fs,
@@ -744,7 +694,7 @@ test('reports an error when the empty-directory fallback cannot be created', t =
 
 test('rechecks a concurrently created destination immediately before promotion', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   fs.mkdirSync(legacyPath)
@@ -769,7 +719,7 @@ test('rechecks a concurrently created destination immediately before promotion',
 
 test('refuses a user-data name that escapes appData', t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   assert.throws(() => migrateLegacyUserData({
     appDataPath,
     currentDirName: '..',
@@ -794,38 +744,48 @@ test('portable mode resolves package-local paths without invoking migration', ()
   }), null)
 })
 
-test('startup migrates legacy data before Electron materializes the default user-data directory', t => {
+test('startup migrates legacy data before Electron materializes the default user-data directory', async t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyConfigPath = path.join(appDataPath, 'lx-music-desktop', 'LxDatas', 'config.json')
   fs.mkdirSync(path.dirname(legacyConfigPath), { recursive: true })
   fs.writeFileSync(legacyConfigPath, 'legacy')
 
-  const { currentPath, paths } = runMainStartup({
+  const { currentPath, paths, applicationLoaded } = await runMainStartup({
     appDataPath,
-    lockCreatesDefaultUserData: true,
+    materializeApplicationData({ currentPath, paths }) {
+      const migratedConfigPath = path.join(currentPath, 'LxDatas', 'config.json')
+      assert.equal(fs.readFileSync(migratedConfigPath, 'utf8'), 'legacy')
+      const logPath = path.join(paths.userData, 'logs', 'startup.log')
+      fs.mkdirSync(path.dirname(logPath), { recursive: true })
+      fs.writeFileSync(logPath, 'started')
+    },
   })
 
   const migratedConfigPath = path.join(currentPath, 'LxDatas', 'config.json')
+  assert.equal(applicationLoaded, true)
   assert.equal(fs.existsSync(migratedConfigPath), true, 'legacy config must exist before the Electron lock creates userData')
   assert.equal(fs.readFileSync(migratedConfigPath, 'utf8'), 'legacy')
-  assert.equal(paths.userData, currentPath)
-  assert.equal(fs.readFileSync(path.join(currentPath, 'logs', 'startup.log'), 'utf8'), 'started')
+  assert.equal(paths.userData, path.join(currentPath, 'LxDatas'))
+  assert.equal(fs.readFileSync(path.join(paths.userData, 'logs', 'startup.log'), 'utf8'), 'started')
 })
 
-test('startup migration failure cannot materialize the new user-data directory through file logging', t => {
+test('startup migration failure cannot materialize the new user-data directory through file logging', async t => {
   const appDataPath = makeRoot()
-  t.after(() => fs.rmSync(appDataPath, { recursive: true, force: true }))
+  t.after(() => cleanupRoot(appDataPath))
   const legacyConfigPath = path.join(appDataPath, 'lx-music-desktop', 'LxDatas', 'config.json')
   fs.mkdirSync(path.dirname(legacyConfigPath), { recursive: true })
   fs.writeFileSync(legacyConfigPath, 'legacy')
 
-  const { currentPath, exitCode } = runMainStartup({
+  const { applicationLoaded, currentPath, exitCode } = await runMainStartup({
     appDataPath,
-    lockCreatesDefaultUserData: false,
     mutateLegacyDuringCopy: true,
+    materializeApplicationData() {
+      throw new Error('application loader must not run after migration failure')
+    },
   })
 
   assert.equal(exitCode, 1)
+  assert.equal(applicationLoaded, false)
   assert.equal(fs.existsSync(currentPath), false, 'a failed migration must remain retryable on the next launch')
 })

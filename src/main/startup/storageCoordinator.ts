@@ -18,6 +18,7 @@ import type {
 } from '../../common/storage/phase3'
 import type { CachePhasePrerequisiteV1 } from '../../common/storage/cachePhase'
 import type { Phase3CredentialHealth, Phase3PlaybackSmokeEvidence } from './phase3Attestation'
+import type { PortableProfileStartupToken } from '../migration/portableProfile'
 
 export type StorageRecoveryTarget =
   | {
@@ -100,6 +101,10 @@ export interface StorageCoordinatorDependencies {
   }) => Promise<void> | void
   getCachePhasePrerequisite?: () => Promise<CachePhasePrerequisiteV1> | CachePhasePrerequisiteV1
   initializePhase4?: (prerequisite: CachePhasePrerequisiteV1) => Promise<{ schemaVersion: 6 | 7 }> | { schemaVersion: 6 | 7 }
+  portableProfileToken?: PortableProfileStartupToken
+  acknowledgePortableProfileStartup?: (
+    token: PortableProfileStartupToken,
+  ) => Promise<{ state: 'typed-only-acknowledged' }> | { state: 'typed-only-acknowledged' }
   initSettings: () => Promise<void>
   registerModules: () => void
   appInited: () => void
@@ -371,6 +376,7 @@ export const createStorageCoordinator = (
   let shutdownPromise: Promise<void> | null = null
   let runHasStarted = false
   let startupReachedReady = false
+  let portableProfileAcknowledgement: (() => Promise<void>) | null = null
   let shutdownRequested = false
 
   // Repeated callers must receive the exact cached startup Promise.
@@ -436,11 +442,26 @@ export const createStorageCoordinator = (
         if (shutdownRequested) return startupCancelled()
         const phase4 = cachePrerequisite == null ? undefined : await dependencies.initializePhase4?.(cachePrerequisite)
         if (shutdownRequested) return startupCancelled()
+        let acknowledgementToArm: (() => Promise<void>) | null = null
+        if (phase4 != null) {
+          if (phase4.schemaVersion != 6 && phase4.schemaVersion != 7) {
+            throw errorWithCode('cache_phase4_result_invalid')
+          }
+          if (dependencies.portableProfileToken != null) {
+            const token = dependencies.portableProfileToken
+            const acknowledge = dependencies.acknowledgePortableProfileStartup
+            if (acknowledge == null) {
+              throw errorWithCode('portable_profile_acknowledgement_unavailable')
+            }
+            acknowledgementToArm = async() => { await acknowledge(token) }
+          }
+        }
         await dependencies.initSettings()
         if (shutdownRequested) return startupCancelled()
         dependencies.registerModules()
         dependencies.appInited()
         startupReachedReady = true
+        portableProfileAcknowledgement = acknowledgementToArm
         return { status: 'ready', schemaVersion: phase4?.schemaVersion ?? database.schemaVersion }
       } catch (error) {
         return { status: 'fatal', reason: failureCode(error, 'storage_startup_failed') }
@@ -531,6 +552,11 @@ export const createStorageCoordinator = (
 
       if (failure != null) throw failure
       if (runHasStarted && startupReachedReady) await dependencies.runState.markClean()
+      if (portableProfileAcknowledgement != null) {
+        const acknowledgePortableProfile = portableProfileAcknowledgement
+        portableProfileAcknowledgement = null
+        await acknowledgePortableProfile()
+      }
     })()
     return shutdownPromise
   }

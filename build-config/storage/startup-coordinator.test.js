@@ -23,6 +23,7 @@ require.extensions['.ts'] = (module, filename) => {
 }
 
 const coordinatorPath = '../../src/main/startup/storageCoordinator.ts'
+const portableMigrationPath = '../../src/main/migration/portableProfile.js'
 const runStatePath = '../../src/main/startup/runState.ts'
 const recoveryPath = '../../src/main/startup/recovery.ts'
 const workerAdapterPath = '../../src/main/worker/dbService/index.ts'
@@ -82,6 +83,7 @@ const tempDirectory = prefix => {
 afterEach(() => {
   try { workerDbService.close() } catch {}
   try { delete require.cache[require.resolve(coordinatorPath)] } catch {}
+  try { delete require.cache[require.resolve(portableMigrationPath)] } catch {}
   try { delete require.cache[require.resolve(runStatePath)] } catch {}
   try { delete require.cache[require.resolve(recoveryPath)] } catch {}
   try { delete require.cache[require.resolve(workerAdapterPath)] } catch {}
@@ -226,6 +228,15 @@ const createDeps = (overrides = {}) => {
 }
 
 const createCoordinator = deps => require(coordinatorPath).createStorageCoordinator(deps)
+
+const seedPortableProfile = rootPath => {
+  const portableRoot = path.join(rootPath, 'portable')
+  const sourceRoot = path.join(portableRoot, 'userData', 'LxDatas')
+  const profileRoot = path.join(portableRoot, 'profile')
+  fs.mkdirSync(sourceRoot, { recursive: true })
+  fs.writeFileSync(path.join(sourceRoot, 'lx.data.db'), 'legacy-database')
+  return { portableRoot, sourceRoot, profileRoot }
+}
 
 const loadWorkerAdapter = databaseInit => {
   const originalLoad = Module._load
@@ -535,6 +546,220 @@ describe('storage startup coordinator', () => {
     assert.equal(calls.includes('run-state:clean'), false)
     assert.equal(calls.includes('modules:register'), false)
     assert.equal(calls.includes('app:inited'), false)
+  })
+
+  it('checkpoints a portable profile after final writes and database close so the next startup can retire the source', async() => {
+    const paths = seedPortableProfile(tempDirectory('portable-clean-lifecycle'))
+    const {
+      PORTABLE_PROFILE_JOURNAL_FILE,
+      acknowledgePortableProfileStartup,
+      preparePortableProfile,
+      retireAcknowledgedPortableSource,
+    } = require(portableMigrationPath)
+    const prepared = preparePortableProfile({ ...paths, runId: 'startup-1', logger: { info() {}, warn() {}, error() {} } })
+    assert.equal(prepared.state, 'promoted')
+    const { calls, deps } = createDeps()
+    deps.initializePhase4 = async() => {
+      calls.push('phase4:initialize')
+      fs.writeFileSync(path.join(paths.profileRoot, 'lx.data.db'), 'typed-database')
+      return { schemaVersion: 7 }
+    }
+    deps.portableProfileToken = prepared.token
+    deps.acknowledgePortableProfileStartup = async token => {
+      calls.push('portable:acknowledge')
+      return await acknowledgePortableProfileStartup(token, { logger: { info() {}, warn() {}, error() {} } })
+    }
+    const coordinator = createCoordinator(deps)
+
+    assert.deepEqual(await coordinator.start(), { status: 'ready', schemaVersion: 7 })
+    const journalPath = path.join(paths.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
+    assert.equal(JSON.parse(fs.readFileSync(journalPath, 'utf8')).state, 'promoted')
+    fs.writeFileSync(path.join(paths.profileRoot, 'settings.json'), '{"volume":0.5}')
+    await coordinator.shutdown()
+
+    assert.ok(calls.indexOf('db:close') < calls.indexOf('run-state:clean'))
+    assert.ok(calls.indexOf('run-state:clean') < calls.indexOf('portable:acknowledge'))
+    assert.equal(JSON.parse(fs.readFileSync(journalPath, 'utf8')).state, 'typed-only-acknowledged')
+    assert.equal(retireAcknowledgedPortableSource({
+      ...paths,
+      runId: 'startup-2',
+      logger: { info() {}, warn() {}, error() {} },
+    }).state, 'retired')
+    assert.equal(fs.existsSync(paths.sourceRoot), false)
+    assert.equal(fs.readFileSync(path.join(paths.profileRoot, 'settings.json'), 'utf8'), '{"volume":0.5}')
+  })
+
+  it('keeps an unclean post-Phase-4 profile retryable until a later clean shutdown', async() => {
+    const paths = seedPortableProfile(tempDirectory('portable-unclean-lifecycle'))
+    const {
+      acknowledgePortableProfileStartup,
+      preparePortableProfile,
+      retireAcknowledgedPortableSource,
+    } = require(portableMigrationPath)
+    const logger = { info() {}, warn() {}, error() {} }
+    const firstPreparation = preparePortableProfile({ ...paths, runId: 'startup-1', logger })
+    const first = createDeps()
+    first.deps.initializePhase4 = async() => {
+      fs.writeFileSync(path.join(paths.profileRoot, 'lx.data.db'), 'typed-after-unclean-startup')
+      return { schemaVersion: 7 }
+    }
+    first.deps.portableProfileToken = firstPreparation.token
+    first.deps.acknowledgePortableProfileStartup = token => acknowledgePortableProfileStartup(token, { logger })
+    assert.equal((await createCoordinator(first.deps).start()).status, 'ready')
+    fs.writeFileSync(path.join(paths.profileRoot, 'settings.json'), '{"unclean":true}')
+
+    assert.equal(retireAcknowledgedPortableSource({ ...paths, runId: 'startup-2', logger }).state, 'not-acknowledged')
+    assert.equal(fs.existsSync(paths.sourceRoot), true)
+    const retry = preparePortableProfile({ ...paths, runId: 'startup-2', logger })
+    assert.equal(retry.state, 'already-promoted')
+    const second = createDeps()
+    second.deps.initializePhase4 = async() => ({ schemaVersion: 7 })
+    second.deps.portableProfileToken = retry.token
+    second.deps.acknowledgePortableProfileStartup = token => acknowledgePortableProfileStartup(token, { logger })
+    const retryCoordinator = createCoordinator(second.deps)
+    assert.equal((await retryCoordinator.start()).status, 'ready')
+    await retryCoordinator.shutdown()
+
+    assert.equal(retireAcknowledgedPortableSource({ ...paths, runId: 'startup-3', logger }).state, 'retired')
+    assert.equal(fs.readFileSync(path.join(paths.profileRoot, 'settings.json'), 'utf8'), '{"unclean":true}')
+  })
+
+  it('does not acknowledge a portable profile after any unclean startup or shutdown path', async t => {
+    const scenarios = [
+      {
+        name: 'startup failure after Phase 4',
+        configure(deps) {
+          deps.initSettings = async() => { throw new Error('settings_failed') }
+        },
+        expectStartup: 'fatal',
+      },
+      {
+        name: 'failed shutdown flusher',
+        configure(_deps, coordinator) {
+          coordinator.registerShutdownFlusher('failed', async() => { throw new Error('flusher_failed') })
+        },
+        shutdownRejects: true,
+      },
+      {
+        name: 'timed-out shutdown flusher',
+        configure(deps, coordinator) {
+          deps.shutdownTimeoutMs = 20
+          coordinator.registerShutdownFlusher('blocked', async() => await new Promise(() => {}))
+        },
+        shutdownRejects: true,
+      },
+      {
+        name: 'store flush failure',
+        configure(deps) {
+          deps.flushStores = async() => { throw new Error('store_flush_failed') }
+        },
+        shutdownRejects: true,
+      },
+      {
+        name: 'database close failure',
+        configure(deps) {
+          deps.closeDatabase = async() => { throw new Error('database_close_failed') }
+        },
+        shutdownRejects: true,
+      },
+      {
+        name: 'clean-run marker failure',
+        configure(deps) {
+          deps.runState.markClean = async() => { throw new Error('run_state_clean_failed') }
+        },
+        shutdownRejects: true,
+      },
+    ]
+
+    for (const scenario of scenarios) {
+      await t.test(scenario.name, async() => {
+        let acknowledgements = 0
+        const { deps } = createDeps({ shutdownTimeoutMs: 20 })
+        deps.initializePhase4 = async() => ({ schemaVersion: 7 })
+        deps.portableProfileToken = Object.freeze({
+          version: 1,
+          portableRoot: 'C:\\portable-fixture',
+          promotionRunId: 'promotion-run',
+          startupRunId: 'startup-run',
+          destinationIdentity: Object.freeze({ dev: '1', ino: '2' }),
+        })
+        deps.acknowledgePortableProfileStartup = async() => {
+          acknowledgements++
+          return { state: 'typed-only-acknowledged' }
+        }
+        const coordinator = createCoordinator(deps)
+        scenario.configure(deps, coordinator)
+        const outcome = await coordinator.start()
+        assert.equal(outcome.status, scenario.expectStartup ?? 'ready')
+        if (scenario.shutdownRejects) await assert.rejects(coordinator.shutdown())
+        else await coordinator.shutdown()
+        assert.equal(acknowledgements, 0)
+      })
+    }
+  })
+
+  it('keeps the portable journal retryable when acknowledgement fails after the clean marker', async() => {
+    const paths = seedPortableProfile(tempDirectory('portable-ack-failure'))
+    const {
+      PORTABLE_PROFILE_JOURNAL_FILE,
+      preparePortableProfile,
+      retireAcknowledgedPortableSource,
+    } = require(portableMigrationPath)
+    const logger = { info() {}, warn() {}, error() {} }
+    const prepared = preparePortableProfile({ ...paths, runId: 'startup-1', logger })
+    const { calls, deps } = createDeps()
+    deps.initializePhase4 = async() => ({ schemaVersion: 7 })
+    deps.portableProfileToken = prepared.token
+    deps.acknowledgePortableProfileStartup = async() => {
+      calls.push('portable:acknowledge')
+      throw new Error('portable_acknowledgement_failed')
+    }
+    const coordinator = createCoordinator(deps)
+    assert.equal((await coordinator.start()).status, 'ready')
+
+    await assert.rejects(coordinator.shutdown(), /portable_acknowledgement_failed/)
+
+    assert.ok(calls.indexOf('db:close') < calls.indexOf('run-state:clean'))
+    assert.ok(calls.indexOf('run-state:clean') < calls.indexOf('portable:acknowledge'))
+    assert.equal(calls.filter(call => call == 'run-state:clean').length, 1)
+    const journalPath = path.join(paths.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
+    assert.equal(JSON.parse(fs.readFileSync(journalPath, 'utf8')).state, 'promoted')
+    assert.equal(fs.existsSync(paths.sourceRoot), true)
+    assert.equal(retireAcknowledgedPortableSource({ ...paths, runId: 'startup-2', logger }).state, 'not-acknowledged')
+    assert.equal(preparePortableProfile({ ...paths, runId: 'startup-2', logger }).state, 'already-promoted')
+  })
+
+  it('uses the exact portable token and finalizer captured when startup reached ready', async() => {
+    const originalToken = Object.freeze({
+      version: 1,
+      portableRoot: 'C:\\portable-fixture',
+      promotionRunId: 'promotion-original',
+      startupRunId: 'startup-original',
+      destinationIdentity: Object.freeze({ dev: '1', ino: '2' }),
+    })
+    const replacementToken = Object.freeze({
+      ...originalToken,
+      promotionRunId: 'promotion-replacement',
+    })
+    const acknowledgements = []
+    const { deps } = createDeps()
+    deps.initializePhase4 = async() => ({ schemaVersion: 7 })
+    deps.portableProfileToken = originalToken
+    deps.acknowledgePortableProfileStartup = async token => {
+      acknowledgements.push(['original', token])
+      return { state: 'typed-only-acknowledged' }
+    }
+    const coordinator = createCoordinator(deps)
+    assert.equal((await coordinator.start()).status, 'ready')
+    deps.portableProfileToken = replacementToken
+    deps.acknowledgePortableProfileStartup = async token => {
+      acknowledgements.push(['replacement', token])
+      return { state: 'typed-only-acknowledged' }
+    }
+
+    await coordinator.shutdown()
+
+    assert.deepEqual(acknowledgements, [['original', originalToken]])
   })
 
   it('marks a run clean only after every flusher, stores, and database close succeeds', async() => {

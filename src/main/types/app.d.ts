@@ -8,6 +8,7 @@ import { type CredentialVault } from '@main/storage/credentials/credentialVault'
 import { type CredentialMigrationResult } from '@main/migration/credentials/credentialMigration'
 import { type AccountRepository } from '@main/storage/accounts/accountRepository'
 import { type StoragePaths } from '@main/utils/storagePaths'
+import { type PortableProfileStartupToken } from '@main/migration/portableProfile'
 
 interface Lx {
   inited: boolean
@@ -57,6 +58,7 @@ declare global {
   var lxDataPath: string
   var lxOldDataPath: string
   var storagePaths: Readonly<StoragePaths>
+  var portableProfileStartup: { token: PortableProfileStartupToken } | null
   var lx: Lx
   var appWorder: AppWorder
 }

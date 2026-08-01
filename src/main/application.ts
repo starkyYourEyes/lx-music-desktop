@@ -16,10 +16,12 @@ import { createRunState } from '@main/startup/runState'
 import { checkCredentialStartup, createStorageCoordinator } from '@main/startup/storageCoordinator'
 import { showStorageRecovery } from '@main/startup/recovery'
 import { readLegacyDataSource } from '@main/migration/legacyData/source'
+import { acknowledgePortableProfileStartup } from '@main/migration/portableProfile'
 
 let isFinishingStorageShutdown = false
 
 const getStorageCoordinator = () => {
+  const portableProfileStartup = global.portableProfileStartup
   global.lx.storage ??= createStorageCoordinator({
     runState: createRunState({ runtimeRoot: global.storagePaths.runtimeRoot }),
     preflightLegacyData: () => readLegacyDataSource({
@@ -45,6 +47,16 @@ const getStorageCoordinator = () => {
     runPlaybackTypedSmoke: () => global.lx.worker.dbService.playbackRunTypedSmoke(),
     getPhase3AttestationPrerequisites: () => global.lx.worker.dbService.getPhase3AttestationPrerequisites(),
     completePhase3Attestation: completePhase3StartupAttestation,
+    ...(portableProfileStartup == null
+      ? {}
+      : {
+          portableProfileToken: portableProfileStartup.token,
+          acknowledgePortableProfileStartup: async(token) => {
+            const acknowledgement = await acknowledgePortableProfileStartup(token)
+            if (portableProfileStartup.token === token) global.portableProfileStartup = null
+            return acknowledgement
+          },
+        }),
     initSettings: initAppSetting,
     registerModules,
     appInited: () => global.lx.event_app.app_inited(),

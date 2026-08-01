@@ -89,6 +89,33 @@ const createTransport = calls => async command => {
   return activityAck(checkpoint.playbackGroupUuid, checkpoint.checkpointSeq)
 }
 
+const createControlledPlaybackTransport = () => {
+  const attempts = []
+  let activeAttempts = 0
+  let maxActiveAttempts = 0
+  return {
+    attempts,
+    get activeAttempts() { return activeAttempts },
+    get maxActiveAttempts() { return maxActiveAttempts },
+    transport: command => new Promise((resolve, reject) => {
+      activeAttempts++
+      maxActiveAttempts = Math.max(maxActiveAttempts, activeAttempts)
+      let settled = false
+      const finish = callback => value => {
+        assert.equal(settled, false)
+        settled = true
+        activeAttempts--
+        callback(value)
+      }
+      attempts.push({
+        command: structuredClone(command),
+        resolve: finish(resolve),
+        reject: finish(reject),
+      })
+    }),
+  }
+}
+
 const loadRecorder = transport => loadTsModule(recorderPath, {
   '@renderer/utils/playback': { sendPlaybackCommand: transport },
   '../../utils/playback': { sendPlaybackCommand: transport },
@@ -233,6 +260,149 @@ describe('playback recorder renderer cutover', () => {
 
     assert.deepEqual(await Promise.all([first, second]), [true, true])
     assert.equal(attempts, 1)
+  })
+
+  it('concurrent flushes retry once immediately when their in-flight send fails', async() => {
+    const controlled = createControlledPlaybackTransport()
+    const recorder = loadTsModule(recorderPath, {
+      '../../utils/playback': { sendPlaybackCommand: async() => { throw new Error('unexpected default transport') } },
+    }).createPlaybackRecorder({
+      retry: { initialMs: 5_000, maxMs: 5_000 },
+      transport: controlled.transport,
+    })
+    recorder.dispatch({
+      type: 'start-requested',
+      request: {
+        version: 1,
+        playbackGroupUuid: UUID,
+        ...selection(),
+        occurredAtMs: 100,
+        consent: { recentAllowed: true, statsAllowed: true, privateMode: false },
+      },
+    })
+    recorder.dispatch({ type: 'native-playing', playbackRate: 1, monotonicMs: 0, positionMs: 0, occurredAtMs: 100 })
+    await settle()
+    assert.equal(controlled.attempts.length, 1)
+
+    const startedAt = Date.now()
+    const firstFlush = recorder.flush({ timeoutMs: 250 })
+    const secondFlush = recorder.flush({ timeoutMs: 500 })
+    await settle()
+    assert.equal(controlled.attempts.length, 1)
+    controlled.attempts[0].reject(new Error('transient send failure'))
+    await settle()
+
+    assert.equal(controlled.attempts.length, 2)
+    assert.equal(controlled.maxActiveAttempts, 1)
+    assert.deepEqual(controlled.attempts[1].command, controlled.attempts[0].command)
+    await settle()
+    assert.equal(controlled.attempts.length, 2)
+    controlled.attempts[1].resolve({ mode: 'activity', ack: activityAck(UUID, 1) })
+
+    assert.deepEqual(await Promise.all([firstFlush, secondFlush]), [true, true])
+    assert.ok(Date.now() - startedAt < 250)
+    assert.equal(controlled.activeAttempts, 0)
+    assert.equal(recorder.getState().outbox.length, 0)
+  })
+
+  it('an expired flush leaves a later send failure on normal backoff', async() => {
+    const controlled = createControlledPlaybackTransport()
+    const timers = []
+    const clock = {
+      now: () => 0,
+      setTimeout(callback, delayMs) {
+        const timer = { callback, delayMs }
+        timers.push(timer)
+        return timer
+      },
+      clearTimeout(timer) {
+        const index = timers.indexOf(timer)
+        if (index >= 0) timers.splice(index, 1)
+      },
+    }
+    const recorder = loadTsModule(recorderPath, {
+      '../../utils/playback': { sendPlaybackCommand: async() => { throw new Error('unexpected default transport') } },
+    }).createPlaybackRecorder({
+      clock,
+      retry: { initialMs: 5_000, maxMs: 5_000 },
+      transport: controlled.transport,
+    })
+    recorder.dispatch({
+      type: 'start-requested',
+      request: {
+        version: 1,
+        playbackGroupUuid: UUID,
+        ...selection(),
+        occurredAtMs: 100,
+        consent: { recentAllowed: true, statsAllowed: true, privateMode: false },
+      },
+    })
+    recorder.dispatch({ type: 'native-playing', playbackRate: 1, monotonicMs: 0, positionMs: 0, occurredAtMs: 100 })
+    await settle()
+
+    const flushing = recorder.flush({ timeoutMs: 25 })
+    const timeout = timers.find(timer => timer.delayMs == 25)
+    assert.ok(timeout)
+    timers.splice(timers.indexOf(timeout), 1)
+    timeout.callback()
+    assert.equal(await flushing, false)
+
+    controlled.attempts[0].reject(new Error('failure after flush expired'))
+    await settle()
+    assert.equal(controlled.attempts.length, 1)
+    assert.deepEqual(timers.map(timer => timer.delayMs), [5_000])
+  })
+
+  it('a failed urgent retry returns to normal backoff without an immediate loop', async() => {
+    const controlled = createControlledPlaybackTransport()
+    const timers = []
+    const clock = {
+      now: () => 0,
+      setTimeout(callback, delayMs) {
+        const timer = { callback, delayMs }
+        timers.push(timer)
+        return timer
+      },
+      clearTimeout(timer) {
+        const index = timers.indexOf(timer)
+        if (index >= 0) timers.splice(index, 1)
+      },
+    }
+    const recorder = loadTsModule(recorderPath, {
+      '../../utils/playback': { sendPlaybackCommand: async() => { throw new Error('unexpected default transport') } },
+    }).createPlaybackRecorder({
+      clock,
+      retry: { initialMs: 5_000, maxMs: 5_000 },
+      transport: controlled.transport,
+    })
+    recorder.dispatch({
+      type: 'start-requested',
+      request: {
+        version: 1,
+        playbackGroupUuid: UUID,
+        ...selection(),
+        occurredAtMs: 100,
+        consent: { recentAllowed: true, statsAllowed: true, privateMode: false },
+      },
+    })
+    recorder.dispatch({ type: 'native-playing', playbackRate: 1, monotonicMs: 0, positionMs: 0, occurredAtMs: 100 })
+    await settle()
+
+    const flushing = recorder.flush({ timeoutMs: 250 })
+    controlled.attempts[0].reject(new Error('first failure'))
+    await settle()
+    assert.equal(controlled.attempts.length, 2)
+    controlled.attempts[1].reject(new Error('urgent retry failure'))
+    await settle()
+
+    assert.equal(controlled.attempts.length, 2)
+    assert.equal(controlled.maxActiveAttempts, 1)
+    assert.ok(timers.some(timer => timer.delayMs == 5_000))
+    const timeout = timers.find(timer => timer.delayMs == 250)
+    assert.ok(timeout)
+    timers.splice(timers.indexOf(timeout), 1)
+    timeout.callback()
+    assert.equal(await flushing, false)
   })
 
   it('creates recent/session state only on first native playing and keeps duplicate playing idempotent', async() => {

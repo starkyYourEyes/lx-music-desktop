@@ -84,6 +84,7 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
   const groupModes = new Map<string, PlaybackMode>()
   const groupStartOwners = new Map<string, PlaybackStartCommand>()
   const waiters = new Set<() => void>()
+  const urgentRetryRequests = new Set<symbol>()
 
   let state = createPlaybackRecorderState()
   let inFlight: Promise<void> | null = null
@@ -186,6 +187,12 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
     retryHandle.unref?.()
   }
 
+  const consumeUrgentRetryRequest = (): boolean => {
+    if (urgentRetryRequests.size == 0) return false
+    urgentRetryRequests.clear()
+    return true
+  }
+
   const kick = (): void => {
     if (inFlight != null || retryTimer != null || state.outbox.length == 0 || !isAlive()) return
     if (!validateAndLatchOutbox()) {
@@ -209,17 +216,23 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
         inFlight = null
         releaseDrainedGroups()
         if (delivered) {
+          urgentRetryRequests.clear()
           failures = 0
           notify()
           kick()
         } else {
           notify()
-          scheduleRetry()
+          if (consumeUrgentRetryRequest()) kick()
+          else scheduleRetry()
         }
       })
   }
 
-  const kickForFlush = (): void => {
+  const kickForFlush = (urgentRetryRequest: symbol): void => {
+    if (inFlight != null) {
+      urgentRetryRequests.add(urgentRetryRequest)
+      return
+    }
     if (retryTimer != null) {
       clock.clearTimeout(retryTimer)
       retryTimer = null
@@ -258,14 +271,19 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
     async flush({ timeoutMs = 2_000 } = {}) {
       if (typeof timeoutMs != 'number' || !Number.isFinite(timeoutMs) || timeoutMs < 0) throw new Error('Invalid playback flush timeout')
       const deadline = clock.now() + timeoutMs
-      kickForFlush()
-      while (state.outbox.length > 0) {
-        if (!isAlive()) return false
-        const remainingMs = deadline - clock.now()
-        if (remainingMs <= 0) return false
-        if (!await waitForChange(remainingMs)) return state.outbox.length == 0
+      const urgentRetryRequest = Symbol('playback flush urgent retry')
+      try {
+        kickForFlush(urgentRetryRequest)
+        while (state.outbox.length > 0) {
+          if (!isAlive()) return false
+          const remainingMs = deadline - clock.now()
+          if (remainingMs <= 0) return false
+          if (!await waitForChange(remainingMs)) return state.outbox.length == 0
+        }
+        return true
+      } finally {
+        urgentRetryRequests.delete(urgentRetryRequest)
       }
-      return true
     },
   }
 }

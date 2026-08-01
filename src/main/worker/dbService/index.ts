@@ -5,6 +5,7 @@ import {
 } from './db'
 import { exposeWorker } from '../utils/worker'
 import { list, lyric, music_url, music_other_source, download, dislike_list, account_profile, app_state, playback, phase3 } from './modules/index'
+import type { CachePhasePrerequisiteV1 } from '../../../common/storage/cachePhase'
 
 export { init }
 
@@ -27,3 +28,5 @@ export type workerDBSeriveTypes = typeof common
   & typeof app_state
   & typeof playback
   & typeof phase3
+
+export type WorkerCachePhasePrerequisite = CachePhasePrerequisiteV1

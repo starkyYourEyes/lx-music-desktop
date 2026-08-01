@@ -12,6 +12,10 @@ import {
   type Phase3ManifestCheckV1,
   type Phase3PrerequisiteV1,
 } from '../../../../../common/storage/phase3'
+import {
+  getCachePhasePrerequisite as parseCachePhasePrerequisite,
+  type CachePhasePrerequisiteV1,
+} from '../../../../../common/storage/cachePhase'
 
 const CROSS_ARTIFACT_MARKER_NAME = 'legacy_data_v1.cross_artifact_complete'
 
@@ -50,6 +54,15 @@ export const getPhase3AttestationPrerequisites = (value?: unknown): Phase3Attest
     accountProfile: prerequisite('legacy_data_v1.account_profiles', 'account-profile'),
     phase2: prerequisite('legacy_data_v1.phase2_complete', 'phase2-storage'),
     playbackActivity: prerequisite('legacy_data_v1.playback_activity', 'playback-activity'),
+  }
+}
+
+export const getCachePhasePrerequisite = (value?: unknown): CachePhasePrerequisiteV1 => {
+  if (value !== undefined) throw phase3Error('cache_phase3_prerequisite_invalid', 'cache_phase3_prerequisite_invalid')
+  try {
+    return parseCachePhasePrerequisite(getMigrationMarker(getDB(), CROSS_ARTIFACT_MARKER_NAME))
+  } catch {
+    throw phase3Error('cache_phase3_prerequisite_invalid', 'cache_phase3_prerequisite_invalid')
   }
 }
 

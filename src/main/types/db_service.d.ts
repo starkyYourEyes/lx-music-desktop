@@ -12,6 +12,13 @@ declare namespace LX {
       order: number
     }
 
+    interface CachePhasePrerequisiteV1 {
+      version: 1
+      markerName: 'legacy_data_v1.cross_artifact_complete'
+      sourceSha256: string
+      completedAtMs: number
+    }
+
     interface MusicInfoOrder {
       listId: string
       musicInfoId: string

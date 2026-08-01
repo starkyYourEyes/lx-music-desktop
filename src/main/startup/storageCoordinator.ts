@@ -16,6 +16,7 @@ import type {
   Phase3AttestationPrerequisitesV1,
   Phase3CheckState,
 } from '../../common/storage/phase3'
+import type { CachePhasePrerequisiteV1 } from '../../common/storage/cachePhase'
 import type { Phase3CredentialHealth, Phase3PlaybackSmokeEvidence } from './phase3Attestation'
 
 export type StorageRecoveryTarget =
@@ -97,6 +98,8 @@ export interface StorageCoordinatorDependencies {
     prerequisites: Phase3AttestationPrerequisitesV1
     smoke: Phase3PlaybackSmokeEvidence
   }) => Promise<void> | void
+  getCachePhasePrerequisite?: () => Promise<CachePhasePrerequisiteV1> | CachePhasePrerequisiteV1
+  initializePhase4?: (prerequisite: CachePhasePrerequisiteV1) => Promise<{ schemaVersion: 6 | 7 }> | { schemaVersion: 6 | 7 }
   initSettings: () => Promise<void>
   registerModules: () => void
   appInited: () => void
@@ -426,12 +429,19 @@ export const createStorageCoordinator = (
         const legacySourceState = legacyData.status == 'available' ? 'complete' : 'not-applicable'
         await runPhase3Gate(dependencies, legacySourceState, credentialHealth, activityEvidence)
         if (shutdownRequested) return startupCancelled()
+        if (dependencies.initializePhase4 != null && dependencies.getCachePhasePrerequisite == null) {
+          throw errorWithCode('cache_phase3_prerequisite_invalid')
+        }
+        const cachePrerequisite = await dependencies.getCachePhasePrerequisite?.()
+        if (shutdownRequested) return startupCancelled()
+        const phase4 = cachePrerequisite == null ? undefined : await dependencies.initializePhase4?.(cachePrerequisite)
+        if (shutdownRequested) return startupCancelled()
         await dependencies.initSettings()
         if (shutdownRequested) return startupCancelled()
         dependencies.registerModules()
         dependencies.appInited()
         startupReachedReady = true
-        return { status: 'ready', schemaVersion: database.schemaVersion }
+        return { status: 'ready', schemaVersion: phase4?.schemaVersion ?? database.schemaVersion }
       } catch (error) {
         return { status: 'fatal', reason: failureCode(error, 'storage_startup_failed') }
       }

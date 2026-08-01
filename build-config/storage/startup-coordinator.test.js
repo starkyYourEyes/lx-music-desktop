@@ -1,7 +1,6 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const Module = require('node:module')
-const os = require('node:os')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
@@ -25,6 +24,7 @@ const coordinatorPath = '../../src/main/startup/storageCoordinator.ts'
 const runStatePath = '../../src/main/startup/runState.ts'
 const recoveryPath = '../../src/main/startup/recovery.ts'
 const workerAdapterPath = '../../src/main/worker/dbService/index.ts'
+const { createTestStorageRoot } = require('./helpers/test-storage-root.js')
 const tempDirectories = []
 
 const compileCoordinatorTypeFixture = source => {
@@ -57,9 +57,9 @@ const compileCoordinatorTypeFixture = source => {
 }
 
 const tempDirectory = prefix => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
-  tempDirectories.push(directory)
-  return directory
+  const fixture = createTestStorageRoot(prefix)
+  tempDirectories.push(fixture)
+  return fixture.path
 }
 
 afterEach(() => {
@@ -67,8 +67,8 @@ afterEach(() => {
   try { delete require.cache[require.resolve(runStatePath)] } catch {}
   try { delete require.cache[require.resolve(recoveryPath)] } catch {}
   try { delete require.cache[require.resolve(workerAdapterPath)] } catch {}
-  for (const directory of tempDirectories.splice(0)) {
-    fs.rmSync(directory, { recursive: true, force: true })
+  for (const fixture of tempDirectories.splice(0)) {
+    fixture.cleanup()
   }
 })
 
@@ -118,6 +118,12 @@ const createDeps = (overrides = {}) => {
       playbackActivity: { markerName: 'legacy_data_v1.playback_activity', state: 'not-applicable', evidenceSha256: 'c'.repeat(64) },
     }),
     completePhase3Attestation: async() => {},
+    getCachePhasePrerequisite: async() => ({
+      version: 1,
+      markerName: 'legacy_data_v1.cross_artifact_complete',
+      sourceSha256: 'f'.repeat(64),
+      completedAtMs: 1,
+    }),
     initSettings: async() => { calls.push('settings:init') },
     registerModules: () => { calls.push('modules:register') },
     appInited: () => { calls.push('app:inited') },
@@ -154,6 +160,50 @@ const loadWorkerAdapter = databaseInit => {
 }
 
 describe('storage startup coordinator', () => {
+  it('rejects a missing marker before cache initialization without changing the app database fixture', async() => {
+    const fixture = createTestStorageRoot('cache-prerequisite')
+    try {
+      const appDbPath = path.join(fixture.path, 'app.db')
+      fs.writeFileSync(appDbPath, 'schema-6-before')
+      const beforeHash = require('node:crypto').createHash('sha256').update(fs.readFileSync(appDbPath)).digest('hex')
+      const { calls, deps } = createDeps({
+        getCachePhasePrerequisite: async() => {
+          calls.push('cache:prerequisite')
+          throw Object.assign(new Error('marker missing'), { code: 'cache_phase3_prerequisite_invalid' })
+        },
+        initializePhase4: async() => { calls.push('phase4:initialize'); return { schemaVersion: 7 } },
+      })
+
+      const result = await createCoordinator(deps).start()
+
+      assert.deepEqual(result, { status: 'fatal', reason: 'cache_phase3_prerequisite_invalid' })
+      assert.equal(calls.includes('phase4:initialize'), false)
+      assert.equal(require('node:crypto').createHash('sha256').update(fs.readFileSync(appDbPath)).digest('hex'), beforeHash)
+    } finally {
+      fixture.cleanup()
+    }
+  })
+
+  it('runs the cache prerequisite after Phase 3 and propagates the Phase 4 schema version', async() => {
+    const { calls, deps } = createDeps({
+      completePhase3Attestation: async() => { calls.push('phase3:attestation') },
+      getCachePhasePrerequisite: async() => {
+        calls.push('cache:prerequisite')
+        return { version: 1, markerName: 'legacy_data_v1.cross_artifact_complete', sourceSha256: 'f'.repeat(64), completedAtMs: 1 }
+      },
+      initializePhase4: async prerequisite => {
+        calls.push(`phase4:initialize:${prerequisite.markerName}`)
+        return { schemaVersion: 7 }
+      },
+    })
+
+    const result = await createCoordinator(deps).start()
+
+    assert.deepEqual(result, { status: 'ready', schemaVersion: 7 })
+    assert.ok(calls.indexOf('phase3:attestation') < calls.indexOf('cache:prerequisite'))
+    assert.ok(calls.indexOf('cache:prerequisite') < calls.indexOf('phase4:initialize:legacy_data_v1.cross_artifact_complete'))
+  })
+
   it('accepts a branch-dependent migration hook returning recovery or undefined', () => {
     const diagnostics = compileCoordinatorTypeFixture(`
       import type {

@@ -169,8 +169,13 @@ test('failed durable theme save preserves disk and published state and reclaims 
     assert.deepEqual(JSON.parse(await fsp.readFile(storePath, 'utf8')), { themes: [priorTheme] })
     assert.equal(await fsp.readFile(unrelatedAsset, 'utf8'), 'unrelated durable asset')
     assert.deepEqual(await fsp.readdir(assetRoot), ['existing.img'])
-    assert.equal(fs.existsSync(path.join(runTempRoot, 'theme-editor', staged.stagingId)), true)
+    assert.equal(
+      fs.existsSync(path.join(runTempRoot, 'theme-editor', staged.stagingId)),
+      process.platform == 'linux',
+    )
     assert.deepEqual(await fsp.readFile(externalImage), pngBytes)
+    await manager.discardThemeImage({ stagingId: staged.stagingId })
+    await assert.rejects(manager.discardThemeImage({ stagingId: staged.stagingId }), /theme_stage_invalid/)
   } finally {
     await store?.flush().catch(() => {})
     activeThemeStore = undefined

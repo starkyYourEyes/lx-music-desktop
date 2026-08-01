@@ -5,6 +5,8 @@ import { assertContainedPath } from '@main/utils/storagePaths'
 import type { RunTempHandle, RunTempChildOwnership } from '@main/utils/tempLifecycle'
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+const MAX_MEMORY_STAGES = 8
+const MAX_MEMORY_STAGE_BYTES = MAX_IMAGE_BYTES * MAX_MEMORY_STAGES
 
 export interface StagedThemeImage {
   stagingId: string
@@ -40,21 +42,35 @@ interface OwnedFile {
   identity: FileIdentity
 }
 
-interface StagedFile extends OwnedFile {
+interface DiskStagedFile extends OwnedFile {
+  backing: 'disk'
   stagingId: string
   previewPath: string
 }
 
-const isImage = (bytes: Buffer): boolean => {
-  if (bytes.length < 12) return false
-  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return true
-  if (bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff) return true
-  if (bytes.subarray(0, 6).toString('ascii') == 'GIF87a' || bytes.subarray(0, 6).toString('ascii') == 'GIF89a') return true
-  if (bytes.subarray(0, 2).toString('ascii') == 'BM') return true
-  if (bytes.subarray(0, 4).toString('ascii') == 'RIFF' && bytes.subarray(8, 12).toString('ascii') == 'WEBP') return true
-  const text = bytes.subarray(0, 1024).toString('utf8').trimStart().toLowerCase()
-  return text.startsWith('<svg') || (text.startsWith('<?xml') && text.includes('<svg'))
+interface MemoryStagedFile {
+  backing: 'memory'
+  stagingId: string
+  bytes: Buffer
+  mime: string
 }
+
+type StagedFile = DiskStagedFile | MemoryStagedFile
+type DirectoryHandle = Awaited<ReturnType<typeof fs.open>>
+
+const imageMime = (bytes: Buffer): string | null => {
+  if (bytes.length < 12) return null
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png'
+  if (bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff) return 'image/jpeg'
+  if (bytes.subarray(0, 6).toString('ascii') == 'GIF87a' || bytes.subarray(0, 6).toString('ascii') == 'GIF89a') return 'image/gif'
+  if (bytes.subarray(0, 2).toString('ascii') == 'BM') return 'image/bmp'
+  if (bytes.subarray(0, 4).toString('ascii') == 'RIFF' && bytes.subarray(8, 12).toString('ascii') == 'WEBP') return 'image/webp'
+  const text = bytes.subarray(0, 1024).toString('utf8').trimStart().toLowerCase()
+  return text.startsWith('<svg') || (text.startsWith('<?xml') && text.includes('<svg')) ? 'image/svg+xml' : null
+}
+
+const isImage = (bytes: Buffer): boolean => imageMime(bytes) != null
+const toDataUrl = (bytes: Buffer, mime: string): string => `data:${mime};base64,${bytes.toString('base64')}`
 
 const inspect = async(targetPath: string) => await fs.lstat(targetPath, { bigint: true })
 const identityOf = (stat: Awaited<ReturnType<typeof inspect>>): FileIdentity => ({
@@ -141,6 +157,7 @@ export const createThemeAssetManager = (input: {
   const legacyRoot = path.join(profileRoot, 'theme_images')
   const stages = new Map<string, StagedFile>()
   const stageTails = new Map<string, Promise<unknown>>()
+  let memoryStageBytes = 0
   let assetRootIdentity: { dev: string, ino: string } | null = null
 
   const getStagingOwnership = async(): Promise<RunTempChildOwnership> => {
@@ -156,6 +173,33 @@ export const createThemeAssetManager = (input: {
     const target = path.join(ownership.childPath, stagingId)
     assertDirectFilePath(ownership.childPath, target, 'theme_stage_invalid')
     return target
+  }
+
+  const assertStagingOwnership = async(ownership: RunTempChildOwnership): Promise<void> => {
+    const current = await getStagingOwnership()
+    if (current.runTempRoot != ownership.runTempRoot || current.childPath != ownership.childPath ||
+      !samePathIdentity(current.runTempIdentity, ownership.runTempIdentity) ||
+      !samePathIdentity(current.childIdentity, ownership.childIdentity)) throw new Error('theme_stage_invalid')
+  }
+
+  const openOwnedStagingChild = async(ownership: RunTempChildOwnership): Promise<Readonly<{
+    handle: DirectoryHandle
+    accessPath: string
+  }>> => {
+    let handle: DirectoryHandle | null = null
+    try {
+      await assertStagingOwnership(ownership)
+      handle = await fs.open(ownership.childPath, 'r')
+      const opened = await handle.stat({ bigint: true })
+      if (!opened.isDirectory() || !samePathIdentity(identityOf(opened), ownership.childIdentity)) {
+        throw new Error('theme_stage_invalid')
+      }
+      await assertStagingOwnership(ownership)
+      return Object.freeze({ handle, accessPath: `/proc/self/fd/${handle.fd}` })
+    } catch (error) {
+      try { await handle?.close() } catch {}
+      throw error
+    }
   }
 
   const ensureAssetRoot = async(): Promise<void> => {
@@ -196,6 +240,7 @@ export const createThemeAssetManager = (input: {
     assertDirectFilePath(rootPath, quarantinePath, errorCode)
     if (!await missing(quarantinePath)) throw new Error(errorCode)
     await fs.rename(owned.filePath, quarantinePath)
+    const movedIdentity = identityOf(await inspect(quarantinePath))
     try {
       await validateRoot()
       await assertRenamedOwnedFile(rootPath, { ...owned, filePath: quarantinePath }, errorCode)
@@ -203,7 +248,8 @@ export const createThemeAssetManager = (input: {
     } catch (error) {
       try {
         await validateRoot()
-        await assertRenamedOwnedFile(rootPath, { ...owned, filePath: quarantinePath }, errorCode)
+        const currentIdentity = identityOf(await inspect(quarantinePath))
+        if (!sameNode(currentIdentity, movedIdentity)) throw new Error(errorCode)
         if (await missing(owned.filePath)) await fs.rename(quarantinePath, owned.filePath)
       } catch {}
       throw error
@@ -224,16 +270,67 @@ export const createThemeAssetManager = (input: {
     } catch {}
   }
 
-  const writeOwnedFile = async(rootPath: string, targetPath: string, bytes: Buffer, errorCode: string): Promise<OwnedFile> => {
+  const removeOpenedFileIfCurrent = async(
+    openPath: string,
+    expectedIdentity: FileIdentity,
+    errorCode: string,
+  ): Promise<void> => {
+    const quarantinePath = path.join(
+      path.dirname(openPath),
+      `.${path.basename(openPath)}.quarantine-${crypto.randomUUID()}`,
+    )
+    if (!await missing(quarantinePath)) throw new Error(errorCode)
+    await fs.rename(openPath, quarantinePath)
+    const movedIdentity = identityOf(await inspect(quarantinePath))
+    if (!sameNode(movedIdentity, expectedIdentity)) {
+      try {
+        const currentIdentity = identityOf(await inspect(quarantinePath))
+        if (!sameNode(currentIdentity, movedIdentity)) throw new Error(errorCode)
+        if (await missing(openPath)) await fs.rename(quarantinePath, openPath)
+      } catch {}
+      return
+    }
+    try {
+      const currentIdentity = identityOf(await inspect(quarantinePath))
+      if (!sameNode(currentIdentity, movedIdentity)) throw new Error(errorCode)
+      await fs.unlink(quarantinePath)
+    } catch {
+      try {
+        const currentIdentity = identityOf(await inspect(quarantinePath))
+        if (!sameNode(currentIdentity, movedIdentity)) throw new Error(errorCode)
+        if (await missing(openPath)) await fs.rename(quarantinePath, openPath)
+      } catch {}
+    }
+  }
+
+  const writeOwnedFile = async(
+    rootPath: string,
+    targetPath: string,
+    bytes: Buffer,
+    errorCode: string,
+    options: {
+      openPath?: string
+      validateRoot?: () => Promise<void>
+    } = {},
+  ): Promise<OwnedFile> => {
     assertDirectFilePath(rootPath, targetPath, errorCode)
-    const handle = await fs.open(targetPath, 'wx')
+    const openPath = options.openPath ?? targetPath
+    const handle = await fs.open(openPath, 'wx')
     let openedIdentity: FileIdentity | null = null
     try {
-      openedIdentity = identityOf(await handle.stat({ bigint: true }))
+      const opened = await handle.stat({ bigint: true })
+      if (!opened.isFile()) throw new Error(errorCode)
+      openedIdentity = identityOf(opened)
+      await options.validateRoot?.()
+      const created = await inspect(targetPath)
+      if (created.isSymbolicLink() || !created.isFile() || !sameFile(identityOf(created), openedIdentity)) {
+        throw new Error(errorCode)
+      }
       await handle.writeFile(bytes)
       await handle.sync()
       const writtenIdentity = identityOf(await handle.stat({ bigint: true }))
       await handle.close()
+      await options.validateRoot?.()
       const pathIdentity = identityOf(await inspect(targetPath))
       if (!sameFile(writtenIdentity, pathIdentity)) throw new Error(errorCode)
       return { filePath: targetPath, identity: pathIdentity }
@@ -241,8 +338,11 @@ export const createThemeAssetManager = (input: {
       try { await handle.close() } catch {}
       if (openedIdentity != null) {
         try {
-          const current = identityOf(await inspect(targetPath))
-          if (sameNode(current, openedIdentity)) await fs.unlink(targetPath)
+          if (openPath != targetPath) await removeOpenedFileIfCurrent(openPath, openedIdentity, errorCode)
+          else {
+            const current = identityOf(await inspect(openPath))
+            if (sameNode(current, openedIdentity)) await fs.unlink(openPath)
+          }
         } catch {}
       }
       throw error
@@ -250,19 +350,35 @@ export const createThemeAssetManager = (input: {
   }
 
   const verifyStaged = async(stagingId: string, previewPath?: string): Promise<{ record: StagedFile, bytes: Buffer }> => {
-    const ownership = await getStagingOwnership()
+    if (!isOpaqueId(stagingId)) throw new Error('theme_stage_invalid')
     const record = stages.get(stagingId)
-    if (record == null || record.filePath != stagePath(ownership, stagingId) ||
+    if (record == null) throw new Error('theme_stage_invalid')
+    if (record.backing == 'memory') {
+      if (record.bytes.length > MAX_IMAGE_BYTES || imageMime(record.bytes) != record.mime ||
+        (previewPath != null && previewPath != toDataUrl(record.bytes, record.mime))) {
+        throw new Error('theme_stage_invalid')
+      }
+      return { record, bytes: Buffer.from(record.bytes) }
+    }
+    const ownership = await getStagingOwnership()
+    if (record.filePath != stagePath(ownership, stagingId) ||
       (previewPath != null && previewPath != record.previewPath)) throw new Error('theme_stage_invalid')
     await assertOwnedFile(ownership.childPath, record, 'theme_stage_invalid')
     const bytes = await readStableRegularFile(record.filePath, 'theme_stage_invalid', 'theme_stage_invalid')
-    await getStagingOwnership()
+    await assertStagingOwnership(ownership)
     await assertOwnedFile(ownership.childPath, record, 'theme_stage_invalid')
     if (!isImage(bytes)) throw new Error('theme_stage_invalid')
     return { record, bytes }
   }
 
   const retireStage = async(record: StagedFile): Promise<void> => {
+    if (record.backing == 'memory') {
+      if (stages.get(record.stagingId) == record) {
+        stages.delete(record.stagingId)
+        memoryStageBytes -= record.bytes.length
+      }
+      return
+    }
     const ownership = await getStagingOwnership()
     await quarantineAndRemove(
       ownership.childPath,
@@ -299,6 +415,89 @@ export const createThemeAssetManager = (input: {
       }
     }
     throw new Error('theme_asset_collision')
+  }
+
+  const createDiskStage = async(bytes: Buffer): Promise<DiskStagedFile> => {
+    const ownership = await getStagingOwnership()
+    const child = await openOwnedStagingChild(ownership)
+    let owned: OwnedFile | null = null
+    let stagingId = ''
+    let failure: unknown
+    try {
+      for (let attempts = 0; attempts < 8; attempts++) {
+        stagingId = crypto.randomBytes(16).toString('hex')
+        const target = stagePath(ownership, stagingId)
+        try {
+          owned = await writeOwnedFile(ownership.childPath, target, bytes, 'theme_stage_invalid', {
+            openPath: path.join(child.accessPath, stagingId),
+            validateRoot: async() => { await assertStagingOwnership(ownership) },
+          })
+          break
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code != 'EEXIST') throw error
+        }
+      }
+      if (owned == null) throw new Error('theme_stage_collision')
+    } catch (error) {
+      failure = error
+    }
+    try {
+      await child.handle.close()
+    } catch (error) {
+      failure ??= error
+    }
+    if (failure != null) {
+      if (owned != null) {
+        await removeOwnedNodeIfCurrent(
+          ownership.childPath,
+          owned.filePath,
+          owned.identity,
+          async() => { await assertStagingOwnership(ownership) },
+          'theme_stage_invalid',
+        )
+      }
+      throw failure instanceof Error ? failure : new Error('theme_stage_invalid')
+    }
+    const record: DiskStagedFile = {
+      ...owned!,
+      backing: 'disk',
+      stagingId,
+      previewPath: owned!.filePath,
+    }
+    try {
+      await assertStagingOwnership(ownership)
+      await assertOwnedFile(ownership.childPath, record, 'theme_stage_invalid')
+      return record
+    } catch (error) {
+      await removeOwnedNodeIfCurrent(
+        ownership.childPath,
+        record.filePath,
+        record.identity,
+        async() => { await assertStagingOwnership(ownership) },
+        'theme_stage_invalid',
+      )
+      throw error
+    }
+  }
+
+  const createMemoryStage = (bytes: Buffer, mime: string): StagedThemeImage => {
+    if (stages.size >= MAX_MEMORY_STAGES || memoryStageBytes + bytes.length > MAX_MEMORY_STAGE_BYTES) {
+      throw new Error('theme_stage_capacity')
+    }
+    for (let attempts = 0; attempts < 8; attempts++) {
+      const stagingId = crypto.randomBytes(16).toString('hex')
+      if (stages.has(stagingId)) continue
+      const record: MemoryStagedFile = {
+        backing: 'memory',
+        stagingId,
+        bytes: Buffer.from(bytes),
+        mime,
+      }
+      stages.set(stagingId, record)
+      memoryStageBytes += record.bytes.length
+      return { stagingId, previewPath: toDataUrl(record.bytes, record.mime) }
+    }
+    throw new Error('theme_stage_collision')
   }
 
   const publishAsset = async(temp: OwnedFile, preferredName?: string): Promise<{ promoted: PromotedThemeImage, final: OwnedFile }> => {
@@ -384,25 +583,14 @@ export const createThemeAssetManager = (input: {
       }
     },
     stageThemeImage: async({ sourcePath }) => {
-      const ownership = await getStagingOwnership()
       const source = path.resolve(sourcePath)
       const bytes = await readStableRegularFile(source, 'theme_image_invalid', 'theme_image_too_large')
-      if (!isImage(bytes)) throw new Error('theme_image_invalid')
-      await getStagingOwnership()
-      for (let attempts = 0; attempts < 8; attempts++) {
-        const stagingId = crypto.randomBytes(16).toString('hex')
-        const target = stagePath(ownership, stagingId)
-        try {
-          const owned = await writeOwnedFile(ownership.childPath, target, bytes, 'theme_stage_invalid')
-          const record = { ...owned, stagingId, previewPath: target }
-          await assertOwnedFile(ownership.childPath, record, 'theme_stage_invalid')
-          stages.set(stagingId, record)
-          return { stagingId, previewPath: target }
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code != 'EEXIST') throw error
-        }
-      }
-      throw new Error('theme_stage_collision')
+      const mime = imageMime(bytes)
+      if (mime == null) throw new Error('theme_image_invalid')
+      if (process.platform != 'linux') return createMemoryStage(bytes, mime)
+      const record = await createDiskStage(bytes)
+      stages.set(record.stagingId, record)
+      return { stagingId: record.stagingId, previewPath: record.previewPath }
     },
     promoteThemeImage: async(staged, commit) => await withStage(staged.stagingId, async() => {
       const { record, bytes } = await verifyStaged(staged.stagingId, staged.previewPath)

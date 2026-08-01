@@ -209,6 +209,55 @@ describe('typed playback IPC', () => {
     assert.deepEqual(workerCalls, [])
   })
 
+  it('rejects oversized playback scalars at request and result IPC boundaries', async() => {
+    const requestCalls = []
+    const resultCalls = []
+    const oversizedSource = 's'.repeat(1025)
+    const oversizedIdentity = 'i'.repeat(16 * 1024 + 1)
+    const oversizedDisplay = 'd'.repeat(4 * 1024 + 1)
+    const invalidListening = {
+      ...listening,
+      tracks: [{
+        baselinePlayedMs: 0,
+        livePlayedMs: 0,
+        baselineActiveMs: 0,
+        liveActiveMs: 0,
+        playedMs: 0,
+        activeMs: 0,
+        source: 'webdav',
+        sourceTrackId: 'track',
+        name: 'Name',
+        singer: oversizedDisplay,
+        durationMs: null,
+      }],
+    }
+    const { createPlaybackHandlers } = loadSourceModule(handlerPath)
+    const handlers = createPlaybackHandlers({
+      playbackStart: request => { requestCalls.push(['start', request]); return { mode: 'activity', ack: activityAck(1) } },
+      playbackCommit: () => activityAck(),
+      playbackUpdateResume: request => { requestCalls.push(['resume', request]); return resumeAck() },
+      playbackRecordPreplayFailure: request => { requestCalls.push(['failure', request]); return activityAck(1) },
+      playbackGetRecent: () => { resultCalls.push('recent'); return [{ ...recentTrack, name: oversizedDisplay }] },
+      playbackGetListeningStats: () => { resultCalls.push('listening'); return invalidListening },
+      playbackGetResume: () => { resultCalls.push('resume'); return { ...savedResume, source: oversizedSource } },
+    })
+
+    await assert.rejects(() => handlers.start(start({
+      track: { ...start().track, source: oversizedSource },
+    })))
+    await assert.rejects(() => handlers.preplayFailure({
+      ...preplayFailure(),
+      track: { ...preplayFailure().track, sourceTrackId: oversizedIdentity },
+    }))
+    await assert.rejects(() => handlers.resumeUpdate({ ...resumeUpdate(), listId: oversizedIdentity }))
+    assert.deepEqual(requestCalls, [])
+
+    await assert.rejects(() => handlers.recentGet({ version: 1, limit: 2 }), /Invalid playback recent result/)
+    await assert.rejects(() => handlers.listeningGet(undefined), /Invalid playback listening result/)
+    await assert.rejects(() => handlers.resumeGet(undefined), /Invalid playback resume result/)
+    assert.deepEqual(resultCalls, ['recent', 'listening', 'resume'])
+  })
+
   it('snapshots an exact recent query data envelope before worker dispatch', async() => {
     let limitReads = 0
     let workerCalls = 0

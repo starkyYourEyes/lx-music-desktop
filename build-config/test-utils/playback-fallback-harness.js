@@ -220,6 +220,7 @@ const createFakeClock = (start = 0) => {
       await Promise.resolve()
       await Promise.resolve()
     },
+    get pendingTimerCount() { return timers.size },
   }
   return clock
 }
@@ -310,6 +311,7 @@ const createPoolHarness = (options = {}) => {
     const devToolsIds = []
     const statusEvents = []
     const loggedErrors = []
+    const remainingDisposeFailures = new Map(options.disposeFailures ?? [])
     const runtimes = new Map()
     const proxyListeners = new Set()
     const createWaiters = new Map()
@@ -408,6 +410,11 @@ const createPoolHarness = (options = {}) => {
         disposedIds.push(runtime.identity.apiId)
         disposedGenerations.push(runtime.identity.generation)
         notify(disposeWaiters, runtime.identity.apiId, runtime.identity.generation)
+        const remainingFailures = remainingDisposeFailures.get(runtime.identity.apiId) ?? 0
+        if (remainingFailures > 0) {
+          remainingDisposeFailures.set(runtime.identity.apiId, remainingFailures - 1)
+          throw new Error(`dispose ${runtime.identity.apiId} failed`)
+        }
         const disposeError = options.disposeErrors?.get(runtime.identity.apiId)
         if (disposeError) throw disposeError
         if (options.disposeRejectIds?.includes(runtime.identity.apiId)) throw new Error(`dispose ${runtime.identity.apiId} failed`)

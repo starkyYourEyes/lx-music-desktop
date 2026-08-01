@@ -10,6 +10,7 @@ import type {
 import { createPlaybackRecorder } from '@renderer/core/playbackRecorder'
 import type { PlaybackRecorder, PlaybackRecorderAction } from '@renderer/core/playbackRecorder'
 import { nextLocalDayBoundary } from '../../playbackRecorder/boundary'
+import type { PlaybackDayBoundary, PlaybackSample } from '../../playbackRecorder/types'
 import { createPlaybackComparison } from '../../playbackRecorder/comparison'
 import type { PlaybackComparison } from '../../playbackRecorder/comparison'
 import {
@@ -76,6 +77,8 @@ export interface PlaybackRecorderController {
   stopTimers: () => void
 }
 
+type TimedPlaybackSample = Omit<PlaybackSample, 'occurredAtMs'> & { occurredAtMs: number }
+
 const defaultTimers: PlaybackTimers = {
   setInterval: (callback, delayMs) => globalThis.setInterval(callback, delayMs),
   clearInterval: timer => { globalThis.clearInterval(timer as ReturnType<typeof setInterval>) },
@@ -108,9 +111,10 @@ export const createPlaybackRecorderController = (
   let activePolicy: PlaybackStartCommandV1['consent'] | null = null
   let checkpointTimer: unknown | null = null
   let dayBoundaryTimer: unknown | null = null
+  let nextDayBoundary: PlaybackDayBoundary | null = null
 
   const positionMs = (): number => finiteNonNegative(getPositionMs())
-  const timed = () => ({
+  const timed = (): TimedPlaybackSample => ({
     monotonicMs: finiteNonNegative(monotonicNow()),
     positionMs: positionMs(),
     occurredAtMs: finiteNonNegative(now()),
@@ -153,7 +157,7 @@ export const createPlaybackRecorderController = (
     return after
   }
 
-  const startRequest = (): PlaybackStartCommandV1 | null => {
+  const startRequest = (occurredAtMs: number): PlaybackStartCommandV1 | null => {
     if (draft == null) return null
     const durationMs = getDurationMs()
     return {
@@ -167,14 +171,14 @@ export const createPlaybackRecorderController = (
       resume: draft.resume,
       startReason: draft.startReason,
       startPositionMs: draft.startPositionMs,
-      occurredAtMs: finiteNonNegative(now()),
+      occurredAtMs,
       consent: { ...getPolicy() },
     }
   }
 
-  const ensureStarted = (): boolean => {
+  const ensureStarted = (occurredAtMs: number): boolean => {
     if (groupStarted) return true
-    const request = startRequest()
+    const request = startRequest(occurredAtMs)
     if (request == null) return false
     dispatch({ type: 'start-requested', request })
     activePolicy = { ...request.consent }
@@ -199,18 +203,74 @@ export const createPlaybackRecorderController = (
     refreshAfterFlush(false)
   }
 
-  const scheduleDayBoundary = (): void => {
-    if (dayBoundaryTimer != null) timers.clearTimeout(dayBoundaryTimer)
-    const boundary = nextLocalDayBoundary({ afterMs: now(), timeZone })
-    const delayMs = Math.min(MAX_TIMER_DELAY_MS, Math.max(0, boundary.occurredAtMs - now()))
-    dayBoundaryTimer = timers.setTimeout(() => {
-      dayBoundaryTimer = null
+  const followingDayBoundary = (boundary: PlaybackDayBoundary): PlaybackDayBoundary => nextLocalDayBoundary({
+    afterMs: boundary.occurredAtMs,
+    timeZone,
+  })
+
+  const ensureNextDayBoundary = (afterMs: number): PlaybackDayBoundary => {
+    nextDayBoundary ??= nextLocalDayBoundary({ afterMs, timeZone })
+    return nextDayBoundary
+  }
+
+  const isActivePhase = (phase: ReturnType<PlaybackRecorder['getState']>['phase']): boolean =>
+    phase == 'playing' || phase == 'paused' || phase == 'buffering'
+
+  const catchUpDayBoundaries = (current: TimedPlaybackSample): void => {
+    let boundary = ensureNextDayBoundary(recorder.getState().sample?.occurredAtMs ?? current.occurredAtMs)
+    const state = recorder.getState()
+    if (!isActivePhase(state.phase)) {
+      while (boundary.occurredAtMs <= current.occurredAtMs) {
+        boundary = followingDayBoundary(boundary)
+      }
+      nextDayBoundary = boundary
+      return
+    }
+
+    const previous = state.sample
+    while (previous?.occurredAtMs != null && boundary.occurredAtMs < previous.occurredAtMs) {
+      boundary = followingDayBoundary(boundary)
+    }
+    const wallDeltaMs = previous?.occurredAtMs == null ? 0 : current.occurredAtMs - previous.occurredAtMs
+    const monotonicDeltaMs = previous == null ? 0 : current.monotonicMs - previous.monotonicMs
+    const mediaDeltaMs = previous == null ? 0 : current.positionMs - previous.positionMs
+    const canInterpolate = previous?.occurredAtMs != null && wallDeltaMs > 0 &&
+      monotonicDeltaMs >= 0 && mediaDeltaMs >= 0 &&
+      mediaDeltaMs <= monotonicDeltaMs * state.playbackRate + 1_000
+
+    while (boundary.occurredAtMs <= current.occurredAtMs) {
+      let monotonicMs = previous?.monotonicMs ?? current.monotonicMs
+      let positionMs = previous?.positionMs ?? current.positionMs
+      if (canInterpolate && previous?.occurredAtMs != null) {
+        // Interpolate from the original endpoints so rounded pieces telescope to the exact final totals.
+        const ratio = (boundary.occurredAtMs - previous.occurredAtMs) / wallDeltaMs
+        monotonicMs = Math.round(previous.monotonicMs + monotonicDeltaMs * ratio)
+        positionMs = Math.round(previous.positionMs + mediaDeltaMs * ratio)
+      }
+      // Unsafe intervals keep the old baseline at every boundary; their delta can only land after rotation.
       dispatchBoundary({
         type: 'day-boundary',
-        ...timed(),
+        monotonicMs: finiteNonNegative(monotonicMs),
+        positionMs: finiteNonNegative(positionMs),
+        occurredAtMs: boundary.occurredAtMs,
         nextLocalDay: boundary.nextLocalDay,
         utcOffsetMinutes: boundary.utcOffsetMinutes,
       })
+      boundary = followingDayBoundary(boundary)
+    }
+    nextDayBoundary = boundary
+  }
+
+  const scheduleDayBoundary = (): void => {
+    if (dayBoundaryTimer != null) timers.clearTimeout(dayBoundaryTimer)
+    const scheduledAtMs = finiteNonNegative(now())
+    const boundary = ensureNextDayBoundary(scheduledAtMs)
+    const delayMs = Math.min(MAX_TIMER_DELAY_MS, Math.max(0, boundary.occurredAtMs - scheduledAtMs))
+    dayBoundaryTimer = timers.setTimeout(() => {
+      dayBoundaryTimer = null
+      const current = timed()
+      catchUpDayBoundaries(current)
+      if (isActivePhase(recorder.getState().phase)) dispatch({ type: 'sample', ...current })
       scheduleDayBoundary()
     }, delayMs)
   }
@@ -228,35 +288,45 @@ export const createPlaybackRecorderController = (
       activePolicy = null
     },
     nativePlaying(playbackRate, resumeReason = 'device') {
-      if (!ensureStarted()) return
+      const current = timed()
+      if (!ensureStarted(current.occurredAtMs)) return
+      catchUpDayBoundaries(current)
       const phase = recorder.getState().phase
       if (phase == 'paused') {
-        dispatchBoundary({ type: 'resume', reason: resumeReason, playbackRate, ...timed() })
+        dispatchBoundary({ type: 'resume', reason: resumeReason, playbackRate, ...current })
         return
       }
       if (phase == 'buffering') {
-        dispatch({ type: 'buffering-end', playbackRate, ...timed() })
+        dispatch({ type: 'buffering-end', playbackRate, ...current })
         return
       }
       const firstPlaying = phase == 'pending'
-      dispatch({ type: 'native-playing', playbackRate, ...timed() })
+      dispatch({ type: 'native-playing', playbackRate, ...current })
       if (firstPlaying) refreshAfterFlush(true)
     },
     sample() {
       if (!groupStarted) return
-      dispatch({ type: 'sample', monotonicMs: monotonicNow(), positionMs: positionMs() })
+      const current = timed()
+      catchUpDayBoundaries(current)
+      dispatch({ type: 'sample', ...current })
     },
     pause(reason) {
       if (recorder.getState().phase != 'playing') return
-      dispatchBoundary({ type: 'pause', reason, ...timed() })
+      const current = timed()
+      catchUpDayBoundaries(current)
+      dispatchBoundary({ type: 'pause', reason, ...current })
     },
     resume(reason, playbackRate) {
       if (recorder.getState().phase != 'paused') return
-      dispatchBoundary({ type: 'resume', reason, playbackRate, ...timed() })
+      const current = timed()
+      catchUpDayBoundaries(current)
+      dispatchBoundary({ type: 'resume', reason, playbackRate, ...current })
     },
     bufferingStart() {
       if (recorder.getState().phase != 'playing') return
-      dispatchBoundary({ type: 'buffering-start', ...timed() })
+      const current = timed()
+      catchUpDayBoundaries(current)
+      dispatchBoundary({ type: 'buffering-start', ...current })
     },
     seek(intent) {
       if (!groupStarted && draft != null) {
@@ -265,55 +335,73 @@ export const createPlaybackRecorderController = (
       }
       const phase = recorder.getState().phase
       if (phase != 'playing' && phase != 'paused' && phase != 'buffering') return
+      const current = timed()
+      catchUpDayBoundaries(current)
       dispatchBoundary({
         type: 'seek-requested',
         origin: intent.origin,
         fromMs: finiteNonNegative(intent.fromMs),
         toMs: finiteNonNegative(intent.toMs),
-        monotonicMs: finiteNonNegative(monotonicNow()),
-        occurredAtMs: finiteNonNegative(now()),
+        monotonicMs: current.monotonicMs,
+        occurredAtMs: current.occurredAtMs,
       })
     },
     rateChanged(playbackRate) {
       if (recorder.getState().phase != 'playing') return
-      dispatchBoundary({ type: 'rate-changed', playbackRate, ...timed() })
+      const current = timed()
+      catchUpDayBoundaries(current)
+      dispatchBoundary({ type: 'rate-changed', playbackRate, ...current })
     },
     error(error) {
-      const phase = recorder.getState().phase
+      let phase = recorder.getState().phase
+      const current = timed()
       if (!groupStarted) {
-        if (error.recoverable || !ensureStarted()) return
+        if (error.recoverable || !ensureStarted(current.occurredAtMs)) return
       } else if (phase == 'idle' || phase == 'closing') {
         return
       }
-      dispatchBoundary({ type: 'error', ...error, ...timed() })
+      catchUpDayBoundaries(current)
+      phase = recorder.getState().phase
+      if (phase == 'idle' || phase == 'closing') return
+      dispatchBoundary({ type: 'error', ...error, ...current })
     },
     advance(advance) {
       if (advance.reason == 'natural_end') return
       const phase = recorder.getState().phase
       if (phase != 'playing' && phase != 'paused' && phase != 'buffering') return
-      dispatchBoundary({ type: 'skip', reason: advance.reason, automatic: advance.automatic, ...timed() })
+      const current = timed()
+      catchUpDayBoundaries(current)
+      dispatchBoundary({ type: 'skip', reason: advance.reason, automatic: advance.automatic, ...current })
     },
     naturalEnd() {
       const phase = recorder.getState().phase
       if (phase != 'playing' && phase != 'paused' && phase != 'buffering') return
-      dispatchBoundary({ type: 'natural-end', ...timed() })
+      const current = timed()
+      catchUpDayBoundaries(current)
+      dispatchBoundary({ type: 'natural-end', ...current })
     },
     checkpoint() {
       const phase = recorder.getState().phase
       if (phase != 'playing' && phase != 'paused' && phase != 'buffering') return
-      dispatchBoundary({ type: 'periodic-checkpoint', ...timed() })
+      const current = timed()
+      catchUpDayBoundaries(current)
+      dispatchBoundary({ type: 'periodic-checkpoint', ...current })
     },
     teardown() {
       const phase = recorder.getState().phase
       if (phase != 'playing' && phase != 'paused' && phase != 'buffering') return
-      dispatchBoundary({ type: 'teardown', ...timed() })
+      const current = timed()
+      catchUpDayBoundaries(current)
+      dispatchBoundary({ type: 'teardown', ...current })
     },
     startTimers() {
       if (checkpointTimer == null) {
         checkpointTimer = timers.setInterval(() => {
           const phase = recorder.getState().phase
           if (phase != 'playing' && phase != 'paused' && phase != 'buffering') return
-          dispatchBoundary({ type: 'periodic-checkpoint', ...timed() })
+          const current = timed()
+          catchUpDayBoundaries(current)
+          dispatchBoundary({ type: 'periodic-checkpoint', ...current })
         }, CHECKPOINT_INTERVAL_MS)
       }
       if (dayBoundaryTimer == null) scheduleDayBoundary()

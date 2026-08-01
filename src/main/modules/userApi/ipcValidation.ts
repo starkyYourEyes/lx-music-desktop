@@ -16,13 +16,13 @@ const hasExactKeys = (value: Record<string, unknown>, required: string[], option
     keys.every(key => required.includes(key) || optional.includes(key))
 }
 
-export type UserApiRequestPayload =
-  | { requestKey: string, data: unknown }
-  | { apiId: string, requestId: string, data: unknown }
+export interface UserApiRequestPayload { apiId: string, requestId: string, data: unknown }
 
-export type UserApiCancellationPayload =
-  | string
-  | { apiId: string, requestId: string, reason?: 'cancelled' | 'timeout' }
+export interface UserApiCancellationPayload {
+  apiId: string
+  requestId: string
+  reason?: 'cancelled' | 'timeout'
+}
 
 const invalidEnsurePayload = (): never => {
   throw new Error('Invalid User API ensure payload')
@@ -34,9 +34,6 @@ const invalidRuntimeLeasePayload = (): never => {
 
 export const parseUserApiRequestPayload = (value: unknown): UserApiRequestPayload => {
   if (!isPlainObject(value)) throw new Error('Invalid User API request payload')
-  if (hasExactKeys(value, ['requestKey', 'data']) && isIdentifier(value.requestKey)) {
-    return { requestKey: value.requestKey, data: value.data }
-  }
   if (hasExactKeys(value, ['apiId', 'requestId', 'data']) && isIdentifier(value.apiId) && isIdentifier(value.requestId)) {
     return { apiId: value.apiId, requestId: value.requestId, data: value.data }
   }
@@ -44,7 +41,6 @@ export const parseUserApiRequestPayload = (value: unknown): UserApiRequestPayloa
 }
 
 export const parseUserApiCancellationPayload = (value: unknown): UserApiCancellationPayload => {
-  if (isIdentifier(value)) return value
   if (!isPlainObject(value) || !hasExactKeys(value, ['apiId', 'requestId'], ['reason'])) {
     throw new Error('Invalid User API cancellation payload')
   }

@@ -14,6 +14,7 @@ import type {
 export interface PlaybackSample {
   monotonicMs: number
   positionMs: number
+  occurredAtMs: number | null
 }
 
 export interface PlaybackSessionState {
@@ -40,6 +41,7 @@ interface TimedAction {
 interface SampleAction {
   monotonicMs: number
   positionMs: number
+  occurredAtMs: number
 }
 
 export type PlaybackRecorderAction =

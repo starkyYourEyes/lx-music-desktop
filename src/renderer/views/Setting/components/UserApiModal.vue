@@ -137,6 +137,13 @@ export default {
         message: detail,
       })
     },
+    reconcileApiList(apiList, previousCustomIds) {
+      userApi.list = apiList
+      const selectedId = appSetting['common.apiSource']
+      if (!previousCustomIds.has(selectedId) || apiList.some(api => api.id == selectedId)) return
+      const fallback = apiSourceInfo.find(api => !api.disabled) ?? apiList[0]
+      setApiSource(fallback?.id ?? '')
+    },
     isGitHubViewCurrent(viewGeneration) {
       return this.modelValue && this.githubViewGeneration == viewGeneration
     },
@@ -168,6 +175,7 @@ export default {
       const action = 'import'
       this.githubAction = action
       const viewGeneration = this.githubViewGeneration
+      const oldCustomIds = new Set(this.apiList.map(api => api.id))
       this.githubStatus = this.$t('user_api__github_importing')
       try {
         const snapshot = await getGitHubUserApiSnapshot()
@@ -187,16 +195,10 @@ export default {
           return
         }
 
-        const oldCustomIds = new Set(this.apiList.map(api => api.id))
         const items = await downloadGitHubUserApiSnapshot(snapshot)
         if (!this.isGitHubViewCurrent(viewGeneration)) return
         const apiList = await replaceUserApisFromGitHub(items)
-        userApi.list = apiList
-        const selectedId = appSetting['common.apiSource']
-        if (oldCustomIds.has(selectedId) && !apiList.some(api => api.id == selectedId)) {
-          const fallback = apiSourceInfo.find(api => !api.disabled) ?? apiList[0]
-          setApiSource(fallback?.id ?? '')
-        }
+        this.reconcileApiList(apiList, oldCustomIds)
         if (!this.isGitHubViewCurrent(viewGeneration)) return
         this.githubStatus = this.$t('user_api__github_import_success', {
           version: snapshot.version,
@@ -204,7 +206,7 @@ export default {
         })
       } catch (err) {
         if (err instanceof Error && 'apiList' in err && Array.isArray(err.apiList)) {
-          userApi.list = err.apiList
+          this.reconcileApiList(err.apiList, oldCustomIds)
         }
         if (!this.isGitHubViewCurrent(viewGeneration)) return
         const message = this.formatGitHubError(err)

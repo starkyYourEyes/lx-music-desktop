@@ -23,11 +23,13 @@ const dbService = require('../../src/main/worker/dbService/db.ts')
 const repository = require('../../src/main/worker/dbService/modules/playback/index.ts')
 
 const tempDirs = []
+const playbackPipelineClocks = []
 const groupA = '11111111-1111-4111-8111-111111111111'
 const groupB = '22222222-2222-4222-8222-222222222222'
 const startAt = Date.parse('2026-03-08T05:00:00.000Z')
 
 afterEach(() => {
+  for (const clock of playbackPipelineClocks.splice(0)) clock.alive = false
   try { dbService.close() } catch {}
   for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
 })
@@ -141,6 +143,87 @@ const total = db => db.prepare(`
     baseline_active_ms AS baselineActiveMs, live_active_ms AS liveActiveMs,
     updated_at_ms AS updatedAtMs FROM activity_totals WHERE id = 1
 `).get()
+
+const createPlaybackPipeline = ({
+  occurredAtMs,
+  monotonicMs = 0,
+  positionMs = 0,
+  timeZone = 'America/New_York',
+  phase = 'playing',
+}) => {
+  const recorderPath = path.resolve(__dirname, '../../src/renderer/core/playbackRecorder/index.ts')
+  const hookPath = path.resolve(__dirname, '../../src/renderer/core/useApp/usePlayer/usePlaybackRecorder.ts')
+  const current = { occurredAtMs, monotonicMs, positionMs, alive: true }
+  playbackPipelineClocks.push(current)
+  const timeouts = []
+  const commands = []
+  const timers = {
+    setInterval: () => ({ type: 'interval' }),
+    clearInterval: () => {},
+    setTimeout(callback, delayMs) {
+      const timer = { callback, delayMs, cleared: false, fired: false }
+      timeouts.push(timer)
+      return timer
+    },
+    clearTimeout(timer) { timer.cleared = true },
+  }
+  const recorder = loadTsModule(recorderPath, {
+    '../../utils/playback': { sendPlaybackCommand: async() => { throw new Error('unexpected default transport') } },
+  }).createPlaybackRecorder({
+    isAlive: () => current.alive,
+    transport: async command => {
+      commands.push(command)
+      switch (command.kind) {
+        case 'start': return repository.playbackStart(command.request)
+        case 'commit': return repository.playbackCommit(command.request)
+        default: throw new Error(`unexpected playback command: ${command.kind}`)
+      }
+    },
+  })
+  const controller = loadTsModule(hookPath, {
+    '@renderer/core/playbackRecorder': { createPlaybackRecorder: () => recorder },
+    '@renderer/store/recentPlay/action': { initRecentPlayList: async() => {} },
+    '@renderer/store/listeningTime/action': { initListeningTimeStats: async() => {} },
+    '@renderer/utils/ipc': { registerShutdownFlusher: () => () => {} },
+    '@renderer/plugins/player': {},
+    '@common/utils/vueTools': { onBeforeUnmount: () => {} },
+  }).createPlaybackRecorderController({
+    recorder,
+    now: () => current.occurredAtMs,
+    monotonicNow: () => current.monotonicMs,
+    getPositionMs: () => current.positionMs,
+    getDurationMs: () => null,
+    createUuid: () => groupA,
+    timeZone,
+    timers,
+  })
+
+  controller.startTimers()
+  controller.select({
+    track: { ...track(), durationMs: null },
+    context: { type: 'playlist', id: 'list-one' },
+    resume: { listId: 'list-one', indexHint: 3 },
+    startReason: 'select',
+    startPositionMs: positionMs,
+  })
+  controller.nativePlaying(1)
+  if (phase == 'paused') controller.pause('user')
+  if (phase == 'buffering') controller.bufferingStart()
+
+  return {
+    commands,
+    controller,
+    current,
+    recorder,
+    stop() { current.alive = false },
+    fireNextBoundary() {
+      const timer = timeouts.find(candidate => !candidate.cleared && !candidate.fired)
+      assert.ok(timer, 'expected a scheduled civil-day boundary')
+      timer.fired = true
+      timer.callback()
+    },
+  }
+}
 
 const integrity = db => ({
   quick: db.pragma('quick_check'),
@@ -648,6 +731,146 @@ describe('atomic playback repository', () => {
     }
 
     assert.deepEqual(repository.playbackCommit(commitAt(1, 0)), started.ack)
+  })
+
+  it('rotates exact and delayed midnight callbacks at the exact boundary and drains later commands', async() => {
+    const cases = [
+      { label: 'exact', delayMs: 0, expectedPriorMs: 10_000, expectedCurrentMs: 0 },
+      { label: '+1 ms', delayMs: 1, expectedPriorMs: 10_000, expectedCurrentMs: 1 },
+      { label: 'materially delayed', delayMs: 20_000, expectedPriorMs: 10_000, expectedCurrentMs: 20_000 },
+    ]
+
+    for (const testCase of cases) {
+      const db = await createStore()
+      const startMs = Date.parse('2026-01-02T04:59:50.000Z')
+      const pipeline = createPlaybackPipeline({ occurredAtMs: startMs })
+      assert.equal(await pipeline.recorder.flush({ timeoutMs: 1_000 }), true, testCase.label)
+
+      const elapsedMs = 10_000 + testCase.delayMs
+      Object.assign(pipeline.current, {
+        occurredAtMs: startMs + elapsedMs,
+        monotonicMs: elapsedMs,
+        positionMs: elapsedMs,
+      })
+      pipeline.fireNextBoundary()
+      pipeline.controller.checkpoint()
+
+      assert.equal(await pipeline.recorder.flush({ timeoutMs: 1_000 }), true, testCase.label)
+      assert.equal(pipeline.recorder.getState().outbox.length, 0, testCase.label)
+      const boundary = pipeline.commands.find(command => command.kind == 'commit' && command.request.boundary != null)
+      assert.equal(boundary.request.checkpoint.occurredAtMs, Date.parse('2026-01-02T05:00:00.000Z'), testCase.label)
+      assert.deepEqual(repository.playbackGetListeningStats().daily.map(row => [row.localDay, row.livePlayedMs]), [
+        ['2026-01-01', testCase.expectedPriorMs],
+        ...(testCase.expectedCurrentMs == 0 ? [] : [['2026-01-02', testCase.expectedCurrentMs]]),
+      ], testCase.label)
+      pipeline.stop()
+      dbService.close()
+    }
+  })
+
+  it('catches up every missed New York spring boundary without skipping the 23-hour day', async() => {
+    const db = await createStore()
+    const startMs = Date.parse('2026-03-07T05:00:00.000Z')
+    const endMs = Date.parse('2026-03-10T05:00:00.000Z')
+    const elapsedMs = endMs - startMs
+    const pipeline = createPlaybackPipeline({ occurredAtMs: startMs })
+    assert.equal(await pipeline.recorder.flush({ timeoutMs: 1_000 }), true)
+
+    Object.assign(pipeline.current, { occurredAtMs: endMs, monotonicMs: elapsedMs, positionMs: elapsedMs })
+    pipeline.fireNextBoundary()
+    pipeline.controller.checkpoint()
+
+    assert.equal(await pipeline.recorder.flush({ timeoutMs: 1_000 }), true)
+    assert.equal(pipeline.recorder.getState().outbox.length, 0)
+    assert.deepEqual(pipeline.commands
+      .filter(command => command.kind == 'commit' && command.request.boundary != null)
+      .map(command => [
+        command.request.checkpoint.occurredAtMs,
+        command.request.boundary.nextLocalDay,
+        command.request.boundary.utcOffsetMinutes,
+      ]), [
+      [Date.parse('2026-03-08T05:00:00.000Z'), '2026-03-08', -300],
+      [Date.parse('2026-03-09T04:00:00.000Z'), '2026-03-09', -240],
+      [Date.parse('2026-03-10T04:00:00.000Z'), '2026-03-10', -240],
+    ])
+    assert.deepEqual(repository.playbackGetListeningStats().daily.map(row => [row.localDay, row.livePlayedMs]), [
+      ['2026-03-07', 24 * 60 * 60 * 1_000],
+      ['2026-03-08', 23 * 60 * 60 * 1_000],
+      ['2026-03-09', 24 * 60 * 60 * 1_000],
+      ['2026-03-10', 60 * 60 * 1_000],
+    ])
+    assert.equal(total(db).livePlayedMs, elapsedMs)
+  })
+
+  it('allocates the complete 25-hour New York fall day before the next boundary', async() => {
+    const db = await createStore()
+    const startMs = Date.parse('2026-11-01T04:00:00.000Z')
+    const boundaryMs = Date.parse('2026-11-02T05:00:00.000Z')
+    const elapsedMs = boundaryMs - startMs
+    const pipeline = createPlaybackPipeline({ occurredAtMs: startMs })
+    assert.equal(await pipeline.recorder.flush({ timeoutMs: 1_000 }), true)
+
+    Object.assign(pipeline.current, { occurredAtMs: boundaryMs, monotonicMs: elapsedMs, positionMs: elapsedMs })
+    pipeline.fireNextBoundary()
+
+    assert.equal(await pipeline.recorder.flush({ timeoutMs: 1_000 }), true)
+    assert.deepEqual(repository.playbackGetListeningStats().daily.map(row => [row.localDay, row.livePlayedMs]), [
+      ['2026-11-01', 25 * 60 * 60 * 1_000],
+    ])
+    assert.equal(total(db).livePlayedMs, elapsedMs)
+  })
+
+  it('rotates paused and buffering intervals without adding played or active time', async() => {
+    for (const phase of ['paused', 'buffering']) {
+      const db = await createStore()
+      const startMs = Date.parse('2026-01-02T04:59:50.000Z')
+      const pipeline = createPlaybackPipeline({ occurredAtMs: startMs, phase })
+      assert.equal(await pipeline.recorder.flush({ timeoutMs: 1_000 }), true, phase)
+
+      Object.assign(pipeline.current, { occurredAtMs: startMs + 30_000, monotonicMs: 30_000, positionMs: 0 })
+      pipeline.fireNextBoundary()
+
+      assert.equal(await pipeline.recorder.flush({ timeoutMs: 1_000 }), true, phase)
+      assert.equal(total(db).livePlayedMs, 0, phase)
+      assert.equal(total(db).liveActiveMs, 0, phase)
+      assert.deepEqual(repository.playbackGetListeningStats().daily, [], phase)
+      pipeline.stop()
+      dbService.close()
+    }
+  })
+
+  it('interpolates divergent wall and monotonic clocks and conservatively resets an unsafe interval', async() => {
+    let db = await createStore()
+    let startMs = Date.parse('2026-01-02T04:59:50.000Z')
+    let pipeline = createPlaybackPipeline({ occurredAtMs: startMs })
+    assert.equal(await pipeline.recorder.flush({ timeoutMs: 1_000 }), true)
+
+    Object.assign(pipeline.current, { occurredAtMs: startMs + 30_000, monotonicMs: 15_000, positionMs: 15_000 })
+    pipeline.fireNextBoundary()
+    pipeline.controller.checkpoint()
+    assert.equal(await pipeline.recorder.flush({ timeoutMs: 1_000 }), true)
+    assert.deepEqual(repository.playbackGetListeningStats().daily.map(row => [row.localDay, row.livePlayedMs]), [
+      ['2026-01-01', 5_000],
+      ['2026-01-02', 10_000],
+    ])
+    assert.equal(total(db).livePlayedMs, 15_000)
+
+    pipeline.stop()
+    dbService.close()
+    db = await createStore()
+    startMs = Date.parse('2026-01-03T04:59:50.000Z')
+    pipeline = createPlaybackPipeline({ occurredAtMs: startMs, monotonicMs: 10_000, positionMs: 10_000 })
+    assert.equal(await pipeline.recorder.flush({ timeoutMs: 1_000 }), true)
+    Object.assign(pipeline.current, { occurredAtMs: startMs + 30_000, monotonicMs: 1_000, positionMs: 1_000 })
+    pipeline.fireNextBoundary()
+    Object.assign(pipeline.current, { occurredAtMs: startMs + 31_000, monotonicMs: 2_000, positionMs: 2_000 })
+    pipeline.controller.checkpoint()
+
+    assert.equal(await pipeline.recorder.flush({ timeoutMs: 1_000 }), true)
+    assert.deepEqual(repository.playbackGetListeningStats().daily.map(row => [row.localDay, row.livePlayedMs]), [
+      ['2026-01-03', 1_000],
+    ])
+    assert.equal(total(db).livePlayedMs, 1_000)
   })
 
   it('rejects a midnight multiple civil dates after the open segment before mutation', async() => {

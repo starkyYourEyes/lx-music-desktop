@@ -25,6 +25,10 @@ import type {
 } from './playback'
 
 const MAX_CONTEXT_LENGTH = 256
+const MAX_CONTEXT_BYTES = 1024
+const MAX_SOURCE_BYTES = 1024
+const MAX_IDENTITY_BYTES = 16 * 1024
+const MAX_DISPLAY_BYTES = 4 * 1024
 const MAX_DURATION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_EVENT_DETAILS_BYTES = 16 * 1024
 const MAX_PLAYABLE_PAYLOAD_BYTES = 128 * 1024
@@ -87,12 +91,25 @@ const assertString: (value: unknown, field: string) => asserts value is string =
   if (typeof value != 'string') invalidField(field)
 }
 
-const assertNullableString: (value: unknown, field: string) => asserts value is string | null = (value, field) => {
-  if (value !== null) assertString(value, field)
+const assertUtf8String: (
+  value: unknown,
+  field: string,
+  maximumBytes: number,
+) => asserts value is string = (value, field, maximumBytes) => {
+  if (typeof value != 'string' || Buffer.byteLength(value, 'utf8') > maximumBytes) invalidField(field)
+}
+
+const assertNullableUtf8String: (
+  value: unknown,
+  field: string,
+  maximumBytes: number,
+) => asserts value is string | null = (value, field, maximumBytes) => {
+  if (value !== null) assertUtf8String(value, field, maximumBytes)
 }
 
 const assertContextString: (value: unknown, field: string) => asserts value is string = (value, field) => {
-  if (typeof value != 'string' || value.length > MAX_CONTEXT_LENGTH) invalidField(field)
+  assertUtf8String(value, field, MAX_CONTEXT_BYTES)
+  if (value.length > MAX_CONTEXT_LENGTH) invalidField(field)
 }
 
 const assertInteger: (
@@ -186,7 +203,7 @@ const assertResumeHint: (
 ) => asserts value is PlaybackStartCommandV1['resume'] = (value, field = 'resume') => {
   assertRecord(value, field)
   assertExactKeys(value, field, ['listId', 'indexHint'])
-  assertNullableString(value.listId, `${field}.listId`)
+  assertNullableUtf8String(value.listId, `${field}.listId`, MAX_IDENTITY_BYTES)
   if (value.indexHint !== null) assertInteger(value.indexHint, `${field}.indexHint`, 0, 1_000_000)
 }
 
@@ -396,10 +413,10 @@ const assertTrackScalars: (
   value: Record<string, unknown>,
   field: string,
 ) => asserts value is Record<string, unknown> & Omit<PlaybackTrackV1, 'playablePayload'> = (value, field) => {
-  assertString(value.source, `${field}.source`)
-  assertString(value.sourceTrackId, `${field}.sourceTrackId`)
-  assertString(value.name, `${field}.name`)
-  assertString(value.singer, `${field}.singer`)
+  assertUtf8String(value.source, `${field}.source`, MAX_SOURCE_BYTES)
+  assertUtf8String(value.sourceTrackId, `${field}.sourceTrackId`, MAX_IDENTITY_BYTES)
+  assertUtf8String(value.name, `${field}.name`, MAX_DISPLAY_BYTES)
+  assertUtf8String(value.singer, `${field}.singer`, MAX_DISPLAY_BYTES)
   assertDuration(value.durationMs, `${field}.durationMs`)
 }
 
@@ -575,9 +592,9 @@ export const parsePlaybackResumeUpdate = (value: unknown): PlaybackResumeUpdateV
     assertInteger(value.checkpointSeq, 'checkpointSeq', 0)
     assertRecord(value.track, 'track')
     assertExactKeys(value.track, 'track', ['source', 'sourceTrackId'])
-    assertString(value.track.source, 'track.source')
-    assertString(value.track.sourceTrackId, 'track.sourceTrackId')
-    assertNullableString(value.listId, 'listId')
+    assertUtf8String(value.track.source, 'track.source', MAX_SOURCE_BYTES)
+    assertUtf8String(value.track.sourceTrackId, 'track.sourceTrackId', MAX_IDENTITY_BYTES)
+    assertNullableUtf8String(value.listId, 'listId', MAX_IDENTITY_BYTES)
     if (value.indexHint !== null) assertInteger(value.indexHint, 'indexHint', 0, 1_000_000)
     assertInteger(value.positionMs, 'positionMs', 0, MAX_DURATION_MS)
     assertDuration(value.durationMs, 'durationMs')
@@ -743,9 +760,9 @@ export const parsePlaybackResume = (value: unknown): PlaybackResumeV1 => {
     assertRecord(value, 'resume')
     assertExactKeys(value, 'resume', ['version', 'source', 'sourceTrackId', 'listId', 'indexHint', 'positionMs', 'durationMs', 'updatedAtMs'])
     assertVersion(value.version)
-    assertString(value.source, 'source')
-    assertString(value.sourceTrackId, 'sourceTrackId')
-    assertNullableString(value.listId, 'listId')
+    assertUtf8String(value.source, 'source', MAX_SOURCE_BYTES)
+    assertUtf8String(value.sourceTrackId, 'sourceTrackId', MAX_IDENTITY_BYTES)
+    assertNullableUtf8String(value.listId, 'listId', MAX_IDENTITY_BYTES)
     if (value.indexHint !== null) assertInteger(value.indexHint, 'indexHint', 0, 1_000_000)
     assertInteger(value.positionMs, 'positionMs', 0, MAX_DURATION_MS)
     assertDuration(value.durationMs, 'durationMs')

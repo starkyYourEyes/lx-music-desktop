@@ -38,6 +38,11 @@ const {
 
 const UUID = '123e4567-e89b-42d3-a456-426614174000'
 const MAX_MS = 7 * 24 * 60 * 60 * 1000
+const MAX_SOURCE_BYTES = 1024
+const MAX_IDENTITY_BYTES = 16 * 1024
+const MAX_DISPLAY_BYTES = 4 * 1024
+
+const exactFourByteUtf8 = bytes => '\u{1f642}'.repeat(bytes / 4)
 
 const webdavPayload = (overrides = {}) => ({
   id: 'track',
@@ -122,6 +127,125 @@ describe('playback activity contracts', () => {
     assert.deepEqual(result, command)
     assert.notStrictEqual(result, command)
     assert.notStrictEqual(result.track, command.track)
+  })
+
+  it('bounds every persisted playback scalar by UTF-8 bytes across all DTO families', () => {
+    const sourceAscii = 's'.repeat(MAX_SOURCE_BYTES)
+    const sourceUtf8 = exactFourByteUtf8(MAX_SOURCE_BYTES)
+    const identityAscii = 'i'.repeat(MAX_IDENTITY_BYTES)
+    const identityUtf8 = exactFourByteUtf8(MAX_IDENTITY_BYTES)
+    const displayAscii = 'd'.repeat(MAX_DISPLAY_BYTES)
+    const displayUtf8 = exactFourByteUtf8(MAX_DISPLAY_BYTES)
+    for (const [value, expectedBytes] of [
+      [sourceAscii, MAX_SOURCE_BYTES],
+      [sourceUtf8, MAX_SOURCE_BYTES],
+      [identityAscii, MAX_IDENTITY_BYTES],
+      [identityUtf8, MAX_IDENTITY_BYTES],
+      [displayAscii, MAX_DISPLAY_BYTES],
+      [displayUtf8, MAX_DISPLAY_BYTES],
+    ]) assert.equal(Buffer.byteLength(value, 'utf8'), expectedBytes)
+
+    const boundedTrack = track({
+      source: sourceAscii,
+      sourceTrackId: identityUtf8,
+      name: displayAscii,
+      singer: displayUtf8,
+      playablePayload: null,
+    })
+    const boundedStart = start({
+      track: boundedTrack,
+      resume: { listId: identityAscii, indexHint: null },
+    })
+    const boundedResumeUpdate = {
+      version: 1,
+      playbackGroupUuid: UUID,
+      checkpointSeq: 1,
+      track: { source: sourceUtf8, sourceTrackId: identityAscii },
+      listId: identityUtf8,
+      indexHint: null,
+      positionMs: 0,
+      durationMs: null,
+      updatedAtMs: 1,
+    }
+    const boundedResume = {
+      version: 1,
+      source: sourceAscii,
+      sourceTrackId: identityUtf8,
+      listId: identityAscii,
+      indexHint: null,
+      positionMs: 0,
+      durationMs: null,
+      updatedAtMs: 1,
+    }
+    const boundedRecent = {
+      version: 1,
+      ...boundedTrack,
+      lastPlayedAtMs: 1,
+      legacyRank: null,
+    }
+    const boundedStats = {
+      version: 1,
+      total: { baselinePlayedMs: 0, livePlayedMs: 0, baselineActiveMs: 0, liveActiveMs: 0, playedMs: 0, activeMs: 0 },
+      daily: [],
+      tracks: [{
+        baselinePlayedMs: 0,
+        livePlayedMs: 0,
+        baselineActiveMs: 0,
+        liveActiveMs: 0,
+        playedMs: 0,
+        activeMs: 0,
+        source: sourceUtf8,
+        sourceTrackId: identityAscii,
+        name: displayUtf8,
+        singer: displayAscii,
+        durationMs: null,
+      }],
+      updatedAtMs: 1,
+    }
+    const boundedFailure = {
+      ...boundedStart,
+      error: { version: 1, type: 'error', stage: 'url', code: null, recoverable: false, attempt: 0 },
+    }
+
+    for (const [parse, value] of [
+      [parsePlaybackStartCommand, boundedStart],
+      [parsePlaybackPreplayFailure, boundedFailure],
+      [parsePlaybackResumeUpdate, boundedResumeUpdate],
+      [parsePlaybackResume, boundedResume],
+      [parseRecentTrack, boundedRecent],
+      [parseListeningStats, boundedStats],
+    ]) assert.deepEqual(parse(value), value)
+
+    const oversizedSourceAscii = `${sourceAscii}x`
+    const oversizedSourceUtf8 = `${sourceUtf8}x`
+    const oversizedIdentityAscii = `${identityAscii}x`
+    const oversizedIdentityUtf8 = `${identityUtf8}x`
+    const oversizedDisplayAscii = `${displayAscii}x`
+    const oversizedDisplayUtf8 = `${displayUtf8}x`
+    for (const [value, expectedBytes] of [
+      [oversizedSourceAscii, MAX_SOURCE_BYTES + 1],
+      [oversizedSourceUtf8, MAX_SOURCE_BYTES + 1],
+      [oversizedIdentityAscii, MAX_IDENTITY_BYTES + 1],
+      [oversizedIdentityUtf8, MAX_IDENTITY_BYTES + 1],
+      [oversizedDisplayAscii, MAX_DISPLAY_BYTES + 1],
+      [oversizedDisplayUtf8, MAX_DISPLAY_BYTES + 1],
+    ]) assert.equal(Buffer.byteLength(value, 'utf8'), expectedBytes)
+
+    const rejected = [
+      () => parsePlaybackStartCommand(start({ track: track({ source: oversizedSourceAscii, playablePayload: null }) })),
+      () => parsePlaybackPreplayFailure({
+        ...start({ track: track({ sourceTrackId: oversizedIdentityUtf8, playablePayload: null }) }),
+        error: { version: 1, type: 'error', stage: 'url', code: null, recoverable: false, attempt: 0 },
+      }),
+      () => parsePlaybackResumeUpdate({ ...boundedResumeUpdate, listId: oversizedIdentityAscii }),
+      () => parsePlaybackResume({ ...boundedResume, source: oversizedSourceUtf8 }),
+      () => parseRecentTrack({ ...boundedRecent, name: oversizedDisplayAscii }),
+      () => parseListeningStats({
+        ...boundedStats,
+        tracks: [{ ...boundedStats.tracks[0], singer: oversizedDisplayUtf8 }],
+      }),
+    ]
+    for (const parse of rejected) assert.throws(parse)
   })
 
   it('rejects version, keys, UUID variants, nullable fields, and scalar range regressions', () => {

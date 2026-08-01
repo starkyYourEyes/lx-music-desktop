@@ -27,19 +27,13 @@ const loadRendererIpc = results => loadTsModule(path.join(__dirname, '../../src/
     APP_EVENT_NAMES: { winMainName: 'main', winLyricName: 'lyric' }, DATA_KEYS: {},
   },
   './storageState': { getLocalState() {}, setLocalState() {} },
+  './shutdown': {},
 })
 
-test('renderer IPC unwraps legacy results while preserving source-aware result envelopes', async() => {
+test('renderer IPC preserves source-aware result envelopes', async() => {
   const sourceResult = { ok: true, value: { source: 'a' } }
-  const ipc = loadRendererIpc([
-    { ok: true, value: { data: { url: 'https://music.test/file' } } },
-    sourceResult,
-  ])
+  const ipc = loadRendererIpc([sourceResult])
 
-  assert.deepEqual(
-    await ipc.sendUserApiRequest({ requestKey: 'legacy', data: { action: 'musicUrl' } }),
-    { data: { url: 'https://music.test/file' } },
-  )
   assert.strictEqual(
     await ipc.sendUserApiRequest({ apiId: 'user_api/a', requestId: 'source', data: {} }),
     sourceResult,

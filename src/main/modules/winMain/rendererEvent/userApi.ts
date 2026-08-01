@@ -28,6 +28,39 @@ const REPLACE_ERROR_LIMITS = {
   detail: 500,
 } as const
 
+const SOURCE_FAILURE_KINDS = new Set<LX.Playback.SourceFailureKind>([
+  'unsupported',
+  'emptyUrl',
+  'request',
+  'initialization',
+  'runtimeCrash',
+  'rateLimit',
+  'serverBusy',
+  'sourceChanged',
+  'timeout',
+  'cancelled',
+  'mediaValidation',
+])
+
+const parseFireAndForget = <T>(parser: (value: unknown) => T, value: unknown): T | null => {
+  try {
+    return parser(value)
+  } catch {
+    return null
+  }
+}
+
+const ensureFailureKind = (error: unknown): LX.Playback.SourceFailureKind => {
+  try {
+    if (error == null || typeof error != 'object') return 'initialization'
+    const descriptors = Object.getOwnPropertyDescriptors(error)
+    const name = descriptors.name?.value
+    const kind = descriptors.kind?.value
+    if (name == 'PlaybackSourceError' && SOURCE_FAILURE_KINDS.has(kind)) return kind
+  } catch {}
+  return 'initialization'
+}
+
 const getErrorText = (
   err: unknown,
   key: keyof typeof REPLACE_ERROR_LIMITS,
@@ -130,20 +163,24 @@ export default () => {
       await runtimePool.ensure(apiId)
       return { ok: true, value: runtimePool.getStatus(apiId) }
     } catch (error) {
-      return { ok: false, error: normalizeRuntimeFailure(error, { apiId, kind: 'initialization' }) }
+      return { ok: false, error: normalizeRuntimeFailure(error, { apiId, kind: ensureFailureKind(error) }) }
     }
   })
   mainOn<unknown>(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api_cancel, ({ event, params }) => {
+    const cancellation = parseFireAndForget(parseUserApiCancellationPayload, params)
+    if (cancellation == null) return
     registerOwner(event.sender)
-    cancelRequest(parseUserApiCancellationPayload(params), event.sender.id)
+    cancelRequest(cancellation, event.sender.id)
   })
   mainOn<unknown>(WIN_MAIN_RENDERER_EVENT_NAME.acquire_user_api_runtime, ({ event, params }) => {
-    const lease = parseUserApiRuntimeLeasePayload(params)
+    const lease = parseFireAndForget(parseUserApiRuntimeLeasePayload, params)
+    if (lease == null) return
     registerOwner(event.sender)
     runtimePool.acquireLease(lease, event.sender.id)
   })
   mainOn<unknown>(WIN_MAIN_RENDERER_EVENT_NAME.release_user_api_runtime, ({ event, params }) => {
-    const lease = parseUserApiRuntimeLeasePayload(params)
+    const lease = parseFireAndForget(parseUserApiRuntimeLeasePayload, params)
+    if (lease == null) return
     registerOwner(event.sender)
     void getUserApiRuntimePool().releaseLease(lease, event.sender.id).catch(error => {
       log.error('release user API runtime lease failed', error)

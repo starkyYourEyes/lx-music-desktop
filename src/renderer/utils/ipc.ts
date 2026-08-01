@@ -156,23 +156,17 @@ export const getUserApiList = async() => {
   return rendererInvoke<LX.UserApi.UserApiInfo[]>(WIN_MAIN_RENDERER_EVENT_NAME.get_user_api_list)
 }
 export function sendUserApiRequest(
-  params: LX.UserApi.LegacyUserApiRequestParams,
-): Promise<any>
-export function sendUserApiRequest(
   params: LX.UserApi.SourceUserApiRequestParams,
 ): Promise<LX.UserApi.UserApiRequestResult>
 export async function sendUserApiRequest(
-  params: LX.UserApi.UserApiRequestParams,
-): Promise<any> {
-  const result = await rendererInvoke<LX.UserApi.UserApiRequestParams, LX.UserApi.UserApiRequestResult>(
+  params: LX.UserApi.SourceUserApiRequestParams,
+): Promise<LX.UserApi.UserApiRequestResult> {
+  return rendererInvoke<LX.UserApi.SourceUserApiRequestParams, LX.UserApi.UserApiRequestResult>(
     WIN_MAIN_RENDERER_EVENT_NAME.request_user_api,
     params,
   )
-  if ('apiId' in params) return result
-  if (result.ok) return result.value
-  throw new Error(result.error.message)
 }
-export const userApiRequestCancel = (params: LX.UserApi.UserApiRequestCancelParams) => {
+export const userApiRequestCancel = (params: LX.UserApi.SourceUserApiRequestCancelParams) => {
   rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api_cancel, params)
 }
 export const ensureUserApi = async(apiId: string): Promise<LX.UserApi.UserApiEnsureResult> => {

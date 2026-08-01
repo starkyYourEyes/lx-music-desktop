@@ -27,32 +27,15 @@ export const init = (runtimePool?: UserApiRuntimePool) => {
 }
 
 export const request = async(
-  params: LX.UserApi.UserApiRequestParams,
+  params: LX.UserApi.SourceUserApiRequestParams,
   ownerWebContentsId: number,
-) => getUserApiRuntimePool().request(
-  'apiId' in params
-    ? params
-    : {
-        apiId: global.lx.appSetting['common.apiSource'],
-        requestId: params.requestKey,
-        data: params.data,
-      },
-  ownerWebContentsId,
-)
+) => getUserApiRuntimePool().request(params, ownerWebContentsId)
 
 export const cancelRequest = (
-  params: LX.UserApi.UserApiRequestCancelParams,
+  params: LX.UserApi.SourceUserApiRequestCancelParams,
   ownerWebContentsId: number,
 ) => {
-  getUserApiRuntimePool().cancel(
-    typeof params == 'string'
-      ? {
-          apiId: global.lx.appSetting['common.apiSource'],
-          requestId: params,
-        }
-      : params,
-    ownerWebContentsId,
-  )
+  getUserApiRuntimePool().cancel(params, ownerWebContentsId)
 }
 
 export const getStatus = (apiId: string) => getUserApiRuntimePool().getStatus(apiId)

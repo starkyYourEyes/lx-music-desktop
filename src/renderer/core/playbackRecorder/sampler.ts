@@ -4,8 +4,13 @@ export const samplePlayback = (
   state: PlaybackSessionState,
   monotonicMs: number,
   positionMs: number,
+  occurredAtMs?: number,
 ): PlaybackSessionState => {
-  const sample = { monotonicMs, positionMs }
+  const sample = {
+    monotonicMs,
+    positionMs,
+    occurredAtMs: typeof occurredAtMs == 'number' && Number.isFinite(occurredAtMs) ? occurredAtMs : null,
+  }
   if (state.phase != 'playing' || state.sample == null) return { ...state, sample }
 
   const activeDelta = Math.max(0, monotonicMs - state.sample.monotonicMs)

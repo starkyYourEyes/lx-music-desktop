@@ -131,6 +131,95 @@ test('a failed initialization retires only that generation and a later ensure ca
   assert.deepEqual(harness.clearedSessionIds, [])
 })
 
+test('initialization deadline rejects ensure and pending requests before retiring without timer leaks', async() => {
+  const clock = createFakeClock()
+  const harness = createPoolHarness({ autoInit: false, clock, initialConfiguredIds: ['a'] })
+  const ensuring = harness.pool.ensure('a')
+  const ensureOutcome = ensuring.then(
+    value => ({ state: 'resolved', value }),
+    error => ({ state: 'rejected', error }),
+  )
+  const requesting = harness.pool.request({ apiId: 'a', requestId: 'waiting', data: {} }, 11)
+  await harness.waitForInitializeCall('a', 1)
+
+  clock.advance(10_000)
+  await clock.flush()
+  await new Promise(resolve => setImmediate(resolve))
+  const ensureResult = await Promise.race([
+    ensureOutcome,
+    Promise.resolve({ state: 'pending' }),
+  ])
+
+  assert.equal(ensureResult.state, 'rejected')
+  assert.equal(ensureResult.error.name, 'PlaybackSourceError')
+  assert.equal(ensureResult.error.scope, 'source')
+  assert.equal(ensureResult.error.kind, 'initialization')
+  assert.equal(ensureResult.error.message, 'User API runtime initialization timed out')
+  const requestResult = await requesting
+  assert.equal(requestResult.ok, false)
+  assert.equal(requestResult.error.message, 'User API runtime initialization timed out')
+  await harness.waitForDisposed('a', 1)
+  assert.equal(harness.statusEvents.at(-1).message, 'User API runtime initialization timed out')
+  assert.equal(clock.pendingTimerCount, 0)
+})
+
+test('successful init and explicit lifecycle exits clear the initialization deadline', async() => {
+  let clock = createFakeClock()
+  let harness = createPoolHarness({ autoInit: false, clock, initialConfiguredIds: ['a'] })
+  let ensuring = harness.pool.ensure('a')
+  await harness.waitForInitializeCall('a', 1)
+  await harness.init('a', { sources: {} })
+  await ensuring
+  assert.equal(clock.pendingTimerCount, 0)
+
+  for (const exit of ['invalidate', 'crash', 'dispose']) {
+    clock = createFakeClock()
+    harness = createPoolHarness({ autoInit: false, clock, initialConfiguredIds: ['a'] })
+    ensuring = harness.pool.ensure('a')
+    await harness.waitForInitializeCall('a', 1)
+    if (exit == 'invalidate') await harness.pool.invalidate('a', 'sourceChanged')
+    if (exit == 'crash') harness.crash('a')
+    if (exit == 'dispose') await harness.pool.dispose('a', { clearSession: false })
+    await assert.rejects(ensuring)
+    await clock.flush()
+    assert.equal(clock.pendingTimerCount, 0, exit)
+  }
+})
+
+test('failed retirement blocks recreation until explicit disposal retries cleanup', async() => {
+  const harness = createPoolHarness({
+    autoInit: true,
+    initialConfiguredIds: ['a'],
+    disposeFailures: new Map([['a', 1]]),
+  })
+  await harness.pool.ensure('a')
+
+  await assert.rejects(harness.pool.dispose('a', { clearSession: false }), /dispose a failed/)
+  await assert.rejects(harness.pool.ensure('a'), /dispose a failed/)
+  assert.deepEqual(harness.createdGenerations('a'), [1])
+
+  await harness.pool.dispose('a', { clearSession: false })
+  await harness.pool.ensure('a')
+  assert.deepEqual(harness.disposedGenerations, [1, 1])
+  assert.deepEqual(harness.createdGenerations('a'), [1, 2])
+})
+
+test('disposeAll retries every retained retirement and propagates repeated cleanup failure', async() => {
+  const harness = createPoolHarness({
+    autoInit: true,
+    initialConfiguredIds: ['a'],
+    disposeRejectIds: ['a'],
+  })
+  await harness.pool.ensure('a')
+
+  await assert.rejects(harness.pool.dispose('a', { clearSession: false }), /dispose a failed/)
+  await assert.rejects(harness.pool.disposeAll(), /dispose a failed/)
+  await assert.rejects(harness.pool.disposeAll(), /dispose a failed/)
+  assert.deepEqual(harness.disposedGenerations, [1, 1, 1])
+  await assert.rejects(harness.pool.ensure('a'), /dispose a failed/)
+  assert.deepEqual(harness.createdGenerations('a'), [1])
+})
+
 test('invalidation after initialize starts cannot publish the old generation', async() => {
   const harness = createPoolHarness({ autoInit: false, initialConfiguredIds: ['a'] })
   const oldEnsure = harness.pool.ensure('a')

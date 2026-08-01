@@ -30,6 +30,14 @@ interface RuntimeRecord {
   disposing: boolean
   disposeWhenIdle: boolean
   initSettled: boolean
+  initTimer: ReturnType<typeof setTimeout> | null
+}
+
+interface RuntimeRetirementState {
+  record: RuntimeRecord
+  clearSession: boolean
+  promise: Promise<void> | null
+  failure: unknown
 }
 
 interface RuntimeCreationState {
@@ -88,6 +96,8 @@ const messageFailure = (
   message: string,
 ) => normalizeRuntimeFailure({ message }, { apiId, kind })
 
+const USER_API_INITIALIZATION_TIMEOUT_MS = 10_000
+
 export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   const recordsByApiId = new Map<string, RuntimeRecord>()
   const bindingsByWebContentsId = new Map<number, LX.UserApi.UserApiRuntimeIdentity>()
@@ -95,7 +105,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   const configuredApiIds = new Set(deps.initialConfiguredApiIds)
   const pendingByApiId = new Map<string, Map<string, PendingRequest>>()
   const creatingByApiId = new Map<string, RuntimeCreationState>()
-  const retiringByApiId = new Map<string, Promise<void>>()
+  const retiringByApiId = new Map<string, RuntimeRetirementState>()
   const nextGenerationByApiId = new Map<string, number>()
   const intentionalCreationCancellations = new WeakSet<Error>()
 
@@ -147,7 +157,14 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     }
   }
 
+  const clearInitTimer = (record: RuntimeRecord) => {
+    if (record.initTimer == null) return
+    deps.clearTimeout(record.initTimer)
+    record.initTimer = null
+  }
+
   const rejectInit = (record: RuntimeRecord, failure: LX.Playback.SourceFailureData) => {
+    clearInitTimer(record)
     if (record.initSettled) return
     record.initSettled = true
     record.rejectInit(failure)
@@ -161,22 +178,51 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     }
   }
 
+  // Preserve the exact in-flight promise so concurrent cleanup callers share one attempt.
+  // eslint-disable-next-line @typescript-eslint/promise-function-async
+  const attemptRetirement = (retirement: RuntimeRetirementState): Promise<void> => {
+    if (retirement.promise) return retirement.promise
+    let attempt!: Promise<void>
+    attempt = Promise.resolve()
+      .then(async() => deps.disposeRuntimeWindow(retirement.record.runtime, {
+        clearSession: retirement.clearSession,
+      }))
+      .then(() => {
+        retirement.failure = null
+        if (retiringByApiId.get(retirement.record.apiId) == retirement) {
+          retiringByApiId.delete(retirement.record.apiId)
+        }
+      }, reason => {
+        retirement.failure = reason
+        throw reason
+      })
+      .finally(() => {
+        if (retirement.promise == attempt) retirement.promise = null
+      })
+    retirement.promise = attempt
+    return attempt
+  }
+
   const retireRecord = async(
     record: RuntimeRecord,
     options: { clearSession: boolean, failure?: LX.Playback.SourceFailureData },
   ): Promise<void> => {
     const existing = retiringByApiId.get(record.apiId)
-    if (record.disposing) return existing ?? Promise.resolve()
+    if (record.disposing) {
+      if (existing?.promise) return existing.promise
+      return existing?.failure == null ? Promise.resolve() : Promise.reject(existing.failure)
+    }
     record.disposing = true
     removeRecord(record)
     if (options.failure) rejectInit(record, options.failure)
-    let retiring!: Promise<void>
-    retiring = deps.disposeRuntimeWindow(record.runtime, { clearSession: options.clearSession })
-      .finally(() => {
-        if (retiringByApiId.get(record.apiId) == retiring) retiringByApiId.delete(record.apiId)
-      })
-    retiringByApiId.set(record.apiId, retiring)
-    return retiring
+    const retirement: RuntimeRetirementState = {
+      record,
+      clearSession: options.clearSession,
+      promise: null,
+      failure: null,
+    }
+    retiringByApiId.set(record.apiId, retirement)
+    return attemptRetirement(retirement)
   }
 
   const failInitialization = (record: RuntimeRecord, reason: unknown) => {
@@ -193,7 +239,8 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   const ensureRecord = async(apiId: string): Promise<RuntimeRecord> => {
     const retiring = retiringByApiId.get(apiId)
     if (retiring) {
-      await retiring
+      if (retiring.promise) await retiring.promise
+      else if (retiring.failure != null) return Promise.reject(retiring.failure)
       return ensureRecord(apiId)
     }
     const record = recordsByApiId.get(apiId)
@@ -267,15 +314,25 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
         disposing: false,
         disposeWhenIdle: state.disposeWhenIdle,
         initSettled: false,
+        initTimer: null,
       }
       recordsByApiId.set(apiId, nextRecord)
       bindingsByWebContentsId.set(runtime.webContentsId, { apiId, generation })
-      try {
-        const sent = await deps.initializeRuntimeWindow(runtime, apiInfo)
-        if (!sent) failInitialization(nextRecord, new Error('User API runtime initialization could not be sent'))
-      } catch (error) {
-        failInitialization(nextRecord, error)
-      }
+      nextRecord.initTimer = deps.setTimeout(() => {
+        failInitialization(nextRecord, new Error('User API runtime initialization timed out'))
+      }, USER_API_INITIALIZATION_TIMEOUT_MS)
+      const initTimer = nextRecord.initTimer as { unref?: () => void }
+      initTimer.unref?.()
+      const initialization = Promise.resolve()
+        .then(async() => deps.initializeRuntimeWindow(runtime, apiInfo))
+        .then(sent => {
+          if (!sent) failInitialization(nextRecord, new Error('User API runtime initialization could not be sent'))
+        })
+        .catch(error => { failInitialization(nextRecord, error) })
+      await Promise.race([
+        initialization,
+        nextRecord.initPromise.then(() => undefined),
+      ])
       await disposeIfIdle(apiId)
       return nextRecord
     }).finally(() => {
@@ -346,7 +403,11 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     }
     settleSource(apiId, failure)
     const retiring = retiringByApiId.get(apiId)
-    if (retiring) await retiring
+    if (retiring) {
+      retiring.clearSession ||= options.clearSession
+      await attemptRetirement(retiring)
+      return
+    }
     if (options.clearSession) await deps.clearRuntimeSession(apiId)
   }
 
@@ -484,6 +545,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     }
     const initializedInfo = { ...apiInfo, sources: envelope.data.sources }
     record.initSettled = true
+    clearInitTimer(record)
     record.status = { apiId: record.apiId, status: true, apiInfo: initializedInfo }
     deps.publishStatus({ ...record.status })
     record.resolveInit(initializedInfo)
@@ -555,8 +617,6 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
         ...retiringByApiId.keys(),
       ])
       const results = await Promise.allSettled([...ids].map(async apiId => {
-        const retiring = retiringByApiId.get(apiId)
-        if (retiring) return retiring
         return dispose(apiId, { clearSession: false })
       }))
       const failed = results.find((result): result is PromiseRejectedResult => result.status == 'rejected')

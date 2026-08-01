@@ -164,6 +164,77 @@ const mountRecorderHook = ({ appEvent, recorder, currentTime = () => 47 }) => {
 }
 
 describe('playback recorder renderer cutover', () => {
+  it('flush overrides a production-length retry backoff with one immediate ordered attempt', async() => {
+    let attempts = 0
+    const recorder = loadTsModule(recorderPath, {
+      '../../utils/playback': { sendPlaybackCommand: async() => { throw new Error('unexpected default transport') } },
+    }).createPlaybackRecorder({
+      retry: { initialMs: 5_000, maxMs: 5_000 },
+      transport: async command => {
+        attempts++
+        if (attempts == 1) throw new Error('transient send failure')
+        assert.equal(command.kind, 'start')
+        return { mode: 'activity', ack: activityAck(UUID, 1) }
+      },
+    })
+    recorder.dispatch({
+      type: 'start-requested',
+      request: {
+        version: 1,
+        playbackGroupUuid: UUID,
+        ...selection(),
+        occurredAtMs: 100,
+        consent: { recentAllowed: true, statsAllowed: true, privateMode: false },
+      },
+    })
+    recorder.dispatch({ type: 'native-playing', playbackRate: 1, monotonicMs: 0, positionMs: 0, occurredAtMs: 100 })
+    await settle()
+    assert.equal(attempts, 1)
+
+    const results = await Promise.all([
+      recorder.flush({ timeoutMs: 500 }),
+      recorder.flush({ timeoutMs: 500 }),
+    ])
+
+    assert.deepEqual(results, [true, true])
+    assert.equal(attempts, 2)
+    assert.equal(recorder.getState().outbox.length, 0)
+  })
+
+  it('concurrent flush callers share an existing in-flight send', async() => {
+    let attempts = 0
+    let resolveTransport
+    const response = new Promise(resolve => { resolveTransport = resolve })
+    const recorder = loadTsModule(recorderPath, {
+      '../../utils/playback': { sendPlaybackCommand: async() => { throw new Error('unexpected default transport') } },
+    }).createPlaybackRecorder({
+      transport: async() => {
+        attempts++
+        return response
+      },
+    })
+    recorder.dispatch({
+      type: 'start-requested',
+      request: {
+        version: 1,
+        playbackGroupUuid: UUID,
+        ...selection(),
+        occurredAtMs: 100,
+        consent: { recentAllowed: true, statsAllowed: true, privateMode: false },
+      },
+    })
+    recorder.dispatch({ type: 'native-playing', playbackRate: 1, monotonicMs: 0, positionMs: 0, occurredAtMs: 100 })
+    await settle()
+
+    const first = recorder.flush({ timeoutMs: 500 })
+    const second = recorder.flush({ timeoutMs: 500 })
+    assert.equal(attempts, 1)
+    resolveTransport({ mode: 'activity', ack: activityAck(UUID, 1) })
+
+    assert.deepEqual(await Promise.all([first, second]), [true, true])
+    assert.equal(attempts, 1)
+  })
+
   it('creates recent/session state only on first native playing and keeps duplicate playing idempotent', async() => {
     const calls = []
     let recentCount = 0

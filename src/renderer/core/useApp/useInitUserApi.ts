@@ -9,16 +9,10 @@ import { setUserApi } from '@renderer/core/apiSource'
 import apiSourceInfo from '@renderer/utils/musicSdk/api-source-info'
 import { reconcilePlaybackSourceRegistry } from '@common/utils/playbackSourceSetting'
 
-const sendUserApiRequest = async(data: LX.UserApi.LegacyUserApiRequestParams): Promise<any> => {
-  let stop: () => void
-  return new Promise<void>((resolve, reject) => {
-    stop = watch(() => appSetting['common.apiSource'], () => {
-      reject(new Error('source changed'))
-    })
-    void sendUserApiRequestRemote(data).then(resolve).catch(reject)
-  }).finally(() => {
-    stop()
-  })
+const sendUserApiRequest = async(data: LX.UserApi.SourceUserApiRequestParams): Promise<any> => {
+  const result = await sendUserApiRequestRemote(data)
+  if (result.ok) return result.value
+  throw Object.assign(new Error(result.error.message), result.error)
 }
 
 export default () => {
@@ -50,16 +44,18 @@ export default () => {
     { immediate: true },
   )
 
-  const rUserApiStatus = onUserApiStatus(({ params: { status, message, apiInfo } }) => {
+  const rUserApiStatus = onUserApiStatus(({ params: { apiId: statusApiId, status, message, apiInfo } }) => {
     // console.log({ status, message, apiInfo })
+    if ((apiInfo?.id ?? statusApiId) !== appSetting['common.apiSource']) return
     userApi.status = status
     userApi.message = message
 
-    if (!apiInfo || apiInfo.id !== appSetting['common.apiSource']) return
+    if (!apiInfo) return
     if (status) {
       if (apiInfo.sources) {
         let apis: any = {}
         let qualitys: LX.QualityList = {}
+        const apiId = apiInfo.id
         for (const [source, { actions, type, qualitys: sourceQualitys }] of Object.entries(apiInfo.sources)) {
           if (type != 'music') continue
           apis[source as LX.Source] = {}
@@ -67,13 +63,14 @@ export default () => {
             switch (action) {
               case 'musicUrl':
                 apis[source].getMusicUrl = (songInfo: LX.Music.MusicInfo, type: LX.Quality) => {
-                  const requestKey = `request__${Math.random().toString().substring(2)}`
+                  const requestId = `request__${Math.random().toString().substring(2)}`
                   return {
                     canceleFn() {
-                      userApiRequestCancel(requestKey)
+                      userApiRequestCancel({ apiId, requestId })
                     },
                     promise: sendUserApiRequest({
-                      requestKey,
+                      apiId,
+                      requestId,
                       data: {
                         source,
                         action: 'musicUrl',
@@ -95,13 +92,14 @@ export default () => {
                 break
               case 'lyric':
                 apis[source].getLyric = (songInfo: LX.Music.MusicInfo) => {
-                  const requestKey = `request__${Math.random().toString().substring(2)}`
+                  const requestId = `request__${Math.random().toString().substring(2)}`
                   return {
                     canceleFn() {
-                      userApiRequestCancel(requestKey)
+                      userApiRequestCancel({ apiId, requestId })
                     },
                     promise: sendUserApiRequest({
-                      requestKey,
+                      apiId,
+                      requestId,
                       data: {
                         source,
                         action: 'lyric',
@@ -123,13 +121,14 @@ export default () => {
                 break
               case 'pic':
                 apis[source].getPic = (songInfo: LX.Music.MusicInfo) => {
-                  const requestKey = `request__${Math.random().toString().substring(2)}`
+                  const requestId = `request__${Math.random().toString().substring(2)}`
                   return {
                     canceleFn() {
-                      userApiRequestCancel(requestKey)
+                      userApiRequestCancel({ apiId, requestId })
                     },
                     promise: sendUserApiRequest({
-                      requestKey,
+                      apiId,
+                      requestId,
                       data: {
                         source,
                         action: 'pic',

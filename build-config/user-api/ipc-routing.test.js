@@ -20,7 +20,7 @@ const hotKeyGroup = new Proxy({}, {
 
 const createMainRemoveHarness = removeImplementation => {
   const registeredHandlers = new Map()
-  const retainedLists = new Map()
+  const retainedLists = new WeakMap()
   const runtimePool = {
     async releaseOwner() {},
     getStatus() {},
@@ -107,6 +107,7 @@ const createRendererRemoveHarness = rendererInvoke => loadTsModule(
       DEFAULT_SETTING: {},
     },
     './storageState': { getLocalState() {}, setLocalState() {} },
+    './shutdown': {},
   },
 )
 
@@ -224,8 +225,8 @@ test('direct delete main handler bounds retained failure fields and excludes arb
   assert.equal(Object.prototype.hasOwnProperty.call(result.error, 'arbitrary'), false)
 })
 
-test('direct delete main handler uses a removal fallback for a retained non-Error failure', async() => {
-  const failure = 'opaque lifecycle failure'
+test('direct delete main handler uses a removal fallback for a retained non-Error object failure', async() => {
+  const failure = Object.freeze({ reason: 'opaque lifecycle failure' })
   const harness = createMainRemoveHarness(async() => { throw failure })
   harness.retain(failure, retainedApiList)
 

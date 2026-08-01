@@ -219,6 +219,14 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
       })
   }
 
+  const kickForFlush = (): void => {
+    if (retryTimer != null) {
+      clock.clearTimeout(retryTimer)
+      retryTimer = null
+    }
+    kick()
+  }
+
   const waitForChange = async(timeoutMs: number): Promise<boolean> => new Promise(resolve => {
     let timer: unknown
     let done = false
@@ -250,7 +258,7 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
     async flush({ timeoutMs = 2_000 } = {}) {
       if (typeof timeoutMs != 'number' || !Number.isFinite(timeoutMs) || timeoutMs < 0) throw new Error('Invalid playback flush timeout')
       const deadline = clock.now() + timeoutMs
-      kick()
+      kickForFlush()
       while (state.outbox.length > 0) {
         if (!isAlive()) return false
         const remainingMs = deadline - clock.now()

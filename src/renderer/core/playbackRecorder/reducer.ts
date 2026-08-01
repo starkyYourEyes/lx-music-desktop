@@ -70,7 +70,10 @@ const checkpointCommand = (
   return { ...state, checkpointSeq, outbox: [...state.outbox, command] }
 }
 
-const sampleAction = (state: PlaybackSessionState, action: { monotonicMs: number, positionMs: number }): PlaybackSessionState => samplePlayback(state, action.monotonicMs, action.positionMs)
+const sampleAction = (
+  state: PlaybackSessionState,
+  action: { monotonicMs: number, positionMs: number, occurredAtMs?: number },
+): PlaybackSessionState => samplePlayback(state, action.monotonicMs, action.positionMs, action.occurredAtMs)
 
 const startPending = (state: PlaybackSessionState, request: PlaybackStartCommandV1): PlaybackSessionState => ({
   ...state,
@@ -134,7 +137,7 @@ export const reduce = (state: PlaybackSessionState, action: PlaybackRecorderActi
           session,
           checkpointSeq: state.deliveryMode == 'activity' ? Math.max(state.checkpointSeq, 1) : state.checkpointSeq,
           playbackRate: action.playbackRate,
-          sample: { monotonicMs: action.monotonicMs, positionMs: action.positionMs },
+          sample: { monotonicMs: action.monotonicMs, positionMs: action.positionMs, occurredAtMs: action.occurredAtMs },
         }
         if (state.deliveryMode == 'activity') {
           return { ...playing, outbox: [...state.outbox, { kind: 'start', request: session }] }
@@ -147,7 +150,7 @@ export const reduce = (state: PlaybackSessionState, action: PlaybackRecorderActi
         ...sampleAction(state, action),
         phase: 'playing',
         playbackRate: action.playbackRate,
-        sample: { monotonicMs: action.monotonicMs, positionMs: action.positionMs },
+        sample: { monotonicMs: action.monotonicMs, positionMs: action.positionMs, occurredAtMs: action.occurredAtMs },
       }
     }
     case 'start-result': {
@@ -171,7 +174,12 @@ export const reduce = (state: PlaybackSessionState, action: PlaybackRecorderActi
     case 'resume': {
       if (state.phase != 'paused') return state
       const sampled = sampleAction(state, action)
-      const resumed = { ...sampled, phase: 'playing' as const, playbackRate: action.playbackRate, sample: { monotonicMs: action.monotonicMs, positionMs: action.positionMs } }
+      const resumed = {
+        ...sampled,
+        phase: 'playing' as const,
+        playbackRate: action.playbackRate,
+        sample: { monotonicMs: action.monotonicMs, positionMs: action.positionMs, occurredAtMs: action.occurredAtMs },
+      }
       return checkpointCommand(resumed, occurredAt(action), { version: 1, type: 'resume', reason: action.reason })
     }
     case 'buffering-start': {
@@ -198,7 +206,10 @@ export const reduce = (state: PlaybackSessionState, action: PlaybackRecorderActi
         fromMs: action.fromMs,
         toMs: action.toMs,
       })
-      return { ...checkpointed, sample: { monotonicMs: action.monotonicMs, positionMs: action.toMs } }
+      return {
+        ...checkpointed,
+        sample: { monotonicMs: action.monotonicMs, positionMs: action.toMs, occurredAtMs: action.occurredAtMs },
+      }
     }
     case 'natural-end': {
       if (state.phase != 'playing' && state.phase != 'paused' && state.phase != 'buffering') return state

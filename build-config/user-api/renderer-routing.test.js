@@ -3,9 +3,7 @@ const path = require('node:path')
 const test = require('node:test')
 const loadTsModule = require('../../scripts/test-utils/load-ts-module')
 
-test('renderer events preserve owner-aware source routing and normalize legacy requests', async() => {
-  const originalLx = global.lx
-  global.lx = { appSetting: { 'common.apiSource': 'user_api/selected' } }
+test('renderer events preserve explicit owner-aware source routing across setting changes', async() => {
   const handlers = new Map()
   const calls = []
   const pool = {
@@ -29,20 +27,14 @@ test('renderer events preserve owner-aware source routing and normalize legacy r
     '../runtimePool': { getUserApiRuntimePool: () => pool },
   })
 
-  try {
-    eventModule.init(pool)
-    handlers.get('proxy')({ event: { sender: { id: 22 } }, params: { identity: { apiId: 'user_api/b', generation: 1 } } })
-    await eventModule.request({ apiId: 'user_api/a', requestId: 'source-request', data: 'source-data' }, 11)
-    await eventModule.request({ requestKey: 'legacy-request', data: 'legacy-data' }, 12)
-    eventModule.cancelRequest('legacy-request', 12)
+  eventModule.init(pool)
+  handlers.get('proxy')({ event: { sender: { id: 22 } }, params: { identity: { apiId: 'user_api/b', generation: 1 } } })
+  await eventModule.request({ apiId: 'user_api/a', requestId: 'source-request', data: 'source-data' }, 11)
+  eventModule.cancelRequest({ apiId: 'user_api/a', requestId: 'source-request' }, 11)
 
-    assert.deepEqual(calls, [
-      ['proxy', 22, { identity: { apiId: 'user_api/b', generation: 1 } }],
-      ['request', 11, { apiId: 'user_api/a', requestId: 'source-request', data: 'source-data' }],
-      ['request', 12, { apiId: 'user_api/selected', requestId: 'legacy-request', data: 'legacy-data' }],
-      ['cancel', 12, { apiId: 'user_api/selected', requestId: 'legacy-request' }],
-    ])
-  } finally {
-    global.lx = originalLx
-  }
+  assert.deepEqual(calls, [
+    ['proxy', 22, { identity: { apiId: 'user_api/b', generation: 1 } }],
+    ['request', 11, { apiId: 'user_api/a', requestId: 'source-request', data: 'source-data' }],
+    ['cancel', 11, { apiId: 'user_api/a', requestId: 'source-request' }],
+  ])
 })

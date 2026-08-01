@@ -3,7 +3,7 @@ const path = require('node:path')
 const test = require('node:test')
 const loadTsModule = require('../../scripts/test-utils/load-ts-module')
 
-const loadHandlers = () => {
+const loadHandlers = (options = {}) => {
   const handlers = new Map()
   const calls = []
   const parser = loadTsModule(path.join(__dirname, '../../src/main/modules/userApi/ipcValidation.ts'))
@@ -12,7 +12,10 @@ const loadHandlers = () => {
       calls.push(['status', apiId])
       return { apiId, status: true }
     },
-    ensure(apiId) { calls.push(['ensure', apiId]) },
+    ensure(apiId) {
+      calls.push(['ensure', apiId])
+      if (options.ensureError) throw options.ensureError
+    },
     request() {},
     cancel() {},
     acquireLease(params, ownerId) { calls.push(['acquire', params, ownerId]) },
@@ -56,7 +59,7 @@ const loadHandlers = () => {
       cancelRequest: value => calls.push(['cancel', value]),
     },
     '@main/modules/userApi/ipcValidation': parser,
-    '@main/modules/userApi/runtimeError': { normalizeRuntimeFailure: error => error },
+    '@main/modules/userApi/runtimeError': loadTsModule(path.join(__dirname, '../../src/main/modules/userApi/runtimeError.ts')),
     '@main/modules/userApi/runtimePool': { getUserApiRuntimePool: () => runtimePool },
     '@main/modules/winMain/main': { sendEvent() {} },
   }).default
@@ -79,13 +82,35 @@ test('rejects malformed user API request envelopes before dispatch without echoi
   assert.deepEqual(calls, [])
 })
 
-test('rejects malformed user API cancellation envelopes before dispatch', async() => {
-  const { handlers, calls, sender } = loadHandlers()
-  await assert.rejects(
-    async() => handlers.get('cancel')({ event: { sender }, params: { apiId: 'user_api/a', requestId: 'one', reason: 'nope' } }),
+test('requires explicit source identity for requests and cancellation', () => {
+  const parser = loadTsModule(path.join(__dirname, '../../src/main/modules/userApi/ipcValidation.ts'))
+
+  assert.throws(
+    () => parser.parseUserApiRequestPayload({ requestKey: 'legacy-request', data: {} }),
+    /Invalid User API request payload/,
+  )
+  assert.throws(
+    () => parser.parseUserApiCancellationPayload('legacy-request'),
     /Invalid User API cancellation payload/,
   )
-  await assert.rejects(async() => handlers.get('cancel')({ event: { sender }, params: { requestKey: 'old', extra: true } }), /Invalid User API cancellation payload/)
+})
+
+test('drops malformed user API cancellation envelopes before dispatch', () => {
+  const { handlers, calls, sender } = loadHandlers()
+  const hostile = { requestId: 'one' }
+  Object.defineProperty(hostile, 'apiId', {
+    enumerable: true,
+    get() { throw new Error('cancellation secret') },
+  })
+
+  for (const params of [
+    { apiId: 'user_api/a', requestId: 'one', reason: 'nope' },
+    { apiId: 'user_api/a', requestId: 'one', extra: true },
+    hostile,
+    'legacy-request',
+  ]) {
+    assert.doesNotThrow(() => handlers.get('cancel')({ event: { sender }, params }))
+  }
   assert.deepEqual(calls, [])
 })
 
@@ -104,7 +129,23 @@ test('rejects malformed ensure IDs with a fixed error before pool dispatch', asy
   assert.deepEqual(calls, [])
 })
 
-test('validates exact runtime lease envelopes before acquire and release dispatch', () => {
+test('ensure preserves a normalized playback source failure kind', async() => {
+  const sourceFailure = Object.assign(new Error('User API source changed'), {
+    name: 'PlaybackSourceError',
+    scope: 'source',
+    kind: 'sourceChanged',
+    apiId: 'user_api/a',
+  })
+  const { handlers } = loadHandlers({ ensureError: sourceFailure })
+
+  const result = await handlers.get('ensure')({ params: 'user_api/a' })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.error.kind, 'sourceChanged')
+  assert.equal(result.error.scope, 'source')
+})
+
+test('drops malformed runtime lease envelopes before acquire and release dispatch', () => {
   const { handlers, calls, sender } = loadHandlers()
   const secret = 'lease-payload-must-not-appear'
   const hostile = {}
@@ -118,16 +159,14 @@ test('validates exact runtime lease envelopes before acquire and release dispatc
   })
 
   for (const name of ['acquire', 'release']) {
-    assert.throws(
+    assert.doesNotThrow(
       () => handlers.get(name)({
         event: { sender },
         params: { apiIds: ['user_api/a'], leaseId: 'lease-1', extra: secret },
       }),
-      error => error.message == 'Invalid User API runtime lease payload' && !error.message.includes(secret),
     )
-    assert.throws(
+    assert.doesNotThrow(
       () => handlers.get(name)({ event: { sender }, params: hostile }),
-      error => error.message == 'Invalid User API runtime lease payload' && !error.message.includes(secret),
     )
   }
   assert.deepEqual(calls, [])

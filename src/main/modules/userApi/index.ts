@@ -65,6 +65,20 @@ const reconcileRetainedUserApiState = (
   notifyUserApiChanged()
 }
 
+const completeCommittedUserApiState = (
+  apiList: LX.UserApi.UserApiInfo[],
+  removedIds: ReadonlySet<string>,
+  configErrorMessage: string,
+) => {
+  try {
+    removeUnavailablePlaybackSources(removedIds)
+  } catch (err) {
+    reconcileRetainedUserApiState(err, apiList, removedIds, configErrorMessage)
+    throw err
+  }
+  notifyUserApiChanged()
+}
+
 const getRemovedUserApiIds = (
   previousIds: ReadonlySet<string>,
   nextList: readonly LX.UserApi.UserApiInfo[],
@@ -108,9 +122,12 @@ const applyRuntimeChanges = async(
   if (failure) throw failure.reason
 }
 
-export const getApiList = async(): Promise<LX.UserApi.UserApiInfo[]> => getUserApis()
+export const getApiList = async(): Promise<LX.UserApi.UserApiInfo[]> => runUserApiTask(async() =>
+  cloneUserApiList(getUserApis()))
 
-export const getUserApiSyncData = async(): Promise<LX.Sync.UserApi.Data> => handleGetUserApiSyncData()
+export const getUserApiSyncData = async(): Promise<LX.Sync.UserApi.Data> => runUserApiTask(
+  handleGetUserApiSyncData,
+)
 
 export const importApi = async(script: string): Promise<LX.UserApi.ImportUserApi> => {
   return runUserApiTask(async() => ({
@@ -140,15 +157,20 @@ export const replaceApisFromGitHub = async(
         commitUserApiState(previousState)
       } catch (rollbackErr) {
         log.error('rollback user APIs after GitHub runtime lifecycle error:', rollbackErr)
-        if (err != null && (typeof err == 'object' || typeof err == 'function')) {
-          replacementFailureApiLists.set(err, failureApiList)
-        }
-        notifyUserApiChanged()
+        reconcileRetainedUserApiState(
+          err,
+          failureApiList,
+          removedIds,
+          'cleanup playback fallbacks after GitHub rollback failure:',
+        )
       }
       throw err
     }
-    removeUnavailablePlaybackSources(removedIds)
-    notifyUserApiChanged()
+    completeCommittedUserApiState(
+      failureApiList,
+      removedIds,
+      'cleanup playback fallbacks after GitHub config failure:',
+    )
     return apiList
   })
 }
@@ -218,8 +240,11 @@ export const removeApi = async(ids: string[]): Promise<LX.UserApi.UserApiInfo[]>
       }
       throw err
     }
-    removeUnavailablePlaybackSources(removedIds)
-    notifyUserApiChanged()
+    completeCommittedUserApiState(
+      failureApiList,
+      removedIds,
+      'cleanup playback fallbacks after deletion config failure:',
+    )
     return apiList
   })
 }

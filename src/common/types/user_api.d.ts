@@ -81,23 +81,18 @@ declare namespace LX {
       updateUrl?: string
     }
 
-    interface LegacyUserApiRequestParams {
-      requestKey: string
-      data: any
-    }
     interface SourceUserApiRequestParams {
       apiId: string
       requestId: string
       data: any
     }
-    type UserApiRequestParams = LegacyUserApiRequestParams | SourceUserApiRequestParams
+    type UserApiRequestParams = SourceUserApiRequestParams
     interface SourceUserApiRequestCancelParams {
       apiId: string
       requestId: string
       reason?: 'cancelled' | 'timeout'
     }
-    type LegacyUserApiRequestCancelParams = string
-    type UserApiRequestCancelParams = LegacyUserApiRequestCancelParams | SourceUserApiRequestCancelParams
+    type UserApiRequestCancelParams = SourceUserApiRequestCancelParams
     interface UserApiRuntimeIdentity {
       apiId: string
       generation: number

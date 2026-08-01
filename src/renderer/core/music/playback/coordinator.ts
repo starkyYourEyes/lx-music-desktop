@@ -474,7 +474,13 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
     record: ActiveResolution,
     input: { musicInfo: LX.Music.MusicInfo | LX.Download.ListItem, reason: LX.Playback.ResolveReason },
   ): Promise<DirectPlaybackResource | CandidatePlaybackResource> => {
-    const result = await deps.createRequest(input)
+    let result: PlaybackRequestResult
+    try {
+      result = await deps.createRequest(input)
+    } catch (error) {
+      if (isResolutionClosed(record)) throw createCancellationError()
+      throw error
+    }
     if (record.phase == 'closed') {
       if (result.kind == 'session') result.session.cancel(record.cancelReason!)
       throw createCancellationError()

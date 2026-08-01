@@ -324,61 +324,19 @@ const validateToken = token => {
   return token
 }
 
-const assertRecordSnapshotUnchanged = (current, expected, label) => {
-  if (!isSameNode(current.identity, expected.identity) || current.raw != expected.raw) {
-    throw new Error(`Portable profile migration ${label} changed before compatibility upgrade`)
-  }
-}
-
-const upgradeLegacyJournal = (fsApi, paths, snapshot) => {
-  if (hasSourceIdentityBinding(snapshot.journal)) {
-    return { snapshot, requiresFreshPreparation: false }
-  }
-  const requiresFreshPreparation = snapshot.journal.state == 'typed-only-acknowledged'
-  const trees = assertRecordedTrees(fsApi, paths, snapshot.journal, {
-    sourceRequired: true,
-    destinationHashRequired: requiresFreshPreparation,
-    sourceIdentityRequired: false,
-  })
-  assertRecordSnapshotUnchanged(readJournal(fsApi, paths.journalPath), snapshot, 'journal')
-  writeJournal(fsApi, paths, {
-    ...snapshot.journal,
-    userDataIdentity: recordNodeIdentity(trees.userDataIdentity),
-    sourceIdentity: recordNodeIdentity(trees.sourceIdentity),
-    state: requiresFreshPreparation ? 'promoted' : snapshot.journal.state,
-    acknowledgementRunId: requiresFreshPreparation ? null : snapshot.journal.acknowledgementRunId,
-  })
-  return {
-    snapshot: readJournal(fsApi, paths.journalPath),
-    requiresFreshPreparation,
-  }
-}
-
-const upgradeLegacyReceipt = (fsApi, paths, snapshot) => {
-  if (hasSourceIdentityBinding(snapshot.receipt)) return snapshot
-  const trees = assertRecordedTrees(fsApi, paths, snapshot.receipt, {
-    sourceRequired: true,
-    destinationHashRequired: true,
-    sourceIdentityRequired: false,
-  })
-  assertRecordSnapshotUnchanged(readReceipt(fsApi, paths.receiptPath), snapshot, 'receipt')
-  writeReceipt(fsApi, paths, {
-    ...snapshot.receipt,
-    userDataIdentity: recordNodeIdentity(trees.userDataIdentity),
-    sourceIdentity: recordNodeIdentity(trees.sourceIdentity),
-  })
-  return readReceipt(fsApi, paths.receiptPath)
-}
-
-const receiptMatchesJournal = (receipt, journal) =>
-  hasSourceIdentityBinding(receipt) &&
-  hasSourceIdentityBinding(journal) &&
+const receiptMatchesJournal = (receipt, journal) => {
+  const receiptIsBound = hasSourceIdentityBinding(receipt)
+  const journalIsBound = hasSourceIdentityBinding(journal)
+  return receiptIsBound == journalIsBound &&
   receipt.promotionRunId == journal.promotionRunId &&
   receipt.sourceManifestHash == journal.sourceManifestHash &&
   receipt.destinationManifestHash == journal.destinationManifestHash &&
-  recordedIdentityMatches(receipt.userDataIdentity, journal.userDataIdentity) &&
-  recordedIdentityMatches(receipt.sourceIdentity, journal.sourceIdentity) &&
+  (!receiptIsBound || (
+    recordedIdentityMatches(receipt.userDataIdentity, journal.userDataIdentity) &&
+    recordedIdentityMatches(receipt.sourceIdentity, journal.sourceIdentity)
+  )) &&
   recordedIdentityMatches(receipt.destinationIdentity, journal.destinationIdentity)
+}
 
 const journalFromReceipt = (receipt, preparationRunId) => ({
   version: JOURNAL_VERSION,
@@ -386,6 +344,17 @@ const journalFromReceipt = (receipt, preparationRunId) => ({
   destinationManifestHash: receipt.destinationManifestHash,
   userDataIdentity: { ...receipt.userDataIdentity },
   sourceIdentity: { ...receipt.sourceIdentity },
+  destinationIdentity: { ...receipt.destinationIdentity },
+  promotionRunId: receipt.promotionRunId,
+  preparationRunId,
+  state: 'promoted',
+  acknowledgementRunId: null,
+})
+
+const legacyJournalFromReceipt = (receipt, preparationRunId) => ({
+  version: JOURNAL_VERSION,
+  sourceManifestHash: receipt.sourceManifestHash,
+  destinationManifestHash: receipt.destinationManifestHash,
   destinationIdentity: { ...receipt.destinationIdentity },
   promotionRunId: receipt.promotionRunId,
   preparationRunId,
@@ -430,17 +399,6 @@ const preparePortableProfile = ({
       }
     }
 
-    try {
-      if (journalSnapshot != null) {
-        journalSnapshot = upgradeLegacyJournal(fsApi, paths, journalSnapshot).snapshot
-      }
-      if (receiptSnapshot != null && hasDestination) {
-        receiptSnapshot = upgradeLegacyReceipt(fsApi, paths, receiptSnapshot)
-      }
-    } catch (error) {
-      return createResult('failed', { error })
-    }
-
     if (journalSnapshot != null && receiptSnapshot != null) {
       if (!receiptMatchesJournal(receiptSnapshot.receipt, journalSnapshot.journal) ||
         !removeOwnedReceipt(fsApi, paths, receiptSnapshot)) {
@@ -452,17 +410,23 @@ const preparePortableProfile = ({
     if (journalSnapshot == null && receiptSnapshot != null) {
       if (hasDestination) {
         try {
+          const receiptIsBound = hasSourceIdentityBinding(receiptSnapshot.receipt)
           assertRecordedTrees(fsApi, paths, receiptSnapshot.receipt, {
             sourceRequired: true,
             destinationHashRequired: true,
+            sourceIdentityRequired: receiptIsBound,
           })
-          const promotedJournal = journalFromReceipt(receiptSnapshot.receipt, runId)
+          const promotedJournal = receiptIsBound
+            ? journalFromReceipt(receiptSnapshot.receipt, runId)
+            : legacyJournalFromReceipt(receiptSnapshot.receipt, runId)
           writeJournal(fsApi, paths, promotedJournal)
           removeStaleOwnedStages({ fsApi, rootPath: paths.portableRoot, stagePrefix: paths.stagePrefix, logger })
           if (!removeOwnedReceipt(fsApi, paths, receiptSnapshot)) {
             throw new Error('Portable profile migration receipt could not be retired after journal promotion')
           }
-          return createResult('already-promoted', { token: createToken(paths, promotedJournal, runId) })
+          return createResult('already-promoted', receiptIsBound
+            ? { token: createToken(paths, promotedJournal, runId) }
+            : {})
         } catch (error) {
           return createResult('failed', { error })
         }
@@ -490,15 +454,20 @@ const preparePortableProfile = ({
         fsApi.rmdirSync(paths.destinationPath)
       } else {
         try {
+          const journalIsBound = hasSourceIdentityBinding(journalSnapshot.journal)
           assertRecordedTrees(fsApi, paths, journalSnapshot.journal, {
             sourceRequired: journalSnapshot.journal.state == 'promoted',
             destinationHashRequired: journalSnapshot.journal.state == 'typed-only-acknowledged',
+            sourceIdentityRequired: journalIsBound,
           })
         } catch (error) {
           return createResult('failed', { error })
         }
         if (journalSnapshot.journal.state == 'typed-only-acknowledged') {
           return createResult('already-acknowledged')
+        }
+        if (!hasSourceIdentityBinding(journalSnapshot.journal)) {
+          return createResult('already-promoted')
         }
         const refreshedJournal = {
           ...journalSnapshot.journal,
@@ -592,11 +561,10 @@ const acknowledgePortableProfileStartup = async(rawToken, {
   const lock = acquireMigrationLock({ fsApi, rootPath: paths.portableRoot, lockPath: paths.lockPath, isProcessAlive, logger })
   if ('error' in lock) throw lock.error
   try {
-    const upgraded = upgradeLegacyJournal(fsApi, paths, readJournal(fsApi, paths.journalPath))
-    if (upgraded.requiresFreshPreparation) {
-      throw new Error('Portable profile requires fresh preparation before acknowledgement')
+    const { journal } = readJournal(fsApi, paths.journalPath)
+    if (!hasSourceIdentityBinding(journal)) {
+      throw new Error('Legacy portable profile records are not eligible for acknowledgement')
     }
-    const { journal } = upgraded.snapshot
     if (journal.state != 'promoted' ||
       journal.promotionRunId != token.promotionRunId ||
       journal.preparationRunId != token.startupRunId ||
@@ -636,11 +604,13 @@ const retireAcknowledgedPortableSource = ({
   try {
     let journal
     try {
-      journal = upgradeLegacyJournal(fsApi, paths, readJournal(fsApi, paths.journalPath)).snapshot.journal
+      journal = readJournal(fsApi, paths.journalPath).journal
     } catch (error) {
       return createResult('failed', { error })
     }
-    if (journal.state != 'typed-only-acknowledged') return createResult('not-acknowledged')
+    if (!hasSourceIdentityBinding(journal) || journal.state != 'typed-only-acknowledged') {
+      return createResult('not-acknowledged')
+    }
     if (journal.acknowledgementRunId == runId) return createResult('same-startup')
     try {
       const identities = assertRecordedTrees(fsApi, paths, journal, { sourceRequired: false })

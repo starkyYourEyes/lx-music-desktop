@@ -13,6 +13,9 @@ import { createPlaybackRecorderState, reduce } from './reducer'
 import type { PlaybackRecorderAction, PlaybackSessionState } from './types'
 
 type PlaybackMode = 'activity' | 'resume-only' | 'private'
+type PlaybackStartCommand = Extract<PlaybackRecorderCommandV1, { kind: 'start' }>
+
+const MAX_TIMER_DELAY_MS = (2 ** 31) - 1
 
 export interface PlaybackDeliveryClock {
   now: () => number
@@ -74,10 +77,12 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
   const initialRetryMs = options.retry?.initialMs ?? 100
   const maxRetryMs = options.retry?.maxMs ?? Math.max(5_000, initialRetryMs)
   if (!Number.isFinite(initialRetryMs) || initialRetryMs <= 0 ||
-    !Number.isFinite(maxRetryMs) || maxRetryMs < initialRetryMs) {
+    !Number.isFinite(maxRetryMs) || maxRetryMs < initialRetryMs ||
+    initialRetryMs > MAX_TIMER_DELAY_MS || maxRetryMs > MAX_TIMER_DELAY_MS) {
     throw new Error('Invalid playback retry options')
   }
   const groupModes = new Map<string, PlaybackMode>()
+  const groupStartOwners = new Map<string, PlaybackStartCommand>()
   const waiters = new Set<() => void>()
 
   let state = createPlaybackRecorderState()
@@ -93,6 +98,7 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
 
   const validateAndLatchOutbox = (): boolean => {
     const modes = new Map(groupModes)
+    const startOwners = new Map(groupStartOwners)
     try {
       for (const command of state.outbox) {
         const group = commandGroup(command)
@@ -101,11 +107,17 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
         const known = modes.get(group)
         if (known != null && known != mode) return false
         modes.set(group, mode)
+        if (command.kind == 'start') {
+          const owner = startOwners.get(group)
+          if (owner != null && owner !== command) return false
+          startOwners.set(group, command)
+        }
       }
     } catch {
       return false
     }
     for (const [group, mode] of modes) groupModes.set(group, mode)
+    for (const [group, owner] of startOwners) groupStartOwners.set(group, owner)
     return true
   }
 
@@ -116,6 +128,7 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
       case 'start': {
         const result = parsePlaybackStartResult(value)
         if (result.mode != commandMode(command) || startResultGroup(result) != group) return false
+        if (result.mode == 'activity' && result.ack.checkpointSeq < 1) return false
         state = reduce(state, { type: 'start-result', result })
         return state.outbox[0] !== command
       }
@@ -143,7 +156,8 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
 
   const scheduleRetry = (): void => {
     if (retryTimer != null || state.outbox.length == 0 || !isAlive()) return
-    const delayMs = Math.min(maxRetryMs, initialRetryMs * (2 ** Math.min(failures, 30)))
+    const multiplier = 2 ** Math.min(failures, 30)
+    const delayMs = multiplier >= maxRetryMs / initialRetryMs ? maxRetryMs : initialRetryMs * multiplier
     failures++
     retryTimer = clock.setTimeout(() => {
       retryTimer = null
@@ -163,8 +177,10 @@ export const createPlaybackRecorder = (options: PlaybackRecorderOptions = {}): P
     const command = state.outbox[0]
     inFlight = Promise.resolve()
       .then(async() => {
-        if (state.outbox[0] !== command || !validateAndLatchOutbox()) return false
-        return applyResponse(command, await transport(command))
+        if (state.outbox[0] !== command || !validateAndLatchOutbox() || !isAlive()) return false
+        const response = await transport(command)
+        if (!isAlive()) return false
+        return applyResponse(command, response)
       })
       .catch(() => {
         state = reduce(state, { type: 'send-failed' })

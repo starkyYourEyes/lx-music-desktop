@@ -209,15 +209,116 @@ describe('typed playback IPC', () => {
     assert.deepEqual(workerCalls, [])
   })
 
+  it('snapshots an exact recent query data envelope before worker dispatch', async() => {
+    let limitReads = 0
+    let workerCalls = 0
+    const statefulLimit = { version: 1 }
+    Object.defineProperty(statefulLimit, 'limit', {
+      enumerable: true,
+      get() {
+        limitReads++
+        return limitReads <= 3 ? 2 : 0
+      },
+    })
+    const hiddenExtra = { version: 1, limit: 2 }
+    Object.defineProperty(hiddenExtra, 'hidden', { value: true })
+    const symbolExtra = { version: 1, limit: 2, [Symbol('hidden')]: true }
+    const secret = 'sentinel-recent-query'
+    const trapped = new Proxy({ version: 1, limit: 2 }, {
+      ownKeys() { throw new Error(secret) },
+    })
+    const { createPlaybackHandlers } = loadSourceModule(handlerPath)
+    const handlers = createPlaybackHandlers({
+      playbackStart: () => ({ mode: 'activity', ack: activityAck(1) }),
+      playbackCommit: () => activityAck(),
+      playbackUpdateResume: () => resumeAck(),
+      playbackRecordPreplayFailure: () => activityAck(1),
+      playbackGetRecent: () => { workerCalls++; return [recentTrack] },
+      playbackGetListeningStats: () => listening,
+      playbackGetResume: () => savedResume,
+    })
+    const queries = [
+      statefulLimit,
+      hiddenExtra,
+      symbolExtra,
+      { version: 1, limit: 2, extra: true },
+      trapped,
+    ]
+    const outcomes = await Promise.all(queries.map(async query => {
+      try {
+        await handlers.recentGet(query)
+        return 'resolved'
+      } catch (error) {
+        return error?.message
+      }
+    }))
+    assert.deepEqual(
+      { outcomes, limitReads, workerCalls },
+      { outcomes: queries.map(() => 'Invalid playback recent query'), limitReads: 0, workerCalls: 0 },
+    )
+  })
+
+  it('validates recent results as dense ordinary data arrays without invoking array hooks', async() => {
+    let workerCalls = 0
+    let mapCalls = 0
+    let indexReads = 0
+    const sparse = [recentTrack]
+    sparse.length = 2
+    const hostileMap = [{ invalid: true }]
+    Object.defineProperty(hostileMap, 'map', {
+      value() { mapCalls++; return [] },
+    })
+    const accessorIndex = []
+    Object.defineProperty(accessorIndex, '0', {
+      enumerable: true,
+      configurable: true,
+      get() { indexReads++; return recentTrack },
+    })
+    const hiddenExtra = [recentTrack]
+    Object.defineProperty(hiddenExtra, 'hidden', { value: true })
+    const symbolExtra = [recentTrack]
+    Object.defineProperty(symbolExtra, Symbol.iterator, {
+      value() { throw new Error('sentinel-array-iterator') },
+    })
+    const results = [sparse, hostileMap, accessorIndex, hiddenExtra, symbolExtra]
+    const { createPlaybackHandlers } = loadSourceModule(handlerPath)
+    const outcomes = await Promise.all(results.map(async result => {
+      const handlers = createPlaybackHandlers({
+        playbackStart: () => ({ mode: 'activity', ack: activityAck(1) }),
+        playbackCommit: () => activityAck(),
+        playbackUpdateResume: () => resumeAck(),
+        playbackRecordPreplayFailure: () => activityAck(1),
+        playbackGetRecent: () => { workerCalls++; return result },
+        playbackGetListeningStats: () => listening,
+        playbackGetResume: () => savedResume,
+      })
+      try {
+        await handlers.recentGet({ version: 1, limit: 2 })
+        return 'resolved'
+      } catch (error) {
+        return error?.message
+      }
+    }))
+    assert.deepEqual(
+      { outcomes, workerCalls, mapCalls, indexReads },
+      {
+        outcomes: results.map(() => 'Invalid playback recent result'),
+        workerCalls: results.length,
+        mapCalls: 0,
+        indexReads: 0,
+      },
+    )
+  })
+
   it('validates every worker output and does not return hostile result sentinels', async() => {
     const secret = 'sentinel-worker-result'
     const hostile = new Proxy({}, { ownKeys() { throw new Error(secret) } })
     const hostileRecent = new Proxy([], {
       get(target, key, receiver) {
         if (key == 'then') return undefined
-        if (key == 'map') throw new Error(secret)
         return Reflect.get(target, key, receiver)
       },
+      ownKeys() { throw new Error(secret) },
     })
     const { createPlaybackHandlers } = loadSourceModule(handlerPath)
     const handlers = createPlaybackHandlers({
@@ -316,6 +417,39 @@ describe('typed playback IPC', () => {
 
 describe('reliable playback command delivery', () => {
   const createRecorder = options => loadSourceModule(recorderPath).createPlaybackRecorder(options)
+
+  const commandEvidence = command => {
+    switch (command.kind) {
+      case 'start': return {
+        kind: command.kind,
+        group: command.request.playbackGroupUuid,
+        seq: null,
+        occurredAtMs: command.request.occurredAtMs,
+        marker: command.request.track.sourceTrackId,
+      }
+      case 'commit': return {
+        kind: command.kind,
+        group: command.request.checkpoint.playbackGroupUuid,
+        seq: command.request.checkpoint.checkpointSeq,
+        occurredAtMs: command.request.checkpoint.occurredAtMs,
+        marker: command.request.fact?.type ?? command.request.boundary?.type ?? null,
+      }
+      case 'resume': return {
+        kind: command.kind,
+        group: command.request.playbackGroupUuid,
+        seq: command.request.checkpointSeq,
+        occurredAtMs: command.request.updatedAtMs,
+        marker: command.request.track.sourceTrackId,
+      }
+      case 'preplay_failure': return {
+        kind: command.kind,
+        group: command.request.playbackGroupUuid,
+        seq: null,
+        occurredAtMs: command.request.occurredAtMs,
+        marker: command.request.track.sourceTrackId,
+      }
+    }
+  }
 
   const queueActivityCommit = async(recorder) => {
     recorder.dispatch({ type: 'start-requested', request: start() })
@@ -435,6 +569,54 @@ describe('reliable playback command delivery', () => {
     assert.equal(modeRecorder.getState().deliveryMode, 'activity')
   })
 
+  it('requires ack1 for activity starts while accepting ack0 for resume-only starts', async() => {
+    const timers = []
+    const clock = {
+      now: () => 0,
+      setTimeout: callback => { timers.push(callback); return callback },
+      clearTimeout: () => {},
+    }
+    const activityRequests = []
+    const activityRecorder = createRecorder({
+      transport: command => {
+        activityRequests.push(commandEvidence(command))
+        if (command.kind == 'start') return Promise.resolve({ mode: 'activity', ack: activityAck(0) })
+        return new Promise(() => {})
+      },
+      clock,
+      retry: { initialMs: 5, maxMs: 10 },
+    })
+    activityRecorder.dispatch({ type: 'start-requested', request: start() })
+    activityRecorder.dispatch({ type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1, occurredAtMs: 100 })
+    activityRecorder.dispatch({ type: 'pause', reason: 'user', monotonicMs: 1000, positionMs: 1000, occurredAtMs: 1100 })
+    await settle()
+    assert.deepEqual(
+      { requests: activityRequests, outbox: activityRecorder.getState().outbox.map(commandEvidence) },
+      {
+        requests: [{ kind: 'start', group: UUID, seq: null, occurredAtMs: 100, marker: 'track' }],
+        outbox: [
+          { kind: 'start', group: UUID, seq: null, occurredAtMs: 100, marker: 'track' },
+          { kind: 'commit', group: UUID, seq: 2, occurredAtMs: 1100, marker: 'pause' },
+        ],
+      },
+    )
+
+    const resumeRequests = []
+    const resumeRecorder = createRecorder({
+      transport: async command => {
+        resumeRequests.push(commandEvidence(command))
+        return { mode: 'resume-only', ack: resumeAck(0) }
+      },
+      clock,
+      retry: { initialMs: 5, maxMs: 10 },
+    })
+    resumeRecorder.dispatch({ type: 'start-requested', request: start({ consent: { recentAllowed: false, statsAllowed: false, privateMode: false } }) })
+    resumeRecorder.dispatch({ type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1, occurredAtMs: 100 })
+    await settle()
+    assert.deepEqual(resumeRequests, [{ kind: 'start', group: UUID, seq: null, occurredAtMs: 100, marker: 'track' }])
+    assert.deepEqual(resumeRecorder.getState().outbox, [])
+  })
+
   it('shares one in-flight attempt across concurrent flush calls', async() => {
     let attempts = 0
     let resolveStart
@@ -462,6 +644,48 @@ describe('reliable playback command delivery', () => {
     assert.equal(await recorder.flush({ timeoutMs: 15 }), false)
     assert.ok(Date.now() - before < 250)
     assert.equal(recorder.getState().outbox[0].kind, 'start')
+  })
+
+  it('does not invoke transport when liveness dies before the send microtask', async() => {
+    let alive = true
+    let attempts = 0
+    const recorder = createRecorder({
+      transport: async() => { attempts++; return { mode: 'activity', ack: activityAck(1) } },
+      isAlive: () => alive,
+    })
+    recorder.dispatch({ type: 'start-requested', request: start() })
+    recorder.dispatch({ type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1, occurredAtMs: 100 })
+    alive = false
+    await settle()
+    assert.equal(attempts, 0)
+    assert.equal(await recorder.flush({ timeoutMs: 20 }), false)
+    assert.deepEqual(recorder.getState().outbox.map(commandEvidence), [
+      { kind: 'start', group: UUID, seq: null, occurredAtMs: 100, marker: 'track' },
+    ])
+  })
+
+  it('does not apply an in-flight success after liveness dies', async() => {
+    let alive = true
+    let attempts = 0
+    let resolveStart
+    const recorder = createRecorder({
+      transport: () => {
+        attempts++
+        return new Promise(resolve => { resolveStart = resolve })
+      },
+      isAlive: () => alive,
+    })
+    recorder.dispatch({ type: 'start-requested', request: start() })
+    recorder.dispatch({ type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1, occurredAtMs: 100 })
+    await settle()
+    const flushing = recorder.flush({ timeoutMs: 100 })
+    alive = false
+    resolveStart({ mode: 'activity', ack: activityAck(1) })
+    assert.equal(await flushing, false)
+    assert.equal(attempts, 1)
+    assert.deepEqual(recorder.getState().outbox.map(commandEvidence), [
+      { kind: 'start', group: UUID, seq: null, occurredAtMs: 100, marker: 'track' },
+    ])
   })
 
   it('stops retrying when the window dies and leaves the failed head untouched', async() => {
@@ -544,6 +768,44 @@ describe('reliable playback command delivery', () => {
     assert.doesNotThrow(() => createRecorder({ transport: async() => activityAck(1), retry: { initialMs: 1, maxMs: 1 } }))
   })
 
+  it('enforces the platform retry timer ceiling and caps exponential delays', async() => {
+    const maxTimerMs = (2 ** 31) - 1
+    assert.doesNotThrow(() => createRecorder({ retry: { initialMs: maxTimerMs, maxMs: maxTimerMs } }))
+    for (const retry of [
+      { initialMs: maxTimerMs + 1, maxMs: maxTimerMs + 1 },
+      { initialMs: 1, maxMs: maxTimerMs + 1 },
+    ]) {
+      assert.throws(() => createRecorder({ retry }), /Invalid playback retry options/)
+    }
+
+    const delays = []
+    const timers = []
+    const recorder = createRecorder({
+      transport: async() => { throw new Error('offline') },
+      clock: {
+        now: () => 0,
+        setTimeout: (callback, delay) => {
+          delays.push(delay)
+          timers.push(callback)
+          return callback
+        },
+        clearTimeout: () => {},
+      },
+      retry: { initialMs: 2 ** 30, maxMs: maxTimerMs },
+    })
+    recorder.dispatch({ type: 'start-requested', request: start() })
+    recorder.dispatch({ type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1, occurredAtMs: 100 })
+    await settle()
+    for (let index = 0; index < 2; index++) {
+      const timer = timers.shift()
+      assert.ok(timer)
+      timer()
+      await settle()
+    }
+    assert.deepEqual(delays, [2 ** 30, maxTimerMs, maxTimerMs])
+    assert.ok(delays.every(delay => delay <= maxTimerMs))
+  })
+
   it('sends nothing when the queued outbox mixes modes within one group', async() => {
     const requests = []
     const timers = []
@@ -605,6 +867,114 @@ describe('reliable playback command delivery', () => {
     await settle()
     assert.equal(requests.length, 1)
     assert.deepEqual(recorder.getState().outbox.map(command => command.kind), ['start', 'commit', 'start'])
+  })
+
+  it('preserves old and new same-UUID lifetimes when an old commit acknowledgement returns', async() => {
+    const requests = []
+    const timers = []
+    let resolveOldCommit
+    let heldOldCommit = false
+    const recorder = createRecorder({
+      transport: command => {
+        requests.push(commandEvidence(command))
+        if (command.kind == 'start') return Promise.resolve({ mode: 'activity', ack: activityAck(1) })
+        if (!heldOldCommit && command.kind == 'commit' && command.request.checkpoint.checkpointSeq == 2) {
+          heldOldCommit = true
+          return new Promise(resolve => { resolveOldCommit = resolve })
+        }
+        return new Promise(() => {})
+      },
+      clock: {
+        now: () => 0,
+        setTimeout: callback => { timers.push(callback); return callback },
+        clearTimeout: () => {},
+      },
+      retry: { initialMs: 5, maxMs: 10 },
+    })
+    recorder.dispatch({ type: 'start-requested', request: start() })
+    recorder.dispatch({ type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1, occurredAtMs: 100 })
+    await settle()
+    recorder.dispatch({ type: 'pause', reason: 'user', monotonicMs: 1000, positionMs: 1000, occurredAtMs: 1100 })
+    await settle()
+    assert.equal(typeof resolveOldCommit, 'function')
+
+    const nextStart = start({
+      occurredAtMs: 2200,
+      track: { ...start().track, sourceTrackId: 'new-track' },
+    })
+    recorder.dispatch({ type: 'repeat', request: nextStart, monotonicMs: 2000, positionMs: 1000, occurredAtMs: 2100 })
+    recorder.dispatch({ type: 'native-playing', monotonicMs: 2200, positionMs: 0, playbackRate: 1, occurredAtMs: 2200 })
+    recorder.dispatch({ type: 'pause', reason: 'user', monotonicMs: 3200, positionMs: 1000, occurredAtMs: 3200 })
+    const expectedOutbox = [
+      { kind: 'commit', group: UUID, seq: 2, occurredAtMs: 1100, marker: 'pause' },
+      { kind: 'commit', group: UUID, seq: 3, occurredAtMs: 2100, marker: 'play_end' },
+      { kind: 'start', group: UUID, seq: null, occurredAtMs: 2200, marker: 'new-track' },
+      { kind: 'commit', group: UUID, seq: 2, occurredAtMs: 3200, marker: 'pause' },
+    ]
+    const fullOutboxBeforeAck = structuredClone(recorder.getState().outbox)
+    assert.deepEqual(recorder.getState().outbox.map(commandEvidence), expectedOutbox)
+    assert.deepEqual(requests, [
+      { kind: 'start', group: UUID, seq: null, occurredAtMs: 100, marker: 'track' },
+      { kind: 'commit', group: UUID, seq: 2, occurredAtMs: 1100, marker: 'pause' },
+    ])
+
+    resolveOldCommit(activityAck(2))
+    await settle()
+    assert.deepEqual(recorder.getState().outbox, fullOutboxBeforeAck)
+    assert.deepEqual(recorder.getState().outbox.map(commandEvidence), expectedOutbox)
+    assert.deepEqual(requests, [
+      { kind: 'start', group: UUID, seq: null, occurredAtMs: 100, marker: 'track' },
+      { kind: 'commit', group: UUID, seq: 2, occurredAtMs: 1100, marker: 'pause' },
+    ])
+  })
+
+  it('does not let a start response remove a second same-UUID start lifetime', async() => {
+    const requests = []
+    const timers = []
+    let resolveFirstStart
+    const recorder = createRecorder({
+      transport: command => {
+        requests.push(commandEvidence(command))
+        if (requests.length == 1) return new Promise(resolve => { resolveFirstStart = resolve })
+        return new Promise(() => {})
+      },
+      clock: {
+        now: () => 0,
+        setTimeout: callback => { timers.push(callback); return callback },
+        clearTimeout: () => {},
+      },
+      retry: { initialMs: 5, maxMs: 10 },
+    })
+    recorder.dispatch({ type: 'start-requested', request: start() })
+    recorder.dispatch({ type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1, occurredAtMs: 100 })
+    await settle()
+
+    const secondStart = start({
+      occurredAtMs: 1200,
+      track: { ...start().track, sourceTrackId: 'second-track' },
+    })
+    recorder.dispatch({ type: 'repeat', request: secondStart, monotonicMs: 1000, positionMs: 1000, occurredAtMs: 1100 })
+    recorder.dispatch({ type: 'native-playing', monotonicMs: 1200, positionMs: 0, playbackRate: 1, occurredAtMs: 1200 })
+    recorder.dispatch({ type: 'pause', reason: 'user', monotonicMs: 2200, positionMs: 1000, occurredAtMs: 2200 })
+    const expectedOutbox = [
+      { kind: 'start', group: UUID, seq: null, occurredAtMs: 100, marker: 'track' },
+      { kind: 'commit', group: UUID, seq: 2, occurredAtMs: 1100, marker: 'play_end' },
+      { kind: 'start', group: UUID, seq: null, occurredAtMs: 1200, marker: 'second-track' },
+      { kind: 'commit', group: UUID, seq: 2, occurredAtMs: 2200, marker: 'pause' },
+    ]
+    const fullOutboxBeforeResponse = structuredClone(recorder.getState().outbox)
+    assert.deepEqual(recorder.getState().outbox.map(commandEvidence), expectedOutbox)
+    assert.deepEqual(requests, [
+      { kind: 'start', group: UUID, seq: null, occurredAtMs: 100, marker: 'track' },
+    ])
+
+    resolveFirstStart({ mode: 'activity', ack: activityAck(1) })
+    await settle()
+    assert.deepEqual(recorder.getState().outbox, fullOutboxBeforeResponse)
+    assert.deepEqual(recorder.getState().outbox.map(commandEvidence), expectedOutbox)
+    assert.deepEqual(requests, [
+      { kind: 'start', group: UUID, seq: null, occurredAtMs: 100, marker: 'track' },
+    ])
   })
 
   it('never logs request bodies or music payloads on validation and delivery failure', async() => {

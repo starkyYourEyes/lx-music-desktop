@@ -24,7 +24,6 @@ import {
   parsePlaybackStartResult,
   parseRecentTrack,
 } from '@common/storage/playbackValidation'
-import { assertRecord } from '@common/storage/validation'
 
 type Awaitable<T> = Promise<T> | T
 interface PlaybackRecentQueryV1 { version: 1, limit: number }
@@ -43,15 +42,18 @@ const invalidRecentQuery = (): never => {
   throw new Error('Invalid playback recent query')
 }
 
-const assertPlaybackRecord: (value: unknown, field: string) => asserts value is Record<string, unknown> = assertRecord
-
 const parseRecentQuery = (value: unknown): PlaybackRecentQueryV1 => {
   try {
-    assertPlaybackRecord(value, 'playback recent query')
-    const keys = Object.keys(value)
-    if (keys.length != 2 || !Object.hasOwn(value, 'version') || !Object.hasOwn(value, 'limit')) invalidRecentQuery()
-    if (value.version !== 1 || !Number.isSafeInteger(value.limit) || (value.limit as number) < 1 || (value.limit as number) > 520) invalidRecentQuery()
-    return { version: 1, limit: value.limit as number }
+    if (value == null || typeof value != 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) invalidRecentQuery()
+    const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<PropertyKey, PropertyDescriptor>
+    const keys = Reflect.ownKeys(descriptors)
+    if (keys.length != 2 || keys.some(key => key != 'version' && key != 'limit')) invalidRecentQuery()
+    const version = descriptors.version
+    const limit = descriptors.limit
+    if (version == null || !version.enumerable || !Object.hasOwn(version, 'value') || version.value !== 1) invalidRecentQuery()
+    if (limit == null || !limit.enumerable || !Object.hasOwn(limit, 'value') ||
+      !Number.isSafeInteger(limit.value) || limit.value < 1 || limit.value > 520) invalidRecentQuery()
+    return { version: 1, limit: limit.value as number }
   } catch {
     return invalidRecentQuery()
   }
@@ -59,8 +61,19 @@ const parseRecentQuery = (value: unknown): PlaybackRecentQueryV1 => {
 
 const parseRecentResult = (value: unknown): RecentTrackV1[] => {
   try {
-    if (!Array.isArray(value)) throw new Error('Invalid playback recent result')
-    return value.map(parseRecentTrack)
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) throw new Error('Invalid playback recent result')
+    const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<PropertyKey, PropertyDescriptor>
+    const lengthDescriptor = descriptors.length
+    if (lengthDescriptor == null || lengthDescriptor.enumerable !== false || !Object.hasOwn(lengthDescriptor, 'value') ||
+      !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0) throw new Error('Invalid playback recent result')
+    const length = lengthDescriptor.value as number
+    if (Reflect.ownKeys(descriptors).length != length + 1) throw new Error('Invalid playback recent result')
+    for (let index = 0; index < length; index++) {
+      const descriptor = descriptors[index]
+      if (descriptor == null || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) throw new Error('Invalid playback recent result')
+      parseRecentTrack(descriptor.value)
+    }
+    return value
   } catch {
     throw new Error('Invalid playback recent result')
   }

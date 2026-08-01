@@ -33,6 +33,15 @@ declare namespace LX {
       error: GitHubReplaceError
     }
 
+    type UserApiRemoveResult = {
+      success: true
+      apiList: UserApiInfo[]
+    } | {
+      success: false
+      apiList: UserApiInfo[]
+      error: GitHubReplaceError
+    }
+
     interface UserApiSourceInfo {
       name: string
       type: UserApiSourceInfoType
@@ -93,11 +102,11 @@ declare namespace LX {
     type UserApiGetStatusParams = string
     type UserApiEnsureParams = string
     type UserApiRequestResult<T = any> =
-      | { ok: true; value: T }
-      | { ok: false; error: LX.Playback.SourceFailureData }
+      | { ok: true, value: T }
+      | { ok: false, error: LX.Playback.SourceFailureData }
     type UserApiEnsureResult =
-      | { ok: true; value: UserApiStatus }
-      | { ok: false; error: LX.Playback.SourceFailureData }
+      | { ok: true, value: UserApiStatus }
+      | { ok: false, error: LX.Playback.SourceFailureData }
 
     interface UserApiRuntimeEnvelope<T> {
       identity: UserApiRuntimeIdentity

@@ -32,8 +32,11 @@ const getErrorText = (
     .substring(0, REPLACE_ERROR_LIMITS[key])
 }
 
-const serializeReplaceError = (err: unknown): LX.UserApi.GitHubReplaceError => {
-  const message = getErrorText(err, 'message') ?? 'GitHub user API replacement failed'
+const serializeReplaceError = (
+  err: unknown,
+  fallbackMessage = 'GitHub user API replacement failed',
+): LX.UserApi.GitHubReplaceError => {
+  const message = getErrorText(err, 'message') ?? fallbackMessage
   const code = getErrorText(err, 'code')
   const detail = getErrorText(err, 'detail')
   return {
@@ -76,9 +79,22 @@ export default () => {
     },
   )
 
-  mainHandle<string[], LX.UserApi.UserApiInfo[]>(WIN_MAIN_RENDERER_EVENT_NAME.remove_user_api, async({ params: apiIds }) => {
-    return removeApi(apiIds)
-  })
+  mainHandle<string[], LX.UserApi.UserApiRemoveResult>(
+    WIN_MAIN_RENDERER_EVENT_NAME.remove_user_api,
+    async({ params: apiIds }) => {
+      try {
+        return { success: true, apiList: await removeApi(apiIds) }
+      } catch (err) {
+        const apiList = takeReplacementFailureApiList(err)
+        if (apiList == null) throw err
+        return {
+          success: false,
+          apiList,
+          error: serializeReplaceError(err, 'User API removal failed'),
+        }
+      }
+    },
+  )
 
   mainHandle<LX.UserApi.UserApiSetApiParams>(WIN_MAIN_RENDERER_EVENT_NAME.set_user_api, async({ params: apiId }) => {
     await setApi(apiId)

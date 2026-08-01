@@ -182,6 +182,8 @@ describe('playback retention', () => {
     })
     commit({
       playbackGroupUuid: '22222222-2222-4222-8222-222222222222',
+      played: 0,
+      active: 0,
       at: 4000,
       fact: terminalFact,
     })
@@ -248,6 +250,57 @@ describe('playback retention', () => {
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM playback_sessions WHERE session_id = 1').get().count, 0)
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM playback_sessions WHERE session_id = 2').get().count, 0)
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM playback_sessions WHERE session_id = 3').get().count, 1)
+  })
+
+  it('preserves factual projection timestamps when rank compaction runs before the statistics cutoff', async() => {
+    const db = await createStore()
+    assert.equal(repository.playbackClearStatistics({ version: 1, occurredAtMs: 2000 }), null)
+    start(db, { id: 'stats-only', at: 2500, consent: { recentAllowed: false } })
+    commit({ at: 3000, fact: terminalFact })
+    const trackId = db.prepare(`
+      SELECT track_id AS trackId FROM track_snapshots WHERE source_track_id = 'stats-only'
+    `).get().trackId
+    const insert = db.prepare(`
+      INSERT INTO playback_sessions(
+        session_uuid, playback_group_uuid, segment_no, track_id, local_day,
+        utc_offset_minutes, context_type, context_id, start_reason, end_reason,
+        started_at_ms, ended_at_ms, start_position_ms, last_position_ms, duration_ms,
+        played_ms, active_ms, cumulative_played_ms, cumulative_active_ms,
+        checkpoint_seq, state, recent_allowed, stats_allowed, created_at_ms
+      ) VALUES(?, ?, 0, ?, '1970-01-01', 0, NULL, NULL, 'select', 'natural_end',
+        3500, 4000, 0, 0, NULL, 0, 0, 0, 0, 1, 'closed', 0, 0, 3500)
+    `)
+    db.transaction(() => {
+      for (let index = 1; index <= 100000; index++) {
+        const suffix = String(index).padStart(12, '0')
+        insert.run(`10000000-0000-4000-8000-${suffix}`, `newer-${index}`, trackId)
+      }
+    })()
+
+    assert.deepEqual(repository.playbackCompact({ version: 1, nowMs: 1000, batchSize: 1 }), {
+      version: 1,
+      deleted: 1,
+      remainingEligible: 0,
+    })
+    assert.deepEqual(db.prepare(`
+      SELECT updated_at_ms AS updatedAtMs FROM listening_daily
+    `).get(), { updatedAtMs: 3000 })
+    assert.deepEqual(db.prepare(`
+      SELECT updated_at_ms AS updatedAtMs FROM listening_tracks
+    `).get(), { updatedAtMs: 3000 })
+    assert.deepEqual(db.prepare(`
+      SELECT updated_at_ms AS updatedAtMs FROM activity_totals WHERE id = 1
+    `).get(), { updatedAtMs: 3000 })
+    const stats = repository.playbackGetListeningStats()
+    assert.equal(stats.total.playedMs, 500)
+    assert.equal(stats.total.activeMs, 700)
+    assert.equal(stats.daily.length, 1)
+    assert.equal(stats.daily[0].playedMs, 500)
+    assert.equal(stats.daily[0].activeMs, 700)
+    assert.equal(stats.tracks.length, 1)
+    assert.equal(stats.tracks[0].playedMs, 500)
+    assert.equal(stats.tracks[0].activeMs, 700)
+    assert.deepEqual(repository.playbackGetRecent({ version: 1, limit: 520 }), [])
   })
 
   it('rejects hostile and out-of-range compaction commands without changing the database', async() => {

@@ -60,7 +60,6 @@ const assertTransferBucket = (
 const transferContribution = (
   db: Database.Database,
   row: RetentionRow,
-  nowMs: number,
 ): void => {
   if (row.playedMs == 0 && row.activeMs == 0) return
   const columns = `
@@ -85,11 +84,10 @@ const transferContribution = (
     row.activeMs,
   )
 
-  const values = [row.playedMs, row.playedMs, row.activeMs, row.activeMs, nowMs]
+  const values = [row.playedMs, row.playedMs, row.activeMs, row.activeMs]
   const update = `
     SET baseline_played_ms = baseline_played_ms + ?, live_played_ms = live_played_ms - ?,
-      baseline_active_ms = baseline_active_ms + ?, live_active_ms = live_active_ms - ?,
-      updated_at_ms = ?
+      baseline_active_ms = baseline_active_ms + ?, live_active_ms = live_active_ms - ?
   `
   const daily = db.prepare(`UPDATE listening_daily ${update} WHERE local_day = ?`)
     .run(...values, row.localDay)
@@ -123,7 +121,7 @@ export const playbackCompact = (value: PlaybackCompactCommandV1): PlaybackCompac
     for (const row of rows) {
       if (row.statsAllowed == 1 &&
         (state.visibleAfterMs == null || row.startedAtMs >= state.visibleAfterMs)) {
-        transferContribution(db, row, input.nowMs)
+        transferContribution(db, row)
       }
       if (db.prepare('DELETE FROM playback_sessions WHERE session_id = ?').run(row.sessionId).changes != 1) {
         throw new Error('playback_retention_delete_failed')

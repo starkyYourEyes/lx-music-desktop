@@ -63,6 +63,15 @@ const failAt = (
 export const playbackClearRecent = (value: PlaybackClearRecentCommandV1): void => {
   const input = parsePlaybackClearRecentCommand(value)
   immediate(db => {
+    const state = db.prepare(`
+      SELECT visible_after_ms AS visibleAfterMs
+      FROM projection_state WHERE name = 'recent'
+    `).get() as { visibleAfterMs: number | null } | undefined
+    if (state == null) throw new Error('playback_projection_state_missing')
+    if (state.visibleAfterMs != null) {
+      if (input.occurredAtMs < state.visibleAfterMs) throw new Error('playback_recent_clear_stale')
+      if (input.occurredAtMs == state.visibleAfterMs) return
+    }
     db.prepare('DELETE FROM recent_tracks').run()
     const result = db.prepare(`
       UPDATE projection_state
@@ -109,6 +118,36 @@ const resetStatistics = (db: Database.Database, occurredAtMs: number): void => {
   if (result.changes != 1) throw new Error('playback_activity_totals_missing')
 }
 
+const openPlaybackGroups = (db: Database.Database): Array<{ playbackGroupUuid: string }> =>
+  db.prepare(`
+    SELECT playback_group_uuid AS playbackGroupUuid
+    FROM playback_sessions
+    WHERE state IN ('playing', 'paused')
+    ORDER BY session_id
+  `).all() as Array<{ playbackGroupUuid: string }>
+
+const replayStatisticsClear = (
+  db: Database.Database,
+  input: PlaybackClearStatisticsCommandV1,
+): PlaybackCheckpointAckV1 | null => {
+  const openGroups = openPlaybackGroups(db)
+  if (openGroups.length == 0) return null
+  if (input.activeCheckpoint == null ||
+    openGroups.some(row => row.playbackGroupUuid != input.activeCheckpoint?.playbackGroupUuid)) {
+    throw new Error('playback_statistics_clear_checkpoint_required')
+  }
+  const current = getOpenSession(db, input.activeCheckpoint.playbackGroupUuid)
+  if (current == null ||
+    input.activeCheckpoint.checkpointSeq != current.checkpointSeq ||
+    input.activeCheckpoint.cumulativePlayedMs != current.cumulativePlayedMs ||
+    input.activeCheckpoint.cumulativeActiveMs != current.cumulativeActiveMs ||
+    input.activeCheckpoint.positionMs != current.lastPositionMs ||
+    input.activeCheckpoint.durationMs != current.durationMs) {
+    throw new Error('playback_statistics_clear_checkpoint_mismatch')
+  }
+  return sessionAck(current)
+}
+
 export const playbackClearStatistics = (
   value: PlaybackClearStatisticsCommandV1,
   options: PlaybackClearStatisticsOptions = {},
@@ -119,12 +158,17 @@ export const playbackClearStatistics = (
     ? null
     : parsePlaybackCommitRequest({ version: 1, checkpoint: input.activeCheckpoint })
   return immediate(db => {
-    const openGroups = db.prepare(`
-      SELECT playback_group_uuid AS playbackGroupUuid
-      FROM playback_sessions
-      WHERE state IN ('playing', 'paused')
-      ORDER BY session_id
-    `).all() as Array<{ playbackGroupUuid: string }>
+    const state = db.prepare(`
+      SELECT visible_after_ms AS visibleAfterMs
+      FROM projection_state WHERE name = 'statistics'
+    `).get() as { visibleAfterMs: number | null } | undefined
+    if (state == null) throw new Error('playback_projection_state_missing')
+    if (state.visibleAfterMs != null) {
+      if (input.occurredAtMs < state.visibleAfterMs) throw new Error('playback_statistics_clear_stale')
+      if (input.occurredAtMs == state.visibleAfterMs) return replayStatisticsClear(db, input)
+    }
+
+    const openGroups = openPlaybackGroups(db)
     if (openGroups.length == 0 && input.activeCheckpoint != null) {
       throw new Error('playback_statistics_clear_no_active_group')
     }

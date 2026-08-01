@@ -341,6 +341,10 @@ export const commitInTransaction = (
     if (input.checkpoint.checkpointSeq <= terminal.checkpointSeq) return sessionAck(terminal)
     throw new Error('playback_group_closed')
   }
+  if (current.statsAllowed == 0 &&
+    (input.checkpoint.cumulativePlayedMs != 0 || input.checkpoint.cumulativeActiveMs != 0)) {
+    throw new Error('playback_statistics_disabled_cumulative_nonzero')
+  }
   if (input.checkpoint.checkpointSeq <= current.checkpointSeq) return sessionAck(current)
   if (input.checkpoint.cumulativePlayedMs < current.cumulativePlayedMs) {
     throw new Error('Invalid cumulativePlayedMs')

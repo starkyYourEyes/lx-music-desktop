@@ -509,7 +509,15 @@ describe('atomic playback repository', () => {
       const started = repository.playbackStart(request)
       assert.equal(started.mode, expected.mode)
       if (started.mode == 'activity') {
-        repository.playbackCommit(commitAt(2, 1000, undefined, { playbackGroupUuid: group }))
+        repository.playbackCommit(commitAt(
+          2,
+          expected.statsAllowed ? 1000 : 0,
+          undefined,
+          {
+            playbackGroupUuid: group,
+            cumulativeActiveMs: expected.statsAllowed ? 1100 : 0,
+          },
+        ))
       } else if (started.mode == 'resume-only') {
         assert.deepEqual(started.ack, {
           playbackGroupUuid: group,

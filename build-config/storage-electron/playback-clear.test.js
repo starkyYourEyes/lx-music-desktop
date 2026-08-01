@@ -167,6 +167,23 @@ describe('recent clear', () => {
     `).run(trackId)
     assert.deepEqual(playback.playbackGetRecent({ version: 1, limit: 520 }), [])
   })
+
+  it('rejects a stale cutoff and replays the same cutoff without deleting newer recent data', async() => {
+    const db = await createStore()
+    start()
+    playback.playbackClearRecent({ version: 1, occurredAtMs: 2000 })
+    start({ group: groupB, id: 'newer', at: 2500 })
+    const before = activitySnapshot(db)
+
+    assert.throws(
+      () => playback.playbackClearRecent({ version: 1, occurredAtMs: 1999 }),
+      /playback_recent_clear_stale/,
+    )
+    assert.deepEqual(activitySnapshot(db), before)
+    assert.equal(playback.playbackClearRecent({ version: 1, occurredAtMs: 2000 }), undefined)
+    assert.deepEqual(activitySnapshot(db), before)
+    assert.deepEqual(playback.playbackGetRecent({ version: 1, limit: 520 }).map(row => row.sourceTrackId), ['newer'])
+  })
 })
 
 describe('statistics clear handshake', () => {
@@ -315,6 +332,97 @@ describe('statistics clear handshake', () => {
       assert.deepEqual(activitySnapshot(db), before, failAt)
     }
   })
+
+  it('rejects stale clears and replays the same cutoff without erasing post-cutoff statistics', async() => {
+    const db = await createStore()
+    start()
+    const firstAck = playback.playbackClearStatistics({
+      version: 1,
+      occurredAtMs: 2000,
+      activeCheckpoint: checkpoint({ seq: 2, played: 500, active: 700, at: 2000 }),
+    })
+    const currentCheckpoint = checkpoint({ seq: 3, played: 800, active: 1100, at: 2500 })
+    const currentAck = playback.playbackCommit({ version: 1, checkpoint: currentCheckpoint })
+    const before = activitySnapshot(db)
+
+    assert.throws(() => playback.playbackClearStatistics({
+      version: 1,
+      occurredAtMs: 1999,
+      activeCheckpoint: currentCheckpoint,
+    }), /playback_statistics_clear_stale/)
+    assert.deepEqual(activitySnapshot(db), before)
+
+    const replay = playback.playbackClearStatistics({
+      version: 1,
+      occurredAtMs: 2000,
+      activeCheckpoint: currentCheckpoint,
+    })
+    assert.equal(firstAck.sessionUuid, currentAck.sessionUuid)
+    assert.deepEqual(replay, currentAck)
+    assert.deepEqual(activitySnapshot(db), before)
+    assert.deepEqual(total(db), {
+      baselinePlayedMs: 0,
+      livePlayedMs: 300,
+      baselineActiveMs: 0,
+      liveActiveMs: 400,
+      updatedAtMs: 2500,
+    })
+  })
+
+  it('rejects nonzero counters for statistics-disabled clear and continues with zero counters', async() => {
+    const db = await createStore()
+    start({ recentAllowed: true, statsAllowed: false })
+    const before = activitySnapshot(db)
+
+    assert.throws(() => playback.playbackClearStatistics({
+      version: 1,
+      occurredAtMs: 2000,
+      activeCheckpoint: checkpoint({ seq: 2, played: 1, active: 1, at: 2000, position: 1 }),
+    }), /playback_statistics_disabled_cumulative_nonzero/)
+    assert.deepEqual(activitySnapshot(db), before)
+
+    const ack = playback.playbackClearStatistics({
+      version: 1,
+      occurredAtMs: 2000,
+      activeCheckpoint: checkpoint({ seq: 2, played: 0, active: 0, at: 2000, position: 0 }),
+    })
+    assert.deepEqual(ack, {
+      playbackGroupUuid: groupA,
+      sessionUuid: ack.sessionUuid,
+      segmentNo: 1,
+      checkpointSeq: 2,
+      cumulativePlayedMs: 0,
+      cumulativeActiveMs: 0,
+    })
+    assert.deepEqual(playback.playbackCommit({
+      version: 1,
+      checkpoint: checkpoint({ seq: 3, played: 0, active: 0, at: 2500, position: 0 }),
+    }), {
+      ...ack,
+      checkpointSeq: 3,
+    })
+    assert.equal(session(db, 1).cumulativePlayedMs, 0)
+    assert.equal(session(db, 1).cumulativeActiveMs, 0)
+  })
+
+  it('retains snapshots referenced by stats-only sessions across recent and statistics clears', async() => {
+    const db = await createStore()
+    start({ recentAllowed: false, statsAllowed: true })
+    commit()
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM recent_tracks').get().count, 0)
+
+    playback.playbackClearRecent({ version: 1, occurredAtMs: 1600 })
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM track_snapshots').get().count, 1)
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM listening_tracks').get().count, 1)
+
+    playback.playbackClearStatistics({
+      version: 1,
+      occurredAtMs: 2000,
+      activeCheckpoint: checkpoint({ seq: 3, played: 800, active: 1000, at: 2000 }),
+    })
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM track_snapshots').get().count, 1)
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM playback_sessions').get().count, 2)
+  })
 })
 
 describe('delete-all and device reset', () => {
@@ -417,5 +525,35 @@ describe('clear command validation', () => {
       () => playback.playbackResetDeviceState({ version: 1, extra: true }),
     ]) assert.throws(callback, /Invalid playback/)
     assert.deepEqual(activitySnapshot(db), before)
+  })
+
+  it('keeps private and resume-only playback fact-free through retention and clear operations', async() => {
+    const db = await createStore()
+    const privateResult = playback.playbackStart({
+      version: 1,
+      playbackGroupUuid: groupA,
+      track: track('private'),
+      context: { type: null, id: null },
+      resume: { listId: null, indexHint: null },
+      startReason: 'select',
+      startPositionMs: 0,
+      occurredAtMs: 1100,
+      consent: { recentAllowed: true, statsAllowed: true, privateMode: true },
+    })
+    const resumeOnly = start({ group: groupB, id: 'resume-only', at: 1200, recentAllowed: false, statsAllowed: false })
+    assert.equal(privateResult.mode, 'private')
+    assert.equal(resumeOnly.mode, 'resume-only')
+
+    playback.playbackClearRecent({ version: 1, occurredAtMs: 1300 })
+    assert.equal(playback.playbackClearStatistics({ version: 1, occurredAtMs: 1300 }), null)
+    assert.deepEqual(playback.playbackCompact({ version: 1, nowMs: 1300, batchSize: 500 }), {
+      version: 1,
+      deleted: 0,
+      remainingEligible: 0,
+    })
+    for (const table of ['track_snapshots', 'playback_sessions', 'playback_events', 'recent_tracks', 'listening_daily', 'listening_tracks']) {
+      assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0, table)
+    }
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM playback_resume_state').get().count, 1)
   })
 })

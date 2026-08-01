@@ -81,11 +81,45 @@ class SourceAttempt {
   }
 }
 
+const getSessionAbortFailure = (signal: AbortSignal): LX.Playback.SourceError => {
+  if (isPlaybackSourceError(signal.reason) && signal.reason.scope == 'session') {
+    return signal.reason
+  }
+  return createPlaybackSourceError({
+    message: 'Playback resolution cancelled',
+    scope: 'session',
+    kind: 'cancelled',
+  })
+}
+
+const throwIfSessionCancelled = (signal: AbortSignal) => {
+  if (signal.aborted) throw getSessionAbortFailure(signal)
+}
+
+const createSessionCancellationWait = (signal: AbortSignal) => {
+  let onAbort: (() => void) | null = null
+  const promise = new Promise<never>((_resolve, reject) => {
+    onAbort = () => {
+      reject(getSessionAbortFailure(signal))
+    }
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  })
+  return {
+    promise,
+    dispose() {
+      if (onAbort) signal.removeEventListener('abort', onAbort)
+    },
+  }
+}
+
 const awaitWithinAttempt = async<T>(
   attempt: SourceAttempt,
   operation: (signal: AbortSignal) => Promise<T>,
   clock: PlaybackClock,
+  sessionSignal: AbortSignal,
 ): Promise<T> => {
+  throwIfSessionCancelled(sessionSignal)
   const remaining = attempt.remaining(clock)
   if (remaining <= 0) {
     const failure = attempt.expire() ?? createPlaybackSourceError({
@@ -98,6 +132,7 @@ const awaitWithinAttempt = async<T>(
     throw failure
   }
   let timer: ReturnType<typeof setTimeout> | null = null
+  const cancellation = createSessionCancellationWait(sessionSignal)
   try {
     const deadline = new Promise<never>((_resolve, reject) => {
       timer = clock.setTimeout(() => {
@@ -122,18 +157,21 @@ const awaitWithinAttempt = async<T>(
       .then(async() => operation(attempt.controller.signal))
       .then(
         value => {
+          throwIfSessionCancelled(sessionSignal)
           if (attempt.state == 'active' && clock.now() < attempt.deadlineAt) return value
           return throwTimeout()
         },
         error => {
+          throwIfSessionCancelled(sessionSignal)
           if (isPlaybackSourceError(error) && error.scope == 'session') throw error
           if (attempt.state == 'active' && clock.now() < attempt.deadlineAt) throw error
           return throwTimeout()
         },
       )
-    return await Promise.race([running, deadline])
+    return await Promise.race([running, deadline, cancellation.promise])
   } finally {
     if (timer) clock.clearTimeout(timer)
+    cancellation.dispose()
   }
 }
 
@@ -180,6 +218,7 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
   let terminalFailure: LX.Playback.SourceError | null = null
   let released = false
   let pendingCommit: Promise<void> | null = null
+  const sessionController = new AbortController()
 
   options.adapter.retainSources(sourceIds, id)
 
@@ -200,6 +239,9 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
     if (state != 'active') return false
     state = nextState
     if (failure) terminalFailure = failure
+    if (failure?.scope == 'session' && !sessionController.signal.aborted) {
+      sessionController.abort(failure)
+    }
     release()
     if (failure) abortAttempts(failure)
     return true
@@ -273,28 +315,34 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
   const offerCache = async(): Promise<PlaybackUrlCandidate | null> => {
     if (cacheChecked) return null
     cacheChecked = true
-    const deadlineAt = options.clock.now() + SOURCE_TIMEOUT
+    const lookupDeadlineAt = options.clock.now() + SOURCE_TIMEOUT
     let timer: ReturnType<typeof setTimeout> | null = null
+    const cancellation = createSessionCancellationWait(sessionController.signal)
     try {
       const timeout = new Promise<null>(resolve => {
         timer = options.clock.setTimeout(() => {
           resolve(null)
         }, SOURCE_TIMEOUT)
       })
-      const lookup = options.cache.lookup(options.musicInfo, options.requestedQuality).then(hit => (
-        options.clock.now() < deadlineAt ? hit : null
-      ))
-      const hit = await Promise.race([lookup, timeout])
-      if (!hit || state != 'active') return null
+      const lookup = Promise.resolve()
+        .then(async() => options.cache.lookup(options.musicInfo, options.requestedQuality))
+        .then(
+          hit => options.clock.now() < lookupDeadlineAt ? hit : null,
+          () => null,
+        )
+      const hit = await Promise.race([lookup, timeout, cancellation.promise])
+      throwIfSessionCancelled(sessionController.signal)
+      if (!hit) return null
       return makeCandidate({
         origin: 'cache',
         quality: hit.quality,
         url: hit.url,
         cacheKey: hit.key,
-        deadlineAt,
+        deadlineAt: options.clock.now() + SOURCE_TIMEOUT,
       })
     } finally {
       if (timer) options.clock.clearTimeout(timer)
+      cancellation.dispose()
     }
   }
 
@@ -322,6 +370,7 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
         attempt,
         async() => provider.getMatched(supported),
         options.clock,
+        sessionController.signal,
       )
     }
     const candidate = attempt.matchedCandidates[attempt.candidateCursor - 1]
@@ -341,6 +390,7 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
           attempt,
           async() => provider.getBatch(attempt.localBatchIndex),
           options.clock,
+          sessionController.signal,
         )
         attempt.localBatchCandidates = batch.filter(candidate => supported.has(candidate.source))
         attempt.localBatchCursor = 0
@@ -374,6 +424,7 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
           attempt,
           async signal => options.adapter.getCapabilities(attempt.apiId, signal),
           options.clock,
+          sessionController.signal,
         )
       }
 
@@ -391,6 +442,7 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
                 signal,
               }),
               options.clock,
+              sessionController.signal,
             )
             attempt.resolvedQuality = resolved.quality
             return makeCandidate({
@@ -436,6 +488,7 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
               signal,
             }),
             options.clock,
+            sessionController.signal,
           )
           attempt.resolvedQuality = resolved.quality
           return makeCandidate({
@@ -473,6 +526,7 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
     if (state != 'active') throw terminalFailure ?? createSessionCancellation('stop')
     if (!cacheChecked) {
       const cached = await offerCache()
+      if (state != 'active') throw terminalFailure ?? createSessionCancellation('stop')
       if (cached) {
         activeCandidate = cached
         return cached
@@ -490,6 +544,7 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
         attempts.push(attempt)
       }
       const candidate = await requestFromAttempt(attempt)
+      if (state != 'active') throw terminalFailure ?? createSessionCancellation('stop')
       if (candidate) {
         activeCandidate = candidate
         return candidate

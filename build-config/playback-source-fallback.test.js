@@ -597,3 +597,156 @@ test('cache media rejection and timeout both observe tombstone persistence failu
     })
   }
 })
+
+test('cancelling a pending cache lookup rejects immediately without starting a source', async() => {
+  const lookupStarted = deferred()
+  const lookupGate = deferred()
+  const session = createSessionHarness({
+    cacheMode: 'lookup',
+    sourceIds: ['primary', 'fallback'],
+    cacheRead: () => {
+      lookupStarted.resolve()
+      return lookupGate.promise
+    },
+  })
+  const resolving = session.nextCandidate()
+  await lookupStarted.promise
+  session.cancel('songChanged')
+  const observed = await Promise.race([
+    resolving.then(
+      () => ({ state: 'resolved' }),
+      error => ({ state: 'rejected', error }),
+    ),
+    new Promise(resolve => setImmediate(() => resolve({ state: 'pending' }))),
+  ])
+  lookupGate.resolve('')
+  await session.flush()
+
+  assert.equal(observed.state, 'rejected')
+  assert.equal(observed.error.scope, 'session')
+  assert.equal(observed.error.kind, 'cancelled')
+  assert.deepEqual(session.requestedSourceIds, [])
+  assert.deepEqual(session.leaseEvents, [
+    'retain:primary', 'retain:fallback',
+    'release:primary', 'release:fallback',
+  ])
+})
+
+test('cancelling pending matching rejects immediately without advancing source', async() => {
+  const matchingStarted = deferred()
+  const matchingGate = deferred()
+  const session = createSessionHarness({
+    sourceIds: ['primary', 'fallback'],
+    request: async({ apiId, musicInfo }) => {
+      if (apiId == 'primary' && musicInfo.source == 'wy') {
+        throw playbackError('candidate', 'request', apiId)
+      }
+      return { url: 'https://unexpected', quality: '128k' }
+    },
+    findCandidates: () => {
+      matchingStarted.resolve()
+      return matchingGate.promise
+    },
+  })
+  const resolving = session.nextCandidate()
+  await matchingStarted.promise
+  session.cancel('songChanged')
+  const observed = await Promise.race([
+    resolving.then(
+      () => ({ state: 'resolved' }),
+      error => ({ state: 'rejected', error }),
+    ),
+    new Promise(resolve => setImmediate(() => resolve({ state: 'pending' }))),
+  ])
+  matchingGate.resolve([])
+  await session.flush()
+
+  assert.equal(observed.state, 'rejected')
+  assert.equal(observed.error.scope, 'session')
+  assert.equal(observed.error.kind, 'cancelled')
+  assert.deepEqual(session.requestedSourceIds, ['primary'])
+  assert.deepEqual(session.leaseEvents, [
+    'retain:primary', 'retain:fallback',
+    'release:primary', 'release:fallback',
+  ])
+})
+
+test('cancelling a request that ignores AbortSignal rejects immediately', async() => {
+  const requestStarted = deferred()
+  const requestGate = deferred()
+  const session = createSessionHarness({
+    sourceIds: ['primary', 'fallback'],
+    request: ({ apiId }) => {
+      requestStarted.resolve()
+      return requestGate.promise.then(() => ({
+        url: `https://${apiId}`,
+        quality: '128k',
+      }))
+    },
+  })
+  const resolving = session.nextCandidate()
+  await requestStarted.promise
+  session.cancel('songChanged')
+  const observed = await Promise.race([
+    resolving.then(
+      () => ({ state: 'resolved' }),
+      error => ({ state: 'rejected', error }),
+    ),
+    new Promise(resolve => setImmediate(() => resolve({ state: 'pending' }))),
+  ])
+  requestGate.resolve()
+  await session.flush()
+
+  assert.equal(observed.state, 'rejected')
+  assert.equal(observed.error.scope, 'session')
+  assert.equal(observed.error.kind, 'cancelled')
+  assert.deepEqual(session.requestedSourceIds, ['primary'])
+  assert.deepEqual(session.leaseEvents, [
+    'retain:primary', 'retain:fallback',
+    'release:primary', 'release:fallback',
+  ])
+})
+
+test('cache validation receives a fresh ten-second budget after slow lookup', async() => {
+  const clock = createFakeClock(0)
+  const session = createSessionHarness({
+    clock,
+    cacheMode: 'lookup',
+    sourceIds: ['primary'],
+    cacheRead: async() => {
+      clock.advance(6000)
+      return 'https://cached'
+    },
+  })
+  const candidate = await session.nextCandidate()
+  assert.equal(candidate.origin, 'cache')
+  assert.equal(candidate.deadlineAt, 16000)
+  clock.advance(10000)
+  assert.equal(session.accept(candidate.candidateId), 'expired')
+  assert.deepEqual(session.cacheCommits, [])
+})
+
+test('cache lookup rejection continues through sources and releases leases on success', async() => {
+  const calls = []
+  const session = createSessionHarness({
+    cacheMode: 'lookup',
+    sourceIds: ['primary', 'fallback'],
+    cacheRead: async() => {
+      throw new Error('database failure with private details')
+    },
+    request: async({ apiId }) => {
+      calls.push(apiId)
+      if (apiId == 'primary') throw playbackError('source', 'rateLimit', apiId)
+      return { url: 'https://fallback', quality: '128k' }
+    },
+  })
+  const candidate = await session.nextCandidate()
+  assert.equal(candidate.apiId, 'fallback')
+  assert.deepEqual(calls, ['primary', 'fallback'])
+  assert.equal(session.accept(candidate.candidateId), 'accepted')
+  assert.deepEqual(session.leaseEvents, [
+    'retain:primary', 'retain:fallback',
+    'release:primary', 'release:fallback',
+  ])
+  assert.equal(JSON.stringify(session.diagnostics).includes('private details'), false)
+})

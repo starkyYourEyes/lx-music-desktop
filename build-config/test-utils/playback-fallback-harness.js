@@ -979,6 +979,7 @@ const createResolveSessionHarness = (options, musicInfo, candidateProvider) => {
   if (options.cachedUrl) rows.set(`${musicInfo.id}_${options.requestedQuality ?? '128k'}`, options.cachedUrl)
   const cache = createCacheHarness({
     rows,
+    read: options.cacheRead,
     save: options.cacheCommit,
     remove: options.cacheDelete,
   })
@@ -1048,7 +1049,10 @@ const createResolveSessionHarness = (options, musicInfo, candidateProvider) => {
 const createSessionHarness = (options = {}) => createResolveSessionHarness(
   options,
   options.musicInfo ?? onlineMusic,
-  createOnlineProvider(options.musicInfo ?? onlineMusic, async() => options.matched ?? []),
+  createOnlineProvider(
+    options.musicInfo ?? onlineMusic,
+    options.findCandidates ?? (async() => options.matched ?? []),
+  ),
 )
 
 const createLocalSessionHarness = (options = {}) => {

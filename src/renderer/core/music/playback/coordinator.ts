@@ -27,6 +27,7 @@ export interface CandidatePlaybackResource {
   candidateId: string
   origin: 'cache' | 'source'
   apiId?: string
+  platform?: LX.OnlineSource
   quality: LX.Quality
   cacheKey: string
   deadlineAt: number
@@ -38,6 +39,7 @@ export interface ValidatedPlaybackResource {
   url: string
   origin: 'direct' | 'cache' | 'source'
   apiId?: string
+  platform?: LX.OnlineSource
   quality?: LX.Quality
   cacheKey?: string
 }
@@ -157,6 +159,7 @@ const toCandidateResource = (
   candidateId: candidate.candidateId,
   origin: candidate.origin,
   ...(candidate.apiId ? { apiId: candidate.apiId } : {}),
+  ...(candidate.platform ? { platform: candidate.platform } : {}),
   quality: candidate.quality,
   cacheKey: candidate.cacheKey,
   deadlineAt: candidate.deadlineAt,
@@ -170,6 +173,7 @@ const toValidatedCandidate = (
   url: resource.url,
   origin: resource.origin,
   ...(resource.apiId ? { apiId: resource.apiId } : {}),
+  ...(resource.platform ? { platform: resource.platform } : {}),
   quality: resource.quality,
   cacheKey: resource.cacheKey,
 })

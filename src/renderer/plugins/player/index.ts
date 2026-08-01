@@ -1,10 +1,40 @@
+import type { PlaybackResource } from '@renderer/core/music/playback/coordinator'
+
 interface HTMLAudioElementChrome extends HTMLAudioElement {
   setSinkId: (id: string) => Promise<void>
 }
-interface SetResourceOptions {
+export type PlayerResourceContext = PlaybackResource & { resourceGeneration: number }
+
+export interface ResourceMediaEvent {
+  resource: PlayerResourceContext
+  currentSrc: string
+}
+
+export interface SetResourceOptions {
   startTime?: number
   shouldPlay?: boolean
+  resource: PlaybackResource
 }
+
+export interface PlayerResourceController {
+  setResource: (url: string, options: SetResourceOptions) => PlayerResourceContext
+  setStop: () => void
+  getResourceContext: () => PlayerResourceContext | null
+  replaceResourceContext: (expected: PlayerResourceContext, resource: PlaybackResource) => boolean
+  clearResourceIf: (expected: PlaybackResource | PlayerResourceContext) => boolean
+  isCurrentResourceEvent: (event: PlayerResourceContext, currentSrc: string) => boolean
+  onCanplay: (handler: (event: ResourceMediaEvent) => void) => () => void
+  onError: (handler: (event: ResourceMediaEvent) => void) => () => void
+  onLoadstart: (handler: (event: ResourceMediaEvent) => void) => () => void
+  onLoadeddata: (handler: (event: ResourceMediaEvent) => void) => () => void
+  onWaiting: (handler: (event: ResourceMediaEvent) => void) => () => void
+}
+
+export type CreatePlayerResourceController = (deps: {
+  audio: HTMLAudioElement
+  canonicalizeUrl: (value: string) => string
+}) => PlayerResourceController
+
 let audio: HTMLAudioElementChrome | null = null
 let audioContext: AudioContext
 let mediaSource: MediaElementAudioSourceNode
@@ -69,6 +99,12 @@ export const createAudio = () => {
   audio.autoplay = true
   audio.preload = 'auto'
   audio.crossOrigin = 'anonymous'
+  resourceControllerInstance = createPlayerResourceController({
+    audio,
+    canonicalizeUrl(value) {
+      try { return new URL(value, window.location.href).href } catch { return value }
+    },
+  })
 }
 
 const initAnalyser = () => {
@@ -387,46 +423,146 @@ export const setPitchShifter = (val: number) => {
 
 export const hasInitedAdvancedAudioFeatures = (): boolean => audioContext != null
 
-const normalizeSetResourceOptions = (options?: SetResourceOptions): Required<SetResourceOptions> => {
+export const createPlayerResourceController: CreatePlayerResourceController = deps => {
+  let nextResourceGeneration = 0
+  let resourceContext: PlayerResourceContext | null = null
+  const handlers = {
+    canplay: new Set<(event: ResourceMediaEvent) => void>(),
+    error: new Set<(event: ResourceMediaEvent) => void>(),
+    loadstart: new Set<(event: ResourceMediaEvent) => void>(),
+    loadeddata: new Set<(event: ResourceMediaEvent) => void>(),
+    waiting: new Set<(event: ResourceMediaEvent) => void>(),
+  }
+  const installed = new Map<keyof typeof handlers, EventListener>()
+  let removePendingSeek: (() => void) | null = null
+
+  const clearAudio = () => {
+    removePendingSeek?.()
+    removePendingSeek = null
+    resourceContext = null
+    deps.audio.pause()
+    deps.audio.removeAttribute('src')
+    deps.audio.load()
+  }
+  const installResourceListeners = (generation: number) => {
+    for (const [name, oldListener] of installed) deps.audio.removeEventListener(name, oldListener)
+    installed.clear()
+    for (const name of Object.keys(handlers) as Array<keyof typeof handlers>) {
+      const listener = () => {
+        const current = resourceContext
+        if (!current || current.resourceGeneration != generation) return
+        const event = { resource: current, currentSrc: deps.audio.currentSrc || deps.audio.src }
+        for (const handler of handlers[name]) handler(event)
+      }
+      installed.set(name, listener)
+      deps.audio.addEventListener(name, listener)
+    }
+  }
+  const isCurrentResourceEvent = (dispatched: PlayerResourceContext, currentSrc: string) => {
+    const current = resourceContext
+    return current != null &&
+      current.resourceGeneration == dispatched.resourceGeneration &&
+      current.songIdentity == dispatched.songIdentity &&
+      deps.canonicalizeUrl(current.url) == deps.canonicalizeUrl(dispatched.url) &&
+      deps.canonicalizeUrl(currentSrc) == deps.canonicalizeUrl(dispatched.url)
+  }
+  const subscribe = (name: keyof typeof handlers) => (
+    handler: (event: ResourceMediaEvent) => void,
+  ) => {
+    handlers[name].add(handler)
+    return () => { handlers[name].delete(handler) }
+  }
+
   return {
-    startTime: options?.startTime ?? 0,
-    shouldPlay: options?.shouldPlay ?? true,
+    setResource(url, options) {
+      removePendingSeek?.()
+      removePendingSeek = null
+      const context = { ...options.resource, resourceGeneration: ++nextResourceGeneration }
+      resourceContext = context
+      installResourceListeners(context.resourceGeneration)
+      const shouldPlay = options.shouldPlay != false
+      deps.audio.autoplay = shouldPlay
+      if (!shouldPlay) deps.audio.pause()
+      if ((options.startTime ?? 0) > 0) {
+        let active = true
+        const seek = () => {
+          if (!active) return
+          active = false
+          deps.audio.removeEventListener('loadedmetadata', seek)
+          if (resourceContext?.resourceGeneration != context.resourceGeneration) return
+          deps.audio.currentTime = options.startTime!
+          removePendingSeek = null
+        }
+        deps.audio.addEventListener('loadedmetadata', seek)
+        removePendingSeek = () => {
+          if (!active) return
+          active = false
+          deps.audio.removeEventListener('loadedmetadata', seek)
+        }
+      }
+      deps.audio.src = url
+      if (resourceContext?.resourceGeneration == context.resourceGeneration) {
+        if (shouldPlay) void deps.audio.play().catch(() => {})
+        else deps.audio.pause()
+      }
+      return context
+    },
+    setStop: clearAudio,
+    getResourceContext: () => resourceContext,
+    replaceResourceContext(expected, resource) {
+      if (resourceContext?.resourceGeneration != expected.resourceGeneration) return false
+      resourceContext = { ...resource, resourceGeneration: expected.resourceGeneration }
+      return true
+    },
+    clearResourceIf(expected) {
+      if (!resourceContext || resourceContext.kind != expected.kind ||
+          resourceContext.songIdentity != expected.songIdentity || resourceContext.url != expected.url) return false
+      if ('candidateId' in expected &&
+          (resourceContext.kind != 'candidate' || resourceContext.candidateId != expected.candidateId)) return false
+      clearAudio()
+      return true
+    },
+    isCurrentResourceEvent,
+    onCanplay: subscribe('canplay'),
+    onError: subscribe('error'),
+    onLoadstart: subscribe('loadstart'),
+    onLoadeddata: subscribe('loadeddata'),
+    onWaiting: subscribe('waiting'),
   }
 }
 
-let clearResourceHandlers: Noop | null = null
-const resetResourceHandlers = () => {
-  clearResourceHandlers?.()
-  clearResourceHandlers = null
+let resourceControllerInstance: PlayerResourceController | null = null
+
+const requireResourceController = (): PlayerResourceController => {
+  if (!resourceControllerInstance) throw new Error('Player resource controller is not initialized')
+  return resourceControllerInstance
 }
 
-export const setResource = (src: string, options?: SetResourceOptions) => {
-  if (!audio) return
-
-  resetResourceHandlers()
-
-  const { startTime, shouldPlay } = normalizeSetResourceOptions(options)
-  const handleLoadedmetadata = () => {
-    if (!audio) return
-    if (startTime > 0) audio.currentTime = startTime
-    if (shouldPlay) void audio.play()
-    else audio.pause()
-    resetResourceHandlers()
-  }
-  const handleEmptied = () => {
-    resetResourceHandlers()
-  }
-
-  clearResourceHandlers = () => {
-    audio?.removeEventListener('loadedmetadata', handleLoadedmetadata)
-    audio?.removeEventListener('emptied', handleEmptied)
-  }
-
-  audio.addEventListener('loadedmetadata', handleLoadedmetadata)
-  audio.addEventListener('emptied', handleEmptied)
-  audio.autoplay = shouldPlay
-  audio.src = src
+export const playerResourceController: PlayerResourceController = {
+  setResource: (...args) => requireResourceController().setResource(...args),
+  setStop: () => { requireResourceController().setStop() },
+  getResourceContext: () => requireResourceController().getResourceContext(),
+  replaceResourceContext: (...args) => requireResourceController().replaceResourceContext(...args),
+  clearResourceIf: (...args) => requireResourceController().clearResourceIf(...args),
+  isCurrentResourceEvent: (...args) => requireResourceController().isCurrentResourceEvent(...args),
+  onCanplay: handler => requireResourceController().onCanplay(handler),
+  onError: handler => requireResourceController().onError(handler),
+  onLoadstart: handler => requireResourceController().onLoadstart(handler),
+  onLoadeddata: handler => requireResourceController().onLoadeddata(handler),
+  onWaiting: handler => requireResourceController().onWaiting(handler),
 }
+
+export const setResource: PlayerResourceController['setResource'] = (...args) => (
+  playerResourceController.setResource(...args)
+)
+export const setStop = () => { playerResourceController.setStop() }
+export const getResourceContext = () => playerResourceController.getResourceContext()
+export const replaceResourceContext: PlayerResourceController['replaceResourceContext'] = (...args) => (
+  playerResourceController.replaceResourceContext(...args)
+)
+export const clearResourceIf: PlayerResourceController['clearResourceIf'] = (...args) => (
+  playerResourceController.clearResourceIf(...args)
+)
 
 export const setPlay = () => {
   void audio?.play()
@@ -434,14 +570,6 @@ export const setPlay = () => {
 
 export const setPause = () => {
   audio?.pause()
-}
-
-export const setStop = () => {
-  resetResourceHandlers()
-  if (audio) {
-    audio.src = ''
-    audio.removeAttribute('src')
-  }
 }
 
 export const isEmpty = (): boolean => !audio?.src
@@ -529,41 +657,21 @@ export const onEnded = (callback: Noop) => {
   }
 }
 
-export const onError = (callback: Noop) => {
-  if (!audio) throw new Error('audio not defined')
+export const onError: PlayerResourceController['onError'] = handler => (
+  playerResourceController.onError(handler)
+)
 
-  audio.addEventListener('error', callback)
-  return () => {
-    audio?.removeEventListener('error', callback)
-  }
-}
+export const onLoadeddata: PlayerResourceController['onLoadeddata'] = handler => (
+  playerResourceController.onLoadeddata(handler)
+)
 
-export const onLoadeddata = (callback: Noop) => {
-  if (!audio) throw new Error('audio not defined')
+export const onLoadstart: PlayerResourceController['onLoadstart'] = handler => (
+  playerResourceController.onLoadstart(handler)
+)
 
-  audio.addEventListener('loadeddata', callback)
-  return () => {
-    audio?.removeEventListener('loadeddata', callback)
-  }
-}
-
-export const onLoadstart = (callback: Noop) => {
-  if (!audio) throw new Error('audio not defined')
-
-  audio.addEventListener('loadstart', callback)
-  return () => {
-    audio?.removeEventListener('loadstart', callback)
-  }
-}
-
-export const onCanplay = (callback: Noop) => {
-  if (!audio) throw new Error('audio not defined')
-
-  audio.addEventListener('canplay', callback)
-  return () => {
-    audio?.removeEventListener('canplay', callback)
-  }
-}
+export const onCanplay: PlayerResourceController['onCanplay'] = handler => (
+  playerResourceController.onCanplay(handler)
+)
 
 export const onEmptied = (callback: Noop) => {
   if (!audio) throw new Error('audio not defined')
@@ -584,14 +692,9 @@ export const onTimeupdate = (callback: Noop) => {
 }
 
 // 缓冲中
-export const onWaiting = (callback: Noop) => {
-  if (!audio) throw new Error('audio not defined')
-
-  audio.addEventListener('waiting', callback)
-  return () => {
-    audio?.removeEventListener('waiting', callback)
-  }
-}
+export const onWaiting: PlayerResourceController['onWaiting'] = handler => (
+  playerResourceController.onWaiting(handler)
+)
 
 // 可见性改变
 export const onVisibilityChange = (callback: Noop) => {

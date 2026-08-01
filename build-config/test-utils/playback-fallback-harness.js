@@ -1177,6 +1177,7 @@ const createMusicFacadeHarness = (options = {}) => {
         },
       },
       '@renderer/store/download/utils': { buildSavePath: () => 'D:\\downloads' },
+      '@renderer/plugins/player': { clearResourceIf() {} },
       '@renderer/utils/music': {
         getDownloadFilePath: async() => options.downloadedFileExists === false
           ? null
@@ -1191,7 +1192,10 @@ const createMusicFacadeHarness = (options = {}) => {
       },
       './cache': { ...cacheModule, playbackUrlCache: cache },
       './candidates': candidatesModule,
-      './coordinator': coordinatorModule,
+      './coordinator': {
+        ...coordinatorModule,
+        createPlaybackResolutionCoordinator: () => ({}),
+      },
       './session': sessionModule,
       './sourceAdapter': { playbackSourceAdapter: adapter },
     },
@@ -1769,6 +1773,700 @@ const createCoordinatorHarness = (options = {}) => {
   }
 }
 
+const loadPlayerIntegrationFactories = () => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  const errorModule = loadTsModule(
+    path.join(__dirname, '../../src/common/utils/playbackSourceError.ts'),
+  )
+  const cacheModule = loadPlaybackCache()
+  const identity = musicInfo => {
+    const target = 'progress' in musicInfo ? musicInfo.metadata.musicInfo : musicInfo
+    return `${target.source}:${target.id}`
+  }
+  const noop = () => {}
+  const appSetting = {
+    'player.autoSkipOnError': false,
+    'player.togglePlayMethod': 'listLoop',
+    'player.playQuality': 'flac',
+  }
+  const playerState = {
+    isPlay: { value: false },
+    playedList: [],
+    playInfo: {},
+    playMusicInfo: { musicInfo: onlineMusic, listId: null, isTempPlay: false },
+    tempPlayList: [],
+    musicInfo: { id: onlineMusic.id },
+  }
+  const playerActions = new Proxy({ setAllStatus: noop }, { get: target => target.setAllStatus })
+  const playbackMocks = {
+    getPlaybackSongIdentity: identity,
+    playbackResolutionCoordinator: {},
+  }
+  const baseMocks = {
+    '@common/utils': { log: { debug: noop, error: noop } },
+    '@common/utils/vueTools': { onBeforeUnmount: noop, watch: noop },
+    '@common/utils/playbackSourceError': errorModule,
+    '@renderer/plugins/i18n': { useI18n: () => value => value },
+    '@renderer/plugins/player': {},
+    '@renderer/store/player/state': playerState,
+    '@renderer/store/player/action': playerActions,
+    '@renderer/store/player/playProgress': { playProgress: { nowPlayTime: 0, maxPlayTime: 0 } },
+    '@renderer/store/setting': { appSetting },
+    '@renderer/store/party': { party: {} },
+    '@renderer/core/music/playback': playbackMocks,
+    '@renderer/core/music/playback/coordinator': { getPlaybackSongIdentity: identity },
+    '@renderer/core/music/playback/cache': {
+      observePlaybackCachePersistence: cacheModule.observePlaybackCachePersistence,
+      playbackUrlCache: {},
+    },
+    '@renderer/core/player': {},
+    '@renderer/core/music': { getMusicUrl: async() => ({ url: '' }) },
+    '../music/index': { getMusicUrl: async() => ({ url: '' }), getPicPath: async() => '', getLyricInfo: async() => ({}) },
+    './utils': { filterList: async() => ({ filteredList: [], playerIndex: -1 }) },
+    '@renderer/utils/message': { requestMsg: {} },
+    '@renderer/utils/index': { getRandom: () => 0, toNewMusicInfo: value => value },
+    '@renderer/store/list/action': { addListMusics: noop, removeListMusics: noop },
+    '@renderer/store/list/state': { loveList: { id: 'love' } },
+    '@renderer/core/dislikeList': { addDislikeInfo: async() => {} },
+    '@renderer/utils/musicSdk': { default: { findMusic: async() => [] } },
+    '@renderer/store/utils': { assertApiSupport: () => true },
+  }
+  const loadWithImportMeta = (relativePath, mocks = {}) => {
+    const fs = require('node:fs')
+    const Module = require('node:module')
+    const babel = require('@babel/core')
+    const { pathToFileURL } = require('node:url')
+    const filename = path.join(__dirname, `../../${relativePath}`)
+    const importMetaUrl = pathToFileURL(filename).href
+    const { code } = babel.transformSync(fs.readFileSync(filename, 'utf8'), {
+      babelrc: false,
+      configFile: false,
+      filename,
+      presets: [[require.resolve('@babel/preset-typescript'), { allowDeclareFields: true }]],
+      plugins: [
+        ({ types }) => ({
+          visitor: {
+            MetaProperty(metaPath) {
+              metaPath.replaceWith(types.objectExpression([
+                types.objectProperty(types.identifier('url'), types.stringLiteral(importMetaUrl)),
+              ]))
+            },
+          },
+        }),
+        require.resolve('@babel/plugin-transform-modules-commonjs'),
+      ],
+    })
+    const loadedModule = new Module(filename, module)
+    loadedModule.filename = filename
+    loadedModule.paths = Module._nodeModulePaths(path.dirname(filename))
+    const originalLoad = Module._load
+    Module._load = (request, parent, isMain) => Object.prototype.hasOwnProperty.call(mocks, request)
+      ? mocks[request]
+      : originalLoad(request, parent, isMain)
+    try {
+      loadedModule._compile(code, filename)
+    } finally {
+      Module._load = originalLoad
+    }
+    return loadedModule.exports
+  }
+  const load = (relativePath, mocks = {}) => loadTsModule(
+    path.join(__dirname, `../../${relativePath}`),
+    { ...baseMocks, ...mocks },
+  )
+  return {
+    player: loadWithImportMeta('src/renderer/plugins/player/index.ts', baseMocks),
+    media: load('src/renderer/core/useApp/usePlayer/usePlayerEvent.ts'),
+    play: load('src/renderer/core/useApp/usePlayer/usePlayEvent.ts'),
+    action: load('src/renderer/core/player/action.ts'),
+    preload: load('src/renderer/core/useApp/usePlayer/usePreloadNextMusic.ts'),
+    coordinator: loadPlaybackCoordinator(),
+    cache: cacheModule,
+    error: errorModule,
+    identity,
+  }
+}
+
+const requireProductionFactory = (module, name) => {
+  if (typeof module[name] != 'function') throw new Error(`Missing production factory: ${name}`)
+  return module[name]
+}
+
+class FakePlayerAudio {
+  constructor(operations, currentTimeWrites) {
+    this.operations = operations
+    this.currentTimeWrites = currentTimeWrites
+    this.listeners = new Map()
+    this.bindings = []
+    this.latestBinding = null
+    this._src = ''
+    this._currentSrc = ''
+    this._autoplay = true
+    this._currentTime = 0
+    this.error = null
+    this.controls = false
+    this.preload = 'auto'
+    this.crossOrigin = 'anonymous'
+  }
+
+  addEventListener(name, handler) {
+    let listeners = this.listeners.get(name)
+    if (!listeners) this.listeners.set(name, listeners = new Set())
+    listeners.add(handler)
+  }
+
+  removeEventListener(name, handler) {
+    this.listeners.get(name)?.delete(handler)
+  }
+
+  set autoplay(value) {
+    this._autoplay = value
+    this.operations.push(`autoplay:${value}`)
+  }
+
+  get autoplay() { return this._autoplay }
+
+  set src(value) {
+    this._src = value
+    this._currentSrc = value
+    this.operations.push(`src:${value}`)
+    const binding = {
+      context: null,
+      listeners: new Map(
+        [...this.listeners].map(([name, listeners]) => [name, [...listeners]]),
+      ),
+    }
+    this.bindings.push(binding)
+    this.latestBinding = binding
+  }
+
+  get src() { return this._src }
+  get currentSrc() { return this._currentSrc }
+
+  set currentTime(value) {
+    this._currentTime = value
+    this.currentTimeWrites.push(value)
+  }
+
+  get currentTime() { return this._currentTime }
+
+  play() {
+    this.operations.push('play')
+    return Promise.resolve()
+  }
+
+  pause() { this.operations.push('pause') }
+
+  removeAttribute(name) {
+    if (name == 'src') {
+      this._src = ''
+      this._currentSrc = ''
+    }
+  }
+
+  load() {}
+
+  attachContext(context) {
+    if (this.latestBinding) this.latestBinding.context = context
+  }
+
+  emitFor(context, name, code) {
+    const binding = this.bindings.find(item => item.context?.resourceGeneration == context.resourceGeneration)
+    if (!binding) return
+    if (code !== undefined) this.error = { code }
+    this._currentSrc = context.url
+    for (const listener of binding.listeners.get(name) ?? []) listener()
+  }
+}
+
+class FakeCoordinatorPreloadAudio {
+  constructor() {
+    this.listeners = new Map()
+    this.bindings = new Map()
+    this._src = ''
+    this.muted = false
+    this.preload = 'auto'
+  }
+
+  addEventListener(name, handler) { this.listeners.set(name, handler) }
+  removeEventListener(name, handler) {
+    if (this.listeners.get(name) == handler) this.listeners.delete(name)
+  }
+  pause() {}
+  load() {}
+  removeAttribute(name) { if (name == 'src') this._src = '' }
+  set src(value) {
+    this._src = value
+    this.bindings.set(value, {
+      canplay: this.listeners.get('canplay'),
+      error: this.listeners.get('error'),
+    })
+  }
+  get src() { return this._src }
+  emitFor(resource, name) { return this.bindings.get(resource.url)?.[name]?.() ?? 'stale' }
+}
+
+const createPlayerHarness = (options = {}) => {
+  const factories = loadPlayerIntegrationFactories()
+  const createPlayerResourceController = requireProductionFactory(factories.player, 'createPlayerResourceController')
+  const createPlayerMediaEventHandlers = requireProductionFactory(factories.media, 'createPlayerMediaEventHandlers')
+  const createValidationAwarePlayEventHandlers = requireProductionFactory(factories.play, 'createValidationAwarePlayEventHandlers')
+  const createPlaybackActionController = requireProductionFactory(factories.action, 'createPlaybackActionController')
+  const createNextMusicPreloadController = requireProductionFactory(factories.preload, 'createNextMusicPreloadController')
+  const clock = options.clock ?? createFakeClock(0)
+  const audioOperations = []
+  const currentTimeWrites = []
+  const setResourceUrls = []
+  const dispatchedResourceKinds = []
+  const committedCacheKeys = []
+  const tombstonedKeys = []
+  const refreshRequests = []
+  const refreshedApiIds = []
+  const postCommitCacheHits = []
+  const invalidatedQualities = []
+  const invalidatedCacheKeys = []
+  const preloadLoadingTransitions = []
+  const boundContexts = []
+  const boundWaiters = []
+  const candidateMetadata = new Map()
+  const deferredForegroundCalls = []
+  const queuedSessionUrls = []
+  const postCommitGates = []
+  let currentMusicInfo = onlineMusic
+  let playedStop = false
+  let createRequestCount = 0
+  let sessionCreateCount = 0
+  let cacheCommitCount = 0
+  let persistenceErrorCount = 0
+  let visibleErrorCount = 0
+  let finalResolutionFailureCount = 0
+  let coordinatorMediaErrors = 0
+  let legacyRefreshCalls = 0
+  let playerErrorEvents = 0
+  let playerCanplayEvents = 0
+  let autoSkipCalls = 0
+  let loadingWatchdogCount = 0
+  let preloadFailureRecords = 0
+  let coordinatorDisposeCount = 0
+  let sessionOrdinal = 0
+  let candidateOrdinal = 0
+
+  const mainAudio = new FakePlayerAudio(audioOperations, currentTimeWrites)
+  const preloadAudio = new FakeCoordinatorPreloadAudio()
+  const baseResource = createPlayerResourceController({
+    audio: mainAudio,
+    canonicalizeUrl: value => value,
+  })
+  const resource = {
+    ...baseResource,
+    setResource(url, input) {
+      const context = baseResource.setResource(url, input)
+      mainAudio.attachContext(context)
+      setResourceUrls.push(url)
+      dispatchedResourceKinds.push(context.kind)
+      boundContexts.push(context)
+      const waiterIndex = boundWaiters.findIndex(waiter => waiter.url == url)
+      if (waiterIndex >= 0) boundWaiters.splice(waiterIndex, 1)[0].gate.resolve(context)
+      return context
+    },
+    replaceResourceContext(expected, replacement) {
+      const replaced = baseResource.replaceResourceContext(expected, replacement)
+      if (replaced) dispatchedResourceKinds.push(replacement.kind)
+      return replaced
+    },
+  }
+
+  const reportPersistenceFailure = () => {
+    persistenceErrorCount++
+    if (options.throwPersistenceReporter) throw new Error('reporter failed')
+  }
+  const observePersistence = promise => factories.cache.observePlaybackCachePersistence(
+    promise,
+    promise.operation ?? 'commit',
+    reportPersistenceFailure,
+  )
+  const makeSession = (musicInfo, reason) => {
+    sessionCreateCount++
+    const id = `player-session-${++sessionOrdinal}`
+    const identity = factories.identity(musicInfo)
+    const configuredUrls = queuedSessionUrls.shift() ?? options.sourceUrls ?? [
+      options.winner ? `https://${options.winner}` : `https://${options.primary ?? 'primary'}`,
+    ]
+    const urls = [...configuredUrls]
+    let index = 0
+    let activeCandidate = null
+    let state = 'active'
+    let rejected = false
+    const expire = () => {
+      activeCandidate = null
+      index++
+      return 'expired'
+    }
+    return {
+      id,
+      songIdentity: identity,
+      sourceIds: Object.freeze([options.primary ?? 'primary', ...(options.fallbacks ?? ['fallback'])]),
+      async nextCandidate() {
+        if (state != 'active') throw playbackError('session', 'cancelled')
+        if ((options.allSourcesFail && reason != 'preload') || (options.allPreloadSourcesFail && reason == 'preload')) {
+          state = 'failed'
+          throw playbackError('source', 'request', options.primary ?? 'primary')
+        }
+        if (rejected && index >= urls.length && options.exhaustAfterMediaError) {
+          state = 'failed'
+          throw playbackError('session', 'request')
+        }
+        const url = urls[index] ?? `https://fallback-${id}-${index}`
+        const quality = options.winnerQuality ?? '128k'
+        const apiId = options.winner ?? (index == 0 ? options.primary ?? 'primary' : (options.fallbacks ?? ['fallback'])[0])
+        activeCandidate = {
+          sessionId: id,
+          candidateId: `${id}:candidate:${++candidateOrdinal}`,
+          songIdentity: identity,
+          origin: 'source',
+          apiId,
+          ...(options.winnerPlatform ? { platform: options.winnerPlatform } : {}),
+          quality,
+          url,
+          cacheKey: `${musicInfo.id}_${quality}`,
+          deadlineAt: clock.now() + 10_000,
+        }
+        candidateMetadata.set(url, activeCandidate)
+        return activeCandidate
+      },
+      accept(candidateId) {
+        if (state != 'active' || activeCandidate?.candidateId != candidateId) return 'stale'
+        if (clock.now() >= activeCandidate.deadlineAt) return expire()
+        state = 'accepted'
+        cacheCommitCount++
+        committedCacheKeys.push(activeCandidate.cacheKey)
+        if (options.rejectCacheSave) {
+          const failure = Promise.reject(Object.assign(new Error('save failed'), { code: 'SQLITE_BUSY' }))
+          failure.operation = 'commit'
+          void observePersistence(failure)
+        }
+        activeCandidate = null
+        return 'accepted'
+      },
+      rejectMedia(candidateId) {
+        if (state != 'active' || activeCandidate?.candidateId != candidateId) return 'stale'
+        if (clock.now() >= activeCandidate.deadlineAt) return expire()
+        activeCandidate = null
+        rejected = true
+        index++
+        return 'resumed'
+      },
+      expireCandidate(candidateId) {
+        if (state != 'active' || activeCandidate?.candidateId != candidateId) return 'stale'
+        return expire()
+      },
+      cancel() {
+        if (state == 'active') state = 'cancelled'
+        activeCandidate = null
+      },
+    }
+  }
+
+  const createRequest = async input => {
+    createRequestCount++
+    if (input.reason == 'forceRefresh' || input.reason == 'postCommitError') {
+      refreshRequests.push({ reason: input.reason })
+      refreshedApiIds.push(options.primary ?? 'primary')
+    }
+    if (input.reason == 'forceRefresh') {
+      for (const quality of ['flac', '320k', '128k']) {
+        invalidatedQualities.push(quality)
+        invalidatedCacheKeys.push(`${input.musicInfo.id}_${quality}`)
+      }
+    }
+    if (options.deferredForeground && input.reason != 'preload') {
+      const call = deferredForegroundCalls.find(item => !item.used)
+      if (!call) throw new Error('No deferred foreground call was prepared')
+      call.used = true
+      return call.gate.promise
+    }
+    if (options.directPreloadUrl && input.reason == 'preload' && input.musicInfo.source == 'local') {
+      return {
+        kind: 'direct',
+        resource: { kind: 'direct', songIdentity: factories.identity(input.musicInfo), url: options.directPreloadUrl },
+      }
+    }
+    if (input.reason == 'postCommitError') {
+      const gate = deferred()
+      postCommitGates.push({ gate, musicInfo: input.musicInfo, reason: input.reason })
+      return gate.promise
+    }
+    return { kind: 'session', session: makeSession(input.musicInfo, input.reason) }
+  }
+  const realCoordinator = factories.coordinator.createPlaybackResolutionCoordinator({
+    createRequest,
+    createPreloadAudio: () => preloadAudio,
+    detachForegroundResource: expected => resource.clearResourceIf(expected),
+    clock,
+  })
+  const coordinator = {
+    ...realCoordinator,
+    setForegroundHandlers(handlers) {
+      realCoordinator.setForegroundHandlers({
+        resource: handlers.resource,
+        failure(input) {
+          finalResolutionFailureCount++
+          handlers.failure(input)
+        },
+      })
+    },
+    handleForegroundError(candidate) {
+      const before = realCoordinator.isForegroundValidating()
+      const result = realCoordinator.handleForegroundError(candidate)
+      if (before && result != 'stale') coordinatorMediaErrors++
+      return result
+    },
+    dispose() {
+      coordinatorDisposeCount++
+      realCoordinator.dispose()
+    },
+  }
+  const action = createPlaybackActionController({
+    coordinator,
+    resource,
+    getCurrentMusicInfo: () => currentMusicInfo,
+    isPlayedStop: () => playedStop,
+    autoSkipOnError: () => options.autoSkip ?? false,
+    setAllStatus() {},
+    emitVisibleError: () => { visibleErrorCount++ },
+    scheduleAutoSkip: () => { autoSkipCalls++ },
+    clearLoadTimeout() {},
+  })
+  const pendingRefreshes = []
+  const playHandlers = createValidationAwarePlayEventHandlers({
+    coordinator,
+    isPlayedStop: () => playedStop,
+    currentMusicId: () => currentMusicInfo?.id ?? '',
+    currentMusicInfo: () => currentMusicInfo,
+    autoSkipOnError: () => options.autoSkip ?? false,
+    isDocumentHidden: () => false,
+    isPlayerEmpty: () => resource.getResourceContext() == null,
+    setStop: () => resource.setStop(),
+    setMusicUrl(info, input) {
+      legacyRefreshCalls++
+      const pending = action.setMusicUrl(info, input)
+      pendingRefreshes.push(pending)
+      void pending.catch(() => {})
+    },
+    playNext: async() => { autoSkipCalls++ },
+    setAllStatus() {},
+    translate: key => key,
+    clock: {
+      ...clock,
+      setTimeout(handler, delay) {
+        if (delay == 25_000) loadingWatchdogCount++
+        return clock.setTimeout(handler, delay)
+      },
+    },
+  })
+  const appEvent = {
+    error() { visibleErrorCount++ },
+    playerError(code) { playerErrorEvents++; playHandlers.error(code) },
+    playerCanplay() { playerCanplayEvents++ },
+    playerLoadstart() { playHandlers.loadstart() },
+    playerLoadeddata() { playHandlers.loadeddata() },
+    playerWaiting() { playHandlers.waiting() },
+  }
+  const cache = {
+    tombstoneKey(key) {
+      tombstonedKeys.push(key)
+      const promise = options.rejectCacheDelete
+        ? Promise.reject(Object.assign(new Error('delete failed'), { code: 'SQLITE_BUSY' }))
+        : Promise.resolve()
+      return promise
+    },
+  }
+  const mediaHandlers = createPlayerMediaEventHandlers({
+    resource,
+    coordinator,
+    cache,
+    getErrorCode: () => mainAudio.error?.code,
+    setLoadedMusicIdentity: identity => action.setLoadedMusicIdentity(identity),
+    appEvent,
+    reportPersistenceFailure,
+  })
+  resource.onCanplay(mediaHandlers.canplay)
+  resource.onError(mediaHandlers.error)
+  resource.onLoadstart(mediaHandlers.loadstart)
+  resource.onLoadeddata(mediaHandlers.loadeddata)
+  resource.onWaiting(mediaHandlers.waiting)
+  const preloadController = createNextMusicPreloadController({
+    coordinator,
+    setLoading: value => preloadLoadingTransitions.push(value),
+    recordFailure: () => { preloadFailureRecords++ },
+  })
+
+  const bindResource = (playbackResource, input = {}) => resource.setResource(playbackResource.url, {
+    startTime: input.startTime ?? 0,
+    shouldPlay: input.shouldPlay ?? true,
+    resource: playbackResource,
+  })
+  const setMusicUrl = async(info, input = {}) => {
+    currentMusicInfo = info
+    playedStop = false
+    await action.setMusicUrl(info, input)
+  }
+  const waitForBoundCandidate = url => {
+    const found = [...boundContexts].reverse().find(context => context.url == url)
+    if (found) return Promise.resolve(found)
+    const gate = deferred()
+    boundWaiters.push({ url, gate })
+    return gate.promise
+  }
+  const flush = async() => {
+    for (const pending of postCommitGates.splice(0)) {
+      pending.gate.resolve({ kind: 'session', session: makeSession(pending.musicInfo, pending.reason) })
+    }
+    await clock.flush()
+    for (let index = 0; index < 4; index++) await new Promise(resolve => setImmediate(resolve))
+    await clock.flush()
+  }
+
+  return {
+    bindCandidate: async url => {
+      queuedSessionUrls.push(options.sourceUrls ?? [url])
+      await setMusicUrl(onlineMusic, { reason: 'initial' })
+      return resource.getResourceContext()
+    },
+    bindResource,
+    async start() {
+      await setMusicUrl(onlineMusic, { reason: 'initial' })
+      return resource.getResourceContext()
+    },
+    forceRefresh: () => setMusicUrl(onlineMusic, { reason: 'forceRefresh' }),
+    setMusicUrl,
+    cancelPlayback(reason) { action.cancel(reason) },
+    disposePlayback() { action.dispose() },
+    emitCanplay(listener) { mainAudio.emitFor(listener, 'canplay') },
+    async emitError(listener, code) { mainAudio.emitFor(listener, 'error', code) },
+    emitLoadedmetadata(listener) { mainAudio.emitFor(listener, 'loadedmetadata') },
+    rejectCurrentCandidate() {
+      const current = resource.getResourceContext()
+      if (current?.kind == 'candidate') coordinator.handleForegroundError(current)
+    },
+    waitForBoundCandidate,
+    currentResource: () => resource.getResourceContext(),
+    isValidating: () => coordinator.isForegroundValidating(),
+    async startDirectPreload(info) { return realCoordinator.startPreload(info) },
+    async promotePreloadToPlayer(info) {
+      await setMusicUrl(info, { reason: 'initial' })
+      return resource.getResourceContext()
+    },
+    emitPreloadCanplay(listener) { return preloadAudio.emitFor(listener, 'canplay') },
+    deferNextForeground() {
+      const gate = deferred()
+      const call = deferredForegroundCalls.length
+      deferredForegroundCalls.push({ gate, used: false })
+      return call
+    },
+    resolveForeground(call, playbackResource) {
+      deferredForegroundCalls[call].gate.resolve({ kind: 'direct', resource: playbackResource })
+    },
+    rejectForeground(call, error) { deferredForegroundCalls[call].gate.reject(error) },
+    preloadNext: info => preloadController.start(info),
+    flush,
+    get coordinatorMediaErrors() { return coordinatorMediaErrors },
+    get legacyRefreshCalls() { return legacyRefreshCalls },
+    get playerErrorEvents() { return playerErrorEvents },
+    get playerCanplayEvents() { return playerCanplayEvents },
+    get autoSkipCalls() { return autoSkipCalls },
+    get loadingWatchdogCount() { return loadingWatchdogCount },
+    get cacheCommitCount() { return cacheCommitCount },
+    committedCacheKeys,
+    dispatchedResourceKinds,
+    tombstonedKeys,
+    refreshRequests,
+    refreshedApiIds,
+    postCommitCacheHits,
+    invalidatedQualities,
+    invalidatedCacheKeys,
+    get loadedMusicIdentity() { return action.getLoadedMusicIdentity() },
+    get createRequestCount() { return createRequestCount },
+    get persistenceErrorCount() { return persistenceErrorCount },
+    get visibleErrorCount() { return visibleErrorCount },
+    get finalResolutionFailureCount() { return finalResolutionFailureCount },
+    get sessionCreateCount() { return sessionCreateCount },
+    setResourceUrls,
+    preloadLoadingTransitions,
+    get preloadFailureRecords() { return preloadFailureRecords },
+    get coordinatorDisposeCount() { return coordinatorDisposeCount },
+    audioOperations,
+    currentTimeWrites,
+  }
+}
+
+const createPreloadSchedulingHarness = () => {
+  const factories = loadPlayerIntegrationFactories()
+  const createNextMusicPreloadController = requireProductionFactory(factories.preload, 'createNextMusicPreloadController')
+  const createNextMusicPreloadScheduler = requireProductionFactory(factories.preload, 'createNextMusicPreloadScheduler')
+  const selections = []
+  const selectionWaiters = []
+  const coordinatorStartIdentities = []
+  const coordinatorCancelReasons = []
+  let selectorCallCount = 0
+  let selectionFailureCount = 0
+  let unhandledRejectionCount = 0
+  const handleUnhandled = () => { unhandledRejectionCount++ }
+  process.on('unhandledRejection', handleUnhandled)
+  const coordinator = {
+    async startPreload(info) {
+      coordinatorStartIdentities.push(factories.identity(info))
+      return { kind: 'direct', songIdentity: factories.identity(info), url: 'file:///preload.mp3' }
+    },
+    cancelPreload(reason) { coordinatorCancelReasons.push(reason) },
+  }
+  const controller = createNextMusicPreloadController({
+    coordinator,
+    setLoading() {},
+    recordFailure() {},
+  })
+  const scheduler = createNextMusicPreloadScheduler({
+    selectNext() {
+      const occurrence = ++selectorCallCount
+      const gate = deferred()
+      selections[occurrence] = gate
+      selectionWaiters[occurrence]?.resolve()
+      return gate.promise
+    },
+    controller,
+    resetRandomNextMusicInfo() {},
+    getCurrentProgress: () => 0,
+    recordSelectionFailure: () => { selectionFailureCount++ },
+  })
+  return {
+    tick: (time, duration) => scheduler.tick(time, duration),
+    setProgress: time => scheduler.setProgress(time),
+    musicToggled: () => scheduler.musicToggled(),
+    toggleModeChanged: () => scheduler.toggleModeChanged(),
+    waitForSelection(occurrence) {
+      if (selections[occurrence]) return Promise.resolve()
+      const gate = deferred()
+      selectionWaiters[occurrence] = gate
+      return gate.promise
+    },
+    resolveSelection(occurrence, info) {
+      selections[occurrence].resolve(info ? { musicInfo: info, listId: null, isTempPlay: false } : null)
+    },
+    rejectSelection(occurrence) { selections[occurrence].reject(new Error('selection failed')) },
+    startControllerAfterDispose: info => controller.start(info),
+    dispose() { scheduler.dispose() },
+    async flush() {
+      for (let index = 0; index < 4; index++) await new Promise(resolve => setImmediate(resolve))
+    },
+    get selectorCallCount() { return selectorCallCount },
+    coordinatorStartIdentities,
+    coordinatorCancelReasons,
+    get selectionFailureCount() { return selectionFailureCount },
+    get unhandledRejectionCount() { return unhandledRejectionCount },
+  }
+}
+
 const createCacheHarness = ({ rows = new Map(), read, save, remove } = {}) => {
   const path = require('node:path')
   const loadTsModule = require('../../scripts/test-utils/load-ts-module')
@@ -1862,6 +2560,8 @@ module.exports = {
   createMusicFacadeHarness,
   resolvePolicyForReason,
   createCoordinatorHarness,
+  createPlayerHarness,
+  createPreloadSchedulingHarness,
   selectPlaybackQuality,
   cancelReasonForResolveReason: (...args) => loadPlaybackCoordinator().cancelReasonForResolveReason(...args),
   toPlaybackCachePersistenceFailure: (...args) => {

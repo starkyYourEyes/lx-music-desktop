@@ -1,72 +1,122 @@
+import { log } from '@common/utils'
 import { onBeforeUnmount } from '@common/utils/vueTools'
 import {
-  onPlaying,
-  onPause,
-  onEnded,
-  onError,
-  onLoadeddata,
-  onLoadstart,
-  onCanplay,
-  onEmptied,
-  onWaiting,
   getErrorCode,
+  onEmptied,
+  onEnded,
+  onPause,
+  onPlaying,
+  playerResourceController,
+  type PlayerResourceController,
+  type ResourceMediaEvent,
 } from '@renderer/plugins/player'
+import {
+  playbackResolutionCoordinator,
+  type PlaybackResolutionCoordinator,
+} from '@renderer/core/music/playback'
+import {
+  observePlaybackCachePersistence,
+  playbackUrlCache,
+  type PlaybackCachePersistenceFailure,
+  type PlaybackUrlCache,
+} from '@renderer/core/music/playback/cache'
+import { setLoadedMusicIdentity } from '@renderer/core/player'
 
+export interface PlayerMediaEventHandlers {
+  canplay: (event: ResourceMediaEvent) => void
+  error: (event: ResourceMediaEvent) => void
+  loadstart: (event: ResourceMediaEvent) => void
+  loadeddata: (event: ResourceMediaEvent) => void
+  waiting: (event: ResourceMediaEvent) => void
+}
+
+export type CreatePlayerMediaEventHandlers = (deps: {
+  resource: PlayerResourceController
+  coordinator: PlaybackResolutionCoordinator
+  cache: PlaybackUrlCache
+  getErrorCode: () => number | undefined
+  setLoadedMusicIdentity: (identity: string) => void
+  appEvent: Pick<typeof window.app_event,
+  'error' | 'playerError' | 'playerCanplay' | 'playerLoadstart' |
+  'playerLoadeddata' | 'playerWaiting'>
+  reportPersistenceFailure: (value: PlaybackCachePersistenceFailure) => void
+}) => PlayerMediaEventHandlers
+
+export const createPlayerMediaEventHandlers: CreatePlayerMediaEventHandlers = deps => ({
+  error({ resource, currentSrc }) {
+    if (!deps.resource.isCurrentResourceEvent(resource, currentSrc)) return
+    if (resource.kind == 'candidate') {
+      deps.coordinator.handleForegroundError(resource)
+      return
+    }
+    if (resource.kind == 'validated' && resource.cacheKey) {
+      void observePlaybackCachePersistence(
+        deps.cache.tombstoneKey(resource.cacheKey),
+        'delete',
+        deps.reportPersistenceFailure,
+      )
+    }
+    const errorCode = deps.getErrorCode()
+    deps.appEvent.error(errorCode)
+    deps.appEvent.playerError(errorCode)
+  },
+  canplay({ resource, currentSrc }) {
+    if (!deps.resource.isCurrentResourceEvent(resource, currentSrc)) return
+    let acceptedResource = resource
+    if (resource.kind == 'candidate') {
+      const result = deps.coordinator.handleForegroundCanplay(resource)
+      if (result.status != 'accepted') return
+      if (!deps.resource.replaceResourceContext(resource, result.resource)) return
+      acceptedResource = { ...result.resource, resourceGeneration: resource.resourceGeneration }
+    }
+    deps.setLoadedMusicIdentity(acceptedResource.songIdentity)
+    deps.appEvent.playerCanplay()
+  },
+  loadstart({ resource, currentSrc }) {
+    if (!deps.resource.isCurrentResourceEvent(resource, currentSrc) || resource.kind == 'candidate') return
+    deps.appEvent.playerLoadstart()
+  },
+  loadeddata({ resource, currentSrc }) {
+    if (!deps.resource.isCurrentResourceEvent(resource, currentSrc) || resource.kind == 'candidate') return
+    deps.appEvent.playerLoadeddata()
+  },
+  waiting({ resource, currentSrc }) {
+    if (!deps.resource.isCurrentResourceEvent(resource, currentSrc) || resource.kind == 'candidate') return
+    deps.appEvent.playerWaiting()
+  },
+})
 
 export default () => {
-  const rOnPlaying = onPlaying(() => {
-    console.log('onPlaying')
-    window.app_event.playerPlaying()
-    window.app_event.play()
+  const handlers = createPlayerMediaEventHandlers({
+    resource: playerResourceController,
+    coordinator: playbackResolutionCoordinator,
+    cache: playbackUrlCache,
+    getErrorCode,
+    setLoadedMusicIdentity,
+    appEvent: window.app_event,
+    reportPersistenceFailure: value => log.error('playback cache persistence failure', value),
   })
-  const rOnPause = onPause(() => {
-    console.log('onPause')
-    window.app_event.playerPause()
-    window.app_event.pause()
-  })
-  const rOnEnded = onEnded(() => {
-    console.log('onEnded')
-    window.app_event.playerEnded()
-    // window.app_event.pause()
-  })
-  const rOnError = onError(() => {
-    console.log('onError')
-    const errorCode = getErrorCode()
-    window.app_event.error(errorCode)
-    window.app_event.playerError(errorCode)
-  })
-  const rOnLoadeddata = onLoadeddata(() => {
-    console.log('onLoadeddata')
-    window.app_event.playerLoadeddata()
-  })
-  const rOnLoadstart = onLoadstart(() => {
-    console.log('onLoadstart')
-    window.app_event.playerLoadstart()
-  })
-  const rOnCanplay = onCanplay(() => {
-    console.log('onCanplay')
-    window.app_event.playerCanplay()
-  })
-  const rOnEmptied = onEmptied(() => {
-    console.log('onEmptied')
-    window.app_event.playerEmptied()
-    // window.app_event.stop()
-  })
-  const rOnWaiting = onWaiting(() => {
-    console.log('onWaiting')
-    window.app_event.playerWaiting()
-  })
-
+  const disposeResourceEvents = [
+    playerResourceController.onCanplay(handlers.canplay),
+    playerResourceController.onError(handlers.error),
+    playerResourceController.onLoadstart(handlers.loadstart),
+    playerResourceController.onLoadeddata(handlers.loadeddata),
+    playerResourceController.onWaiting(handlers.waiting),
+  ]
+  const disposeRawEvents = [
+    onPlaying(() => {
+      window.app_event.playerPlaying()
+      window.app_event.play()
+    }),
+    onPause(() => {
+      window.app_event.playerPause()
+      window.app_event.pause()
+    }),
+    onEnded(() => window.app_event.playerEnded()),
+    onEmptied(() => window.app_event.playerEmptied()),
+  ]
 
   onBeforeUnmount(() => {
-    rOnPlaying()
-    rOnPause()
-    rOnEnded()
-    rOnError()
-    rOnLoadeddata()
-    rOnLoadstart()
-    rOnCanplay()
-    rOnEmptied()
-    rOnWaiting()
+    for (const dispose of [...disposeResourceEvents, ...disposeRawEvents]) dispose()
   })
 }

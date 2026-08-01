@@ -3,6 +3,7 @@ import { appSetting } from '@renderer/store/setting'
 import { buildSavePath } from '@renderer/store/download/utils'
 import { getDownloadFilePath, getLocalFilePath } from '@renderer/utils/music'
 import { getMusicUrl as getWebDAVMusicUrl } from '../webdav'
+import { clearResourceIf } from '@renderer/plugins/player'
 import {
   observePlaybackCachePersistence,
   playbackUrlCache,
@@ -17,6 +18,7 @@ import {
   type OnlineCandidateProvider,
 } from './candidates'
 import {
+  createPlaybackResolutionCoordinator,
   getPlaybackSongIdentity,
   type CreatePlaybackRequest,
 } from './coordinator'
@@ -240,10 +242,25 @@ const playbackMusicFacade = createPlaybackMusicFacade({
 
 export const createPlaybackRequest = playbackMusicFacade.createPlaybackRequest
 
-export { createPlaybackResolutionCoordinator } from './coordinator'
+export const playbackResolutionCoordinator = createPlaybackResolutionCoordinator({
+  createRequest: createPlaybackRequest,
+  createPreloadAudio: () => {
+    const audio = new Audio()
+    audio.muted = true
+    audio.preload = 'auto'
+    return audio
+  },
+  detachForegroundResource: clearResourceIf,
+  clock: playbackClock,
+})
+
+export { createPlaybackResolutionCoordinator, getPlaybackSongIdentity } from './coordinator'
 export type {
   CandidatePlaybackResource,
+  ForegroundPlaybackRequestInput,
   DirectPlaybackResource,
+  ForegroundCanplayResult,
+  ForegroundResolutionHandlers,
   PlaybackRequestResult,
   PlaybackResolutionCoordinator,
   PlaybackResolutionCoordinatorDependencies,
@@ -254,5 +271,8 @@ export { createPlaybackResolveSession } from './session'
 export type {
   CreatePlaybackResolveSession,
   CreatePlaybackResolveSessionOptions,
+  ForegroundCancelReason,
+  PlaybackClock,
   PlaybackResolveSession,
+  PreloadCancelReason,
 } from './session'

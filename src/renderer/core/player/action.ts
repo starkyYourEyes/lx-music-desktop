@@ -1,4 +1,10 @@
-import { isEmpty, setPause, setPlay, setResource, setStop } from '@renderer/plugins/player'
+import {
+  isEmpty,
+  playerResourceController,
+  setPause,
+  setPlay,
+  type PlayerResourceController,
+} from '@renderer/plugins/player'
 import { isPlay, playedList, playInfo, playMusicInfo, tempPlayList, musicInfo as _musicInfo } from '@renderer/store/player/state'
 import {
   getList,
@@ -14,18 +20,24 @@ import {
 } from '@renderer/store/player/action'
 import { appSetting } from '@renderer/store/setting'
 import { party } from '@renderer/store/party'
-import { getMusicUrl, getPicPath, getLyricInfo } from '../music/index'
+import { getPicPath, getLyricInfo } from '../music/index'
 import { filterList } from './utils'
-import { requestMsg } from '@renderer/utils/message'
-import { getRandom, toNewMusicInfo } from '@renderer/utils/index'
+import { getRandom } from '@renderer/utils/index'
 import { addListMusics, removeListMusics } from '@renderer/store/list/action'
 import { loveList } from '@renderer/store/list/state'
 import { addDislikeInfo } from '@renderer/core/dislikeList'
-import musicSdk from '@renderer/utils/musicSdk'
-import { assertApiSupport } from '@renderer/store/utils'
+import { createPlaybackSourceError, isPlaybackSourceError } from '@common/utils/playbackSourceError'
+import {
+  getPlaybackSongIdentity,
+  playbackResolutionCoordinator,
+  type ForegroundCancelReason,
+  type ForegroundPlaybackRequestInput,
+  type PlaybackResolutionCoordinator,
+  type PlaybackResource,
+} from '@renderer/core/music/playback'
 
-interface SetMusicUrlOptions {
-  isRefresh?: boolean
+export interface SetMusicUrlOptions {
+  reason?: ForegroundPlaybackRequestInput['reason']
   startTime?: number
   shouldPlay?: boolean
 }
@@ -36,23 +48,10 @@ interface PlayMusicByInfoOptions extends SetMusicUrlOptions {
   clearTempList?: boolean
 }
 
-let gettingUrlId = ''
-let loadedMusicIdentity = ''
-
-const createGettingUrlId = (musicInfo: LX.Music.MusicInfo | LX.Download.ListItem) => {
-  const targetMusicInfo = 'progress' in musicInfo ? musicInfo.metadata.musicInfo : musicInfo
-  const tInfo = targetMusicInfo.meta.toggleMusicInfo
-  return `${targetMusicInfo.source}:${targetMusicInfo.id}_${tInfo?.source ?? ''}:${tInfo?.id ?? ''}`
-}
-
 const createMusicIdentity = (musicInfo: LX.Player.PlayMusicInfo['musicInfo'] | LX.Music.MusicInfo | null) => {
   if (!musicInfo) return ''
   const targetMusicInfo = 'progress' in musicInfo ? musicInfo.metadata.musicInfo : musicInfo
   return `${targetMusicInfo.source}:${targetMusicInfo.id}`
-}
-
-const getSourceMusicInfo = (musicInfo: LX.Music.MusicInfo | LX.Download.ListItem) => {
-  return 'progress' in musicInfo ? musicInfo.metadata.musicInfo : musicInfo
 }
 
 const isSameMusicIdentity = (
@@ -60,24 +59,17 @@ const isSameMusicIdentity = (
   right: LX.Player.PlayMusicInfo['musicInfo'] | LX.Music.MusicInfo | LX.Download.ListItem | null | undefined,
 ) => createMusicIdentity(left ?? null) === createMusicIdentity(right ?? null)
 
-const normalizeSetMusicUrlOptions = (options?: boolean | SetMusicUrlOptions): Required<SetMusicUrlOptions> => {
-  if (typeof options === 'boolean') {
-    return {
-      isRefresh: options,
-      startTime: 0,
-      shouldPlay: true,
-    }
-  }
-  return {
-    isRefresh: options?.isRefresh ?? false,
-    startTime: options?.startTime ?? 0,
-    shouldPlay: options?.shouldPlay ?? true,
-  }
-}
+const normalizeSetMusicUrlOptions = (
+  options: SetMusicUrlOptions = {},
+): Required<SetMusicUrlOptions> => ({
+  reason: options.reason ?? 'initial',
+  startTime: options.startTime ?? 0,
+  shouldPlay: options.shouldPlay ?? true,
+})
 
 const normalizePlayMusicByInfoOptions = (options?: PlayMusicByInfoOptions): Required<PlayMusicByInfoOptions> => {
   return {
-    isRefresh: options?.isRefresh ?? false,
+    reason: options?.reason ?? 'initial',
     startTime: options?.startTime ?? 0,
     shouldPlay: options?.shouldPlay ?? true,
     listId: options?.listId ?? null,
@@ -112,7 +104,7 @@ const createDelayNextTimeout = (delay: number) => {
 }
 
 const { addDelayNextTimeout, clearDelayNextTimeout } = createDelayNextTimeout(5000)
-const { addDelayNextTimeout: addLoadTimeout, clearDelayNextTimeout: clearLoadTimeout } = createDelayNextTimeout(100000)
+const { clearDelayNextTimeout: clearLoadTimeout } = createDelayNextTimeout(100000)
 
 const getPartyQueueCurrentIndex = () => {
   const room = party.room
@@ -144,165 +136,152 @@ const getPartyQueuePlayMusicInfo = (offset: number): LX.Player.PlayMusicInfo | n
   }
 }
 
-const diffCurrentMusicInfo = (curMusicInfo: LX.Music.MusicInfo | LX.Download.ListItem): boolean => {
-  return gettingUrlId != createGettingUrlId(curMusicInfo) || !isSameMusicIdentity(curMusicInfo, playMusicInfo.musicInfo) || isPlay.value
+export interface PlaybackActionController {
+  setMusicUrl: (
+    info: LX.Music.MusicInfo | LX.Download.ListItem,
+    options?: SetMusicUrlOptions,
+  ) => Promise<void>
+  setLoadedMusicIdentity: (identity: string) => void
+  getLoadedMusicIdentity: () => string
+  cancel: (reason: ForegroundCancelReason) => void
+  dispose: () => void
 }
 
-const findBestProjectSourceMusic = async(musicInfo: LX.Music.MusicInfo): Promise<LX.Music.MusicInfoOnline | null> => {
-  if (musicInfo.source != 'wy') return null
+export type CreatePlaybackActionController = (deps: {
+  coordinator: PlaybackResolutionCoordinator
+  resource: PlayerResourceController
+  getCurrentMusicInfo: () => LX.Player.PlayMusicInfo['musicInfo'] | null
+  isPlayedStop: () => boolean
+  autoSkipOnError: () => boolean
+  setAllStatus: (value: string) => void
+  emitVisibleError: () => void
+  scheduleAutoSkip: () => void
+  clearLoadTimeout: () => void
+}) => PlaybackActionController
 
-  if (!musicInfo.name) return null
-
-  setAllStatus(window.i18n.t('toggle_source_try'))
-  const list = await musicSdk.findMusic({
-    name: musicInfo.name,
-    singer: musicInfo.singer,
-    albumName: musicInfo.meta.albumName,
-    interval: musicInfo.interval ?? '',
-    source: musicInfo.source,
-  }).then(result => result.map((item: any) => toNewMusicInfo(item) as LX.Music.MusicInfoOnline)).catch(() => [])
-  const playableSong = list.find((item: LX.Music.MusicInfoOnline) => item.source != 'wy' && assertApiSupport(item.source))
-  if (!playableSong || window.lx.isPlayedStop || !isSameMusicIdentity(musicInfo, playMusicInfo.musicInfo)) return null
-
-  musicInfo.meta.toggleMusicInfo = playableSong
-  gettingUrlId = createGettingUrlId(musicInfo)
-  return playableSong
-}
-
-const getPlayableMusicUrl = async(options: Parameters<typeof getMusicUrl>[0]): Promise<string> => {
-  const url = await getMusicUrl(options)
-  if (!url) throw new Error(window.i18n.t('toggle_source_failed'))
-  return url
-}
-
-const getDirectMusicUrl = async(musicInfo: LX.Music.MusicInfo | LX.Download.ListItem, isRefresh: boolean): Promise<string> => {
-  const targetMusicInfo = getSourceMusicInfo(musicInfo)
-  const toggleMusicInfo = targetMusicInfo.meta.toggleMusicInfo
-
-  if (toggleMusicInfo) {
-    try {
-      return await getPlayableMusicUrl({
-        musicInfo: toggleMusicInfo,
-        isRefresh,
-        allowToggleSource: false,
-      })
-    } catch (err) {
-      console.log(err)
-      targetMusicInfo.meta.toggleMusicInfo = null
-      gettingUrlId = createGettingUrlId(musicInfo)
-    }
+export const createPlaybackActionController: CreatePlaybackActionController = deps => {
+  interface ActiveForegroundBinding {
+    token: number
+    songIdentity: string
+    options: Required<SetMusicUrlOptions>
+    terminalFailureEmitted: boolean
   }
+  let nextToken = 0
+  let active: ActiveForegroundBinding | null = null
+  let loadedMusicIdentity = ''
 
-  const projectSourceMusic = await findBestProjectSourceMusic(targetMusicInfo)
-  if (projectSourceMusic) {
-    try {
-      return await getPlayableMusicUrl({
-        musicInfo: projectSourceMusic,
-        isRefresh,
-        allowToggleSource: false,
-      })
-    } catch (err: any) {
-      if (err.message == requestMsg.tooManyRequests) throw err
-      console.log(err)
-      targetMusicInfo.meta.toggleMusicInfo = null
-      gettingUrlId = createGettingUrlId(musicInfo)
-    }
+  const isCurrent = (binding: ActiveForegroundBinding) => {
+    const current = deps.getCurrentMusicInfo()
+    return active === binding && !deps.isPlayedStop() && current != null &&
+      getPlaybackSongIdentity(current) == binding.songIdentity
   }
-
-  try {
-    return await getPlayableMusicUrl({
-      musicInfo,
-      isRefresh,
-      allowToggleSource: targetMusicInfo.source != 'wy',
-      onToggleSource() {
-        if (diffCurrentMusicInfo(musicInfo)) return
-        setAllStatus(window.i18n.t('toggle_source_try'))
-      },
+  const bind = (binding: ActiveForegroundBinding, resource: PlaybackResource) => {
+    if (!isCurrent(binding) || resource.songIdentity != binding.songIdentity) return
+    deps.resource.setResource(resource.url, {
+      startTime: binding.options.startTime,
+      shouldPlay: binding.options.shouldPlay,
+      resource,
     })
-  } catch (err: any) {
-    if (targetMusicInfo.source != 'wy' || err.message == requestMsg.tooManyRequests) throw err
+  }
+  const fail = (binding: ActiveForegroundBinding, error: LX.Playback.SourceError) => {
+    if (!isCurrent(binding) || binding.terminalFailureEmitted ||
+        (error.scope == 'session' && error.kind == 'cancelled')) return
+    binding.terminalFailureEmitted = true
+    deps.clearLoadTimeout()
+    deps.setAllStatus(error.message)
+    deps.emitVisibleError()
+    if (deps.autoSkipOnError()) deps.scheduleAutoSkip()
+  }
+  const clearActiveResource = () => {
+    active = null
+    loadedMusicIdentity = ''
+    deps.resource.setStop()
+  }
+  const cancelInternal = (reason: ForegroundCancelReason) => {
+    clearActiveResource()
+    deps.coordinator.cancelForeground(reason)
   }
 
-  return getPlayableMusicUrl({
-    musicInfo,
-    isRefresh,
-    onToggleSource() {
-      if (diffCurrentMusicInfo(musicInfo)) return
-      setAllStatus(window.i18n.t('toggle_source_try'))
+  deps.coordinator.setForegroundHandlers({
+    resource(resource) {
+      const binding = active
+      if (binding) bind(binding, resource)
+    },
+    failure({ songIdentity, error }) {
+      const binding = active
+      if (binding?.songIdentity == songIdentity) fail(binding, error)
     },
   })
+
+  return {
+    async setMusicUrl(info, options = {}) {
+      const normalized = normalizeSetMusicUrlOptions(options)
+      const binding: ActiveForegroundBinding = {
+        token: ++nextToken,
+        songIdentity: getPlaybackSongIdentity(info),
+        options: normalized,
+        terminalFailureEmitted: false,
+      }
+      active = binding
+      loadedMusicIdentity = ''
+      deps.resource.setStop()
+      try {
+        const resource = await deps.coordinator.startForeground({
+          musicInfo: info,
+          reason: normalized.reason,
+        })
+        bind(binding, resource)
+      } catch (error) {
+        fail(binding, isPlaybackSourceError(error) ? error : createPlaybackSourceError({
+          message: error instanceof Error ? error.message : 'Playback resolution failed',
+          scope: 'candidate',
+          kind: 'request',
+          cause: error,
+        }))
+      }
+    },
+    setLoadedMusicIdentity(identity) { loadedMusicIdentity = identity },
+    getLoadedMusicIdentity: () => loadedMusicIdentity,
+    cancel(reason) { cancelInternal(reason) },
+    dispose() {
+      clearActiveResource()
+      deps.coordinator.dispose()
+    },
+  }
 }
 
-let cancelDelayRetry: (() => void) | null = null
-const delayRetry = async(musicInfo: LX.Music.MusicInfo | LX.Download.ListItem, isRefresh = false): Promise<string | null> => {
-  return new Promise<string | null>((resolve, reject) => {
-    const time = getRandom(2, 6)
-    setAllStatus(window.i18n.t('player__getting_url_delay_retry', { time }))
-    const timeout = setTimeout(() => {
-      getMusicPlayUrl(musicInfo, isRefresh, true).then(result => {
-        cancelDelayRetry = null
-        resolve(result)
-      }).catch((err: any) => {
-        cancelDelayRetry = null
-        reject(err)
-      })
-    }, time * 1000)
-    cancelDelayRetry = () => {
-      clearTimeout(timeout)
-      cancelDelayRetry = null
-      resolve(null)
-    }
+let actionControllerInstance: PlaybackActionController | null = null
+
+const requireActionController = (): PlaybackActionController => {
+  if (!actionControllerInstance) throw new Error('Playback action controller is not initialized')
+  return actionControllerInstance
+}
+
+export const initializePlaybackActionController = (): PlaybackActionController => {
+  actionControllerInstance ??= createPlaybackActionController({
+    coordinator: playbackResolutionCoordinator,
+    resource: playerResourceController,
+    getCurrentMusicInfo: () => playMusicInfo.musicInfo,
+    isPlayedStop: () => window.lx.isPlayedStop,
+    autoSkipOnError: () => appSetting['player.autoSkipOnError'],
+    setAllStatus,
+    emitVisibleError: () => window.app_event.error(),
+    scheduleAutoSkip: addDelayNextTimeout,
+    clearLoadTimeout,
   })
+  return actionControllerInstance
 }
 
-const getMusicPlayUrl = async(musicInfo: LX.Music.MusicInfo | LX.Download.ListItem, isRefresh = false, isRetryed = false): Promise<string | null> => {
-  setAllStatus(window.i18n.t('player__getting_url'))
-  if (appSetting['player.autoSkipOnError']) addLoadTimeout()
-
-  return getDirectMusicUrl(musicInfo, isRefresh).then(url => {
-    if (window.lx.isPlayedStop || diffCurrentMusicInfo(musicInfo)) return null
-    return url
-  }).catch(async err => {
-    if (
-      window.lx.isPlayedStop ||
-      diffCurrentMusicInfo(musicInfo) ||
-      err.message == requestMsg.cancelRequest
-    ) return null
-
-    if (err.message == requestMsg.tooManyRequests) return delayRetry(musicInfo, isRefresh)
-    if (!isRetryed) return getMusicPlayUrl(musicInfo, isRefresh, true)
-    throw err
-  })
+export const disposePlaybackActionController = () => {
+  actionControllerInstance?.dispose()
+  actionControllerInstance = null
 }
 
-export const getLoadedMusicIdentity = () => loadedMusicIdentity
-
-export const setMusicUrl = (musicInfo: LX.Music.MusicInfo | LX.Download.ListItem, options?: boolean | SetMusicUrlOptions) => {
-  if (!diffCurrentMusicInfo(musicInfo)) return
-
-  const normalizedOptions = normalizeSetMusicUrlOptions(options)
-  if (cancelDelayRetry) cancelDelayRetry()
-  gettingUrlId = createGettingUrlId(musicInfo)
-
-  void getMusicPlayUrl(musicInfo, normalizedOptions.isRefresh).then(url => {
-    if (!url) return
-    loadedMusicIdentity = createMusicIdentity(musicInfo)
-    setResource(url, {
-      startTime: normalizedOptions.startTime,
-      shouldPlay: normalizedOptions.shouldPlay,
-    })
-  }).catch((err: any) => {
-    console.log(err)
-    setAllStatus(err.message)
-    window.app_event.error()
-    if (appSetting['player.autoSkipOnError']) addDelayNextTimeout()
-  }).finally(() => {
-    if (musicInfo === playMusicInfo.musicInfo) {
-      gettingUrlId = ''
-      clearLoadTimeout()
-    }
-  })
-}
+export const setMusicUrl: PlaybackActionController['setMusicUrl'] = async(...args) => (
+  requireActionController().setMusicUrl(...args)
+)
+export const setLoadedMusicIdentity = (identity: string) => { requireActionController().setLoadedMusicIdentity(identity) }
+export const getLoadedMusicIdentity = () => requireActionController().getLoadedMusicIdentity()
 
 const loadMusicMeta = (musicInfo: LX.Music.MusicInfo | LX.Download.ListItem, listId: string | null) => {
   void getPicPath({ musicInfo, listId }).then((url: string) => {
@@ -345,7 +324,7 @@ const handleRestorePlay = async(restorePlayInfo: LX.Player.SavedPlayInfo) => {
   }
 }
 
-const handlePlay = (options?: boolean | SetMusicUrlOptions) => {
+const handlePlay = (options?: SetMusicUrlOptions) => {
   window.lx.isPlayedStop &&= false
 
   resetRandomNextMusicInfo()
@@ -358,7 +337,6 @@ const handlePlay = (options?: boolean | SetMusicUrlOptions) => {
   const currentMusicInfo = playMusicInfo.musicInfo
   if (!currentMusicInfo) return
 
-  setStop()
   window.app_event.pause()
   clearDelayNextTimeout()
   clearLoadTimeout()
@@ -367,7 +345,7 @@ const handlePlay = (options?: boolean | SetMusicUrlOptions) => {
     addPlayedList({ ...(playMusicInfo as LX.Player.PlayMusicInfo) })
   }
 
-  setMusicUrl(currentMusicInfo, options)
+  void setMusicUrl(currentMusicInfo, options)
   loadMusicMeta(currentMusicInfo, playMusicInfo.listId)
 }
 
@@ -399,7 +377,7 @@ export const playMusicByInfo = (musicInfo: LX.Music.MusicInfo, options?: PlayMus
   setPlayMusicInfo(normalizedOptions.listId, musicInfo, normalizedOptions.isTempPlay)
   if (normalizedOptions.clearTempList) clearTempPlayeList()
   handlePlay({
-    isRefresh: normalizedOptions.isRefresh,
+    reason: normalizedOptions.reason,
     startTime: normalizedOptions.startTime,
     shouldPlay: normalizedOptions.shouldPlay,
   })
@@ -701,7 +679,7 @@ export const play = () => {
   window.lx.isPlayedStop &&= false
   if (playMusicInfo.musicInfo == null) return
   if (isEmpty()) {
-    if (createGettingUrlId(playMusicInfo.musicInfo) != gettingUrlId) setMusicUrl(playMusicInfo.musicInfo)
+    void setMusicUrl(playMusicInfo.musicInfo)
     return
   }
   setPlay()
@@ -712,8 +690,7 @@ export const pause = () => {
 }
 
 export const stop = () => {
-  loadedMusicIdentity = ''
-  setStop()
+  requireActionController().cancel('stop')
   setTimeout(() => {
     window.app_event.stop()
   })

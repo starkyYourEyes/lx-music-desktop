@@ -159,6 +159,7 @@ const testPlaybackFacadeReturnsDirectOrSessionControlFlow = async() => {
       },
     },
     '@renderer/store/download/utils': { buildSavePath: () => '' },
+    '@renderer/plugins/player': { clearResourceIf() {} },
     '@renderer/utils/music': {
       getDownloadFilePath: async() => null,
       getLocalFilePath: async() => null,
@@ -174,6 +175,7 @@ const testPlaybackFacadeReturnsDirectOrSessionControlFlow = async() => {
       findPlaybackCandidates: async() => [],
     },
     './coordinator': {
+      createPlaybackResolutionCoordinator: () => ({}),
       getPlaybackSongIdentity: musicInfo => `${musicInfo.source}:${musicInfo.id}`,
     },
     './session': { createPlaybackResolveSession: () => session },

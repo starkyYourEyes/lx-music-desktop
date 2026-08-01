@@ -67,7 +67,7 @@ const getOtherSourceByLocal = async<T>(musicInfo: LX.Music.MusicInfoLocal, handl
   throw new Error('source not found')
 }
 
-export const getMusicUrl = async({ musicInfo, isRefresh, allowToggleSource = true, onToggleSource = () => {} }: {
+export const getPrimaryMusicUrl = async({ musicInfo, isRefresh, allowToggleSource = false, onToggleSource = () => {} }: {
   musicInfo: LX.Music.MusicInfoLocal
   isRefresh: boolean
   allowToggleSource?: boolean
@@ -104,6 +104,8 @@ export const getMusicUrl = async({ musicInfo, isRefresh, allowToggleSource = tru
   }
   throw new Error('source not found')
 }
+
+export const getMusicUrl = getPrimaryMusicUrl
 
 export const getPicUrl = async({ musicInfo, listId, isRefresh, onToggleSource = () => {} }: {
   musicInfo: LX.Music.MusicInfoLocal

@@ -15,13 +15,138 @@ const {
   createFakeClock,
   createSessionHarness,
   createLocalSessionHarness,
+  createMusicFacadeHarness,
+  resolvePolicyForReason,
   onlineMusic,
   matchedTx,
   matchedKg,
   flacMusic,
   no128Music,
   localMusic,
+  webdavMusic,
+  downloadItem,
 } = require('./test-utils/playback-fallback-harness')
+
+test('a missing local file tries direct local action for every source before that source batches', async() => {
+  const calls = []
+  const session = createLocalSessionHarness({
+    sourceIds: ['a', 'b'],
+    directLocal: async apiId => { calls.push(`${apiId}:local`); throw playbackError('candidate', 'request', apiId) },
+    requestOnline: async({ apiId, batch }) => {
+      calls.push(`${apiId}:batch${batch}`)
+      if (apiId == 'b') return { url: 'https://ok', quality: '128k' }
+      throw playbackError('candidate', 'request', apiId)
+    },
+  })
+  await session.nextCandidate()
+  assert.deepEqual(calls, ['a:local', 'a:batch0', 'b:local', 'b:batch0'])
+})
+
+test('missing-local candidate batches stay ordered and are reused across API sources', async() => {
+  const searchQueries = []
+  const batches = [
+    [{ ...matchedTx, id: 'batch-zero' }],
+    [{ ...matchedKg, id: 'batch-one' }],
+  ]
+  const calls = []
+  const session = createLocalSessionHarness({
+    sourceIds: ['a', 'b'],
+    findCandidates: async query => {
+      const batch = batches[searchQueries.length] ?? []
+      searchQueries.push([query.name, query.singer])
+      return batch
+    },
+    directLocal: async apiId => {
+      calls.push(`${apiId}:local`)
+      throw playbackError('candidate', 'request', apiId)
+    },
+    requestOnline: async({ apiId, batch, musicInfo }) => {
+      calls.push(`${apiId}:batch${batch}:${musicInfo.id}`)
+      if (apiId == 'a' && batch == 1) throw playbackError('source', 'rateLimit', apiId)
+      if (apiId == 'b' && batch == 1) return { url: 'https://ok', quality: '128k' }
+      throw playbackError('candidate', 'request', apiId)
+    },
+  })
+  await session.nextCandidate()
+  assert.deepEqual(calls, [
+    'a:local', 'a:batch0:batch-zero', 'a:batch1:batch-one',
+    'b:local', 'b:batch0:batch-zero', 'b:batch1:batch-one',
+  ])
+  assert.equal(searchQueries.length, 2)
+})
+
+test('WebDAV bypasses API source sessions', async() => {
+  const harness = createMusicFacadeHarness()
+  const result = await harness.createPlaybackRequest({ musicInfo: webdavMusic, reason: 'initial' })
+  assert.equal(result.kind, 'direct')
+  assert.equal(result.resource.songIdentity, 'webdav:webdav-song')
+  assert.equal(harness.sessionCreateCount, 0)
+  assert.equal(harness.webdavCalls, 1)
+})
+
+test('download URL acquisition stays primary-only and exact-quality', async() => {
+  const harness = createMusicFacadeHarness({ primary: 'a', fallbacks: ['b'] })
+  await harness.getDownloadUrl(downloadItem)
+  assert.deepEqual(harness.requestedApiIds, ['a'])
+  assert.deepEqual(harness.cacheLookups, [`${downloadItem.metadata.musicInfo.id}_${downloadItem.metadata.quality}`])
+})
+
+test('force refresh continues after rejecting cache invalidation and a throwing reporter', async() => {
+  const harness = createMusicFacadeHarness({
+    rejectCacheInvalidation: Object.assign(new Error('private cache failure'), {
+      code: 'SQLITE_IOERR',
+    }),
+    throwPersistenceReporter: true,
+  })
+  const result = await harness.createPlaybackRequest({
+    musicInfo: onlineMusic, reason: 'forceRefresh',
+  })
+  assert.equal(result.kind, 'session')
+  assert.equal(harness.sessionCreateCount, 1)
+  assert.deepEqual(harness.persistenceFailures, [{
+    operation: 'delete', errorName: 'Error', errorCode: 'SQLITE_IOERR',
+  }])
+})
+
+test('playing a downloaded item with a missing file uses online fallback resolution', async() => {
+  const harness = createMusicFacadeHarness({ downloadedFileExists: false })
+  const result = await harness.createPlaybackRequest({ musicInfo: downloadItem, reason: 'initial' })
+  assert.equal(result.kind, 'session')
+  assert.equal(harness.sessionCreateCount, 1)
+})
+
+test('lyrics and covers never request a fallback API source', async() => {
+  const harness = createMusicFacadeHarness({ primary: 'a', fallbacks: ['b'] })
+  await harness.getOnlineLyric(onlineMusic)
+  await harness.getOnlinePic(onlineMusic)
+  await harness.getLocalLyric(localMusic)
+  await harness.getLocalPic(localMusic)
+  assert.deepEqual(harness.apiActionCalls, [
+    'a:wy:lyric', 'a:wy:pic', 'a:local:lyric', 'a:local:pic',
+  ])
+})
+
+test('WebDAV lyrics and covers stay on WebDAV IPC', async() => {
+  const harness = createMusicFacadeHarness({ primary: 'a', fallbacks: ['b'] })
+  await harness.getWebdavLyric(webdavMusic)
+  await harness.getWebdavPic(webdavMusic)
+  assert.deepEqual(harness.webdavActions, ['lyric', 'pic'])
+  assert.deepEqual(harness.requestedApiIds, [])
+})
+
+test('download retry remains primary-only while preserving platform switching', async() => {
+  const harness = createMusicFacadeHarness({ primary: 'a', fallbacks: ['b'], failFirstDownloadRequest: true })
+  await harness.getDownloadUrl(downloadItem)
+  assert.deepEqual(harness.requestedApiIds, ['a', 'a'])
+  assert.equal(harness.downloadPlatformSwitches, 1)
+})
+
+test('resolve reason uniquely determines policy and cache mode', () => {
+  assert.deepEqual(resolvePolicyForReason('initial'), { policy: 'fallback', cacheMode: 'lookup' })
+  assert.deepEqual(resolvePolicyForReason('preload'), { policy: 'fallback', cacheMode: 'lookup' })
+  assert.deepEqual(resolvePolicyForReason('forceRefresh'), { policy: 'fallback', cacheMode: 'bypass' })
+  assert.deepEqual(resolvePolicyForReason('postCommitError'), { policy: 'primaryOnly', cacheMode: 'bypass' })
+})
 
 test('online matching is lazy and runs once across API sources', async() => {
   const calls = []

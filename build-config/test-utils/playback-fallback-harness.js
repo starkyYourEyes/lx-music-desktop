@@ -23,7 +23,7 @@ const localMusic = {
 }
 const webdavMusic = {
   id: 'webdav-song', source: 'webdav', name: 'Song', singer: 'Artist', interval: '03:00',
-  meta: { albumName: 'Album', filePath: '/Song.mp3', _qualitys: {} },
+  meta: { albumName: 'Album', filePath: '/Song.mp3', picPath: '/cover.jpg', _qualitys: {} },
 }
 const downloadItem = {
   id: 'download-song', progress: 0, status: 'run',
@@ -970,8 +970,23 @@ const createResolveSessionHarness = (options, musicInfo, candidateProvider) => {
         markSourceStarted(apiId)
         return capabilities
       },
-      getMusicUrl: requestDirect,
-      getLocalMusicUrl: requestDirect,
+      getMusicUrl: options.requestOnline
+        ? request => {
+            markSourceRequested(request.apiId)
+            const batch = request.musicInfo?.__playbackBatchIndex
+            return options.requestOnline({
+              apiId: request.apiId,
+              batch,
+              musicInfo: request.musicInfo,
+            })
+          }
+        : requestDirect,
+      getLocalMusicUrl: options.directLocal
+        ? request => {
+            markSourceRequested(request.apiId)
+            return options.directLocal(request.apiId)
+          }
+        : requestDirect,
     }
   }
 
@@ -1058,11 +1073,14 @@ const createSessionHarness = (options = {}) => createResolveSessionHarness(
 const createLocalSessionHarness = (options = {}) => {
   const batchIndexes = []
   let batchIndex = 0
-  const provider = createLocalProvider(options.musicInfo ?? localMusic, async query => {
+  const musicInfo = options.musicInfo ?? (options.findCandidates
+    ? { ...localMusic, name: 'Song - Artist' }
+    : localMusic)
+  const provider = createLocalProvider(musicInfo, async query => {
     const currentBatch = batchIndex++
     const result = options.findCandidates
       ? await options.findCandidates(query, currentBatch)
-      : options.batches?.[currentBatch] ?? []
+      : options.batches?.[currentBatch] ?? (currentBatch == 0 ? [matchedTx] : [])
     for (const candidate of result) {
       Object.defineProperty(candidate, '__playbackBatchIndex', {
         configurable: true,
@@ -1084,11 +1102,281 @@ const createLocalSessionHarness = (options = {}) => {
           }
         : request,
     },
-    options.musicInfo ?? localMusic,
+    musicInfo,
     provider,
   )
   return Object.assign(harness, { batchIndexes })
 }
+
+const createMusicFacadeHarness = (options = {}) => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  const primary = options.primary ?? 'primary'
+  const fallbacks = options.fallbacks ?? ['fallback']
+  const requestedQuality = options.requestedQuality ?? '320k'
+  const requestedApiIds = []
+  const cacheLookups = []
+  const apiActionCalls = []
+  const webdavActions = []
+  const persistenceFailures = []
+  let sessionCreateCount = 0
+  let webdavCalls = 0
+  let downloadPlatformSwitches = 0
+  let downloadRequestCount = 0
+
+  const cacheModule = loadPlaybackCache()
+  const candidatesModule = loadCandidates()
+  const coordinatorModule = loadPlaybackCoordinator()
+  const sessionModule = loadPlaybackSession()
+  const cache = {
+    lookup: async() => null,
+    tombstone: async() => {},
+    tombstoneKey: async() => {},
+    commit: async() => {},
+    invalidateQualityRange: async() => {
+      if (options.rejectCacheInvalidation !== undefined) {
+        throw options.rejectCacheInvalidation
+      }
+    },
+    getPlaybackQualityOrder: cacheModule.getPlaybackQualityOrder,
+  }
+  const adapter = {
+    retainSources() {},
+    releaseSources() {},
+    async getCapabilities() { return { sources: {} } },
+    async getMusicUrl() { throw new Error('not used') },
+    async getLocalMusicUrl() { throw new Error('not used') },
+  }
+  const originalWindow = global.window
+  global.window = {
+    ...(originalWindow ?? {}),
+    setTimeout,
+    clearTimeout,
+  }
+  const playbackModule = loadTsModule(
+    path.join(__dirname, '../../src/renderer/core/music/playback/index.ts'),
+    {
+      '@common/utils': { encodePath: value => `encoded:${value}`, log: { debug() {}, error() {} } },
+      '@renderer/store/setting': {
+        appSetting: {
+          'common.apiSource': primary,
+          'common.apiFallbackSources': [...fallbacks],
+          'player.playQuality': requestedQuality,
+        },
+      },
+      '@renderer/store/download/utils': { buildSavePath: () => 'D:\\downloads' },
+      '@renderer/utils/music': {
+        getDownloadFilePath: async() => options.downloadedFileExists === false
+          ? null
+          : 'D:\\downloads\\song.mp3',
+        getLocalFilePath: async() => 'D:\\music\\song.mp3',
+      },
+      '../webdav': {
+        getMusicUrl: async() => {
+          webdavCalls++
+          return 'https://dav.test/song.mp3'
+        },
+      },
+      './cache': { ...cacheModule, playbackUrlCache: cache },
+      './candidates': candidatesModule,
+      './coordinator': coordinatorModule,
+      './session': sessionModule,
+      './sourceAdapter': { playbackSourceAdapter: adapter },
+    },
+  )
+  global.window = originalWindow
+
+  const reportPersistenceFailure = value => {
+    persistenceFailures.push(value)
+    if (options.throwPersistenceReporter) throw new Error('persistence reporter failed')
+  }
+  const sessionFactories = playbackModule.createPlaybackSessionFactories({
+    readSettings: () => ({ primaryId: primary, fallbackIds: [...fallbacks], requestedQuality }),
+    cache,
+    adapter,
+    clock: createFakeClock(),
+    createId: () => `facade-session-${sessionCreateCount + 1}`,
+    diagnostics: { record() {} },
+    reportPersistenceFailure,
+    createResolveSession(input) {
+      sessionCreateCount++
+      return sessionModule.createPlaybackResolveSession(input)
+    },
+    createOnlineCandidateProvider: musicInfo => candidatesModule.createOnlineCandidateProvider(
+      musicInfo,
+      async() => [],
+    ),
+    createLocalCandidateProvider: musicInfo => candidatesModule.createLocalCandidateProvider(
+      musicInfo,
+      async() => [],
+    ),
+  })
+  const facade = playbackModule.createPlaybackMusicFacade({
+    getDownloadFilePath: async() => options.downloadedFileExists === false
+      ? null
+      : 'D:\\downloads\\song.mp3',
+    buildSavePath: () => 'D:\\downloads',
+    getLocalFilePath: async() => 'D:\\music\\song.mp3',
+    encodePath: value => `encoded:${value}`,
+    getWebDAVMusicUrl: async() => {
+      webdavCalls++
+      return 'https://dav.test/song.mp3'
+    },
+    ...sessionFactories,
+  })
+
+  const onlineModule = loadTsModule(
+    path.join(__dirname, '../../src/renderer/core/music/online.ts'),
+    {
+      '@renderer/store/list/action': { updateListMusics() {} },
+      '@renderer/store/setting': { appSetting: { 'player.playQuality': requestedQuality } },
+      '@renderer/utils/ipc': {
+        saveLyric() {},
+        async getMusicUrl(musicInfo, quality) {
+          cacheLookups.push(`${musicInfo.id}_${quality}`)
+          return null
+        },
+      },
+      './utils': {
+        buildLyricInfo: value => value,
+        getPlayQuality: quality => quality,
+        getCachedLyricInfo: async() => null,
+        async handleGetOnlineMusicUrl({ musicInfo, quality, allowToggleSource }) {
+          requestedApiIds.push(primary)
+          downloadRequestCount++
+          if (options.failFirstDownloadRequest && downloadRequestCount == 1) {
+            throw new Error('simulated primary download failure')
+          }
+          if (options.failFirstDownloadRequest && allowToggleSource) downloadPlatformSwitches++
+          return {
+            url: 'https://audio.test/song.mp3',
+            quality: quality ?? requestedQuality,
+            musicInfo,
+            isFromCache: false,
+          }
+        },
+        async handleGetOnlineLyricInfo({ musicInfo }) {
+          apiActionCalls.push(`${primary}:${musicInfo.source}:lyric`)
+          return { lyricInfo: { lyric: '' }, musicInfo, isFromCache: false }
+        },
+        async handleGetOnlinePicUrl({ musicInfo }) {
+          apiActionCalls.push(`${primary}:${musicInfo.source}:pic`)
+          return { url: 'https://image.test/cover.jpg', musicInfo, isFromCache: false }
+        },
+      },
+    },
+  )
+  const localModule = loadTsModule(
+    path.join(__dirname, '../../src/renderer/core/music/local.ts'),
+    {
+      '@common/utils/common': { encodePath: value => value },
+      '@renderer/store/list/action': { updateListMusics() {} },
+      '@renderer/utils/ipc': { saveLyric() {}, saveMusicUrl() {} },
+      '@renderer/utils/music': { getLocalFilePath: async() => null },
+      './utils': {
+        buildLyricInfo: value => value,
+        getCachedLyricInfo: async() => null,
+        getOtherSource: async() => [],
+        async getOnlineOtherSourceLyricByLocal() {
+          apiActionCalls.push(`${primary}:local:lyric`)
+          return { lyricInfo: { lyric: '' }, isFromCache: false }
+        },
+        async getOnlineOtherSourcePicByLocal() {
+          apiActionCalls.push(`${primary}:local:pic`)
+          return { url: 'https://image.test/local.jpg' }
+        },
+        async getOnlineOtherSourceMusicUrlByLocal() { throw new Error('not used') },
+        async getOnlineOtherSourceMusicUrl() { throw new Error('not used') },
+        async getOnlineOtherSourcePicUrl() { throw new Error('not used') },
+        async getOnlineOtherSourceLyricInfo() { throw new Error('not used') },
+      },
+      './playback/candidates': candidatesModule,
+    },
+  )
+  const webdavModule = loadTsModule(
+    path.join(__dirname, '../../src/renderer/core/music/webdav.ts'),
+    {
+      '@renderer/utils/ipc': {
+        async getWebDAVMusicLyric() {
+          webdavActions.push('lyric')
+          return { lyric: '' }
+        },
+        async getWebDAVMusicPic() {
+          webdavActions.push('pic')
+          return 'https://dav.test/cover.jpg'
+        },
+        async getWebDAVMusicUrl() { throw new Error('not used') },
+      },
+      './utils': { buildLyricInfo: value => value },
+    },
+  )
+  const actionModule = loadTsModule(
+    path.join(__dirname, '../../src/renderer/store/download/action.ts'),
+    {
+      '@renderer/utils/ipc': {
+        downloadTasksGet: async() => [],
+        downloadTasksCreate: async() => {},
+        downloadTasksRemove: async() => {},
+        downloadTasksUpdate: async() => {},
+      },
+      './state': { downloadList: [] },
+      '@common/utils/vueTools': { markRaw() {}, toRaw: value => value },
+      '@renderer/core/music/online': onlineModule,
+      '../setting': {
+        appSetting: {
+          'download.isUseOtherSource': true,
+          'download.maxDownloadNum': 1,
+        },
+      },
+      '..': { qualityList: { value: {} } },
+      '@renderer/worker/utils': { proxyCallback: value => value },
+      '@renderer/utils': {
+        arrPush() {}, arrUnshift() {}, joinPath: (...values) => values.join('/'),
+      },
+      '@common/constants': { DOWNLOAD_STATUS: {} },
+      '../index': { proxy: { enable: false } },
+      './utils': { buildSavePath: () => 'D:\\downloads' },
+      '@renderer/core/music/primarySource': { ensurePrimarySourceCapabilities: async() => {} },
+    },
+  )
+
+  return {
+    ...facade,
+    getDownloadUrl(item) {
+      if (!options.failFirstDownloadRequest) return actionModule.getDownloadUrl(item)
+      const toggleMusicInfo = {
+        ...item.metadata.musicInfo,
+        id: `${item.metadata.musicInfo.id}-toggle`,
+      }
+      return actionModule.getDownloadUrl({
+        ...item,
+        metadata: {
+          ...item.metadata,
+          musicInfo: {
+            ...item.metadata.musicInfo,
+            meta: { ...item.metadata.musicInfo.meta, toggleMusicInfo },
+          },
+        },
+      })
+    },
+    getOnlineLyric: info => onlineModule.getLyricInfo({ musicInfo: info, isRefresh: true }),
+    getOnlinePic: info => onlineModule.getPicUrl({ musicInfo: info, isRefresh: true }),
+    getLocalLyric: info => localModule.getLyricInfo({ musicInfo: info, isRefresh: true }),
+    getLocalPic: info => localModule.getPicUrl({ musicInfo: info, isRefresh: true }),
+    getWebdavLyric: info => webdavModule.getLyricInfo({ musicInfo: info, isRefresh: true }),
+    getWebdavPic: info => webdavModule.getPicUrl({ musicInfo: info, isRefresh: true }),
+    get sessionCreateCount() { return sessionCreateCount },
+    get webdavCalls() { return webdavCalls },
+    requestedApiIds,
+    cacheLookups,
+    apiActionCalls,
+    webdavActions,
+    get downloadPlatformSwitches() { return downloadPlatformSwitches },
+    persistenceFailures,
+  }
+}
+
+const resolvePolicyForReason = reason => createMusicFacadeHarness().resolvePolicyForReason(reason)
 
 const loadPlaybackCoordinator = () => {
   const path = require('node:path')
@@ -1532,6 +1820,8 @@ module.exports = {
   createLocalProvider,
   createSessionHarness,
   createLocalSessionHarness,
+  createMusicFacadeHarness,
+  resolvePolicyForReason,
   createCoordinatorHarness,
   selectPlaybackQuality,
   cancelReasonForResolveReason: (...args) => loadPlaybackCoordinator().cancelReasonForResolveReason(...args),

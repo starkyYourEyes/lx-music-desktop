@@ -3,17 +3,17 @@
 //   // console.log(filePath)
 
 import {
-  getMusicUrl as getOnlineMusicUrl,
+  getPrimaryMusicUrl as getOnlineMusicUrl,
   getPicUrl as getOnlinePicUrl,
   getLyricInfo as getOnlineLyricInfo,
 } from './online'
 import {
-  getMusicUrl as getDownloadMusicUrl,
+  getPrimaryMusicUrl as getDownloadMusicUrl,
   getPicUrl as getDownloadPicUrl,
   getLyricInfo as getDownloadLyricInfo,
 } from './download'
 import {
-  getMusicUrl as getLocalMusicUrl,
+  getPrimaryMusicUrl as getLocalMusicUrl,
   getPicUrl as getLocalPicUrl,
   getLyricInfo as getLocalLyricInfo,
 } from './local'
@@ -22,6 +22,8 @@ import {
   getPicUrl as getWebDAVPicUrl,
   getLyricInfo as getWebDAVLyricInfo,
 } from './webdav'
+
+export { createPlaybackRequest } from './playback'
 
 
 export const getMusicUrl = async({
@@ -36,13 +38,13 @@ export const getMusicUrl = async({
   quality?: LX.Quality
   onToggleSource?: (musicInfo?: LX.Music.MusicInfoOnline) => void
   allowToggleSource?: boolean
-}): Promise<string> => {
+}): Promise<LX.Music.PlayableMusicUrlResult> => {
   if ('progress' in musicInfo) {
-    return getDownloadMusicUrl({ musicInfo, isRefresh, onToggleSource, allowToggleSource })
+    return { url: await getDownloadMusicUrl({ musicInfo, isRefresh, onToggleSource, allowToggleSource }) }
   } else if (musicInfo.source == 'local') {
-    return getLocalMusicUrl({ musicInfo, isRefresh, onToggleSource, allowToggleSource })
+    return { url: await getLocalMusicUrl({ musicInfo, isRefresh, onToggleSource, allowToggleSource }) }
   } else if (musicInfo.source == 'webdav') {
-    return getWebDAVMusicUrl({ musicInfo, isRefresh })
+    return { url: await getWebDAVMusicUrl({ musicInfo, isRefresh }) }
   } else {
     return getOnlineMusicUrl({ musicInfo, isRefresh, quality, onToggleSource, allowToggleSource })
   }

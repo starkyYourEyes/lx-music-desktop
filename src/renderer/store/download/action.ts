@@ -9,7 +9,7 @@ import {
   downloadList,
 } from './state'
 import { markRaw, toRaw } from '@common/utils/vueTools'
-import { getMusicUrl, getPicUrl, getLyricInfo } from '@renderer/core/music/online'
+import { getPrimaryMusicUrl as getMusicUrl, getPicUrl, getLyricInfo } from '@renderer/core/music/online'
 import { appSetting } from '../setting'
 import { qualityList } from '..'
 import { proxyCallback } from '@renderer/worker/utils'
@@ -220,8 +220,9 @@ const getUrl = async(downloadInfo: LX.Download.ListItem, isRefresh: boolean = fa
       quality: downloadInfo.metadata.quality,
       allowToggleSource: appSetting['download.isUseOtherSource'],
     })
-  }).catch(() => '')
+  }).then(({ url }) => url).catch(() => '')
 }
+export const getDownloadUrl = getUrl
 const handleRefreshUrl = (downloadInfo: LX.Download.ListItem) => {
   setStatusText(downloadInfo, window.i18n.t('download_status_error_refresh_url'))
   let toggleMusicInfo = downloadInfo.metadata.musicInfo.meta.toggleMusicInfo
@@ -238,6 +239,7 @@ const handleRefreshUrl = (downloadInfo: LX.Download.ListItem) => {
       allowToggleSource: appSetting['download.isUseOtherSource'],
     })
   })
+    .then(({ url }) => url)
     .catch(() => '')
     .then(url => {
     // commit('setStatusText', { downloadInfo, text: '链接刷新成功' })

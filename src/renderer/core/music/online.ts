@@ -37,13 +37,13 @@ export const setPic = (datas: {
  */
 
 
-export const getPrimaryMusicUrl = async({ musicInfo, quality, isRefresh, allowToggleSource = true, onToggleSource = () => {} }: {
+export const getPrimaryMusicUrl = async({ musicInfo, quality, isRefresh, allowToggleSource = false, onToggleSource = () => {} }: {
   musicInfo: LX.Music.MusicInfoOnline
   quality?: LX.Quality
   isRefresh: boolean
   allowToggleSource?: boolean
   onToggleSource?: (musicInfo?: LX.Music.MusicInfoOnline) => void
-}): Promise<string> => {
+}): Promise<LX.Music.MusicUrlResult> => {
   // if (!musicInfo._types[type]) {
   //   // 兼容旧版酷我源搜索列表过滤128k音质的bug
   //   if (!(musicInfo.source == 'kw' && type == '128k')) throw new Error('该歌曲没有可播放的音频')
@@ -52,16 +52,16 @@ export const getPrimaryMusicUrl = async({ musicInfo, quality, isRefresh, allowTo
   // }
   const targetQuality = quality ?? getPlayQuality(appSetting['player.playQuality'], musicInfo)
   const cachedUrl = await getStoreMusicUrl(musicInfo, targetQuality)
-  if (cachedUrl && !isRefresh) return cachedUrl
+  if (cachedUrl && !isRefresh) return { url: cachedUrl, quality: targetQuality, musicInfo }
 
   return handleGetOnlineMusicUrl({ musicInfo, quality, onToggleSource, isRefresh, allowToggleSource }).then(({ url, quality: targetQuality, musicInfo: targetMusicInfo, isFromCache }) => {
-    return url
+    return { url, quality: targetQuality, musicInfo: targetMusicInfo }
   })
 }
 
 export const getMusicUrl = getPrimaryMusicUrl
 
-export const getPicUrl = async({ musicInfo, listId, isRefresh, allowToggleSource = true, onToggleSource = () => {} }: {
+export const getPicUrl = async({ musicInfo, listId, isRefresh, allowToggleSource = false, onToggleSource = () => {} }: {
   musicInfo: LX.Music.MusicInfoOnline
   listId?: string | null
   isRefresh: boolean
@@ -79,7 +79,7 @@ export const getPicUrl = async({ musicInfo, listId, isRefresh, allowToggleSource
     return url
   })
 }
-export const getLyricInfo = async({ musicInfo, isRefresh, allowToggleSource = true, onToggleSource = () => {} }: {
+export const getLyricInfo = async({ musicInfo, isRefresh, allowToggleSource = false, onToggleSource = () => {} }: {
   musicInfo: LX.Music.MusicInfoOnline
   isRefresh: boolean
   allowToggleSource?: boolean

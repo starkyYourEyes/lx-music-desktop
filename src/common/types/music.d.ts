@@ -112,6 +112,18 @@ declare namespace LX {
     type MusicInfoOnline = MusicInfo_online_common | MusicInfo_kg | MusicInfo_tx | MusicInfo_mg
     type MusicInfo = MusicInfoOnline | MusicInfoLocal | MusicInfoWebDAV
 
+    interface PlayableMusicUrlResult {
+      url: string
+      quality?: LX.Quality
+      musicInfo?: MusicInfoOnline
+    }
+
+    interface MusicUrlResult {
+      url: string
+      quality: LX.Quality
+      musicInfo: MusicInfoOnline
+    }
+
     interface WebDAVConfig {
       url: string
       username: string

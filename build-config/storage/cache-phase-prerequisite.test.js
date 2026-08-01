@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict')
+const childProcess = require('node:child_process')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -25,6 +26,17 @@ const dbService = require('../../src/main/worker/dbService/db.ts')
 const testStorageRootPath = './helpers/test-storage-root.js'
 const workerFixtures = []
 const supportsWorkerDatabase = typeof process.versions.electron == 'string'
+
+const runElectronChild = () => {
+  const result = childProcess.spawnSync(require('electron'), ['--test', __filename], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1',
+    },
+  })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+}
 
 const canonical = value => {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
@@ -163,7 +175,8 @@ describe('cache Phase 3 prerequisite', () => {
     assert.throws(() => getCachePhasePrerequisite('legacy_data_v1.local_state'), /cache_phase3_prerequisite_invalid/)
   })
 
-  it('reads raw worker marker bytes instead of normalized migration marker details', { skip: !supportsWorkerDatabase }, async() => {
+  it('reads raw worker marker bytes instead of normalized migration marker details', async() => {
+    if (!supportsWorkerDatabase) return runElectronChild()
     const db = await createWorkerStore()
     const repository = require(phase3WorkerPath)
     const canonicalMarker = completeMarker()
@@ -244,7 +257,7 @@ describe('cache Phase 3 prerequisite', () => {
     }
   })
 
-  it('quarantines a target swapped after verification and never deletes the swapped directory', () => {
+  it('restores a target swapped after verification and never deletes the replacement', () => {
     const { createTestStorageRoot } = require(testStorageRootPath)
     const baseRoot = fs.realpathSync(process.env.LX_TEST_STORAGE_ROOT)
     const fixture = createTestStorageRoot('swap-owned')
@@ -253,7 +266,6 @@ describe('cache Phase 3 prerequisite', () => {
     fs.writeFileSync(path.join(unowned, 'unowned.txt'), 'keep')
     const rename = fs.renameSync
     let swapped = false
-    let quarantined
     try {
       fs.renameSync = (source, target) => {
         if (!swapped && source == fixture.path) {
@@ -264,16 +276,16 @@ describe('cache Phase 3 prerequisite', () => {
         return rename(source, target)
       }
       assert.throws(() => fixture.cleanup(), /ownership changed/)
-      quarantined = fs.readdirSync(baseRoot)
-        .map(name => path.join(baseRoot, name))
-        .find(candidate => fs.existsSync(path.join(candidate, 'unowned.txt')))
-      assert.ok(quarantined)
-      assert.equal(fs.readFileSync(path.join(quarantined, 'unowned.txt'), 'utf8'), 'keep')
+      assert.equal(fs.readFileSync(path.join(fixture.path, 'unowned.txt'), 'utf8'), 'keep')
     } finally {
       fs.renameSync = rename
       fs.rmSync(ownedParking, { recursive: true, force: true })
       fs.rmSync(unowned, { recursive: true, force: true })
-      if (quarantined != null && quarantined != unowned) fs.rmSync(quarantined, { recursive: true, force: true })
+      fs.rmSync(fixture.path, { recursive: true, force: true })
+      for (const name of fs.readdirSync(baseRoot)) {
+        const candidate = path.join(baseRoot, name)
+        if (fs.existsSync(path.join(candidate, 'unowned.txt'))) fs.rmSync(candidate, { recursive: true, force: true })
+      }
     }
   })
 })

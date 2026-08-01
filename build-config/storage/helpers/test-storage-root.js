@@ -72,7 +72,14 @@ const createTestStorageRoot = prefix => {
         throw new Error('Test storage root quarantine path is invalid')
       }
       fs.renameSync(rootPath, quarantinePath)
-      assertOwnedChild(ownership, quarantinePath, true)
+      try {
+        assertOwnedChild(ownership, quarantinePath, true)
+      } catch (error) {
+        if (!fs.existsSync(rootPath)) {
+          try { fs.renameSync(quarantinePath, rootPath) } catch {}
+        }
+        throw error
+      }
       fs.rmSync(quarantinePath, { recursive: true, force: false })
       cleaned = true
     },

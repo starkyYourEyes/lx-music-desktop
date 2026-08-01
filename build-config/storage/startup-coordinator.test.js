@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict')
+const childProcess = require('node:child_process')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const Module = require('node:module')
@@ -31,6 +32,17 @@ const { createTestStorageRoot } = require('./helpers/test-storage-root.js')
 const tempDirectories = []
 const appDbFixtures = []
 const supportsWorkerDatabase = typeof process.versions.electron == 'string'
+
+const runElectronChild = () => {
+  const result = childProcess.spawnSync(require('electron'), ['--test', __filename], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1',
+    },
+  })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+}
 
 const compileCoordinatorTypeFixture = source => {
   const fixturePath = path.resolve(__dirname, 'storage-coordinator-type-fixture.ts')
@@ -103,7 +115,17 @@ const canonical = value => {
   return JSON.stringify(value)
 }
 
-const sha256File = filename => crypto.createHash('sha256').update(fs.readFileSync(filename)).digest('hex')
+const sqliteFingerprint = databasePath => Object.fromEntries([
+  databasePath,
+  `${databasePath}-wal`,
+  `${databasePath}-shm`,
+].map(filename => [filename, fs.existsSync(filename)
+  ? crypto.createHash('sha256').update(fs.readFileSync(filename)).digest('hex')
+  : null]))
+const checkpointAndClose = db => {
+  db.pragma('wal_checkpoint(TRUNCATE)')
+  workerDbService.close()
+}
 const sha256 = value => crypto.createHash('sha256').update(value, 'utf8').digest('hex')
 const cacheChecks = () => [
   { name: 'credentials', version: 1, state: 'complete', evidenceSha256: 'a'.repeat(64) },
@@ -226,7 +248,8 @@ const loadWorkerAdapter = databaseInit => {
 }
 
 describe('storage startup coordinator', () => {
-  it('rejects invalid raw worker markers before Phase 4 can mutate the app database', { skip: !supportsWorkerDatabase }, async() => {
+  it('rejects invalid raw worker markers before Phase 4 can mutate the app database', async() => {
+    if (!supportsWorkerDatabase) return runElectronChild()
     const valid = cacheMarker(cacheChecks())
     const incompleteWriter = cacheChecks()
     incompleteWriter[5].state = 'not-applicable'
@@ -243,7 +266,8 @@ describe('storage startup coordinator', () => {
     for (const testCase of cases) {
       const { db, options, appDbPath } = await createAppDbFixture()
       if (testCase.marker != null) insertRawCacheMarker(db, testCase.marker, testCase.allowInvalidJson)
-      const beforeHash = sha256File(appDbPath)
+      checkpointAndClose(db)
+      const beforeFingerprint = sqliteFingerprint(appDbPath)
       const { calls, deps } = createDeps({
         initDatabase: async() => workerDbService.init(options),
         getCachePhasePrerequisite: () => phase3Worker.getCachePhasePrerequisite(),
@@ -258,9 +282,28 @@ describe('storage startup coordinator', () => {
 
       assert.deepEqual(result, { status: 'fatal', reason: 'cache_phase3_prerequisite_invalid' }, testCase.name)
       assert.equal(calls.includes('phase4:initialize'), false, testCase.name)
-      assert.equal(sha256File(appDbPath), beforeHash, testCase.name)
       workerDbService.close()
+      assert.deepEqual(sqliteFingerprint(appDbPath), beforeFingerprint, testCase.name)
     }
+
+    const { db, options, appDbPath } = await createAppDbFixture()
+    insertRawCacheMarker(db, valid)
+    checkpointAndClose(db)
+    const beforeFingerprint = sqliteFingerprint(appDbPath)
+    const { calls, deps } = createDeps({
+      initDatabase: async() => workerDbService.init(options),
+      getCachePhasePrerequisite: () => phase3Worker.getCachePhasePrerequisite(),
+      initializePhase4: async() => {
+        calls.push('phase4:initialize')
+        workerDbService.getDB().exec('CREATE TABLE phase4_mutation_sentinel(value TEXT)')
+        return { schemaVersion: 7 }
+      },
+    })
+
+    assert.deepEqual(await createCoordinator(deps).start(), { status: 'ready', schemaVersion: 7 })
+    assert.equal(calls.includes('phase4:initialize'), true)
+    workerDbService.close()
+    assert.notDeepEqual(sqliteFingerprint(appDbPath), beforeFingerprint)
   })
 
   it('runs the cache prerequisite after Phase 3 and propagates the Phase 4 schema version', async() => {

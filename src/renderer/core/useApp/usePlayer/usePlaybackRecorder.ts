@@ -186,7 +186,7 @@ export const createPlaybackRecorderController = (
       groupStarted = false
       activePolicy = null
     },
-    nativePlaying(playbackRate, resumeReason = 'system') {
+    nativePlaying(playbackRate, resumeReason = 'device') {
       if (!ensureStarted()) return
       const phase = recorder.getState().phase
       if (phase == 'paused') {
@@ -315,12 +315,12 @@ export default () => {
     if (recorder.getState().phase == 'paused') pendingResumeReason = reason
   }
   const handlePlaying = () => {
-    const reason = pendingResumeReason ?? 'system'
+    const reason = pendingResumeReason ?? 'device'
     pendingResumeReason = null
     controller.nativePlaying(getPlaybackRate(), reason)
   }
   const handlePause = () => {
-    const reason = pendingPauseReason ?? 'system'
+    const reason = pendingPauseReason ?? 'device'
     pendingPauseReason = null
     controller.pause(reason)
   }

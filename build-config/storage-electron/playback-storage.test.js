@@ -5,6 +5,7 @@ const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const Database = require('better-sqlite3')
 const typescript = require('typescript')
+const loadTsModule = require('../../scripts/test-utils/load-ts-module')
 
 // Electron ABI tests transpile source modules in-process.
 // eslint-disable-next-line n/no-deprecated-api
@@ -811,6 +812,73 @@ describe('atomic playback repository', () => {
       { sequenceNo: 5, type: 'error', reason: null, detailsJson: '{"attempt":2,"code":12,"recoverable":true,"stage":"buffer"}' },
       { sequenceNo: 6, type: 'error', reason: null, detailsJson: '{"attempt":3,"code":null,"recoverable":false,"stage":"decode"}' },
     ])
+  })
+
+  it('persists the renderer-produced fallback pause reason through the repository', async() => {
+    const db = await createStore()
+    const { AppEvent } = require('../../src/renderer/event/appEvent.ts')
+    const recorderPath = path.resolve(__dirname, '../../src/renderer/core/playbackRecorder/index.ts')
+    const hookPath = path.resolve(__dirname, '../../src/renderer/core/useApp/usePlayer/usePlaybackRecorder.ts')
+    const commitRequests = []
+    let alive = true
+    let cleanup = () => {}
+    const recorder = loadTsModule(recorderPath, {
+      '../../utils/playback': { sendPlaybackCommand: async() => { throw new Error('unexpected default transport') } },
+    }).createPlaybackRecorder({
+      isAlive: () => alive,
+      retry: { initialMs: 100, maxMs: 100 },
+      transport: async command => {
+        switch (command.kind) {
+          case 'start': return repository.playbackStart(command.request)
+          case 'commit':
+            commitRequests.push(command.request)
+            return repository.playbackCommit(command.request)
+          default: throw new Error('unexpected playback mode')
+        }
+      },
+    })
+    const hook = loadTsModule(hookPath, {
+      '@renderer/core/playbackRecorder': { createPlaybackRecorder: () => recorder },
+      '@renderer/store/recentPlay/action': { initRecentPlayList: async() => {} },
+      '@renderer/store/listeningTime/action': { initListeningTimeStats: async() => {} },
+      '@renderer/utils/ipc': { registerShutdownFlusher: () => () => {} },
+      '@renderer/plugins/player': {
+        getCurrentTime: () => 0,
+        getDuration: () => 240,
+        getPlaybackRate: () => 1,
+        onTimeupdate: () => () => {},
+      },
+      '@common/utils/vueTools': { onBeforeUnmount: callback => { cleanup = callback } },
+    })
+    const appEvent = new AppEvent()
+    const previousWindow = global.window
+    global.window = { app_event: appEvent }
+
+    try {
+      hook.default()
+      appEvent.musicToggled({
+        track: track(),
+        context: { type: 'playlist', id: 'list-one' },
+        resume: { listId: 'list-one', indexHint: 3 },
+        startReason: 'select',
+        startPositionMs: 0,
+      })
+      appEvent.playerPlaying()
+      assert.equal(await recorder.flush({ timeoutMs: 1000 }), true)
+
+      appEvent.playerPause()
+      const flushed = await recorder.flush({ timeoutMs: 1000 })
+      assert.deepEqual(commitRequests[0].fact, { version: 1, type: 'pause', reason: 'device' })
+      assert.equal(flushed, true)
+      assert.deepEqual(db.prepare(`
+        SELECT event_type AS type, reason
+        FROM playback_events WHERE sequence_no = 2
+      `).get(), { type: 'pause', reason: 'device' })
+    } finally {
+      alive = false
+      cleanup()
+      global.window = previousWindow
+    }
   })
 
   it('rejects commit-time play_start while playing or paused without mutation', async() => {

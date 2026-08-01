@@ -2,7 +2,7 @@ export type PlaybackStartReason =
   | 'select' | 'next' | 'previous' | 'auto' | 'restore' | 'remote'
   | 'day_boundary' | 'statistics_clear'
 
-export type PlaybackPauseReason = 'user' | 'system' | 'remote' | 'recovery'
+export type PlaybackPauseReason = 'user' | 'device' | 'remote' | 'recovery'
 export type PlaybackSeekOrigin =
   | 'bar' | 'hotkey' | 'media_session' | 'lyric'
   | 'party' | 'restore' | 'buffer_recovery'

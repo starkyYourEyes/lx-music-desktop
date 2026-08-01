@@ -329,12 +329,12 @@ describe('typed playback intent callsites', () => {
     }
   })
 
-  it('labels party control requests as remote and device-removal pauses as system', () => {
+  it('labels party control requests as remote and device-removal pauses as device', () => {
     const partySource = readRendererFile('core/useApp/useParty.ts')
     const mediaDeviceSource = readRendererFile('core/useApp/usePlayer/useMediaDevice.ts')
     assert.match(partySource, /room\.playback\.playing\) play\('remote'\)/)
     assert.match(partySource, /isPlay\.value\) pause\('remote'\)/)
-    assert.match(mediaDeviceSource, /pause\('system'\)/)
+    assert.match(mediaDeviceSource, /pause\('device'\)/)
   })
 
   it('emits a copied selection snapshot at the store action boundary', () => {

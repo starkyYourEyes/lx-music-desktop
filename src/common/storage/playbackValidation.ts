@@ -467,7 +467,7 @@ export const parsePlaybackFact = (value: unknown): PlaybackFactV1 => {
       case 'pause':
       case 'resume':
         assertExactKeys(value, 'fact', ['version', 'type', 'reason'])
-        assertOneOf(value.reason, 'reason', ['user', 'system', 'remote', 'recovery'])
+        assertOneOf(value.reason, 'reason', ['user', 'device', 'remote', 'recovery'])
         break
       case 'seek':
         assertExactKeys(value, 'fact', ['version', 'type', 'origin', 'fromMs', 'toMs'])

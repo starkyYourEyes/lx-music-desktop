@@ -221,7 +221,7 @@ describe('playback recorder renderer cutover', () => {
     }
   })
 
-  it('records requested pause/resume causes and uses system for unexpected native transitions', async() => {
+  it('records requested pause/resume causes and uses device for unexpected native transitions', async() => {
     const { AppEvent } = require('../../src/renderer/event/appEvent.ts')
     const appEvent = new AppEvent()
     const calls = []
@@ -246,8 +246,8 @@ describe('playback recorder renderer cutover', () => {
         [
           { version: 1, type: 'pause', reason: 'remote' },
           { version: 1, type: 'resume', reason: 'recovery' },
-          { version: 1, type: 'pause', reason: 'system' },
-          { version: 1, type: 'resume', reason: 'system' },
+          { version: 1, type: 'pause', reason: 'device' },
+          { version: 1, type: 'resume', reason: 'device' },
         ],
       )
     } finally {

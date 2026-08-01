@@ -2,6 +2,7 @@ import { WIN_MAIN_RENDERER_EVENT_NAME } from '@common/ipcNames'
 import { mainHandle, mainOn } from '@common/mainIpc'
 import { log } from '@common/utils'
 import {
+  createReplacementFailureApiListCarrier,
   getApiList,
   takeReplacementFailureApiList,
   importApi,
@@ -82,10 +83,11 @@ export default () => {
   mainHandle<string[], LX.UserApi.UserApiRemoveResult>(
     WIN_MAIN_RENDERER_EVENT_NAME.remove_user_api,
     async({ params: apiIds }) => {
+      const failureCarrier = createReplacementFailureApiListCarrier()
       try {
-        return { success: true, apiList: await removeApi(apiIds) }
+        return { success: true, apiList: await removeApi(apiIds, failureCarrier) }
       } catch (err) {
-        const apiList = takeReplacementFailureApiList(err)
+        const apiList = takeReplacementFailureApiList(failureCarrier)
         if (apiList == null) throw err
         return {
           success: false,

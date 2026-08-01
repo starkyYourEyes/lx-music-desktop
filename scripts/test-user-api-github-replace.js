@@ -214,6 +214,88 @@ const createRuntimeHarness = (options = {}) => {
   }
 }
 
+const createDirectDeleteIpcHarness = userApiRuntime => {
+  const removeEventName = 'remove_user_api'
+  const createIpcNames = values => new Proxy(values, {
+    get(target, property) {
+      return Reflect.has(target, property) ? Reflect.get(target, property) : String(property)
+    },
+  })
+  const winMainEventNames = createIpcNames({ remove_user_api: removeEventName })
+  const emptyEventNames = createIpcNames({})
+  const hotKeyGroup = new Proxy({}, {
+    get(_target, property) {
+      return { name: String(property), action: String(property) }
+    },
+  })
+  const registeredHandlers = new Map()
+  const mainRuntimePool = {
+    async releaseOwner() {},
+    getStatus() {},
+    request() {},
+    async ensure() {},
+    cancel() {},
+    acquireLease() {},
+    async releaseLease() {},
+  }
+  const mainRuntime = loadTsModule(
+    path.join(__dirname, '../src/main/modules/winMain/rendererEvent/userApi.ts'),
+    {
+      '@common/ipcNames': { WIN_MAIN_RENDERER_EVENT_NAME: winMainEventNames },
+      '@common/mainIpc': {
+        mainHandle(name, handler) {
+          registeredHandlers.set(name, handler)
+        },
+        mainOn() {},
+      },
+      '@common/utils': { log: { error() {} } },
+      '@main/modules/userApi': userApiRuntime,
+      '@main/modules/userApi/runtimeError': { normalizeRuntimeFailure: error => error },
+      '@main/modules/userApi/runtimePool': { getUserApiRuntimePool: () => mainRuntimePool },
+      '@main/modules/winMain/main': { sendEvent() {} },
+    },
+  )
+  mainRuntime.default()
+  const removeHandler = registeredHandlers.get(removeEventName)
+  assert.strictEqual(typeof removeHandler, 'function')
+
+  return loadTsModule(
+    path.join(__dirname, '../src/renderer/utils/ipc.ts'),
+    {
+      '@common/rendererIpc': {
+        rendererSend() {},
+        async rendererInvoke(name, params) {
+          const handler = registeredHandlers.get(name)
+          assert.strictEqual(typeof handler, 'function')
+          return structuredClone(await handler({ params }))
+        },
+        rendererOn() {},
+        rendererOff() {},
+      },
+      '@common/ipcNames': {
+        HOTKEY_RENDERER_EVENT_NAME: emptyEventNames,
+        WIN_MAIN_RENDERER_EVENT_NAME: winMainEventNames,
+        CMMON_EVENT_NAME: emptyEventNames,
+      },
+      '@common/utils/vueTools': {
+        markRaw: value => value,
+        toRaw: value => value,
+      },
+      '@common/hotKey': {
+        __esModule: true,
+        HOTKEY_PLAYER: hotKeyGroup,
+        HOTKEY_COMMON: hotKeyGroup,
+        HOTKEY_DESKTOP_LYRIC: hotKeyGroup,
+      },
+      '@common/constants': {
+        APP_EVENT_NAMES: { winMainName: 'main', winLyricName: 'lyric' },
+        DATA_KEYS: {},
+        DEFAULT_SETTING: {},
+      },
+    },
+  )
+}
+
 const oldSerialized = () => [{
   id: 'user_api_old',
   name: 'Old source',
@@ -872,6 +954,111 @@ const originalLx = global.lx
     assert.strictEqual(
       deleteSecondaryFailureRuntime.runtime
         .takeReplacementFailureApiList(deleteSecondaryLifecycleError),
+      undefined,
+    )
+
+    const primitiveDeleteLifecycleError = 'primitive deletion lifecycle failure'
+    const primitiveRetainedApi = {
+      id: 'untouched-id',
+      name: 'Primitive retained source',
+      description: 'Forward state retained after rollback failure',
+      allowShowUpdateAlert: false,
+    }
+    const primitiveDeleteRuntime = createRuntimeHarness({
+      initialApis: [
+        {
+          id: 'removed-id',
+          name: 'Removed before primitive failure',
+          description: 'Removed source',
+          allowShowUpdateAlert: false,
+        },
+        primitiveRetainedApi,
+      ],
+      initialScripts: {
+        'removed-id': 'script:removed-id:old',
+        'untouched-id': 'script:untouched-id:old',
+      },
+      fallbackSources: ['removed-id', 'untouched-id'],
+      disposeSteps: [() => { throw primitiveDeleteLifecycleError }],
+      commitSteps: [
+        undefined,
+        new Error('simulated primitive deletion rollback commit failure'),
+      ],
+    })
+    const directDeleteIpc = createDirectDeleteIpcHarness(primitiveDeleteRuntime.runtime)
+    const primitiveDeleteEvents = []
+    await assert.rejects(
+      () => directDeleteIpc.removeUserApi(['removed-id'], apiList => {
+        primitiveDeleteEvents.push({ type: 'published', apiList })
+      }),
+      error => {
+        primitiveDeleteEvents.push({ type: 'rejected', error })
+        assert(error instanceof Error)
+        assert.strictEqual(error.message, 'User API removal failed')
+        assert.deepStrictEqual(error.apiList, [primitiveRetainedApi])
+        return true
+      },
+    )
+    assert.deepStrictEqual(
+      primitiveDeleteEvents.map(event => event.type),
+      ['published', 'rejected'],
+    )
+    assert.deepStrictEqual(primitiveDeleteEvents[0].apiList, [primitiveRetainedApi])
+    assert.deepStrictEqual(primitiveDeleteRuntime.getCurrentState(), {
+      apiList: [primitiveRetainedApi],
+      scripts: new Map([['untouched-id', 'script:untouched-id:old']]),
+    })
+
+    const sharedPrimitiveLifecycleError = 'shared primitive deletion failure'
+    const samePrimitiveRuntime = createRuntimeHarness({
+      initialApis: [
+        { id: 'first-id', name: 'First source' },
+        { id: 'second-id', name: 'Second source' },
+        { id: 'retained-id', name: 'Retained source' },
+      ],
+      initialScripts: {
+        'first-id': 'script:first-id:old',
+        'second-id': 'script:second-id:old',
+        'retained-id': 'script:retained-id:old',
+      },
+      disposeSteps: [
+        () => { throw sharedPrimitiveLifecycleError },
+        () => { throw sharedPrimitiveLifecycleError },
+      ],
+      commitSteps: [
+        undefined,
+        new Error('simulated first rollback commit failure'),
+        undefined,
+        new Error('simulated second rollback commit failure'),
+      ],
+    })
+    const firstCarrier = samePrimitiveRuntime.runtime.createReplacementFailureApiListCarrier()
+    const secondCarrier = samePrimitiveRuntime.runtime.createReplacementFailureApiListCarrier()
+    const samePrimitiveResults = await Promise.allSettled([
+      samePrimitiveRuntime.runtime.removeApi(['first-id'], firstCarrier),
+      samePrimitiveRuntime.runtime.removeApi(['second-id'], secondCarrier),
+    ])
+    assert.strictEqual(samePrimitiveResults[0].status, 'rejected')
+    assert.strictEqual(samePrimitiveResults[0].reason, sharedPrimitiveLifecycleError)
+    assert.strictEqual(samePrimitiveResults[1].status, 'rejected')
+    assert.strictEqual(samePrimitiveResults[1].reason, sharedPrimitiveLifecycleError)
+    assert.deepStrictEqual(
+      samePrimitiveRuntime.runtime.takeReplacementFailureApiList(firstCarrier),
+      [
+        { id: 'second-id', name: 'Second source' },
+        { id: 'retained-id', name: 'Retained source' },
+      ],
+    )
+    assert.deepStrictEqual(
+      samePrimitiveRuntime.runtime.takeReplacementFailureApiList(secondCarrier),
+      [{ id: 'retained-id', name: 'Retained source' }],
+    )
+    assert.strictEqual(
+      samePrimitiveRuntime.runtime.takeReplacementFailureApiList(firstCarrier),
+      undefined,
+    )
+    assert.strictEqual(
+      samePrimitiveRuntime.runtime.takeReplacementFailureApiList(secondCarrier),
       undefined,
     )
 

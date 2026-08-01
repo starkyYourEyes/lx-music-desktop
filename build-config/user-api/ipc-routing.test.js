@@ -20,7 +20,8 @@ const hotKeyGroup = new Proxy({}, {
 
 const createMainRemoveHarness = removeImplementation => {
   const registeredHandlers = new Map()
-  const retainedLists = new Map()
+  const retainedLists = new WeakMap()
+  let nextRetainedList
   const runtimePool = {
     async releaseOwner() {},
     getStatus() {},
@@ -42,10 +43,21 @@ const createMainRemoveHarness = removeImplementation => {
       },
       '@common/utils': { log: { error() {} } },
       '@main/modules/userApi': {
+        createReplacementFailureApiListCarrier: () => ({}),
         getApiList() {},
         importApi() {},
         replaceApisFromGitHub() {},
-        removeApi: removeImplementation,
+        async removeApi(apiIds, failureCarrier) {
+          try {
+            return await removeImplementation(apiIds)
+          } catch (error) {
+            if (nextRetainedList != null && failureCarrier != null) {
+              retainedLists.set(failureCarrier, nextRetainedList)
+              nextRetainedList = undefined
+            }
+            throw error
+          }
+        },
         setApi() {},
         setAllowShowUpdateAlert() {},
         takeReplacementFailureApiList(error) {
@@ -64,8 +76,8 @@ const createMainRemoveHarness = removeImplementation => {
   assert.equal(typeof removeHandler, 'function')
   return {
     invoke: apiIds => removeHandler({ params: apiIds }),
-    retain(error, apiList) {
-      retainedLists.set(error, apiList)
+    retain(apiList) {
+      nextRetainedList = apiList
     },
   }
 }
@@ -184,7 +196,7 @@ test('direct delete main handler rethrows an ordinary failure unchanged', async(
 test('direct delete main handler returns and consumes a retained failure list', async() => {
   const failure = new Error('runtime close failed after delete commit')
   const harness = createMainRemoveHarness(async() => { throw failure })
-  harness.retain(failure, retainedApiList)
+  harness.retain(retainedApiList)
 
   assert.deepEqual(await harness.invoke(['source']), {
     success: false,
@@ -201,7 +213,7 @@ test('direct delete main handler bounds retained failure fields and excludes arb
     arbitrary: 'must not cross IPC',
   })
   const harness = createMainRemoveHarness(async() => { throw failure })
-  harness.retain(failure, retainedApiList)
+  harness.retain(retainedApiList)
 
   const result = await harness.invoke(['source'])
   assert.deepEqual(result, {
@@ -214,18 +226,6 @@ test('direct delete main handler bounds retained failure fields and excludes arb
     },
   })
   assert.equal(Object.prototype.hasOwnProperty.call(result.error, 'arbitrary'), false)
-})
-
-test('direct delete main handler uses a removal fallback for a retained non-Error failure', async() => {
-  const failure = 'opaque lifecycle failure'
-  const harness = createMainRemoveHarness(async() => { throw failure })
-  harness.retain(failure, retainedApiList)
-
-  assert.deepEqual(await harness.invoke(['source']), {
-    success: false,
-    apiList: retainedApiList,
-    error: { message: 'User API removal failed' },
-  })
 })
 
 test('direct delete renderer helper returns and publishes the committed success list', async() => {

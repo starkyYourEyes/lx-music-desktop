@@ -31,6 +31,8 @@ import {
 
 const replacementFailureApiLists = new WeakMap<object, LX.UserApi.UserApiInfo[]>()
 
+export const createReplacementFailureApiListCarrier = (): object => ({})
+
 export const takeReplacementFailureApiList = (
   err: unknown,
 ): LX.UserApi.UserApiInfo[] | undefined => {
@@ -38,6 +40,20 @@ export const takeReplacementFailureApiList = (
   const apiList = replacementFailureApiLists.get(err)
   replacementFailureApiLists.delete(err)
   return apiList
+}
+
+const retainReplacementFailureApiList = (
+  err: unknown,
+  apiList: LX.UserApi.UserApiInfo[],
+  failureCarrier?: object,
+) => {
+  if (failureCarrier != null) {
+    replacementFailureApiLists.set(failureCarrier, apiList)
+    return
+  }
+  if (err != null && (typeof err == 'object' || typeof err == 'function')) {
+    replacementFailureApiLists.set(err, apiList)
+  }
 }
 
 const removeUnavailablePlaybackSources = (removedIds: ReadonlySet<string>) => {
@@ -53,10 +69,9 @@ const reconcileRetainedUserApiState = (
   apiList: LX.UserApi.UserApiInfo[],
   removedIds: ReadonlySet<string>,
   configErrorMessage: string,
+  failureCarrier?: object,
 ) => {
-  if (err != null && (typeof err == 'object' || typeof err == 'function')) {
-    replacementFailureApiLists.set(err, apiList)
-  }
+  retainReplacementFailureApiList(err, apiList, failureCarrier)
   try {
     removeUnavailablePlaybackSources(removedIds)
   } catch (configErr) {
@@ -185,7 +200,10 @@ export const overwriteUserApisFromSync = async(data: LX.Sync.UserApi.Data): Prom
   })
 }
 
-export const removeApi = async(ids: string[]): Promise<LX.UserApi.UserApiInfo[]> => {
+export const removeApi = async(
+  ids: string[],
+  failureCarrier?: object,
+): Promise<LX.UserApi.UserApiInfo[]> => {
   return runUserApiTask(async() => {
     const currentState = getUserApiState()
     const previousState = cloneUserApiState(currentState)
@@ -214,6 +232,7 @@ export const removeApi = async(ids: string[]): Promise<LX.UserApi.UserApiInfo[]>
           failureApiList,
           removedIds,
           'cleanup playback fallbacks after deletion rollback failure:',
+          failureCarrier,
         )
       }
       throw err

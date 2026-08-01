@@ -74,6 +74,8 @@ interface ShutdownDiagnostic {
 
 export interface StorageCoordinatorDependencies {
   runState: RunStateStore
+  initializeTempLifecycle?: () => Promise<void>
+  cleanupTempLifecycle?: () => Promise<void>
   preflightLegacyData?: () => Promise<LegacyDataSourceResult>
   initDatabase: (previousShutdownWasClean: boolean) => Promise<DatabaseStartupResult>
   closeDatabase: () => Promise<void> | void
@@ -388,6 +390,7 @@ export const createStorageCoordinator = (
         if (shutdownRequested) return startupCancelled()
         const previousShutdownWasClean = await dependencies.runState.begin()
         runHasStarted = true
+        await dependencies.initializeTempLifecycle?.()
         if (shutdownRequested) return startupCancelled()
         const legacyData = await dependencies.preflightLegacyData?.() ?? { status: 'absent' as const }
         if (shutdownRequested) return startupCancelled()
@@ -556,6 +559,11 @@ export const createStorageCoordinator = (
         const acknowledgePortableProfile = portableProfileAcknowledgement
         portableProfileAcknowledgement = null
         await acknowledgePortableProfile()
+      }
+      try {
+        await dependencies.cleanupTempLifecycle?.()
+      } catch (error) {
+        failure ??= error instanceof Error ? error : errorWithCode('shutdown_temp_cleanup_failed')
       }
     })()
     return shutdownPromise

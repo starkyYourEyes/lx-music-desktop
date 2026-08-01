@@ -1,5 +1,6 @@
 // import defaultSetting from '@common/defaultSetting'
 import createWorkers from '@renderer/worker'
+import { getRunTempRoot } from '@renderer/utils/ipc'
 
 window.lx = {
   // appSetting: defaultSetting,
@@ -30,5 +31,7 @@ window.lx = {
 }
 
 window.lxData = {}
+
+void getRunTempRoot().then(runTempRoot => window.lx.worker.main.configureRunTempRoot(runTempRoot))
 
 window.ELECTRON_DISABLE_SECURITY_WARNINGS = process.env.ELECTRON_DISABLE_SECURITY_WARNINGS

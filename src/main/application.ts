@@ -17,6 +17,7 @@ import { checkCredentialStartup, createStorageCoordinator } from '@main/startup/
 import { showStorageRecovery } from '@main/startup/recovery'
 import { readLegacyDataSource } from '@main/migration/legacyData/source'
 import { acknowledgePortableProfileStartup } from '@main/migration/portableProfile'
+import { createRunTempHandle, scavengeRunTempRoots } from '@main/utils/tempLifecycle'
 
 let isFinishingStorageShutdown = false
 
@@ -24,6 +25,18 @@ const getStorageCoordinator = () => {
   const portableProfileStartup = global.portableProfileStartup
   global.lx.storage ??= createStorageCoordinator({
     runState: createRunState({ runtimeRoot: global.storagePaths.runtimeRoot }),
+    initializeTempLifecycle: async() => {
+      await scavengeRunTempRoots(global.storagePaths.tempRoot)
+      global.lx.runTemp = await createRunTempHandle({
+        tempRoot: global.storagePaths.tempRoot,
+        runTempRoot: global.storagePaths.runTempRoot,
+      })
+    },
+    cleanupTempLifecycle: async() => {
+      const runTemp = global.lx.runTemp
+      global.lx.runTemp = null
+      await runTemp?.cleanup()
+    },
     preflightLegacyData: () => readLegacyDataSource({
       profileRoot: global.storagePaths.profileRoot,
       legacyRoot: global.lxOldDataPath,

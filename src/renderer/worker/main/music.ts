@@ -1,12 +1,17 @@
 import { getLocalMusicFileLyric, getLocalMusicFilePic } from '@renderer/utils/music'
 import path from 'node:path'
-import os from 'node:os'
 import fs from 'node:fs/promises'
 import { checkPath } from '@common/utils/nodejs'
-import { PROJECT_IDENTITY } from '@common/projectIdentity'
+
+let runTempRoot = ''
+
+export const configureRunTempRoot = (root: string) => {
+  runTempRoot = root
+}
 
 const getTempDir = async() => {
-  const tempDir = path.join(os.tmpdir(), PROJECT_IDENTITY.tempDirectoryName)
+  if (!runTempRoot) throw new Error('run_temp_root_unavailable')
+  const tempDir = path.join(runTempRoot, 'local-artwork')
   if (!await checkPath(tempDir)) {
     await fs.mkdir(tempDir, { recursive: true })
   }

@@ -2,13 +2,15 @@ import * as Comlink from 'comlink'
 
 export type MainTypes = Comlink.Remote<LX.WorkerMainTypes>
 
-export const createMainWorker = () => {
+export const createMainWorker = (runTempRoot?: string) => {
   const worker: Worker = new Worker(new URL(
     /* webpackChunkName: 'renderer.main.worker' */
     '../main',
     import.meta.url,
   ))
-  return Comlink.wrap<LX.WorkerMainTypes>(worker)
+  const remote = Comlink.wrap<LX.WorkerMainTypes>(worker)
+  if (runTempRoot) void remote.configureRunTempRoot(runTempRoot)
+  return remote
 }
 
 // export const createWorker = <T>(url: string): Comlink.Remote<T> => {

@@ -123,7 +123,7 @@
 </template>
 
 <script>
-import { joinPath, extname, copyFile, checkPath, createDir, removeFile, moveFile, basename } from '@common/utils/nodejs'
+import { joinPath } from '@common/utils/nodejs'
 import { nextTick, ref, watch } from '@common/utils/vueTools'
 import { applyTheme, buildThemeColors, getThemes, copyTheme } from '@renderer/store/utils'
 import { isUrl, encodePath } from '@common/utils/common'
@@ -142,7 +142,7 @@ import useCloseBtnColor from './useCloseBtnColor'
 import useMinBtnColor from './useMinBtnColor'
 import useHideBtnColor from './useHideBtnColor'
 import { appSetting, updateSetting } from '@renderer/store/setting'
-import { removeTheme, saveTheme, showSelectDialog } from '@renderer/utils/ipc'
+import { discardThemeImage, promoteThemeImage, removeTheme, saveTheme, showSelectDialog, stageThemeImage } from '@renderer/utils/ipc'
 import { dialog } from '@renderer/plugins/Dialog'
 import { themeInfo } from '@renderer/store'
 
@@ -167,8 +167,13 @@ export default {
     const preview = ref(false)
     const bgImg = ref('')
     let bgImgRaw = ''
-    let originBgName = ''
     let currentBgPath = ''
+    let currentBgStagingId = ''
+    const takeCurrentBgStagingId = () => {
+      const stagingId = currentBgStagingId
+      currentBgStagingId = ''
+      return stagingId
+    }
 
     let theme
 
@@ -255,13 +260,11 @@ export default {
       if (theme.config.extInfo['--background-image'] == 'none') {
         bgImg.value = ''
         bgImgRaw = ''
-        originBgName = ''
       } else {
         bgImgRaw = isUrl(theme.config.extInfo['--background-image'])
           ? theme.config.extInfo['--background-image']
           : joinPath(themeInfo.dataPath, theme.config.extInfo['--background-image'])
         bgImg.value = encodePath(bgImgRaw)
-        originBgName = theme.config.extInfo['--background-image']
       }
       appBgColorOrigin = theme.config.extInfo['--color-app-background']
       appBgColor = getColor(appBgColorOrigin, theme)
@@ -361,7 +364,7 @@ export default {
           } else {
             destroyColors()
             // 移除临时保存的背景
-            if (currentBgPath) removeFile(currentBgPath).catch(_ => _)
+            if (currentBgStagingId) void discardThemeImage(currentBgStagingId).catch(_ => _)
           }
         })
       })
@@ -383,20 +386,20 @@ export default {
       })
       if (result.canceled) return
       const path = result.filePaths[0]
-      const fileName = `${theme.id}_${Date.now()}${extname(path)}`
-      const tempDir = joinPath(themeInfo.dataPath, 'temp')
-      const bgPath = joinPath(tempDir, fileName)
-      if (!await checkPath(tempDir)) await createDir(tempDir)
-      await copyFile(path, bgPath)
-      currentBgPath = bgImgRaw = bgPath
+      const previousStagingId = takeCurrentBgStagingId()
+      if (previousStagingId) await discardThemeImage(previousStagingId)
+      const staged = await stageThemeImage(path)
+      currentBgStagingId = staged.stagingId
+      currentBgPath = bgImgRaw = staged.previewPath
       bgImg.value = encodePath(bgImgRaw)
-      theme.config.extInfo['--background-image'] = 'temp/' + fileName
+      theme.config.extInfo['--background-image'] = 'none'
 
       createPreview()
     }
     const removeBgImg = async() => {
-      if (currentBgPath) {
-        void removeFile(currentBgPath)
+      if (currentBgStagingId) {
+        void discardThemeImage(currentBgStagingId)
+        takeCurrentBgStagingId()
         currentBgPath = ''
       }
       bgImg.value = ''
@@ -424,6 +427,7 @@ export default {
       }
     }
     const handleCancel = () => {
+      if (currentBgStagingId) void discardThemeImage(currentBgStagingId)
       handlePreview(false)
       emit('update:modelValue', false)
     }
@@ -432,15 +436,11 @@ export default {
       if (!themeName.value) return
       theme.name = themeName.value.substring(0, 20)
       // 保存新背景
-      if (currentBgPath && !isUrl(currentBgPath)) {
-        const name = basename(currentBgPath)
-        await moveFile(currentBgPath, joinPath(themeInfo.dataPath, name))
-        theme.config.extInfo['--background-image'] = name
+      if (currentBgStagingId) {
+        const promoted = await promoteThemeImage({ stagingId: currentBgStagingId, previewPath: currentBgPath })
+        takeCurrentBgStagingId()
+        theme.config.extInfo['--background-image'] = promoted.fileName
       }
-      // 移除旧背景
-      if (originBgName &&
-        theme.config.extInfo['--background-image'] != originBgName &&
-        !isUrl(theme.config.extInfo['--background-image'])) void removeFile(joinPath(themeInfo.dataPath, originBgName))
       if (props.themeId) {
         const index = themeInfo.userThemes.findIndex(t => t.id == theme.id)
         if (index > -1) themeInfo.userThemes.splice(index, 1, theme)
@@ -476,7 +476,6 @@ export default {
         }
       }
       if (isRequireUpdateSetting) updateSetting(newSetting)
-      if (originBgName) void removeFile(joinPath(themeInfo.dataPath, originBgName))
       await removeTheme(props.themeId)
       const index = themeInfo.userThemes.findIndex(t => t.id == theme.id)
       console.log(index)
@@ -491,16 +490,10 @@ export default {
       theme.name = themeName.value.substring(0, 20)
       theme.id = 'user_theme_' + Date.now()
       // 保存新背景
-      if (!isUrl(currentBgPath)) {
-        if (currentBgPath) {
-          const name = basename(currentBgPath)
-          await moveFile(currentBgPath, joinPath(themeInfo.dataPath, name))
-          theme.config.extInfo['--background-image'] = name
-        } else if (bgImgRaw) {
-          const fileName = `${theme.id}_${Date.now()}${extname(bgImgRaw)}`
-          await copyFile(bgImgRaw, joinPath(themeInfo.dataPath, fileName))
-          theme.config.extInfo['--background-image'] = fileName
-        }
+      if (currentBgStagingId) {
+        const promoted = await promoteThemeImage({ stagingId: currentBgStagingId, previewPath: currentBgPath })
+        takeCurrentBgStagingId()
+        theme.config.extInfo['--background-image'] = promoted.fileName
       }
       themeInfo.userThemes.push(theme)
       handlePreview(false)

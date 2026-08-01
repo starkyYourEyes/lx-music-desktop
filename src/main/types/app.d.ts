@@ -9,6 +9,7 @@ import { type CredentialMigrationResult } from '@main/migration/credentials/cred
 import { type AccountRepository } from '@main/storage/accounts/accountRepository'
 import { type StoragePaths } from '@main/utils/storagePaths'
 import { type PortableProfileStartupToken } from '@main/migration/portableProfile'
+import { type RunTempHandle } from '@main/utils/tempLifecycle'
 
 interface Lx {
   inited: boolean
@@ -33,6 +34,7 @@ interface Lx {
     dbService: DBSeriveTypes
   }
   storage: StorageCoordinator | null
+  runTemp: RunTempHandle | null
   credentialVault?: CredentialVault
   credentialMigration?: CredentialMigrationResult
   accountRepository?: AccountRepository

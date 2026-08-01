@@ -189,6 +189,10 @@ const modules = {
     get_themes: 'get_themes',
     save_theme: 'save_theme',
     remove_theme: 'remove_theme',
+    stage_theme_image: 'stage_theme_image',
+    promote_theme_image: 'promote_theme_image',
+    discard_theme_image: 'discard_theme_image',
+    get_run_temp_root: 'get_run_temp_root',
 
     download_list_get: 'download_list_get',
     download_list_add: 'download_list_add',

@@ -25,8 +25,13 @@ import {
 import { quitApp } from '@main/app'
 import { getAllThemes, removeTheme, saveTheme, setPowerSaveBlocker } from '@main/utils'
 import { openDirInExplorer } from '@common/utils/electron'
+import { createThemeAssetManager } from '@main/services/themeAssetManager'
 
 export default () => {
+  const themeAssets = createThemeAssetManager({
+    profileRoot: global.storagePaths.profileRoot,
+    runTempRoot: global.storagePaths.runTempRoot,
+  })
   // 设置应用名称
   // mainOn(WIN_MAIN_RENDERER_EVENT_NAME.set_app_name, ({ params: name }) => {
   //   if (name == null) {
@@ -123,8 +128,19 @@ export default () => {
   })
 
   mainHandle<{ themes: LX.Theme[], userThemes: LX.Theme[] }>(WIN_MAIN_RENDERER_EVENT_NAME.get_themes, async() => {
+    await themeAssets.prepareThemeAssetStorage()
     return getAllThemes()
   })
+  mainHandle<{ sourcePath: string }, LX.StagedThemeImage>(WIN_MAIN_RENDERER_EVENT_NAME.stage_theme_image, async({ params }) => {
+    return themeAssets.stageThemeImage(params)
+  })
+  mainHandle<LX.StagedThemeImage, LX.PromotedThemeImage>(WIN_MAIN_RENDERER_EVENT_NAME.promote_theme_image, async({ params }) => {
+    return themeAssets.promoteThemeImage(params)
+  })
+  mainHandle<{ stagingId: string }>(WIN_MAIN_RENDERER_EVENT_NAME.discard_theme_image, async({ params }) => {
+    await themeAssets.discardThemeImage(params)
+  })
+  mainHandle<string>(WIN_MAIN_RENDERER_EVENT_NAME.get_run_temp_root, async() => global.storagePaths.runTempRoot)
   mainHandle<LX.Theme>(WIN_MAIN_RENDERER_EVENT_NAME.save_theme, async({ params: theme }) => {
     saveTheme(theme)
   })

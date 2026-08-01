@@ -49,6 +49,7 @@ export const initGlobalData = () => {
     appSetting: defaultSetting,
     worker: createWorkers(),
     storage: null,
+    runTemp: null,
     hotKey: {
       enable: true,
       config: {

@@ -671,6 +671,7 @@ const createPrimaryCapabilityHarness = (options) => {
   const controller = module.createPrimarySourceCapabilityController({
     getPrimaryId: () => primary,
     isInstalledCustom: apiId => customIds.has(apiId),
+    isCustomRegistryLoaded: () => options.customRegistryLoaded ?? true,
     getBuiltinCapabilities: apiId => options.builtinCapabilities?.[apiId],
     getRuntimeStatus: apiId => runtimeStates[apiId],
     getKnownCapabilities: apiId => knownCapabilities[apiId],

@@ -167,6 +167,24 @@ test('a failed lazy primary initialization is retryable and does not change sour
   assert.deepEqual(setting, { primary: 'user_api_a', fallbacks: ['user_api_b'] })
 })
 
+test('cold primary initialization reaches the broker before renderer registry hydration', async() => {
+  const sources = {
+    wy: { name: 'WY', type: 'music', actions: ['musicUrl'], qualitys: ['128k'] },
+  }
+  const harness = createPrimaryCapabilityHarness({
+    primary: 'user_api_a',
+    customApis: [],
+    customRegistryLoaded: false,
+    ensure: async apiId => ({
+      ok: true,
+      value: { apiId, status: true, apiInfo: { id: apiId, sources } },
+    }),
+  })
+
+  assert.deepEqual(await harness.controller.ensurePrimaryCapabilities(), { sources })
+  assert.deepEqual(harness.ensureCalls, ['user_api_a'])
+})
+
 test('invalidating a pending primary ensure rejects the old generation and permits a fresh one', async() => {
   const oldEnsure = deferred()
   const freshEnsure = deferred()
@@ -229,6 +247,30 @@ test('aborting sends a matching cancel and returns session cancellation', async(
   controller.abort()
   await assert.rejects(promise, err => err.scope == 'session' && err.kind == 'cancelled')
   assert.deepEqual(cancels, [{ apiId: 'a', requestId: 'r', reason: 'cancelled' }])
+})
+
+test('a pre-aborted custom request never reaches the broker', async() => {
+  const requests = []
+  const cancels = []
+  const controller = new AbortController()
+  controller.abort()
+  const adapter = createAdapterHarness({
+    request: params => {
+      requests.push(params)
+      return new Promise(() => {})
+    },
+    cancel: params => cancels.push(params),
+  })
+
+  await assert.rejects(
+    adapter.getMusicUrl({
+      apiId: 'a', requestId: 'pre-aborted', musicInfo: onlineMusic,
+      quality: '128k', signal: controller.signal,
+    }),
+    error => error.scope == 'session' && error.kind == 'cancelled',
+  )
+  assert.deepEqual(requests, [])
+  assert.deepEqual(cancels, [])
 })
 
 test('attempt timeout abort cancels the matching broker request and remains source timeout', async() => {

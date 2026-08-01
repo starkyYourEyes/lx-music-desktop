@@ -103,6 +103,7 @@ export const createPlaybackSourceAdapter = (
     },
     quality: LX.Quality | null,
   ) => {
+    if (request.signal.aborted) throw failureFromAbort(request.apiId, request.signal)
     let abort: (() => void) | undefined
     const aborted = new Promise<never>((_resolve, reject) => {
       abort = () => {

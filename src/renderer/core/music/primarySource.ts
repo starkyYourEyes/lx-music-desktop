@@ -8,6 +8,7 @@ import { deriveQualityListFromCapabilities } from './playback/sourceSelectors'
 export interface PrimarySourceCapabilityControllerDependencies {
   getPrimaryId(): string
   isInstalledCustom(apiId: string): boolean
+  isCustomRegistryLoaded(): boolean
   getBuiltinCapabilities(apiId: string): LX.Playback.SourceCapabilities | undefined
   getRuntimeStatus(apiId: string): LX.UserApi.UserApiStatus | undefined
   getKnownCapabilities(apiId: string): LX.Playback.SourceCapabilities | undefined
@@ -54,7 +55,7 @@ export const createPrimarySourceCapabilityController = (
   const ensureFor = (apiId: string): Promise<LX.Playback.SourceCapabilities> => {
     const builtin = deps.getBuiltinCapabilities(apiId)
     if (builtin) return Promise.resolve(cloneCapabilities(builtin))
-    if (!deps.isInstalledCustom(apiId)) {
+    if (deps.isCustomRegistryLoaded() && !deps.isInstalledCustom(apiId)) {
       return Promise.reject(createPlaybackSourceError({
         message: 'Primary playback source is not installed',
         scope: 'source', kind: 'initialization', apiId,
@@ -100,7 +101,7 @@ export const createPrimarySourceCapabilityController = (
       deps.cancelUserApi({ apiId, requestId, reason: 'cancelled' })
     }
     const promise = (async(): Promise<T> => {
-      if (!deps.isInstalledCustom(apiId)) {
+      if (deps.isCustomRegistryLoaded() && !deps.isInstalledCustom(apiId)) {
         throw createPlaybackSourceError({
           message: 'Primary compatibility action requires a custom source',
           scope: 'candidate', kind: 'unsupported', apiId,
@@ -174,6 +175,7 @@ let requestSequence = 0
 export const primarySourceCapabilityController = createPrimarySourceCapabilityController({
   getPrimaryId: () => appSetting['common.apiSource'],
   isInstalledCustom: apiId => userApi.list.some(api => api.id == apiId),
+  isCustomRegistryLoaded: () => userApi.listLoaded,
   getBuiltinCapabilities: builtinCapabilities,
   getRuntimeStatus: apiId => userApi.runtimeStates[apiId],
   getKnownCapabilities: apiId => userApi.capabilities[apiId],

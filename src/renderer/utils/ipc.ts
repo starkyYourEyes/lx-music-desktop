@@ -1,3 +1,4 @@
+// eslint-disable-next-line @typescript-eslint/triple-slash-reference -- Ambient declarations cannot be imported as a module.
 /// <reference path="../../common/types/playback_source.d.ts" />
 
 import { rendererSend, rendererInvoke, rendererOn, rendererOff } from '@common/rendererIpc'

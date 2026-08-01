@@ -1,6 +1,6 @@
 type PlaybackSettingSnapshot = Pick<
-  LX.AppSetting,
-  'common.apiSource' | 'common.apiFallbackSources'
+LX.AppSetting,
+'common.apiSource' | 'common.apiFallbackSources'
 >
 
 export const canStartPlaybackWithRegistry = (

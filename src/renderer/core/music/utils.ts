@@ -181,7 +181,7 @@ export const getOnlineOtherSourceMusicUrlByLocal = async(musicInfo: LX.Music.Mus
   try {
     cachedUrl = await getStoreMusicUrl(musicInfo, quality)
   } catch (error) {
-    reserved.provide(() => Promise.reject(error))
+    reserved.provide(async() => { throw error })
     return reserved.result
   }
   if (cachedUrl && !isRefresh) {
@@ -209,7 +209,7 @@ export const getOnlineOtherSourceLyricByLocal = async(musicInfo: LX.Music.MusicI
   try {
     lyricInfo = await getCachedLyricInfo(musicInfo)
   } catch (error) {
-    reserved.provide(() => Promise.reject(error))
+    reserved.provide(async() => { throw error })
     return reserved.result
   }
   if (lyricInfo && !isRefresh) {

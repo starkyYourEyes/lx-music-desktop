@@ -64,7 +64,7 @@ export default () => {
       appSetting['common.apiFallbackSources'].join('\u0000'),
       userApi.list.map(({ id }) => id).join('\u0000'),
     ] as const,
-    () => reconcileInstalledPlaybackSources(userApi.list),
+    () => { reconcileInstalledPlaybackSources(userApi.list) },
     { immediate: true },
   )
 
@@ -81,8 +81,8 @@ export default () => {
       for (const [apiId, signature] of before) {
         if (after.get(apiId) == signature) continue
         primarySourceCapabilityController.invalidate(apiId)
-        delete userApi.runtimeStates[apiId]
-        delete userApi.capabilities[apiId]
+        Reflect.deleteProperty(userApi.runtimeStates, apiId)
+        Reflect.deleteProperty(userApi.capabilities, apiId)
       }
     },
   )

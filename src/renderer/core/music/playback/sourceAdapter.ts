@@ -10,34 +10,34 @@ import { requestMsg } from '@renderer/utils/message'
 import { getApiById, supportQuality } from '@renderer/utils/musicSdk/api-source'
 
 export interface PlaybackSourceAdapter {
-  retainSources(apiIds: readonly string[], sessionId: string): void
-  releaseSources(apiIds: readonly string[], sessionId: string): void
-  getCapabilities(apiId: string, signal: AbortSignal): Promise<LX.Playback.SourceCapabilities>
-  getMusicUrl(request: {
+  retainSources: (apiIds: readonly string[], sessionId: string) => void
+  releaseSources: (apiIds: readonly string[], sessionId: string) => void
+  getCapabilities: (apiId: string, signal: AbortSignal) => Promise<LX.Playback.SourceCapabilities>
+  getMusicUrl: (request: {
     apiId: string
     requestId: string
     musicInfo: LX.Music.MusicInfoOnline
     quality: LX.Quality
     signal: AbortSignal
-  }): Promise<{ url: string, quality: LX.Quality }>
-  getLocalMusicUrl(request: {
+  }) => Promise<{ url: string, quality: LX.Quality }>
+  getLocalMusicUrl: (request: {
     apiId: string
     requestId: string
     musicInfo: LX.Music.MusicInfoLocal
     signal: AbortSignal
-  }): Promise<{ url: string, quality: LX.Quality }>
+  }) => Promise<{ url: string, quality: LX.Quality }>
 }
 
 export interface PlaybackSourceAdapterDependencies {
-  isCustomApi(apiId: string): boolean
-  ensureUserApi(apiId: string): Promise<LX.UserApi.UserApiEnsureResult>
-  requestUserApi(params: LX.UserApi.UserApiRequestParams): Promise<LX.UserApi.UserApiRequestResult>
-  cancelUserApi(params: LX.UserApi.UserApiRequestCancelParams): void
-  acquireRuntime(params: LX.UserApi.UserApiRuntimeLeaseParams): void
-  releaseRuntime(params: LX.UserApi.UserApiRuntimeLeaseParams): void
-  getBuiltinCapabilities(apiId: string): LX.Playback.SourceCapabilities | undefined
-  getBuiltinApi(apiId: string, platform: LX.OnlineSource): {
-    getMusicUrl(info: LX.Music.MusicInfo, quality: LX.Quality | null): unknown
+  isCustomApi: (apiId: string) => boolean
+  ensureUserApi: (apiId: string) => Promise<LX.UserApi.UserApiEnsureResult>
+  requestUserApi: (params: LX.UserApi.UserApiRequestParams) => Promise<LX.UserApi.UserApiRequestResult>
+  cancelUserApi: (params: LX.UserApi.UserApiRequestCancelParams) => void
+  acquireRuntime: (params: LX.UserApi.UserApiRuntimeLeaseParams) => void
+  releaseRuntime: (params: LX.UserApi.UserApiRuntimeLeaseParams) => void
+  getBuiltinCapabilities: (apiId: string) => LX.Playback.SourceCapabilities | undefined
+  getBuiltinApi: (apiId: string, platform: LX.OnlineSource) => {
+    getMusicUrl: (info: LX.Music.MusicInfo, quality: LX.Quality | null) => unknown
   }
   tooManyRequestsMessage?: string
   serverBusyMessages: ReadonlySet<string>
@@ -48,12 +48,16 @@ const failureFromAbort = (apiId: string, signal: AbortSignal): LX.Playback.Sourc
   if (reason?.scope == 'source' && reason.kind == 'timeout') {
     return createPlaybackSourceError({
       message: reason.message ?? 'Playback source request timed out',
-      scope: 'source', kind: 'timeout', apiId,
+      scope: 'source',
+      kind: 'timeout',
+      apiId,
     })
   }
   return createPlaybackSourceError({
     message: 'Playback source request cancelled',
-    scope: 'session', kind: 'cancelled', apiId,
+    scope: 'session',
+    kind: 'cancelled',
+    apiId,
   })
 }
 
@@ -62,7 +66,10 @@ const validateUrl = (apiId: string, platform: LX.OnlineSource | undefined, resul
   if (typeof value?.url != 'string' || !/^https?:\/\//.test(value.url)) {
     throw createPlaybackSourceError({
       message: 'Playback source returned an empty or invalid URL',
-      scope: 'candidate', kind: 'emptyUrl', apiId, platform,
+      scope: 'candidate',
+      kind: 'emptyUrl',
+      apiId,
+      platform,
     })
   }
   return value.url
@@ -90,7 +97,11 @@ export const createPlaybackSourceAdapter = (
     return createPlaybackSourceError({
       message: candidate?.message ?? 'Playback source request failed',
       scope: kind == 'request' ? 'candidate' : 'source',
-      kind, apiId, platform, statusCode, cause: error,
+      kind,
+      apiId,
+      platform,
+      statusCode,
+      cause: error,
     })
   }
 
@@ -176,14 +187,18 @@ export const createPlaybackSourceAdapter = (
       if (!deps.isCustomApi(apiId)) {
         throw createPlaybackSourceError({
           message: 'Playback source is not installed',
-          scope: 'source', kind: 'initialization', apiId,
+          scope: 'source',
+          kind: 'initialization',
+          apiId,
         })
       }
       const result = await deps.ensureUserApi(apiId)
       if (!result.ok) {
         throw createPlaybackSourceError({
           message: result.error.message,
-          scope: 'source', kind: 'initialization', apiId,
+          scope: 'source',
+          kind: 'initialization',
+          apiId,
         })
       }
       const status = result.value
@@ -191,13 +206,17 @@ export const createPlaybackSourceAdapter = (
       if (!status.status || status.apiId != apiId) {
         throw createPlaybackSourceError({
           message: status.message ?? 'Playback source initialization failed',
-          scope: 'source', kind: 'initialization', apiId,
+          scope: 'source',
+          kind: 'initialization',
+          apiId,
         })
       }
       if (!sources) {
         throw createPlaybackSourceError({
           message: status.message ?? 'Playback source initialization failed',
-          scope: 'source', kind: 'initialization', apiId,
+          scope: 'source',
+          kind: 'initialization',
+          apiId,
         })
       }
       return { sources }

@@ -6,17 +6,17 @@ import { supportQuality } from '@renderer/utils/musicSdk/api-source'
 import { deriveQualityListFromCapabilities } from './playback/sourceSelectors'
 
 export interface PrimarySourceCapabilityControllerDependencies {
-  getPrimaryId(): string
-  isInstalledCustom(apiId: string): boolean
-  isCustomRegistryLoaded(): boolean
-  getBuiltinCapabilities(apiId: string): LX.Playback.SourceCapabilities | undefined
-  getRuntimeStatus(apiId: string): LX.UserApi.UserApiStatus | undefined
-  getKnownCapabilities(apiId: string): LX.Playback.SourceCapabilities | undefined
-  ensureUserApi(apiId: string): Promise<LX.UserApi.UserApiEnsureResult>
-  requestUserApi(params: LX.UserApi.UserApiRequestParams): Promise<LX.UserApi.UserApiRequestResult>
-  cancelUserApi(params: LX.UserApi.UserApiRequestCancelParams): void
-  publishCapabilities(apiId: string, value: LX.Playback.SourceCapabilities): void
-  createRequestId(): string
+  getPrimaryId: () => string
+  isInstalledCustom: (apiId: string) => boolean
+  isCustomRegistryLoaded: () => boolean
+  getBuiltinCapabilities: (apiId: string) => LX.Playback.SourceCapabilities | undefined
+  getRuntimeStatus: (apiId: string) => LX.UserApi.UserApiStatus | undefined
+  getKnownCapabilities: (apiId: string) => LX.Playback.SourceCapabilities | undefined
+  ensureUserApi: (apiId: string) => Promise<LX.UserApi.UserApiEnsureResult>
+  requestUserApi: (params: LX.UserApi.UserApiRequestParams) => Promise<LX.UserApi.UserApiRequestResult>
+  cancelUserApi: (params: LX.UserApi.UserApiRequestCancelParams) => void
+  publishCapabilities: (apiId: string, value: LX.Playback.SourceCapabilities) => void
+  createRequestId: () => string
 }
 
 export interface PrimarySourceActionInput {
@@ -27,12 +27,12 @@ export interface PrimarySourceActionInput {
 }
 
 export interface PrimarySourceCapabilityController {
-  ensurePrimaryCapabilities(): Promise<LX.Playback.SourceCapabilities>
-  requestPrimaryAction<T>(input: PrimarySourceActionInput): {
-    canceleFn(): void
+  ensurePrimaryCapabilities: () => Promise<LX.Playback.SourceCapabilities>
+  requestPrimaryAction: <T>(input: PrimarySourceActionInput) => {
+    canceleFn: () => void
     promise: Promise<T>
   }
-  invalidate(apiId: string): void
+  invalidate: (apiId: string) => void
 }
 
 export const createPrimarySourceCapabilityController = (
@@ -52,13 +52,17 @@ export const createPrimarySourceCapabilityController = (
     }
     return { sources }
   }
+  // Keep the exact per-ID promise so concurrent callers share one observable generation.
+  // eslint-disable-next-line @typescript-eslint/promise-function-async
   const ensureFor = (apiId: string): Promise<LX.Playback.SourceCapabilities> => {
     const builtin = deps.getBuiltinCapabilities(apiId)
     if (builtin) return Promise.resolve(cloneCapabilities(builtin))
     if (deps.isCustomRegistryLoaded() && !deps.isInstalledCustom(apiId)) {
       return Promise.reject(createPlaybackSourceError({
         message: 'Primary playback source is not installed',
-        scope: 'source', kind: 'initialization', apiId,
+        scope: 'source',
+        kind: 'initialization',
+        apiId,
       }))
     }
     const known = deps.getKnownCapabilities(apiId)
@@ -79,7 +83,9 @@ export const createPrimarySourceCapabilityController = (
       if (!sources) {
         throw createPlaybackSourceError({
           message: status.message ?? 'Playback source initialization failed',
-          scope: 'source', kind: 'initialization', apiId,
+          scope: 'source',
+          kind: 'initialization',
+          apiId,
         })
       }
       const capabilities = { sources }
@@ -104,14 +110,18 @@ export const createPrimarySourceCapabilityController = (
       if (deps.isCustomRegistryLoaded() && !deps.isInstalledCustom(apiId)) {
         throw createPlaybackSourceError({
           message: 'Primary compatibility action requires a custom source',
-          scope: 'candidate', kind: 'unsupported', apiId,
+          scope: 'candidate',
+          kind: 'unsupported',
+          apiId,
         })
       }
       const capabilities = await ensureFor(apiId)
       if (isCancelled) {
         throw createPlaybackSourceError({
           message: 'Playback source request cancelled',
-          scope: 'session', kind: 'cancelled', apiId,
+          scope: 'session',
+          kind: 'cancelled',
+          apiId,
         })
       }
       const sourceInfo = capabilities.sources[input.source]
@@ -120,7 +130,9 @@ export const createPrimarySourceCapabilityController = (
           (input.quality == null || !sourceInfo.qualitys.includes(input.quality)))) {
         throw createPlaybackSourceError({
           message: 'Playback source action is not supported',
-          scope: 'candidate', kind: 'unsupported', apiId,
+          scope: 'candidate',
+          kind: 'unsupported',
+          apiId,
         })
       }
       const result = await deps.requestUserApi({
@@ -135,7 +147,9 @@ export const createPrimarySourceCapabilityController = (
       if (isCancelled) {
         throw createPlaybackSourceError({
           message: 'Playback source request cancelled',
-          scope: 'session', kind: 'cancelled', apiId,
+          scope: 'session',
+          kind: 'cancelled',
+          apiId,
         })
       }
       if (!result.ok) throw toPlaybackSourceError(result.error)
@@ -144,7 +158,9 @@ export const createPrimarySourceCapabilityController = (
         !Object.prototype.hasOwnProperty.call(response, 'data')) {
         throw createPlaybackSourceError({
           message: 'Playback source returned an invalid response',
-          scope: 'candidate', kind: 'request', apiId,
+          scope: 'candidate',
+          kind: 'request',
+          apiId,
         })
       }
       return response.data as T
@@ -152,6 +168,7 @@ export const createPrimarySourceCapabilityController = (
     return { canceleFn, promise }
   }
   return {
+    // eslint-disable-next-line @typescript-eslint/promise-function-async -- Forward the per-ID promise without wrapping it.
     ensurePrimaryCapabilities: () => ensureFor(deps.getPrimaryId()),
     requestPrimaryAction,
     invalidate(apiId) {
@@ -191,5 +208,6 @@ export const primarySourceCapabilityController = createPrimarySourceCapabilityCo
   createRequestId: () => `primary__${Date.now()}_${++requestSequence}`,
 })
 
+// eslint-disable-next-line @typescript-eslint/promise-function-async -- Preserve the controller promise identity for callers.
 export const ensurePrimarySourceCapabilities = () => primarySourceCapabilityController.ensurePrimaryCapabilities()
 export const requestPrimarySourceAction = <T>(input: PrimarySourceActionInput) => primarySourceCapabilityController.requestPrimaryAction<T>(input)

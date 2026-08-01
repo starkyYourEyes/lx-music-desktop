@@ -24,7 +24,13 @@ import { setProxyByHost } from '@common/utils/request'
 import { getWebContentsNavigationDecision } from '@main/utils/webContentsNavigationGuard'
 import { getPortableUserDataPaths, migrateLegacyUserData } from './migration/legacyUserData'
 import { PROJECT_IDENTITY } from '@common/projectIdentity'
-import type { StorageStartupOutcome } from './startup/storageCoordinator'
+import type { StorageStartupOutcome, CredentialStartupCheck } from './startup/storageCoordinator'
+import {
+  createPhase3AttestationCommand,
+  type Phase3ActivityEvidence,
+  type Phase3PlaybackSmokeEvidence,
+} from './startup/phase3Attestation'
+import type { Phase3AttestationPrerequisitesV1 } from '../common/storage/phase3'
 
 export const initGlobalData = () => {
   const envParams = parseEnvParams()
@@ -423,10 +429,10 @@ export const runStorageMigrationHooks = async(
 export const runPlaybackActivityMigration = async(
   _result: { existed: boolean },
   legacyData: Exclude<LegacyDataSourceResult, { status: 'recovery' }>,
-): Promise<undefined> => {
+): Promise<Phase3ActivityEvidence> => {
   const vault = global.lx.credentialVault
   if (vault == null) throw new Error('Playback activity quarantine vault is unavailable')
-  await migrateLegacyPlaybackActivity({
+  const result = await migrateLegacyPlaybackActivity({
     source: legacyData.status == 'available' ? legacyData.snapshot : null,
     vault,
     repository: {
@@ -434,7 +440,56 @@ export const runPlaybackActivityMigration = async(
       getPlaybackActivityMigrationMarker: () => global.lx.worker.dbService.getPlaybackActivityMigrationMarker(),
     },
   })
-  return undefined
+  return result.phase3
+}
+
+export const completePhase3StartupAttestation = async(input: {
+  completedAtMs: number
+  legacySourceState: Phase3ActivityEvidence['sourceState']
+  credentialCheck: CredentialStartupCheck
+  activity: Phase3ActivityEvidence | null
+  prerequisites: Phase3AttestationPrerequisitesV1
+  smoke: Phase3PlaybackSmokeEvidence
+}): Promise<void> => {
+  const vault = global.lx.credentialVault
+  const migration = global.lx.credentialMigration
+  if (vault == null || migration == null || input.activity == null) {
+    throw Object.assign(new Error('Phase 3 migration evidence is unavailable'), { code: 'phase3_attestation_inputs_invalid' })
+  }
+  if (migration.status == 'secure-storage-unavailable' ||
+    vault.getMigrationMarker('legacy_data_v1.credentials.memory-only') != null) {
+    throw Object.assign(new Error('Phase 3 credential evidence is unavailable'), { code: 'phase3_attestation_inputs_invalid' })
+  }
+  const credentialState = vault.getMigrationMarker('legacy_data_v1.credentials') == null
+    ? 'not-applicable' as const
+    : 'complete' as const
+  if (migration.encryptedEntries > 0 && credentialState != 'complete') {
+    throw Object.assign(new Error('Phase 3 credential marker is unavailable'), { code: 'phase3_attestation_inputs_invalid' })
+  }
+  if (migration.profiles > 0 && input.prerequisites.accountProfile.state != 'complete') {
+    throw Object.assign(new Error('Phase 3 account profile marker is unavailable'), { code: 'phase3_attestation_inputs_invalid' })
+  }
+  if (input.activity.sourceState != input.legacySourceState) {
+    throw Object.assign(new Error('Phase 3 legacy source state is inconsistent'), { code: 'phase3_attestation_inputs_invalid' })
+  }
+  if (input.legacySourceState == 'complete' &&
+    (input.prerequisites.phase2.state != 'complete' || input.prerequisites.playbackActivity.state != 'complete')) {
+    throw Object.assign(new Error('Phase 3 legacy marker evidence is unavailable'), { code: 'phase3_attestation_inputs_invalid' })
+  }
+  const command = createPhase3AttestationCommand({
+    completedAtMs: input.completedAtMs,
+    credential: {
+      state: credentialState,
+      encrypted: vault.mode == 'encrypted',
+      vaultReadable: input.credentialCheck.vaultReadable,
+      profileRepositoryReadable: input.credentialCheck.profileRepositoryReadable,
+      activePlaintextSources: [...input.credentialCheck.activePlaintextSources],
+    },
+    prerequisites: input.prerequisites,
+    activity: input.activity,
+    smoke: input.smoke,
+  })
+  await global.lx.worker.dbService.completePhase3Attestation(command)
 }
 
 export const initAppSetting = async(): Promise<void> => {

@@ -553,6 +553,7 @@ export {
   playbackGetResume,
   playbackMarkStaleSessionsInterrupted,
   playbackRecordPreplayFailure,
+  playbackRunTypedSmoke,
   playbackStart,
   playbackUpdateResume,
 } from './repository'

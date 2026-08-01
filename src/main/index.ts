@@ -11,7 +11,7 @@ import {
   listenerAppEvent,
 } from './app'
 import { isLinux } from '@common/utils'
-import { initAppSetting, runPlaybackActivityMigration, runStorageMigrationHooks } from '@main/app'
+import { completePhase3StartupAttestation, initAppSetting, runPlaybackActivityMigration, runStorageMigrationHooks } from '@main/app'
 import registerModules from '@main/modules'
 import { flushStores } from '@main/utils/store'
 import { createRunState } from '@main/startup/runState'
@@ -42,6 +42,10 @@ const getStorageCoordinator = () => {
       vault: global.lx.credentialVault,
       profileRepository: global.lx.accountRepository,
     }),
+    interruptStalePlaybackSessions: input => global.lx.worker.dbService.playbackMarkStaleSessionsInterrupted(input),
+    runPlaybackTypedSmoke: () => global.lx.worker.dbService.playbackRunTypedSmoke(),
+    getPhase3AttestationPrerequisites: () => global.lx.worker.dbService.getPhase3AttestationPrerequisites(),
+    completePhase3Attestation: completePhase3StartupAttestation,
     initSettings: initAppSetting,
     registerModules,
     appInited: () => global.lx.event_app.app_inited(),

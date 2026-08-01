@@ -11,6 +11,12 @@ import type { CredentialVault } from '../storage/credentials/credentialVault'
 import { collectLegacyCredentialInventory } from '../migration/credentials/legacySources'
 import type { LegacyDataSourceResult } from '../migration/legacyData/source'
 import type { RunStateStore } from './runState'
+import type {
+  Phase3ActivityEvidence,
+  Phase3AttestationPrerequisitesV1,
+  Phase3CheckState,
+} from '../../common/storage/phase3'
+import type { Phase3PlaybackSmokeEvidence } from './phase3Attestation'
 
 export type StorageRecoveryTarget =
   | {
@@ -76,9 +82,21 @@ export interface StorageCoordinatorDependencies {
   runPlaybackActivityMigration?: (
     result: DatabaseReadyResult,
     legacyData: Phase2LegacyDataSourceResult,
-  ) => Promise<RecoveryOutcome | undefined>
+  ) => Promise<RecoveryOutcome | Phase3ActivityEvidence | undefined>
   checkCredentials: () => Promise<CredentialStartupCheck>
   verifyPhase2Storage?: (legacyData: Phase2LegacyDataSourceResult) => Promise<void>
+  now?: () => number
+  interruptStalePlaybackSessions: (input: { nowMs: number }) => Promise<number> | number
+  runPlaybackTypedSmoke: () => Promise<Phase3PlaybackSmokeEvidence> | Phase3PlaybackSmokeEvidence
+  getPhase3AttestationPrerequisites: () => Promise<Phase3AttestationPrerequisitesV1> | Phase3AttestationPrerequisitesV1
+  completePhase3Attestation: (input: {
+    completedAtMs: number
+    legacySourceState: Phase3CheckState
+    credentialCheck: CredentialStartupCheck
+    activity: Phase3ActivityEvidence | null
+    prerequisites: Phase3AttestationPrerequisitesV1
+    smoke: Phase3PlaybackSmokeEvidence
+  }) => Promise<void> | void
   initSettings: () => Promise<void>
   registerModules: () => void
   appInited: () => void
@@ -264,6 +282,34 @@ const verifyPhase2Storage = async(
   }
 }
 
+const runPhase3Gate = async(
+  dependencies: StorageCoordinatorDependencies,
+  legacySourceState: Phase3CheckState,
+  credentialCheck: CredentialStartupCheck,
+  activity: Phase3ActivityEvidence | null,
+): Promise<void> => {
+  try {
+    const nowMs = (dependencies.now ?? Date.now)()
+    if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw errorWithCode('phase3_time_invalid')
+    await dependencies.interruptStalePlaybackSessions({ nowMs })
+    const smoke = await dependencies.runPlaybackTypedSmoke()
+    const prerequisites = await dependencies.getPhase3AttestationPrerequisites()
+    await dependencies.completePhase3Attestation({
+      completedAtMs: nowMs,
+      legacySourceState,
+      credentialCheck,
+      activity,
+      prerequisites,
+      smoke,
+    })
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && typeof error.code == 'string') throw error
+    const gateError = errorWithCode('phase3_storage_unavailable')
+    Object.defineProperty(gateError, 'cause', { value: error })
+    throw gateError
+  }
+}
+
 const legacyDataRecovery = (
   result: Extract<LegacyDataSourceResult, { status: 'recovery' }>,
 ): RecoveryOutcome => ({
@@ -345,12 +391,16 @@ export const createStorageCoordinator = (
 
         const playbackMigrationOutcome = await dependencies.runPlaybackActivityMigration?.(database, legacyData)
         if (shutdownRequested) return startupCancelled()
-        if (playbackMigrationOutcome?.status == 'recovery') {
+        if (playbackMigrationOutcome != null && 'status' in playbackMigrationOutcome && playbackMigrationOutcome.status == 'recovery') {
           await dependencies.showRecovery(playbackMigrationOutcome)
           return playbackMigrationOutcome
         }
+        const activityEvidence = playbackMigrationOutcome != null && 'sourceState' in playbackMigrationOutcome
+          ? playbackMigrationOutcome
+          : null
 
-        const credentialOutcome = credentialRecovery(await dependencies.checkCredentials())
+        const credentialCheck = await dependencies.checkCredentials()
+        const credentialOutcome = credentialRecovery(credentialCheck)
         if (shutdownRequested) return startupCancelled()
         if (credentialOutcome != null) {
           await dependencies.showRecovery(credentialOutcome)
@@ -358,6 +408,9 @@ export const createStorageCoordinator = (
         }
 
         await verifyPhase2Storage(dependencies.verifyPhase2Storage, legacyData)
+        if (shutdownRequested) return startupCancelled()
+        const legacySourceState = legacyData.status == 'available' ? 'complete' : 'not-applicable'
+        await runPhase3Gate(dependencies, legacySourceState, credentialCheck, activityEvidence)
         if (shutdownRequested) return startupCancelled()
         await dependencies.initSettings()
         if (shutdownRequested) return startupCancelled()

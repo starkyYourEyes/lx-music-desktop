@@ -14,13 +14,17 @@ import type {
 } from '../../../../../common/storage/playback'
 import {
   classifyPlaybackMode,
+  parsePlaybackCheckpointAck,
   parsePlaybackCommitRequest,
   parsePlaybackPreplayFailure,
   parsePlaybackResume,
+  parsePlaybackResumeAck,
   parsePlaybackResumeUpdate,
   parsePlaybackStartCommand,
+  parsePlaybackStartResult,
 } from '../../../../../common/storage/playbackValidation'
 import { canonicalJson, type JsonValue } from '../../../../../common/storage/canonicalJson'
+import { phase3Evidence } from '../../../../../common/storage/phase3'
 import { getDB } from '../../db'
 import {
   exactRecord,
@@ -233,62 +237,67 @@ const writeStartResume = (
   updatedAtMs: input.occurredAtMs,
 })
 
+export const startInTransaction = (
+  db: Database.Database,
+  input: PlaybackStartCommandV1,
+): PlaybackStartResultV1 => {
+  const existingSession = getSessionAck(db, input.playbackGroupUuid)
+  if (existingSession != null) return { mode: 'activity', ack: sessionAck(existingSession) }
+  const existingResume = getResumeRow(db)
+  if (existingResume?.playbackGroupUuid == input.playbackGroupUuid) {
+    return { mode: 'resume-only', ack: resumeAck(existingResume) }
+  }
+
+  const mode = classifyPlaybackMode(input.consent)
+  if (mode == 'private') {
+    return { mode: 'private', playbackGroupUuid: input.playbackGroupUuid, checkpointSeq: 0 }
+  }
+  if (mode == 'resume-only') {
+    return { mode: 'resume-only', ack: resumeAck(writeStartResume(db, input, 1)) }
+  }
+
+  const clock = localClockAt(input.occurredAtMs)
+  const trackId = upsertTrack(db, input.track, input.occurredAtMs)
+  const row = insertSession(db, {
+    sessionUuid: newSessionUuid(),
+    playbackGroupUuid: input.playbackGroupUuid,
+    segmentNo: 0,
+    trackId,
+    localDay: clock.localDay,
+    utcOffsetMinutes: clock.utcOffsetMinutes,
+    contextType: input.context.type,
+    contextId: input.context.id,
+    startReason: input.startReason,
+    endReason: null,
+    startedAtMs: input.occurredAtMs,
+    endedAtMs: null,
+    startPositionMs: input.startPositionMs,
+    lastPositionMs: input.startPositionMs,
+    durationMs: input.track.durationMs,
+    playedMs: 0,
+    activeMs: 0,
+    cumulativePlayedMs: 0,
+    cumulativeActiveMs: 0,
+    checkpointSeq: 1,
+    state: 'playing',
+    recentAllowed: input.consent.recentAllowed,
+    statsAllowed: input.consent.statsAllowed,
+  })
+  insertEvent(db, row.sessionId, 1, input.occurredAtMs, input.startPositionMs, {
+    version: 1,
+    type: 'play_start',
+    reason: input.startReason,
+  })
+  if (input.consent.recentAllowed) {
+    updateRecentProjection(db, trackId, row.sessionId, input.occurredAtMs)
+  }
+  writeStartResume(db, input, 1)
+  return { mode: 'activity', ack: sessionAck(row) }
+}
+
 export const playbackStart = (value: PlaybackStartCommandV1): PlaybackStartResultV1 => {
   const input = parsePlaybackStartCommand(value)
-  return immediate(db => {
-    const existingSession = getSessionAck(db, input.playbackGroupUuid)
-    if (existingSession != null) return { mode: 'activity', ack: sessionAck(existingSession) }
-    const existingResume = getResumeRow(db)
-    if (existingResume?.playbackGroupUuid == input.playbackGroupUuid) {
-      return { mode: 'resume-only', ack: resumeAck(existingResume) }
-    }
-
-    const mode = classifyPlaybackMode(input.consent)
-    if (mode == 'private') {
-      return { mode: 'private', playbackGroupUuid: input.playbackGroupUuid, checkpointSeq: 0 }
-    }
-    if (mode == 'resume-only') {
-      return { mode: 'resume-only', ack: resumeAck(writeStartResume(db, input, 1)) }
-    }
-
-    const clock = localClockAt(input.occurredAtMs)
-    const trackId = upsertTrack(db, input.track, input.occurredAtMs)
-    const row = insertSession(db, {
-      sessionUuid: newSessionUuid(),
-      playbackGroupUuid: input.playbackGroupUuid,
-      segmentNo: 0,
-      trackId,
-      localDay: clock.localDay,
-      utcOffsetMinutes: clock.utcOffsetMinutes,
-      contextType: input.context.type,
-      contextId: input.context.id,
-      startReason: input.startReason,
-      endReason: null,
-      startedAtMs: input.occurredAtMs,
-      endedAtMs: null,
-      startPositionMs: input.startPositionMs,
-      lastPositionMs: input.startPositionMs,
-      durationMs: input.track.durationMs,
-      playedMs: 0,
-      activeMs: 0,
-      cumulativePlayedMs: 0,
-      cumulativeActiveMs: 0,
-      checkpointSeq: 1,
-      state: 'playing',
-      recentAllowed: input.consent.recentAllowed,
-      statsAllowed: input.consent.statsAllowed,
-    })
-    insertEvent(db, row.sessionId, 1, input.occurredAtMs, input.startPositionMs, {
-      version: 1,
-      type: 'play_start',
-      reason: input.startReason,
-    })
-    if (input.consent.recentAllowed) {
-      updateRecentProjection(db, trackId, row.sessionId, input.occurredAtMs)
-    }
-    writeStartResume(db, input, 1)
-    return { mode: 'activity', ack: sessionAck(row) }
-  })
+  return immediate(db => startInTransaction(db, input))
 }
 
 const updateResumeForCommit = (
@@ -467,79 +476,96 @@ export const playbackCommit = (
   return immediate(db => commitInTransaction(db, commit.input, commit.failAt))
 }
 
+export const updateResumeInTransaction = (
+  db: Database.Database,
+  input: PlaybackResumeUpdateV1,
+): PlaybackResumeAckV1 => {
+  const stored = getResumeRow(db)
+  if (stored != null) {
+    if (stored.playbackGroupUuid == input.playbackGroupUuid &&
+        input.checkpointSeq <= stored.checkpointSeq) return resumeAck(stored)
+    if (stored.playbackGroupUuid != input.playbackGroupUuid &&
+        input.updatedAtMs < stored.updatedAtMs) return resumeAck(stored)
+  }
+  return resumeAck(putResume(db, {
+    playbackGroupUuid: input.playbackGroupUuid,
+    checkpointSeq: input.checkpointSeq,
+    source: input.track.source,
+    sourceTrackId: input.track.sourceTrackId,
+    listId: input.listId,
+    indexHint: input.indexHint,
+    positionMs: input.positionMs,
+    durationMs: input.durationMs,
+    updatedAtMs: input.updatedAtMs,
+  }))
+}
+
 export const playbackUpdateResume = (value: PlaybackResumeUpdateV1): PlaybackResumeAckV1 => {
   const input = parsePlaybackResumeUpdate(value)
-  return immediate(db => {
-    const stored = getResumeRow(db)
-    if (stored != null) {
-      if (stored.playbackGroupUuid == input.playbackGroupUuid &&
-        input.checkpointSeq <= stored.checkpointSeq) return resumeAck(stored)
-      if (stored.playbackGroupUuid != input.playbackGroupUuid &&
-        input.updatedAtMs < stored.updatedAtMs) return resumeAck(stored)
-    }
-    return resumeAck(putResume(db, {
-      playbackGroupUuid: input.playbackGroupUuid,
-      checkpointSeq: input.checkpointSeq,
-      source: input.track.source,
-      sourceTrackId: input.track.sourceTrackId,
-      listId: input.listId,
-      indexHint: input.indexHint,
-      positionMs: input.positionMs,
-      durationMs: input.durationMs,
-      updatedAtMs: input.updatedAtMs,
-    }))
+  return immediate(db => updateResumeInTransaction(db, input))
+}
+
+export const recordPreplayFailureInTransaction = (
+  db: Database.Database,
+  input: PlaybackPreplayFailureV1,
+): PlaybackCheckpointAckV1 => {
+  if (input.consent.privateMode) throw new Error('playback_private_mode')
+  if (!input.consent.recentAllowed && !input.consent.statsAllowed) {
+    throw new Error('playback_activity_disabled')
+  }
+  if (input.error.recoverable) throw new Error('playback_preplay_failure_recoverable')
+  const existing = getSessionAck(db, input.playbackGroupUuid)
+  if (existing != null) return sessionAck(existing)
+  const trackId = upsertTrack(db, input.track, input.occurredAtMs)
+  const clock = localClockAt(input.occurredAtMs)
+  const row = insertSession(db, {
+    sessionUuid: newSessionUuid(),
+    playbackGroupUuid: input.playbackGroupUuid,
+    segmentNo: 0,
+    trackId,
+    localDay: clock.localDay,
+    utcOffsetMinutes: clock.utcOffsetMinutes,
+    contextType: input.context.type,
+    contextId: input.context.id,
+    startReason: input.startReason,
+    endReason: 'error',
+    startedAtMs: input.occurredAtMs,
+    endedAtMs: input.occurredAtMs,
+    startPositionMs: input.startPositionMs,
+    lastPositionMs: input.startPositionMs,
+    durationMs: input.track.durationMs,
+    playedMs: 0,
+    activeMs: 0,
+    cumulativePlayedMs: 0,
+    cumulativeActiveMs: 0,
+    checkpointSeq: 1,
+    state: 'closed',
+    recentAllowed: false,
+    statsAllowed: false,
   })
+  insertEvent(db, row.sessionId, 1, input.occurredAtMs, input.startPositionMs, input.error)
+  return sessionAck(row)
 }
 
 export const playbackRecordPreplayFailure = (
   value: PlaybackPreplayFailureV1,
 ): PlaybackCheckpointAckV1 => {
   const input = parsePlaybackPreplayFailure(value)
-  if (input.consent.privateMode) throw new Error('playback_private_mode')
-  if (!input.consent.recentAllowed && !input.consent.statsAllowed) {
-    throw new Error('playback_activity_disabled')
-  }
-  if (input.error.recoverable) throw new Error('playback_preplay_failure_recoverable')
-  return immediate(db => {
-    const existing = getSessionAck(db, input.playbackGroupUuid)
-    if (existing != null) return sessionAck(existing)
-    const trackId = upsertTrack(db, input.track, input.occurredAtMs)
-    const clock = localClockAt(input.occurredAtMs)
-    const row = insertSession(db, {
-      sessionUuid: newSessionUuid(),
-      playbackGroupUuid: input.playbackGroupUuid,
-      segmentNo: 0,
-      trackId,
-      localDay: clock.localDay,
-      utcOffsetMinutes: clock.utcOffsetMinutes,
-      contextType: input.context.type,
-      contextId: input.context.id,
-      startReason: input.startReason,
-      endReason: 'error',
-      startedAtMs: input.occurredAtMs,
-      endedAtMs: input.occurredAtMs,
-      startPositionMs: input.startPositionMs,
-      lastPositionMs: input.startPositionMs,
-      durationMs: input.track.durationMs,
-      playedMs: 0,
-      activeMs: 0,
-      cumulativePlayedMs: 0,
-      cumulativeActiveMs: 0,
-      checkpointSeq: 1,
-      state: 'closed',
-      recentAllowed: false,
-      statsAllowed: false,
-    })
-    insertEvent(db, row.sessionId, 1, input.occurredAtMs, input.startPositionMs, input.error)
-    return sessionAck(row)
-  })
+  return immediate(db => recordPreplayFailureInTransaction(db, input))
 }
 
-export const playbackGetRecent = (value: { version: 1, limit: number }): RecentTrackV1[] => {
+const recentInTransaction = (
+  db: Database.Database,
+  value: { version: 1, limit: number },
+): RecentTrackV1[] => {
   const input = exactRecord(value, ['version', 'limit'])
   if (input == null || input.version !== 1 ||
     !safeInteger(input.limit, 1, 520)) throw new Error('Invalid playback recent query')
-  return readRecentProjection(getDB(), input.limit)
+  return readRecentProjection(db, input.limit)
+}
+
+export const playbackGetRecent = (value: { version: 1, limit: number }): RecentTrackV1[] => {
+  return recentInTransaction(getDB(), value)
 }
 
 export const playbackGetListeningStats = (value?: unknown): ListeningStatsV1 => {
@@ -573,4 +599,155 @@ export const playbackMarkStaleSessionsInterrupted = (value: { nowMs: number }): 
     SET state = 'interrupted', ended_at_ms = ?, end_reason = NULL
     WHERE state IN ('playing', 'paused') AND started_at_ms <= ?
   `).run(input.nowMs, input.nowMs).changes)
+}
+
+const smokeTables = [
+  'track_snapshots',
+  'playback_sessions',
+  'playback_events',
+  'recent_tracks',
+  'listening_daily',
+  'listening_tracks',
+  'activity_totals',
+  'projection_state',
+  'playback_resume_state',
+] as const
+
+const smokeSnapshot = (db: Database.Database): string => canonicalJson(Object.fromEntries(
+  smokeTables.map(table => [table, db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]),
+) as unknown as JsonValue)
+
+const rollbackSentinel = new Error('playback_typed_smoke_rollback')
+
+export interface PlaybackTypedSmokeV1 {
+  version: 1
+  writerEvidenceSha256: string
+  readerEvidenceSha256: string
+}
+
+type PlaybackTypedSmokeFailPoint = 'parser' | 'result' | 'rollback'
+
+export const runPlaybackTypedSmokeForTest = (
+  options: { failAt?: PlaybackTypedSmokeFailPoint } = {},
+): PlaybackTypedSmokeV1 => {
+  const db = getDB()
+  const before = smokeSnapshot(db)
+  if (options.failAt == 'parser') {
+    try {
+      parsePlaybackStartCommand({ version: 1 })
+    } catch {
+      throw new Error('playback_typed_smoke_parser_failure')
+    }
+  }
+  const playbackGroupUuid = newSessionUuid()
+  const preplayGroupUuid = newSessionUuid()
+  const occurredAtMs = 1_700_000_000_000
+  const track = {
+    source: 'phase3-smoke',
+    sourceTrackId: 'phase3-smoke-track',
+    name: 'Phase 3 smoke',
+    singer: 'Phase 3 smoke',
+    durationMs: 60_000,
+    playablePayload: null,
+  }
+  try {
+    db.transaction(() => {
+      const start = parsePlaybackStartCommand({
+        version: 1,
+        playbackGroupUuid,
+        track,
+        context: { type: 'unknown', id: null },
+        resume: { listId: null, indexHint: null },
+        startReason: 'auto',
+        startPositionMs: 0,
+        occurredAtMs,
+        consent: { recentAllowed: true, statsAllowed: true, privateMode: false },
+      })
+      const startResult = parsePlaybackStartResult(startInTransaction(db, start))
+      if (startResult.mode != 'activity') throw new Error('playback_typed_smoke_result_failure')
+
+      const commit = parsePlaybackCommitRequest({
+        version: 1,
+        checkpoint: {
+          playbackGroupUuid,
+          checkpointSeq: 2,
+          cumulativePlayedMs: 1_000,
+          cumulativeActiveMs: 1_000,
+          positionMs: 1_000,
+          durationMs: 60_000,
+          occurredAtMs: occurredAtMs + 1_000,
+        },
+        fact: { version: 1, type: 'pause', reason: 'device' },
+      })
+      parsePlaybackCheckpointAck(commitInTransaction(db, commit))
+
+      const resume = parsePlaybackResumeUpdate({
+        version: 1,
+        playbackGroupUuid,
+        checkpointSeq: 3,
+        track: { source: track.source, sourceTrackId: track.sourceTrackId },
+        listId: null,
+        indexHint: null,
+        positionMs: 1_000,
+        durationMs: 60_000,
+        updatedAtMs: occurredAtMs + 2_000,
+      })
+      parsePlaybackResumeAck(updateResumeInTransaction(db, resume))
+
+      const preplay = parsePlaybackPreplayFailure({
+        version: 1,
+        playbackGroupUuid: preplayGroupUuid,
+        track: { ...track, sourceTrackId: 'phase3-smoke-failed-track' },
+        context: { type: 'unknown', id: null },
+        resume: { listId: null, indexHint: null },
+        startReason: 'auto',
+        startPositionMs: 0,
+        occurredAtMs: occurredAtMs + 3_000,
+        consent: { recentAllowed: true, statsAllowed: true, privateMode: false },
+        error: { version: 1, type: 'error', stage: 'url', code: null, recoverable: false, attempt: 0 },
+      })
+      parsePlaybackCheckpointAck(recordPreplayFailureInTransaction(db, preplay))
+
+      recentInTransaction(db, { version: 1, limit: 10 })
+      readListeningStats(db)
+      const resumeRow = getResumeRow(db)
+      if (resumeRow == null) throw new Error('playback_typed_smoke_result_failure')
+      parsePlaybackResume({
+        version: 1,
+        source: resumeRow.source,
+        sourceTrackId: resumeRow.sourceTrackId,
+        listId: resumeRow.listId,
+        indexHint: resumeRow.indexHint,
+        positionMs: resumeRow.positionMs,
+        durationMs: resumeRow.durationMs,
+        updatedAtMs: resumeRow.updatedAtMs,
+      })
+      if (options.failAt == 'result') throw new Error('playback_typed_smoke_result_failure')
+      throw rollbackSentinel
+    }).immediate()
+  } catch (error) {
+    if (error !== rollbackSentinel) throw error
+  }
+  const after = smokeSnapshot(db)
+  if (options.failAt == 'rollback' || after != before) {
+    throw new Error('playback_typed_smoke_rollback_failure')
+  }
+  return {
+    version: 1,
+    writerEvidenceSha256: phase3Evidence('playback-writer', {
+      state: 'complete',
+      writers: ['start', 'commit', 'resume-update', 'preplay-failure'],
+      rolledBack: true,
+    }),
+    readerEvidenceSha256: phase3Evidence('playback-reader', {
+      state: 'complete',
+      readers: ['recent', 'listening', 'resume'],
+      rolledBack: true,
+    }),
+  }
+}
+
+export const playbackRunTypedSmoke = (value?: unknown): PlaybackTypedSmokeV1 => {
+  if (value !== undefined) throw new Error('Invalid playback typed smoke request')
+  return runPlaybackTypedSmokeForTest()
 }

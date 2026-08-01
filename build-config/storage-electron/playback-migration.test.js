@@ -689,6 +689,13 @@ describe('legacy playback activity migration', () => {
         return { vaultReadable: true, profileRepositoryReadable: true, activePlaintextSources: [] }
       },
       verifyPhase2Storage: async() => { calls.push('storage-verification') },
+      interruptStalePlaybackSessions: async() => { calls.push('stale-interruption') },
+      runPlaybackTypedSmoke: async() => {
+        calls.push('playback-smoke')
+        return { version: 1, writerEvidenceSha256: 'd'.repeat(64), readerEvidenceSha256: 'e'.repeat(64) }
+      },
+      getPhase3AttestationPrerequisites: async() => { calls.push('phase3-prerequisites'); return { version: 1 } },
+      completePhase3Attestation: async() => { calls.push('phase3-attestation') },
       initSettings: async() => { calls.push('settings') },
       registerModules: () => { calls.push('modules') },
       appInited: () => { calls.push('app-inited') },
@@ -699,7 +706,8 @@ describe('legacy playback activity migration', () => {
     assert.deepEqual(await coordinator.start(), { status: 'ready', schemaVersion: 6 })
     assert.deepEqual(calls, [
       'phase2-migrations', 'activity-migration', 'credential-check',
-      'storage-verification', 'settings', 'modules', 'app-inited',
+      'storage-verification', 'stale-interruption', 'playback-smoke', 'phase3-prerequisites',
+      'phase3-attestation', 'settings', 'modules', 'app-inited',
     ])
     await handlers.set({ path: 'playInfo', data: { still: 'writable' } })
     assert.deepEqual(await handlers.get('playInfo'), { still: 'writable' })

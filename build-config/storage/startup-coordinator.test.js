@@ -108,6 +108,16 @@ const createDeps = (overrides = {}) => {
       calls.push('credentials:check')
       return { vaultReadable: true, profileRepositoryReadable: true, activePlaintextSources: [] }
     },
+    now: () => 1,
+    interruptStalePlaybackSessions: async() => 0,
+    runPlaybackTypedSmoke: async() => ({ version: 1, writerEvidenceSha256: 'd'.repeat(64), readerEvidenceSha256: 'e'.repeat(64) }),
+    getPhase3AttestationPrerequisites: async() => ({
+      version: 1,
+      accountProfile: { markerName: 'legacy_data_v1.account_profiles', state: 'not-applicable', evidenceSha256: 'a'.repeat(64) },
+      phase2: { markerName: 'legacy_data_v1.phase2_complete', state: 'not-applicable', evidenceSha256: 'b'.repeat(64) },
+      playbackActivity: { markerName: 'legacy_data_v1.playback_activity', state: 'not-applicable', evidenceSha256: 'c'.repeat(64) },
+    }),
+    completePhase3Attestation: async() => {},
     initSettings: async() => { calls.push('settings:init') },
     registerModules: () => { calls.push('modules:register') },
     appInited: () => { calls.push('app:inited') },

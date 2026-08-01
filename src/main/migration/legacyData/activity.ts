@@ -8,6 +8,7 @@ import {
 } from '../../../common/storage/legacyPlaybackActivity'
 import { convertLegacyListeningStats, type LegacyListeningImportV1 } from '../../../common/storage/legacyListening'
 import type { PlaybackTrackV1 } from '../../../common/storage/playback'
+import type { Phase3ActivityEvidence } from '../../../common/storage/phase3'
 import { parsePlaybackTrack, sanitizePlayableTrack } from '../../../common/storage/playbackValidation'
 import type { CredentialVault } from '../../storage/credentials/credentialVault'
 import type { LegacyQuarantinePayloadV1 } from '../../storage/credentials/types'
@@ -44,9 +45,9 @@ export interface LegacyPlaybackMigrationDeps {
 export type LegacyPlaybackMigrationResult =
   | {
     status: 'no-source'
-    quarantineKeys: []
+    phase3: Phase3ActivityEvidence
   }
-  | (LegacyPlaybackActivityImportResultV1 & { quarantineKeys: string[] })
+  | (LegacyPlaybackActivityImportResultV1 & { phase3: Phase3ActivityEvidence })
 
 interface NormalizedActivity {
   sourceSha256: string
@@ -205,14 +206,26 @@ const failIfRequested = (deps: LegacyPlaybackMigrationDeps, point: LegacyPlaybac
 const persistQuarantine = async(
   vault: LegacyPlaybackMigrationDeps['vault'],
   quarantine: LegacyQuarantinePayloadV1,
-): Promise<void> => {
-  if (quarantine.keys.length == 0) return
+): Promise<Pick<Phase3ActivityEvidence, 'quarantineRequired' | 'quarantineSourceSha256' | 'quarantineEncrypted' | 'quarantineVerified'>> => {
+  if (quarantine.keys.length == 0) {
+    return {
+      quarantineRequired: false,
+      quarantineSourceSha256: null,
+      quarantineEncrypted: false,
+      quarantineVerified: false,
+    }
+  }
   if (vault == null || vault.mode != 'encrypted') throw new Error('Persistent encrypted quarantine vault is unavailable')
   const ref = { kind: 'legacy-quarantine' as const, sourceSha256: quarantine.sourceSha256 }
   const existing = vault.read<LegacyQuarantinePayloadV1>(ref)
   if (existing.status == 'available') {
     if (!await vault.verify(ref, quarantine)) throw new Error('Persistent encrypted quarantine mismatch')
-    return
+    return {
+      quarantineRequired: true,
+      quarantineSourceSha256: quarantine.sourceSha256,
+      quarantineEncrypted: true,
+      quarantineVerified: true,
+    }
   }
   if (existing.status != 'missing') throw new Error('Persistent encrypted quarantine is unavailable')
   const written = await vault.write(ref, quarantine)
@@ -221,16 +234,34 @@ const persistQuarantine = async(
   }
   const readback = vault.read<LegacyQuarantinePayloadV1>(ref)
   if (readback.status != 'available') throw new Error('Persistent encrypted quarantine verification failed')
+  return {
+    quarantineRequired: true,
+    quarantineSourceSha256: quarantine.sourceSha256,
+    quarantineEncrypted: true,
+    quarantineVerified: true,
+  }
 }
 
 export const migrateLegacyPlaybackActivity = async(
   deps: LegacyPlaybackMigrationDeps,
 ): Promise<LegacyPlaybackMigrationResult> => {
-  if (deps.source == null) return { status: 'no-source', quarantineKeys: [] }
+  if (deps.source == null) {
+    return {
+      status: 'no-source',
+      phase3: {
+        sourceState: 'not-applicable',
+        legacySourceSha256: null,
+        quarantineRequired: false,
+        quarantineSourceSha256: null,
+        quarantineEncrypted: false,
+        quarantineVerified: false,
+      },
+    }
+  }
   const normalized = normalizeActivity(deps.source)
   assertMarker(await deps.repository.getPlaybackActivityMigrationMarker(), normalized.sourceSha256)
   const quarantine = quarantineFor(deps.source)
-  await persistQuarantine(deps.vault, quarantine)
+  const quarantineEvidence = await persistQuarantine(deps.vault, quarantine)
   failIfRequested(deps, 'after-quarantine')
   failIfRequested(deps, 'before-transaction')
   const result = await deps.repository.importLegacyPlaybackActivity({
@@ -239,5 +270,12 @@ export const migrateLegacyPlaybackActivity = async(
     failAt: deps.failAt == 'inside-transaction' || deps.failAt == 'before-marker' ? deps.failAt : undefined,
   })
   failIfRequested(deps, 'after-commit')
-  return { ...result, quarantineKeys: [...quarantine.keys] }
+  return {
+    ...result,
+    phase3: {
+      sourceState: 'complete',
+      legacySourceSha256: deps.source.fileSha256,
+      ...quarantineEvidence,
+    },
+  }
 }

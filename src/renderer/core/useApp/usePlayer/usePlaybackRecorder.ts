@@ -10,6 +10,8 @@ import type {
 import { createPlaybackRecorder } from '@renderer/core/playbackRecorder'
 import type { PlaybackRecorder, PlaybackRecorderAction } from '@renderer/core/playbackRecorder'
 import { nextLocalDayBoundary } from '../../playbackRecorder/boundary'
+import { createPlaybackComparison } from '../../playbackRecorder/comparison'
+import type { PlaybackComparison } from '../../playbackRecorder/comparison'
 import {
   getCurrentTime,
   getDuration,
@@ -52,6 +54,7 @@ export interface PlaybackRecorderControllerOptions {
   refreshListening?: () => Promise<void>
   timeZone?: string
   timers?: PlaybackTimers
+  comparison?: PlaybackComparison
 }
 
 export interface PlaybackRecorderController {
@@ -98,6 +101,7 @@ export const createPlaybackRecorderController = (
   const refreshListening = options.refreshListening ?? (async() => {})
   const timeZone = options.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone
   const timers = options.timers ?? defaultTimers
+  const comparison = options.comparison ?? createPlaybackComparison()
 
   let draft: (PlaybackSelection & { playbackGroupUuid: string }) | null = null
   let groupStarted = false
@@ -111,6 +115,43 @@ export const createPlaybackRecorderController = (
     positionMs: positionMs(),
     occurredAtMs: finiteNonNegative(now()),
   })
+
+  const localDayAt = (occurredAtMs: number): string => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date(occurredAtMs))
+    const value = Object.fromEntries(parts.map(part => [part.type, part.value]))
+    return `${value.year}-${value.month}-${value.day}`
+  }
+
+  const dispatch = (action: PlaybackRecorderAction, checkpoint = false): ReturnType<PlaybackRecorder['getState']> => {
+    const before = recorder.getState()
+    const after = recorder.dispatch(action)
+    const session = after.session ?? before.session
+    const consent = session?.consent
+    if (session != null && consent?.statsAllowed && !consent.privateMode &&
+      before.playbackGroupUuid == after.playbackGroupUuid &&
+      after.cumulativePlayedMs >= before.cumulativePlayedMs) {
+      const playedMs = after.cumulativePlayedMs - before.cumulativePlayedMs
+      if (playedMs > 0) {
+        const occurredAtMs = 'occurredAtMs' in action ? finiteNonNegative(action.occurredAtMs) : finiteNonNegative(now())
+        comparison.recordAcceptedDelta({
+          playedMs,
+          occurredAtMs,
+          localDay: localDayAt(occurredAtMs),
+          track: {
+            source: session.track.source,
+            sourceTrackId: session.track.sourceTrackId,
+          },
+        })
+      }
+    }
+    if (checkpoint) comparison.flush()
+    return after
+  }
 
   const startRequest = (): PlaybackStartCommandV1 | null => {
     if (draft == null) return null
@@ -135,7 +176,7 @@ export const createPlaybackRecorderController = (
     if (groupStarted) return true
     const request = startRequest()
     if (request == null) return false
-    recorder.dispatch({ type: 'start-requested', request })
+    dispatch({ type: 'start-requested', request })
     activePolicy = { ...request.consent }
     groupStarted = true
     return true
@@ -152,7 +193,7 @@ export const createPlaybackRecorderController = (
 
   const dispatchBoundary = (action: PlaybackRecorderAction): void => {
     const before = recorder.getState()
-    recorder.dispatch(action)
+    dispatch(action, true)
     const after = recorder.getState()
     if (before === after || before.phase == 'idle' || before.phase == 'closing') return
     refreshAfterFlush(false)
@@ -194,16 +235,16 @@ export const createPlaybackRecorderController = (
         return
       }
       if (phase == 'buffering') {
-        recorder.dispatch({ type: 'buffering-end', playbackRate, ...timed() })
+        dispatch({ type: 'buffering-end', playbackRate, ...timed() })
         return
       }
       const firstPlaying = phase == 'pending'
-      recorder.dispatch({ type: 'native-playing', playbackRate, ...timed() })
+      dispatch({ type: 'native-playing', playbackRate, ...timed() })
       if (firstPlaying) refreshAfterFlush(true)
     },
     sample() {
       if (!groupStarted) return
-      recorder.dispatch({ type: 'sample', monotonicMs: monotonicNow(), positionMs: positionMs() })
+      dispatch({ type: 'sample', monotonicMs: monotonicNow(), positionMs: positionMs() })
     },
     pause(reason) {
       if (recorder.getState().phase != 'playing') return

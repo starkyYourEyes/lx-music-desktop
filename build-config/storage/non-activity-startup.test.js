@@ -393,7 +393,7 @@ describe('non-activity startup gate', () => {
     const { Store } = loadSourceModule(storePath)
     const { createDataHandlers } = loadSourceModule(dataHandlerPath)
     const store = new Store(dataJsonPath)
-    const handlers = createDataHandlers(store, {
+    const handlers = createDataHandlers(() => store, {
       getPlaybackActivityMigrationMarker: async() => null,
     })
     const expectedActivity = {

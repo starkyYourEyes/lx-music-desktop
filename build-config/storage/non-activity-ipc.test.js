@@ -124,10 +124,10 @@ describe('typed non-activity IPC', () => {
   it('rejects non-activity and malformed generic data keys before Store access', async() => {
     const storeCalls = []
     const { createDataHandlers } = loadSourceModule(dataHandlerPath)
-    const handlers = createDataHandlers({
+    const handlers = createDataHandlers(() => ({
       get: key => { storeCalls.push(['get', key]); return null },
       set: (key, value) => { storeCalls.push(['set', key, value]) },
-    }, {
+    }), {
       getPlaybackActivityMigrationMarker: async() => null,
     })
 

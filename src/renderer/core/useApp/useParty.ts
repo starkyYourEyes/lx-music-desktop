@@ -156,8 +156,8 @@ export default () => {
     }
 
     if (!shouldReplaceMusic) {
-      if (room.playback.playing) play()
-      else if (isPlay.value) pause()
+      if (room.playback.playing) play('remote')
+      else if (isPlay.value) pause('remote')
     }
   }
 

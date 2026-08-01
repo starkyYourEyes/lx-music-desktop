@@ -1,12 +1,11 @@
-import { onBeforeUnmount, toRaw } from '@common/utils/vueTools'
+import { onBeforeUnmount } from '@common/utils/vueTools'
 import type {
   PlaybackPauseReason,
   PlaybackPreplayFailureV1,
   PlaybackSeekOrigin,
+  PlaybackSelectionIntent,
   PlaybackSkipReason,
   PlaybackStartCommandV1,
-  PlaybackStartReason,
-  PlaybackTrackV1,
 } from '@common/storage/playback'
 import { createPlaybackRecorder } from '@renderer/core/playbackRecorder'
 import type { PlaybackRecorder, PlaybackRecorderAction } from '@renderer/core/playbackRecorder'
@@ -17,7 +16,6 @@ import {
   getPlaybackRate,
   onTimeupdate,
 } from '@renderer/plugins/player'
-import { playInfo, playMusicInfo } from '@renderer/store/player/state'
 import { initRecentPlayList } from '@renderer/store/recentPlay/action'
 import { initListeningTimeStats } from '@renderer/store/listeningTime/action'
 import { registerShutdownFlusher } from '@renderer/utils/ipc'
@@ -33,13 +31,7 @@ export const DEFAULT_PLAYBACK_POLICY: PlaybackStartCommandV1['consent'] = {
 
 export const getPlaybackPolicy = (): PlaybackStartCommandV1['consent'] => DEFAULT_PLAYBACK_POLICY
 
-export interface PlaybackSelection {
-  track: PlaybackTrackV1
-  context: PlaybackStartCommandV1['context']
-  resume: PlaybackStartCommandV1['resume']
-  startReason: PlaybackStartReason
-  startPositionMs: number
-}
+export type PlaybackSelection = PlaybackSelectionIntent
 
 interface PlaybackTimers {
   setInterval: (callback: () => void, delayMs: number) => unknown
@@ -64,7 +56,8 @@ export interface PlaybackRecorderControllerOptions {
 
 export interface PlaybackRecorderController {
   select: (selection: PlaybackSelection) => void
-  nativePlaying: (playbackRate: number) => void
+  nativePlaying: (playbackRate: number, resumeReason?: PlaybackPauseReason) => void
+  newAttempt: () => void
   sample: () => void
   pause: (reason: PlaybackPauseReason) => void
   resume: (reason: PlaybackPauseReason, playbackRate: number) => void
@@ -88,6 +81,8 @@ const defaultTimers: PlaybackTimers = {
 }
 
 const finiteNonNegative = (value: number): number => Number.isFinite(value) && value >= 0 ? Math.round(value) : 0
+const cloneSelection = <T extends PlaybackSelection>(selection: T): T =>
+  JSON.parse(JSON.stringify(selection)) as T
 
 export const createPlaybackRecorderController = (
   options: PlaybackRecorderControllerOptions,
@@ -106,6 +101,7 @@ export const createPlaybackRecorderController = (
 
   let draft: (PlaybackSelection & { playbackGroupUuid: string }) | null = null
   let groupStarted = false
+  let activePolicy: PlaybackStartCommandV1['consent'] | null = null
   let checkpointTimer: unknown | null = null
   let dayBoundaryTimer: unknown | null = null
 
@@ -140,15 +136,17 @@ export const createPlaybackRecorderController = (
     const request = startRequest()
     if (request == null) return false
     recorder.dispatch({ type: 'start-requested', request })
+    activePolicy = { ...request.consent }
     groupStarted = true
     return true
   }
 
   const refreshAfterFlush = (recent: boolean): void => {
+    const policy = activePolicy
     void recorder.flush().then(async flushed => {
-      if (!flushed) return
-      if (recent) await refreshRecent()
-      await refreshListening()
+      if (!flushed || policy == null || policy.privateMode) return
+      if (recent && policy.recentAllowed) await refreshRecent()
+      if (policy.statsAllowed) await refreshListening()
     }).catch(() => {})
   }
 
@@ -178,14 +176,21 @@ export const createPlaybackRecorderController = (
 
   return {
     select(value) {
-      draft = { ...value, playbackGroupUuid: createUuid() }
+      draft = { ...cloneSelection(value), playbackGroupUuid: createUuid() }
       groupStarted = false
+      activePolicy = null
     },
-    nativePlaying(playbackRate) {
+    newAttempt() {
+      if (draft == null || recorder.getState().phase != 'closing') return
+      draft = { ...cloneSelection(draft), playbackGroupUuid: createUuid() }
+      groupStarted = false
+      activePolicy = null
+    },
+    nativePlaying(playbackRate, resumeReason = 'system') {
       if (!ensureStarted()) return
       const phase = recorder.getState().phase
       if (phase == 'paused') {
-        dispatchBoundary({ type: 'resume', reason: 'user', playbackRate, ...timed() })
+        dispatchBoundary({ type: 'resume', reason: resumeReason, playbackRate, ...timed() })
         return
       }
       if (phase == 'buffering') {
@@ -281,24 +286,6 @@ export const createPlaybackRecorderController = (
   }
 }
 
-const clonePlayablePayload = (musicInfo: LX.Music.MusicInfo): LX.Music.MusicInfo =>
-  JSON.parse(JSON.stringify(toRaw(musicInfo))) as LX.Music.MusicInfo
-
-const currentTrack = (): PlaybackTrackV1 | null => {
-  const current = playMusicInfo.musicInfo
-  if (current == null) return null
-  const musicInfo = 'progress' in current ? current.metadata.musicInfo : current
-  const duration = getDuration()
-  return {
-    source: musicInfo.source,
-    sourceTrackId: musicInfo.id,
-    name: musicInfo.name,
-    singer: musicInfo.singer,
-    durationMs: Number.isFinite(duration) && duration > 0 ? Math.round(duration * 1000) : null,
-    playablePayload: clonePlayablePayload(musicInfo),
-  }
-}
-
 export default () => {
   const recorder = createPlaybackRecorder()
   const controller = createPlaybackRecorderController({
@@ -313,22 +300,30 @@ export default () => {
     refreshListening: initListeningTimeStats,
   })
 
-  const handleSelection = (intent: { startReason: PlaybackStartReason }) => {
-    const track = currentTrack()
-    if (track == null) return
-    controller.select({
-      track,
-      context: { type: playMusicInfo.isTempPlay ? 'temporary' : 'playlist', id: playMusicInfo.listId },
-      resume: {
-        listId: playMusicInfo.isTempPlay ? null : playMusicInfo.listId,
-        indexHint: playInfo.playIndex < 0 ? null : playInfo.playIndex,
-      },
-      startReason: intent.startReason,
-      startPositionMs: Math.round(getCurrentTime() * 1000),
-    })
+  let pendingPauseReason: PlaybackPauseReason | null = null
+  let pendingResumeReason: PlaybackPauseReason | null = null
+  const handleSelection = (intent: PlaybackSelectionIntent) => {
+    pendingPauseReason = null
+    pendingResumeReason = null
+    controller.select(intent)
   }
-  const handlePlaying = () => { controller.nativePlaying(getPlaybackRate()) }
-  const handlePause = () => { controller.pause('user') }
+  const handleNewAttempt = () => { controller.newAttempt() }
+  const handlePauseRequested = (reason: PlaybackPauseReason) => {
+    if (recorder.getState().phase == 'playing') pendingPauseReason = reason
+  }
+  const handleResumeRequested = (reason: PlaybackPauseReason) => {
+    if (recorder.getState().phase == 'paused') pendingResumeReason = reason
+  }
+  const handlePlaying = () => {
+    const reason = pendingResumeReason ?? 'system'
+    pendingResumeReason = null
+    controller.nativePlaying(getPlaybackRate(), reason)
+  }
+  const handlePause = () => {
+    const reason = pendingPauseReason ?? 'system'
+    pendingPauseReason = null
+    controller.pause(reason)
+  }
   const handleWaiting = () => { controller.bufferingStart() }
   const handleSeek = (intent: { origin: PlaybackSeekOrigin, fromMs: number, toMs: number }) => { controller.seek(intent) }
   const handleAdvance = (advance: { automatic: boolean, reason: PlaybackSkipReason | 'natural_end' }) => { controller.advance(advance) }
@@ -338,8 +333,11 @@ export default () => {
   const handleStop = () => { controller.advance({ automatic: false, reason: 'stop' }) }
 
   window.app_event.on('musicToggled', handleSelection)
+  window.app_event.on('playbackNewAttempt', handleNewAttempt)
+  window.app_event.on('playbackPauseRequested', handlePauseRequested)
+  window.app_event.on('playbackResumeRequested', handleResumeRequested)
   window.app_event.on('playerPlaying', handlePlaying)
-  window.app_event.on('pause', handlePause)
+  window.app_event.on('playerPause', handlePause)
   window.app_event.on('playerWaiting', handleWaiting)
   window.app_event.on('playbackSeek', handleSeek)
   window.app_event.on('playbackAdvance', handleAdvance)
@@ -357,8 +355,11 @@ export default () => {
 
   onBeforeUnmount(() => {
     window.app_event.off('musicToggled', handleSelection)
+    window.app_event.off('playbackNewAttempt', handleNewAttempt)
+    window.app_event.off('playbackPauseRequested', handlePauseRequested)
+    window.app_event.off('playbackResumeRequested', handleResumeRequested)
     window.app_event.off('playerPlaying', handlePlaying)
-    window.app_event.off('pause', handlePause)
+    window.app_event.off('playerPause', handlePause)
     window.app_event.off('playerWaiting', handleWaiting)
     window.app_event.off('playbackSeek', handleSeek)
     window.app_event.off('playbackAdvance', handleAdvance)

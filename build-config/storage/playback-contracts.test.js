@@ -147,6 +147,7 @@ describe('playback activity contracts', () => {
       { version: 1, type: 'play_start', reason: 'statistics_clear' },
       { version: 1, type: 'pause', reason: 'recovery' },
       { version: 1, type: 'resume', reason: 'remote' },
+      { version: 1, type: 'pause', reason: 'system' },
       { version: 1, type: 'seek', origin: 'buffer_recovery', fromMs: 0, toMs: MAX_MS },
       { version: 1, type: 'skip', reason: 'queue_removed', automatic: true },
       { version: 1, type: 'play_end', reason: 'natural_end' },
@@ -157,6 +158,7 @@ describe('playback activity contracts', () => {
     const invalid = [
       { version: 1, type: 'play_start', reason: 'user' },
       { version: 1, type: 'pause', reason: 'auto' },
+      { version: 1, type: 'pause', reason: 'device' },
       { version: 1, type: 'seek', origin: 'drag', fromMs: 0, toMs: 1 },
       { version: 1, type: 'skip', reason: 'auto' },
       { version: 1, type: 'skip', reason: 'next', automatic: 'true' },

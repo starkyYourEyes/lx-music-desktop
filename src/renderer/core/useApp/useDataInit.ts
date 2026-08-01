@@ -47,7 +47,12 @@ const initPrevPlayInfo = async() => {
   const info = resolvePlaybackResume(resume, list)
   if (info == null) return
   window.lx.restorePlayInfo = info
-  playList(info.listId, info.index, { automatic: false, reason: 'select', startReason: 'restore' })
+  playList(info.listId, info.index, {
+    automatic: false,
+    reason: 'select',
+    startReason: 'restore',
+    startPositionMs: info.time * 1000,
+  })
 
   if (appSetting['player.startupAutoPlay']) {
     const musicInfo = playMusicInfo.musicInfo

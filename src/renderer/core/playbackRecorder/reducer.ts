@@ -127,7 +127,7 @@ export const reduce = (state: PlaybackSessionState, action: PlaybackRecorderActi
     case 'native-playing': {
       if (state.phase == 'pending' && state.pending != null) {
         const session = state.pending
-        return {
+        const playing: PlaybackSessionState = {
           ...state,
           phase: 'playing',
           pending: null,
@@ -135,8 +135,12 @@ export const reduce = (state: PlaybackSessionState, action: PlaybackRecorderActi
           checkpointSeq: state.deliveryMode == 'activity' ? Math.max(state.checkpointSeq, 1) : state.checkpointSeq,
           playbackRate: action.playbackRate,
           sample: { monotonicMs: action.monotonicMs, positionMs: action.positionMs },
-          outbox: [...state.outbox, { kind: 'start', request: session }],
         }
+        if (state.deliveryMode == 'activity') {
+          return { ...playing, outbox: [...state.outbox, { kind: 'start', request: session }] }
+        }
+        if (state.deliveryMode == 'resume-only') return checkpointCommand(playing, occurredAt(action))
+        return playing
       }
       if (state.phase != 'paused' && state.phase != 'buffering') return state
       return {

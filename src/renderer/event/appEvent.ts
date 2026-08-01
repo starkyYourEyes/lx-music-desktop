@@ -1,6 +1,7 @@
 import Event from './Event'
 import type {
   PlaybackErrorIntent,
+  PlaybackPauseReason,
   PlaybackSeekIntent,
   PlaybackSeekOrigin,
   PlaybackSelectionIntent,
@@ -51,6 +52,18 @@ export class AppEvent extends Event {
 
   playbackError(error: PlaybackErrorIntent) {
     this.emit('playbackError', error)
+  }
+
+  playbackNewAttempt() {
+    this.emit('playbackNewAttempt')
+  }
+
+  playbackPauseRequested(reason: PlaybackPauseReason) {
+    this.emit('playbackPauseRequested', reason)
+  }
+
+  playbackResumeRequested(reason: PlaybackPauseReason) {
+    this.emit('playbackResumeRequested', reason)
   }
 
   /**

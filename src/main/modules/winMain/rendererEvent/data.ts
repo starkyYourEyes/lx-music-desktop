@@ -37,7 +37,7 @@ const isAuthoritativePlaybackActivityMarker = (marker: PlaybackActivityMarker | 
   Number.isSafeInteger(marker.completedAtMs) && marker.completedAtMs >= 0 &&
   typeof marker.detailsJson == 'string'
 
-export const createDataHandlers = (store: DataStoreAccess, dependencies: DataHandlerDependencies) => {
+export const createDataHandlers = (getStore: () => DataStoreAccess, dependencies: DataHandlerDependencies) => {
   let markerCheck: Promise<boolean> | null = null
   const getLegacyActivityDisabled = async(): Promise<boolean> => {
     if (markerCheck != null) return markerCheck
@@ -62,7 +62,7 @@ export const createDataHandlers = (store: DataStoreAccess, dependencies: DataHan
     get: async(path: unknown) => {
       const key = parseActivityDataKey(path)
       await assertLegacyActivityEnabled()
-      return store.get(key)
+      return getStore().get(key)
     },
     set: async(params: unknown) => {
       if (params == null || typeof params != 'object' || Array.isArray(params)) throw new Error('Invalid activity data update')
@@ -72,13 +72,13 @@ export const createDataHandlers = (store: DataStoreAccess, dependencies: DataHan
       }
       const key = parseActivityDataKey(record.path)
       await assertLegacyActivityEnabled()
-      store.set(key, record.data)
+      getStore().set(key, record.data)
     },
   }
 }
 
 export default () => {
-  const handlers = createDataHandlers(getStore(STORE_NAMES.DATA), {
+  const handlers = createDataHandlers(() => getStore(STORE_NAMES.DATA), {
     getPlaybackActivityMigrationMarker: async() => global.lx.worker.dbService.getPlaybackActivityMigrationMarker(),
   })
   mainHandle<unknown, unknown>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, async({ params }) => handlers.get(params))

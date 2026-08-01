@@ -16,7 +16,7 @@ import {
 import { getListMusicsFromCache } from '@renderer/store/list/action'
 import { downloadList } from '@renderer/store/download/state'
 import { setProgress } from './playProgress'
-import type { PlaybackSelectionIntent } from '@common/storage/playback'
+import type { PlaybackSelectionIntent, PlaybackSelectionOptions } from '@common/storage/playback'
 import { playNext } from '@renderer/core/player'
 import { LIST_IDS } from '@common/constants'
 import { toRaw } from '@common/utils/vueTools'
@@ -191,13 +191,13 @@ export function setPlayMusicInfo(
   listId: string | null,
   musicInfo: LX.Download.ListItem | LX.Music.MusicInfo,
   isTempPlay: boolean,
-  selectionIntent: PlaybackSelectionIntent,
+  selectionOptions: PlaybackSelectionOptions,
 ): void
 export function setPlayMusicInfo(
   listId: string | null,
   musicInfo: LX.Download.ListItem | LX.Music.MusicInfo | null,
   isTempPlay: boolean = false,
-  selectionIntent?: PlaybackSelectionIntent,
+  selectionOptions?: PlaybackSelectionOptions,
 ) {
   musicInfo = toRaw(musicInfo)
 
@@ -214,11 +214,31 @@ export function setPlayMusicInfo(
     playInfo.playerListId = null
     playInfo.playerPlayIndex = -1
   } else {
-    if (selectionIntent == null) throw new Error('Playback selection intent is required')
+    if (selectionOptions == null) throw new Error('Playback selection intent is required')
     const { playIndex, playerPlayIndex } = getPlayIndex(listId, musicInfo, isTempPlay)
 
     playInfo.playIndex = playIndex
     playInfo.playerPlayIndex = playerPlayIndex
+    const playablePayload = 'progress' in musicInfo ? musicInfo.metadata.musicInfo : musicInfo
+    const selectionIntent: PlaybackSelectionIntent = {
+      track: {
+        source: playablePayload.source,
+        sourceTrackId: playablePayload.id,
+        name: playablePayload.name,
+        singer: playablePayload.singer,
+        durationMs: null,
+        playablePayload: JSON.parse(JSON.stringify(toRaw(playablePayload))) as LX.Music.MusicInfo,
+      },
+      context: { type: isTempPlay ? 'temporary' : 'playlist', id: listId },
+      resume: {
+        listId: isTempPlay ? null : listId,
+        indexHint: isTempPlay || playIndex < 0 ? null : playIndex,
+      },
+      startReason: selectionOptions.startReason,
+      startPositionMs: Number.isFinite(selectionOptions.startPositionMs) && selectionOptions.startPositionMs >= 0
+        ? Math.round(selectionOptions.startPositionMs)
+        : 0,
+    }
     window.app_event.musicToggled(selectionIntent)
   }
 }

@@ -94,7 +94,14 @@ const loadRecorder = transport => loadTsModule(recorderPath, {
   '../../utils/playback': { sendPlaybackCommand: transport },
 }).createPlaybackRecorder({ transport })
 
-const loadController = ({ recorder, policy, clock, refreshRecent = async() => {}, refreshListening = async() => {} }) => {
+const loadController = ({
+  recorder,
+  policy,
+  clock,
+  refreshRecent = async() => {},
+  refreshListening = async() => {},
+  createUuid = () => UUID,
+}) => {
   const module = loadFeature(hookPath, {
     '@renderer/core/playbackRecorder': { createPlaybackRecorder: () => recorder },
     '@renderer/store/recentPlay/action': { initRecentPlayList: refreshRecent },
@@ -110,7 +117,7 @@ const loadController = ({ recorder, policy, clock, refreshRecent = async() => {}
     getPolicy: policy,
     now: clock.now,
     monotonicNow: clock.monotonicNow,
-    createUuid: () => UUID,
+    createUuid,
     getPositionMs: clock.position,
     getDurationMs: () => 120_000,
     refreshRecent,
@@ -118,6 +125,42 @@ const loadController = ({ recorder, policy, clock, refreshRecent = async() => {}
     timeZone: 'UTC',
     timers: clock.timers,
   })
+}
+
+const mountRecorderHook = ({ appEvent, recorder, currentTime = () => 47 }) => {
+  let cleanup = () => {}
+  const module = loadFeature(hookPath, {
+    '@renderer/core/playbackRecorder': { createPlaybackRecorder: () => recorder },
+    '@renderer/store/recentPlay/action': { initRecentPlayList: async() => {} },
+    '@renderer/store/listeningTime/action': { initListeningTimeStats: async() => {} },
+    '@renderer/utils/ipc': { registerShutdownFlusher: () => () => {} },
+    '@renderer/plugins/player': {
+      getCurrentTime: currentTime,
+      getDuration: () => 120,
+      getPlaybackRate: () => 1,
+      onTimeupdate: () => () => {},
+    },
+    '@renderer/store/player/state': {
+      playInfo: { playIndex: 7 },
+      playMusicInfo: {
+        musicInfo: { id: 'old', source: 'local', name: 'Old', singer: 'Singer', meta: { filePath: 'D:/old.flac' } },
+        listId: 'old-list',
+        isTempPlay: false,
+      },
+    },
+    '@renderer/store/player/playbackRate': {},
+    '@common/utils/vueTools': {
+      toRaw: value => value,
+      onBeforeUnmount: callback => { cleanup = callback },
+    },
+  })
+  const previousWindow = global.window
+  global.window = { app_event: appEvent }
+  module.default()
+  return () => {
+    cleanup()
+    global.window = previousWindow
+  }
 }
 
 describe('playback recorder renderer cutover', () => {
@@ -153,6 +196,65 @@ describe('playback recorder renderer cutover', () => {
     assert.equal(calls.filter(call => call.kind == 'start').length, 1)
   })
 
+  it('uses the emitted selection snapshot instead of stale audio or mutable player globals', async() => {
+    const { AppEvent } = require('../../src/renderer/event/appEvent.ts')
+    const appEvent = new AppEvent()
+    const calls = []
+    const recorder = loadRecorder(createTransport(calls))
+    const unmount = mountRecorderHook({ appEvent, recorder })
+
+    try {
+      appEvent.musicToggled(selection({
+        track: track({ id: 'new', source: 'local', name: 'New', singer: 'Singer', meta: { filePath: 'D:/new.flac' } }),
+        resume: { listId: 'new-list', indexHint: 1 },
+        startPositionMs: 0,
+      }))
+      appEvent.playerPlaying()
+      await recorder.flush()
+
+      assert.equal(calls[0].kind, 'start')
+      assert.equal(calls[0].request.track.sourceTrackId, 'track')
+      assert.equal(calls[0].request.resume.listId, 'new-list')
+      assert.equal(calls[0].request.startPositionMs, 0)
+    } finally {
+      unmount()
+    }
+  })
+
+  it('records requested pause/resume causes and uses system for unexpected native transitions', async() => {
+    const { AppEvent } = require('../../src/renderer/event/appEvent.ts')
+    const appEvent = new AppEvent()
+    const calls = []
+    const recorder = loadRecorder(createTransport(calls))
+    const unmount = mountRecorderHook({ appEvent, recorder, currentTime: () => 0 })
+
+    try {
+      appEvent.musicToggled(selection())
+      appEvent.playerPlaying()
+      await recorder.flush()
+      appEvent.playbackPauseRequested('remote')
+      appEvent.playerPause()
+      appEvent.playbackPauseRequested('user')
+      appEvent.playbackResumeRequested('recovery')
+      appEvent.playerPlaying()
+      appEvent.playerPause()
+      appEvent.playerPlaying()
+      await recorder.flush()
+
+      assert.deepEqual(
+        calls.filter(call => call.kind == 'commit').map(call => call.request.fact),
+        [
+          { version: 1, type: 'pause', reason: 'remote' },
+          { version: 1, type: 'resume', reason: 'recovery' },
+          { version: 1, type: 'pause', reason: 'system' },
+          { version: 1, type: 'resume', reason: 'system' },
+        ],
+      )
+    } finally {
+      unmount()
+    }
+  })
+
   it('records a final preplay load failure without creating a recent projection', async() => {
     const calls = []
     const recorder = loadRecorder(createTransport(calls))
@@ -177,22 +279,28 @@ describe('playback recorder renderer cutover', () => {
     assert.equal(calls[0].request.error.attempt, 2)
   })
 
-  it('latches the policy on first native playing and keeps activity, resume-only, and private persistence mutually exclusive', async() => {
+  it('latches policy and isolates transport and projections by consent mode', async() => {
     const policies = [
       { recentAllowed: true, statsAllowed: true, privateMode: false },
+      { recentAllowed: true, statsAllowed: false, privateMode: false },
+      { recentAllowed: false, statsAllowed: true, privateMode: false },
       { recentAllowed: false, statsAllowed: false, privateMode: false },
       { recentAllowed: true, statsAllowed: true, privateMode: true },
     ]
     const expectedKinds = [
       ['start', 'commit'],
-      ['start', 'resume'],
-      ['start'],
+      ['start', 'commit'],
+      ['start', 'commit'],
+      ['resume', 'resume'],
+      [],
     ]
 
     for (let index = 0; index < policies.length; index++) {
       const calls = []
       let currentPolicy = policies[index]
       let policyReads = 0
+      let recentRefreshes = 0
+      let listeningRefreshes = 0
       const recorder = loadRecorder(createTransport(calls))
       const clock = {
         now: () => 1_000,
@@ -204,6 +312,8 @@ describe('playback recorder renderer cutover', () => {
         recorder,
         policy: () => { policyReads++; return currentPolicy },
         clock,
+        refreshRecent: async() => { recentRefreshes++ },
+        refreshListening: async() => { listeningRefreshes++ },
       })
 
       controller.select(selection())
@@ -213,10 +323,41 @@ describe('playback recorder renderer cutover', () => {
       controller.sample()
       controller.pause('user')
       await recorder.flush()
+      await settle()
 
       assert.equal(policyReads, 1)
       assert.deepEqual(calls.map(call => call.kind), expectedKinds[index])
+      assert.equal(recentRefreshes > 0, policies[index].recentAllowed && !policies[index].privateMode)
+      assert.equal(listeningRefreshes > 0, policies[index].statsAllowed && !policies[index].privateMode)
     }
+  })
+
+  it('allocates a fresh playback group when manual play retries a terminal preplay failure', async() => {
+    const calls = []
+    const recorder = loadRecorder(createTransport(calls))
+    const uuids = [UUID, UUID_2]
+    const clock = {
+      now: () => 2_000,
+      monotonicNow: () => 2_000,
+      position: () => 0,
+      timers: { setInterval: () => 1, clearInterval: () => {}, setTimeout: () => 2, clearTimeout: () => {} },
+    }
+    const controller = loadController({
+      recorder,
+      policy: () => ({ recentAllowed: true, statsAllowed: true, privateMode: false }),
+      clock,
+      createUuid: () => uuids.shift(),
+    })
+
+    controller.select(selection())
+    controller.error({ stage: 'load', code: 4, recoverable: false, attempt: 2 })
+    await recorder.flush()
+    controller.newAttempt()
+    controller.nativePlaying(1)
+    await recorder.flush()
+
+    assert.deepEqual(calls.map(call => call.kind), ['preplay_failure', 'start'])
+    assert.deepEqual(calls.map(call => call.request.playbackGroupUuid), [UUID, UUID_2])
   })
 
   it('uses a 15 second checkpoint and flushes every semantic boundary', async() => {
@@ -408,10 +549,10 @@ describe('legacy activity endpoint freeze', () => {
       '@common/mainIpc': { mainOn: () => {}, mainHandle: () => {} },
       '@main/utils/store': {},
     })
-    const handlers = createDataHandlers({
+    const handlers = createDataHandlers(() => ({
       get(key) { calls.push(['get', key]); return { key } },
       set(key, value) { calls.push(['set', key, value]) },
-    }, {
+    }), {
       getPlaybackActivityMigrationMarker: async() => { markerReads++; return marker },
     })
 
@@ -437,10 +578,10 @@ describe('legacy activity endpoint freeze', () => {
       '@common/mainIpc': { mainOn: () => {}, mainHandle: () => {} },
       '@main/utils/store': {},
     })
-    const handlers = createDataHandlers({
+    const handlers = createDataHandlers(() => ({
       get(key) { calls.push(key); return null },
       set() {},
-    }, {
+    }), {
       getPlaybackActivityMigrationMarker: async() => marker,
     })
 
@@ -448,6 +589,48 @@ describe('legacy activity endpoint freeze', () => {
     marker = { name: 'legacy_data_v1.playback_activity', sourceSha256: 'invalid', completedAtMs: 1, detailsJson: '{}' }
     await handlers.get('recentPlayList')
     assert.deepEqual(calls, ['playInfo', 'recentPlayList'])
+  })
+
+  it('registers legacy handlers without opening data.json after the authoritative marker', async() => {
+    const registered = new Map()
+    let storeProviderCalls = 0
+    const marker = {
+      name: 'legacy_data_v1.playback_activity',
+      sourceSha256: 'a'.repeat(64),
+      completedAtMs: 1,
+      detailsJson: '{}',
+    }
+    const previousLx = global.lx
+    global.lx = {
+      worker: { dbService: { getPlaybackActivityMigrationMarker: async() => marker } },
+    }
+
+    try {
+      const module = loadFeature(dataHandlerPath, {
+        '@common/constants': { STORE_NAMES: { DATA: 'data' } },
+        '@common/ipcNames': { WIN_MAIN_RENDERER_EVENT_NAME: { get_data: 'get', save_data: 'set' } },
+        '@common/mainIpc': {
+          mainHandle(name, handler) { registered.set(name, handler) },
+          mainOn(name, handler) { registered.set(name, handler) },
+        },
+        '@main/utils/store': {
+          __esModule: true,
+          default() {
+            storeProviderCalls++
+            throw new Error('legacy store opened')
+          },
+        },
+      })
+
+      module.default()
+      await assert.rejects(
+        registered.get('get')({ params: 'playInfo' }),
+        error => error.message == 'legacy_activity_disabled',
+      )
+      assert.equal(storeProviderCalls, 0)
+    } finally {
+      global.lx = previousLx
+    }
   })
 })
 

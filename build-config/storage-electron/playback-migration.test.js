@@ -673,10 +673,10 @@ describe('legacy playback activity migration', () => {
   it('runs the activity importer before storage verification and module registration without freezing legacy handlers', async() => {
     const calls = []
     const legacyStore = new Map()
-    const handlers = createDataHandlers({
+    const handlers = createDataHandlers(() => ({
       get: key => legacyStore.get(key),
       set: (key, value) => legacyStore.set(key, value),
-    })
+    }), { getPlaybackActivityMigrationMarker: async() => null })
     const coordinator = createStorageCoordinator({
       runState: { begin: async() => true, markClean: async() => {} },
       preflightLegacyData: async() => ({ status: 'absent' }),
@@ -701,7 +701,7 @@ describe('legacy playback activity migration', () => {
       'phase2-migrations', 'activity-migration', 'credential-check',
       'storage-verification', 'settings', 'modules', 'app-inited',
     ])
-    handlers.set({ path: 'playInfo', data: { still: 'writable' } })
-    assert.deepEqual(handlers.get('playInfo'), { still: 'writable' })
+    await handlers.set({ path: 'playInfo', data: { still: 'writable' } })
+    assert.deepEqual(await handlers.get('playInfo'), { still: 'writable' })
   })
 })

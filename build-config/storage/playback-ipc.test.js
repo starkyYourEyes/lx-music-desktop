@@ -528,11 +528,14 @@ describe('reliable playback command delivery', () => {
     assert.ok(commits.every(command => command.request.checkpoint.checkpointSeq == 2))
   })
 
-  it('applies start, resume-only, private, and preplay-failure results without mixing group modes', async() => {
+  it('delivers resume-only directly, skips private transport, and handles activity preplay failures', async() => {
+    const resumeCommands = []
     const resumeRecorder = createRecorder({
-      transport: async command => command.kind == 'start'
-        ? { mode: 'resume-only', ack: resumeAck(0) }
-        : resumeAck(command.request.checkpointSeq),
+      transport: async command => {
+        resumeCommands.push(command)
+        assert.equal(command.kind, 'resume')
+        return resumeAck(command.request.checkpointSeq)
+      },
       retry: { initialMs: 1, maxMs: 2 },
     })
     resumeRecorder.dispatch({ type: 'start-requested', request: start({ consent: { recentAllowed: false, statsAllowed: false, privateMode: false } }) })
@@ -541,13 +544,16 @@ describe('reliable playback command delivery', () => {
     resumeRecorder.dispatch({ type: 'periodic-checkpoint', monotonicMs: 1000, positionMs: 1000, occurredAtMs: 1100 })
     assert.equal(await resumeRecorder.flush({ timeoutMs: 100 }), true)
     assert.equal(resumeRecorder.getState().outbox.length, 0)
+    assert.deepEqual(resumeCommands.map(command => command.kind), ['resume', 'resume'])
 
-    const privateRecorder = createRecorder({ transport: async() => ({ mode: 'private', playbackGroupUuid: UUID, checkpointSeq: 0 }) })
+    let privateTransportCalls = 0
+    const privateRecorder = createRecorder({ transport: async() => { privateTransportCalls++; throw new Error('private transport used') } })
     privateRecorder.dispatch({ type: 'start-requested', request: start({ consent: { recentAllowed: true, statsAllowed: true, privateMode: true } }) })
     privateRecorder.dispatch({ type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1, occurredAtMs: 100 })
     assert.equal(await privateRecorder.flush({ timeoutMs: 100 }), true)
     privateRecorder.dispatch({ type: 'periodic-checkpoint', monotonicMs: 1000, positionMs: 1000, occurredAtMs: 1100 })
     assert.equal(privateRecorder.getState().outbox.length, 0)
+    assert.equal(privateTransportCalls, 0)
 
     const failureRecorder = createRecorder({ transport: async() => activityAck(1), retry: { initialMs: 1, maxMs: 2 } })
     failureRecorder.dispatch({ type: 'start-requested', request: start() })
@@ -569,7 +575,7 @@ describe('reliable playback command delivery', () => {
     assert.equal(modeRecorder.getState().deliveryMode, 'activity')
   })
 
-  it('requires ack1 for activity starts while accepting ack0 for resume-only starts', async() => {
+  it('requires ack1 for activity starts while delivering resume-only checkpoint one directly', async() => {
     const timers = []
     const clock = {
       now: () => 0,
@@ -605,7 +611,8 @@ describe('reliable playback command delivery', () => {
     const resumeRecorder = createRecorder({
       transport: async command => {
         resumeRequests.push(commandEvidence(command))
-        return { mode: 'resume-only', ack: resumeAck(0) }
+        assert.equal(command.kind, 'resume')
+        return resumeAck(command.request.checkpointSeq)
       },
       clock,
       retry: { initialMs: 5, maxMs: 10 },
@@ -613,7 +620,7 @@ describe('reliable playback command delivery', () => {
     resumeRecorder.dispatch({ type: 'start-requested', request: start({ consent: { recentAllowed: false, statsAllowed: false, privateMode: false } }) })
     resumeRecorder.dispatch({ type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1, occurredAtMs: 100 })
     await settle()
-    assert.deepEqual(resumeRequests, [{ kind: 'start', group: UUID, seq: null, occurredAtMs: 100, marker: 'track' }])
+    assert.deepEqual(resumeRequests, [{ kind: 'resume', group: UUID, seq: 1, occurredAtMs: 100, marker: 'track' }])
     assert.deepEqual(resumeRecorder.getState().outbox, [])
   })
 
@@ -829,7 +836,7 @@ describe('reliable playback command delivery', () => {
     recorder.dispatch({ type: 'native-playing', monotonicMs: 1100, positionMs: 0, playbackRate: 1, occurredAtMs: 1200 })
     await settle()
     assert.deepEqual(requests, [])
-    assert.deepEqual(recorder.getState().outbox.map(command => command.kind), ['start', 'commit', 'start'])
+    assert.deepEqual(recorder.getState().outbox.map(command => command.kind), ['start', 'commit', 'resume'])
     assert.ok(recorder.getState().outbox.every(command => {
       if (command.kind == 'commit') return command.request.checkpoint.playbackGroupUuid == UUID
       return command.request.playbackGroupUuid == UUID
@@ -866,7 +873,7 @@ describe('reliable playback command delivery', () => {
     resolveStart({ mode: 'activity', ack: activityAck(1) })
     await settle()
     assert.equal(requests.length, 1)
-    assert.deepEqual(recorder.getState().outbox.map(command => command.kind), ['start', 'commit', 'start'])
+    assert.deepEqual(recorder.getState().outbox.map(command => command.kind), ['start', 'commit', 'resume'])
   })
 
   it('preserves old and new same-UUID lifetimes when an old commit acknowledgement returns', async() => {
@@ -982,13 +989,9 @@ describe('reliable playback command delivery', () => {
     const recorder = createRecorder({
       transport: async command => {
         requests.push(command)
-        if (command.kind == 'start') {
-          const resumeOnly = !command.request.consent.recentAllowed && !command.request.consent.statsAllowed
-          return resumeOnly
-            ? { mode: 'resume-only', ack: resumeAck(0) }
-            : { mode: 'activity', ack: activityAck(1) }
-        }
+        if (command.kind == 'start') return { mode: 'activity', ack: activityAck(1) }
         if (command.kind == 'commit') return activityAck(command.request.checkpoint.checkpointSeq)
+        if (command.kind == 'resume') return resumeAck(command.request.checkpointSeq)
         throw new Error(`Unexpected command: ${command.kind}`)
       },
       retry: { initialMs: 1, maxMs: 2 },
@@ -1010,23 +1013,15 @@ describe('reliable playback command delivery', () => {
     recorder.dispatch({ type: 'start-requested', request: reusedStart })
     recorder.dispatch({ type: 'native-playing', monotonicMs: 1200, positionMs: 0, playbackRate: 1, occurredAtMs: 1200 })
     assert.equal(await recorder.flush({ timeoutMs: 100 }), true)
-    assert.deepEqual(requests.map(command => command.kind), ['start', 'commit', 'start'])
-    assert.equal(requests[2].request, reusedStart)
+    assert.deepEqual(requests.map(command => command.kind), ['start', 'commit', 'resume'])
+    assert.deepEqual(requests[2].request.track, { source: reusedStart.track.source, sourceTrackId: reusedStart.track.sourceTrackId })
     assert.equal(recorder.getState().outbox.length, 0)
   })
 
-  it('releases completed private start delivery metadata while playback remains active', async() => {
-    const v8 = require('node:v8')
-    const vm = require('node:vm')
-    v8.setFlagsFromString('--expose_gc')
-    const collectGarbage = vm.runInNewContext('gc')
-    let commandReference
+  it('keeps private playback active without creating transport metadata', async() => {
+    let transportCalls = 0
     const recorder = createRecorder({
-      transport: async command => {
-        assert.equal(command.kind, 'start')
-        commandReference = new WeakRef(command)
-        return { mode: 'private', playbackGroupUuid: command.request.playbackGroupUuid, checkpointSeq: 0 }
-      },
+      transport: async() => { transportCalls++; throw new Error('private transport used') },
       retry: { initialMs: 1, maxMs: 2 },
     })
 
@@ -1038,17 +1033,7 @@ describe('reliable playback command delivery', () => {
     assert.equal(await recorder.flush({ timeoutMs: 100 }), true)
     assert.equal(recorder.getState().phase, 'playing')
     assert.equal(recorder.getState().outbox.length, 0)
-    assert.ok(commandReference != null)
-
-    await settle()
-    let collected = false
-    for (let attempt = 0; attempt < 12 && !collected; attempt++) {
-      collectGarbage()
-      await new Promise(resolve => setImmediate(resolve))
-      collected = commandReference.deref() === undefined
-      await new Promise(resolve => setImmediate(resolve))
-    }
-    assert.equal(collected, true, 'completed private start command remained strongly reachable')
+    assert.equal(transportCalls, 0)
   })
 
   it('releases completed start metadata after recorder state advances to a new UUID', async() => {

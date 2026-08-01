@@ -23,7 +23,7 @@ import { loveList } from '@renderer/store/list/state'
 import { addDislikeInfo } from '@renderer/core/dislikeList'
 import musicSdk from '@renderer/utils/musicSdk'
 import { assertApiSupport } from '@renderer/store/utils'
-import type { PlaybackSelectionIntent, PlaybackSkipReason, PlaybackStartReason } from '@common/storage/playback'
+import type { PlaybackPauseReason, PlaybackSelectionOptions, PlaybackSkipReason, PlaybackStartReason } from '@common/storage/playback'
 
 interface SetMusicUrlOptions {
   isRefresh?: boolean
@@ -42,13 +42,17 @@ export interface PlaybackAdvanceOptions {
   automatic: boolean
   reason: PlaybackSkipReason | 'natural_end'
   startReason: PlaybackStartReason
+  startPositionMs?: number
 }
 
 const emitPlaybackAdvance = ({ automatic, reason }: PlaybackAdvanceOptions): void => {
   window.app_event.playbackAdvance({ automatic, reason })
 }
 
-const selectionIntent = ({ startReason }: Pick<PlaybackAdvanceOptions, 'startReason'>): PlaybackSelectionIntent => ({ startReason })
+const selectionIntent = ({ startReason, startPositionMs = 0 }: Pick<PlaybackAdvanceOptions, 'startReason' | 'startPositionMs'>): PlaybackSelectionOptions => ({
+  startReason,
+  startPositionMs,
+})
 
 let gettingUrlId = ''
 let loadedMusicIdentity = ''
@@ -402,7 +406,7 @@ export const playListById = (listId: string, id: string) => {
   const currentMusicInfo = getList(listId).find(m => m.id == id)
   if (!currentMusicInfo) return
   window.app_event.playbackAdvance({ automatic: false, reason: 'select' })
-  setPlayMusicInfo(listId, currentMusicInfo, false, { startReason: 'select' })
+  setPlayMusicInfo(listId, currentMusicInfo, false, { startReason: 'select', startPositionMs: 0 })
   if (appSetting['player.isAutoCleanPlayedList'] || prevListId != listId) clearPlayedList()
   clearTempPlayeList()
   handlePlay()
@@ -430,6 +434,7 @@ export const playMusicByInfo = (musicInfo: LX.Music.MusicInfo, options?: PlayMus
   window.app_event.playbackAdvance({ automatic: false, reason: 'select' })
   setPlayMusicInfo(normalizedOptions.listId, musicInfo, normalizedOptions.isTempPlay, {
     startReason: normalizedOptions.startReason,
+    startPositionMs: normalizedOptions.startTime * 1000,
   })
   if (normalizedOptions.clearTempList) clearTempPlayeList()
   handlePlay({
@@ -742,9 +747,11 @@ export const playPrev = async(
   }, options)
 }
 
-export const play = () => {
+export const play = (reason: PlaybackPauseReason = 'user') => {
   window.lx.isPlayedStop &&= false
   if (playMusicInfo.musicInfo == null) return
+  if (reason == 'user') window.app_event.playbackNewAttempt()
+  window.app_event.playbackResumeRequested(reason)
   if (isEmpty()) {
     if (createGettingUrlId(playMusicInfo.musicInfo) != gettingUrlId) setMusicUrl(playMusicInfo.musicInfo)
     return
@@ -752,7 +759,8 @@ export const play = () => {
   setPlay()
 }
 
-export const pause = () => {
+export const pause = (reason: PlaybackPauseReason = 'user') => {
+  window.app_event.playbackPauseRequested(reason)
   setPause()
 }
 

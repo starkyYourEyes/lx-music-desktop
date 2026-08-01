@@ -8,6 +8,7 @@ const typescript = require('typescript')
 const loadTsModule = require('../../scripts/test-utils/load-ts-module')
 
 const rendererRoot = path.resolve(__dirname, '../../src/renderer')
+const storePlayerActionPath = path.join(rendererRoot, 'store/player/action.ts')
 
 const rendererFiles = () => {
   const files = []
@@ -232,23 +233,42 @@ describe('typed playback intent callsites', () => {
     const seeks = []
     const seekFacts = []
     const errors = []
+    const attempts = []
+    const pauseRequests = []
+    const resumeRequests = []
     event.on('musicToggled', intent => selections.push(intent))
     event.on('playbackAdvance', options => advances.push(options))
     event.on('setProgress', (...args) => seeks.push(args))
     event.on('playbackSeek', intent => seekFacts.push(intent))
     event.on('playbackError', error => errors.push(error))
+    event.on('playbackNewAttempt', () => attempts.push('attempt'))
+    event.on('playbackPauseRequested', reason => pauseRequests.push(reason))
+    event.on('playbackResumeRequested', reason => resumeRequests.push(reason))
 
-    event.musicToggled({ startReason: 'remote' })
+    const selection = {
+      track: { source: 'local', sourceTrackId: 'first', name: 'First', singer: 'Singer', durationMs: null, playablePayload: null },
+      context: { type: 'playlist', id: 'list' },
+      resume: { listId: 'list', indexHint: 0 },
+      startReason: 'remote',
+      startPositionMs: 4_000,
+    }
+    event.musicToggled(selection)
     event.playbackAdvance({ automatic: true, reason: 'buffer_timeout' })
     event.setProgress(12, 'bar', 120)
     event.playbackSeek({ origin: 'bar', fromMs: 10_000, toMs: 12_000 })
     event.playbackError({ stage: 'decode', code: 3, recoverable: false, attempt: 2 })
+    event.playbackNewAttempt()
+    event.playbackPauseRequested('remote')
+    event.playbackResumeRequested('recovery')
 
-    assert.deepEqual(selections, [{ startReason: 'remote' }])
+    assert.deepEqual(selections, [selection])
     assert.deepEqual(advances, [{ automatic: true, reason: 'buffer_timeout' }])
     assert.deepEqual(seeks, [[12, 'bar', 120]])
     assert.deepEqual(seekFacts, [{ origin: 'bar', fromMs: 10_000, toMs: 12_000 }])
     assert.deepEqual(errors, [{ stage: 'decode', code: 3, recoverable: false, attempt: 2 }])
+    assert.deepEqual(attempts, ['attempt'])
+    assert.deepEqual(pauseRequests, ['remote'])
+    assert.deepEqual(resumeRequests, ['recovery'])
   })
 
   it('propagates explicit select, restore, remote, and automatic start reasons through player actions', async() => {
@@ -272,11 +292,105 @@ describe('typed playback intent callsites', () => {
       await flushAsync()
 
       assert.deepEqual(selections, [
-        { startReason: 'select' },
-        { startReason: 'restore' },
-        { startReason: 'remote' },
-        { startReason: 'auto' },
+        { startReason: 'select', startPositionMs: 0 },
+        { startReason: 'restore', startPositionMs: 0 },
+        { startReason: 'remote', startPositionMs: 0 },
+        { startReason: 'auto', startPositionMs: 0 },
       ])
+    } finally {
+      global.window = previousWindow
+    }
+  })
+
+  it('emits manual attempt and default user pause/resume request causes from player actions', () => {
+    const previousWindow = global.window
+    const appEvent = createEventHub()
+    const events = []
+    appEvent.on('playbackNewAttempt', () => events.push(['attempt']))
+    appEvent.on('playbackPauseRequested', reason => events.push(['pause', reason]))
+    appEvent.on('playbackResumeRequested', reason => events.push(['resume', reason]))
+    global.window = {
+      lx: { isPlayedStop: false, restorePlayInfo: null },
+      i18n: { t: value => value },
+      app_event: appEvent,
+    }
+
+    try {
+      const harness = loadPlayerActions()
+      harness.actions.pause()
+      harness.actions.play()
+      assert.deepEqual(events, [
+        ['pause', 'user'],
+        ['attempt'],
+        ['resume', 'user'],
+      ])
+    } finally {
+      global.window = previousWindow
+    }
+  })
+
+  it('labels party control requests as remote and device-removal pauses as system', () => {
+    const partySource = readRendererFile('core/useApp/useParty.ts')
+    const mediaDeviceSource = readRendererFile('core/useApp/usePlayer/useMediaDevice.ts')
+    assert.match(partySource, /room\.playback\.playing\) play\('remote'\)/)
+    assert.match(partySource, /isPlay\.value\) pause\('remote'\)/)
+    assert.match(mediaDeviceSource, /pause\('system'\)/)
+  })
+
+  it('emits a copied selection snapshot at the store action boundary', () => {
+    const previousWindow = global.window
+    const appEvent = createEventHub()
+    const selections = []
+    const first = { id: 'first', source: 'local', name: 'First', singer: 'Singer', meta: { filePath: 'D:/first.flac' } }
+    const second = { id: 'second', source: 'local', name: 'Second', singer: 'Singer', meta: { filePath: 'D:/second.flac' } }
+    const list = [first, second]
+    const playInfo = { playerListId: 'list', playerPlayIndex: 0, playIndex: 0 }
+    const playMusicInfo = { musicInfo: first, listId: 'list', isTempPlay: false }
+    const playerMusic = { id: null, pic: null, name: '', singer: '', album: '', lrc: null, tlrc: null, rlrc: null, lxlrc: null, rawlrc: null }
+    appEvent.on('musicToggled', intent => selections.push(intent))
+    global.window = { app_event: appEvent }
+
+    try {
+      const actions = loadTsModule(storePlayerActionPath, {
+        './state': {
+          musicInfo: playerMusic,
+          isPlay: { value: false },
+          status: { value: '' },
+          statusText: { value: '' },
+          isShowPlayerDetail: { value: false },
+          isShowPlayComment: { value: false },
+          isShowLrcSelectContent: { value: false },
+          playInfo,
+          playMusicInfo,
+          playedList: [],
+          tempPlayList: [],
+        },
+        '@renderer/store/list/action': { getListMusicsFromCache: () => list },
+        '@renderer/store/download/state': { downloadList: [] },
+        './playProgress': { setProgress() {} },
+        '@renderer/core/player': { playNext() {} },
+        '@common/constants': { LIST_IDS: { DOWNLOAD: 'download' } },
+        '@common/utils/vueTools': { toRaw: value => value },
+        '@common/utils/common': { arrPush() {}, arrUnshift() {} },
+      })
+
+      actions.setPlayMusicInfo('list', second, false, { startReason: 'select', startPositionMs: 0 })
+      second.meta.filePath = 'D:/mutated.flac'
+
+      assert.deepEqual(selections, [{
+        track: {
+          source: 'local',
+          sourceTrackId: 'second',
+          name: 'Second',
+          singer: 'Singer',
+          durationMs: null,
+          playablePayload: { id: 'second', source: 'local', name: 'Second', singer: 'Singer', meta: { filePath: 'D:/second.flac' } },
+        },
+        context: { type: 'playlist', id: 'list' },
+        resume: { listId: 'list', indexHint: 1 },
+        startReason: 'select',
+        startPositionMs: 0,
+      }])
     } finally {
       global.window = previousWindow
     }

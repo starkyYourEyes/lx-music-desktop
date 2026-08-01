@@ -133,6 +133,7 @@ const loadPlayerActions = ({
   playerIndex = 0,
   autoSkipOnError = true,
   eventLog = [],
+  getMusicUrl = async() => 'url',
 } = {}) => {
   const first = { id: 'first', source: 'local', name: 'First', singer: 'Singer', meta: {} }
   const second = { id: 'second', source: 'local', name: 'Second', singer: 'Singer', meta: {} }
@@ -188,7 +189,7 @@ const loadPlayerActions = ({
     },
     '@renderer/store/party': { party: { room: null } },
     '../music/index': {
-      getMusicUrl: async() => 'url',
+      getMusicUrl,
       getPicPath: async() => '',
       getLyricInfo: async() => ({ lyric: '', tlyric: '', lxlyric: '', rlyric: '', rawlrcInfo: { lyric: '' } }),
     },
@@ -325,6 +326,52 @@ describe('typed playback intent callsites', () => {
       restoreConsole()
       global.window = previousWindow
       global.document = previousDocument
+    }
+  })
+
+  it('keeps action-level delayed load and terminal error reasons distinct', async() => {
+    const previousWindow = global.window
+    const timers = installFakeTimers()
+    const restoreConsole = muteExpectedConsoleOutput()
+    const appEvent = createEventHub()
+    const advances = []
+    appEvent.on('playbackAdvance', options => advances.push(options))
+    global.window = {
+      lx: { isPlayedStop: false, restorePlayInfo: null },
+      i18n: { t: value => value },
+      app_event: appEvent,
+    }
+
+    try {
+      const pendingUrl = new Promise(() => {})
+      const loadTimeoutHarness = loadPlayerActions({ getMusicUrl: () => pendingUrl })
+      loadTimeoutHarness.actions.setMusicUrl(loadTimeoutHarness.first)
+      timers.runNext(100000)
+      await flushAsync()
+      await flushAsync()
+
+      let failedAttempts = 0
+      const errorHarness = loadPlayerActions({
+        getMusicUrl: () => {
+          if (++failedAttempts <= 2) return Promise.reject(new Error('url failed'))
+          return pendingUrl
+        },
+      })
+      errorHarness.actions.setMusicUrl(errorHarness.first)
+      await flushAsync()
+      await flushAsync()
+      timers.runNext(5000)
+      await flushAsync()
+      await flushAsync()
+
+      assert.deepEqual(advances, [
+        { automatic: true, reason: 'load_timeout' },
+        { automatic: true, reason: 'error' },
+      ])
+    } finally {
+      timers.restore()
+      restoreConsole()
+      global.window = previousWindow
     }
   })
 
@@ -841,12 +888,152 @@ describe('typed playback intent callsites', () => {
     }
   })
 
-  it('keeps QQ Daily dislike intent when it selects a replacement from the remaining list', () => {
-    const source = readRendererFile('store/qqDailyRecommend/action.ts')
-    assert.match(
-      source,
-      /playList\([^\n]+\{ automatic: true, reason: ['"]dislike['"] \}\)/,
-    )
+  it('carries automatic dislike intent through every dedicated dislike adapter', async() => {
+    const previousWindow = global.window
+    const appEvent = createEventHub()
+    const advances = []
+    appEvent.on('playbackAdvance', options => advances.push(options))
+    global.window = {
+      lx: { isPlayedStop: false, restorePlayInfo: null },
+      i18n: { t: value => value },
+      app_event: appEvent,
+    }
+
+    try {
+      const modernHarness = loadPlayerActions()
+      const modernSource = readRendererFile('components/layout/PlayBar/ModernBar.vue')
+      const modernScript = modernSource.match(/<script>([\s\S]*?)<\/script>/)?.[1]
+      assert.ok(modernScript, 'ModernBar.vue must contain a script block')
+      const modernBar = loadSourceModule(modernScript, 'ModernBar.vue', {
+        '@common/utils/vueTools': { ref: value => ({ value }), watch() {} },
+        '@common/utils/vueRouter': { useRouter: () => ({ push: async() => {} }) },
+        '@common/utils/electron': { clipboardWriteText() {} },
+        './ControlBtns.vue': {},
+        './PlayProgress.vue': {},
+        '../PlayQueue.vue': {},
+        '@renderer/utils/compositions/usePlayProgress': () => ({
+          nowPlayTimeStr: { value: '' },
+          maxPlayTimeStr: { value: '' },
+          progress: { value: 0 },
+          isActiveTransition: { value: false },
+          handleTransitionEnd() {},
+        }),
+        '@renderer/store/player/state': {
+          statusText: { value: '' },
+          musicInfo: modernHarness.musicInfo,
+          isShowPlayerDetail: { value: false },
+          isPlay: { value: false },
+          playInfo: modernHarness.playInfo,
+          playMusicInfo: modernHarness.playMusicInfo,
+        },
+        '@renderer/store/player/action': { setMusicInfo() {}, setShowPlayerDetail() {} },
+        '@renderer/core/player': modernHarness.actions,
+        '@common/constants': { LIST_IDS: { DOWNLOAD: 'download' } },
+        '@renderer/store/party': { party: { room: null } },
+        '@renderer/store/privateFm/state': { isPrivateFmMode: { value: true } },
+        '@renderer/utils/ipc': { trashNeteasePrivateFmMusic: async() => {} },
+      }).default
+      await modernBar.setup().handleTrashPrivateFmMusic()
+
+      const onlineHarness = loadPlayerActions()
+      const onlineActions = loadTsModule(path.join(rendererRoot, 'components/material/OnlineList/useMusicActions.js'), {
+        '@common/utils/vueRouter': { useRouter: () => ({ push: async() => {} }) },
+        '@renderer/utils/musicSdk': {},
+        '@common/utils/electron': { openUrl() {} },
+        '@renderer/utils': { toOldMusicInfo: value => value },
+        '@renderer/core/dislikeList': { addDislikeInfo: async() => {}, hasDislike: () => true },
+        '@renderer/core/player': onlineHarness.actions,
+        '@renderer/store/player/state': { playMusicInfo: onlineHarness.playMusicInfo },
+        '@renderer/plugins/Dialog': { dialog: { confirm: async() => true } },
+        '@renderer/plugins/i18n': { useI18n: () => value => value },
+      }).default({ props: { list: [onlineHarness.first] } })
+      await onlineActions.handleDislikeMusic(0)
+      await flushAsync()
+
+      const listHarness = loadPlayerActions()
+      const listActions = loadTsModule(path.join(rendererRoot, 'views/List/MusicList/useMusicActions.js'), {
+        '@common/utils/vueRouter': { useRouter: () => ({ push: async() => {} }) },
+        '@renderer/utils/musicSdk': {},
+        '@common/utils/electron': { openUrl() {}, clipboardWriteText() {} },
+        '@renderer/plugins/Dialog': { dialog: { confirm: async() => true } },
+        '@renderer/plugins/i18n': { useI18n: () => value => value },
+        '@renderer/store/list/action': { removeListMusics() {} },
+        '@renderer/store/setting': { appSetting: { 'download.fileName': 'song' } },
+        '@renderer/utils/index': { toOldMusicInfo: value => value },
+        '@renderer/core/dislikeList': { addDislikeInfo: async() => {}, hasDislike: () => true },
+        '@renderer/core/player': listHarness.actions,
+        '@renderer/store/player/state': { playMusicInfo: listHarness.playMusicInfo },
+      }).default({
+        props: { listId: 'list' },
+        list: { value: [listHarness.first] },
+        selectedList: { value: [] },
+        removeAllSelect() {},
+      })
+      await listActions.handleDislikeMusic(0)
+      await flushAsync()
+
+      const dailySongs = [
+        { id: 'tx_one', source: 'tx', name: 'One', singer: 'Singer', meta: {} },
+        { id: 'tx_two', source: 'tx', name: 'Two', singer: 'Singer', meta: {} },
+        { id: 'tx_three', source: 'tx', name: 'Three', singer: 'Singer', meta: {} },
+      ]
+      const dailyHarness = loadPlayerActions({ list: [...dailySongs] })
+      const tempListMeta = { id: null }
+      const vueTools = {
+        ref: value => ({ value }),
+        shallowReactive: value => value,
+        markRawList: value => value,
+        toRaw: value => value,
+      }
+      const dailyState = loadTsModule(path.join(rendererRoot, 'store/qqDailyRecommend/state.ts'), {
+        '@common/utils/vueTools': vueTools,
+        '@common/constants': { LIST_IDS: { TEMP: 'temp' } },
+        '@renderer/store/player/state': { playInfo: dailyHarness.playInfo },
+        '@renderer/store/list/state': { tempListMeta },
+      })
+      const dailyAction = loadTsModule(path.join(rendererRoot, 'store/qqDailyRecommend/action.ts'), {
+        '@common/constants': { LIST_IDS: { TEMP: 'temp' } },
+        '@common/utils/vueTools': vueTools,
+        '@renderer/core/player': dailyHarness.actions,
+        '@renderer/store/list/action': {
+          getListMusicsFromCache: () => dailyHarness.list,
+          setTempList: async(id, songs) => {
+            tempListMeta.id = id
+            dailyHarness.list.splice(0, dailyHarness.list.length, ...songs)
+          },
+        },
+        '@renderer/store/list/state': { tempListMeta },
+        '@renderer/store/player/action': { clearPlayedList() {} },
+        '@renderer/store/player/state': {
+          playInfo: dailyHarness.playInfo,
+          playMusicInfo: dailyHarness.playMusicInfo,
+        },
+        '@renderer/store/qqMusic': { getQQMusicAccountKey: () => 'A' },
+        '@renderer/utils/ipc': {
+          dislikeQQMusic: async() => {},
+          getQQMusicDailyRecommendSongs: async() => dailySongs,
+        },
+        './state': dailyState,
+      })
+      await dailyAction.prepareQQDailyRecommend('A')
+      const priorAdapterCount = advances.length
+      await dailyAction.playQQDailyRecommend('A', 1)
+      advances.splice(priorAdapterCount)
+      const snapshot = dailyAction.getQQDailyRecommendFeedbackSnapshot(dailySongs[1], 'A')
+      assert.ok(snapshot)
+      assert.equal(await dailyAction.dislikeQQDailyRecommendMusic(dailySongs[1], snapshot), true)
+      await flushAsync()
+      await flushAsync()
+
+      assert.deepEqual(advances, [
+        { automatic: true, reason: 'dislike' },
+        { automatic: true, reason: 'dislike' },
+        { automatic: true, reason: 'dislike' },
+        { automatic: true, reason: 'dislike' },
+      ])
+    } finally {
+      global.window = previousWindow
+    }
   })
 
   it('subscribes and unsubscribes native seek, rate, waiting, and canplay events', () => {

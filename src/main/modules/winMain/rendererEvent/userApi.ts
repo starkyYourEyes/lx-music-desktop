@@ -17,7 +17,9 @@ import { getUserApiRuntimePool } from '@main/modules/userApi/runtimePool'
 import { sendEvent } from '@main/modules/winMain/main'
 import {
   parseUserApiCancellationPayload,
+  parseUserApiEnsurePayload,
   parseUserApiRequestPayload,
+  parseUserApiRuntimeLeasePayload,
 } from '@main/modules/userApi/ipcValidation'
 
 const REPLACE_ERROR_LIMITS = {
@@ -106,7 +108,8 @@ export default () => {
     registerOwner(event.sender)
     return request(parseUserApiRequestPayload(params), event.sender.id)
   })
-  mainHandle<LX.UserApi.UserApiEnsureParams, LX.UserApi.UserApiEnsureResult>(WIN_MAIN_RENDERER_EVENT_NAME.ensure_user_api, async({ params: apiId }) => {
+  mainHandle<unknown, LX.UserApi.UserApiEnsureResult>(WIN_MAIN_RENDERER_EVENT_NAME.ensure_user_api, async({ params }) => {
+    const apiId = parseUserApiEnsurePayload(params)
     try {
       await runtimePool.ensure(apiId)
       return { ok: true, value: runtimePool.getStatus(apiId) }
@@ -118,13 +121,15 @@ export default () => {
     registerOwner(event.sender)
     cancelRequest(parseUserApiCancellationPayload(params), event.sender.id)
   })
-  mainOn<LX.UserApi.UserApiRuntimeLeaseParams>(WIN_MAIN_RENDERER_EVENT_NAME.acquire_user_api_runtime, ({ event, params }) => {
+  mainOn<unknown>(WIN_MAIN_RENDERER_EVENT_NAME.acquire_user_api_runtime, ({ event, params }) => {
+    const lease = parseUserApiRuntimeLeasePayload(params)
     registerOwner(event.sender)
-    runtimePool.acquireLease(params, event.sender.id)
+    runtimePool.acquireLease(lease, event.sender.id)
   })
-  mainOn<LX.UserApi.UserApiRuntimeLeaseParams>(WIN_MAIN_RENDERER_EVENT_NAME.release_user_api_runtime, ({ event, params }) => {
+  mainOn<unknown>(WIN_MAIN_RENDERER_EVENT_NAME.release_user_api_runtime, ({ event, params }) => {
+    const lease = parseUserApiRuntimeLeasePayload(params)
     registerOwner(event.sender)
-    void getUserApiRuntimePool().releaseLease(params, event.sender.id).catch(error => {
+    void getUserApiRuntimePool().releaseLease(lease, event.sender.id).catch(error => {
       log.error('release user API runtime lease failed', error)
     })
   })

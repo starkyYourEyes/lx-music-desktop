@@ -184,6 +184,20 @@ test('same request ID in different sources cannot cross-settle', async() => {
   assert.deepEqual(await b, { ok: true, value: { source: 'b' } })
 })
 
+test('duplicate request IDs reject the newcomer without replacing the original owner', async() => {
+  const harness = createPoolHarness({ autoInit: true })
+  const original = harness.pool.request({ apiId: 'a', requestId: 'same', data: { owner: 'original' } }, 11)
+  await harness.waitForPending('a', 'same')
+  const duplicate = harness.pool.request({ apiId: 'a', requestId: 'same', data: { owner: 'duplicate' } }, 12)
+
+  harness.respond('a', 'same', 'original-result')
+
+  assert.deepEqual(await original, { ok: true, value: 'original-result' })
+  const duplicateResult = await duplicate
+  assert.equal(duplicateResult.ok, false)
+  assert.equal(duplicateResult.error.kind, 'cancelled')
+})
+
 test('invalidating one source rejects only that source', async() => {
   const harness = createPoolHarness({ autoInit: true })
   const a = harness.pool.request({ apiId: 'a', requestId: '1', data: {} }, 11)
@@ -275,9 +289,11 @@ test('invalidation during async window creation cannot install a stale record', 
   const harness = createPoolHarness({ autoInit: false, createGate: gate.promise })
   const oldEnsure = harness.pool.ensure('a')
   await harness.waitForCreateCall('a')
-  await harness.pool.invalidate('a', 'sourceChanged')
+  const invalidating = harness.pool.invalidate('a', 'sourceChanged')
   gate.resolve()
-  await assert.rejects(oldEnsure)
+  await assert.rejects(oldEnsure, error => error.kind == 'sourceChanged')
+  await invalidating
+  assert.deepEqual(harness.statusEvents, [])
   const currentEnsure = harness.pool.ensure('a')
   await harness.waitForRuntimeCreated('a', 2)
   await harness.init('a', { sources: {} })
@@ -365,11 +381,12 @@ test('source invalidation during idle creation cannot be cancelled by reconfigur
   const first = harness.pool.ensure('a')
   await harness.waitForCreateCall('a')
   await harness.pool.markConfigured(new Set())
-  await harness.pool.invalidate('a', 'sourceChanged')
+  const invalidating = harness.pool.invalidate('a', 'sourceChanged')
   await harness.pool.markConfigured(new Set(['a']))
   gate.resolve()
 
   await assert.rejects(first, error => error.kind == 'sourceChanged')
+  await invalidating
   await harness.waitForDisposed('a', 1)
   assert.deepEqual(harness.statusEvents, [])
 

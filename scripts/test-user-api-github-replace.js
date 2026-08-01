@@ -4,6 +4,7 @@ const path = require('node:path')
 const actualZlib = require('node:zlib')
 const loadTsModule = require('./test-utils/load-ts-module')
 const githubUserApi = require('../src/common/utils/githubUserApi')
+const { createPoolHarness } = require('../build-config/test-utils/playback-fallback-harness')
 
 const REPOSITORY = 'Macrohard0001/lx-ikun-music-sources'
 const VERSION = 'v260724'
@@ -111,7 +112,7 @@ const createRuntimeHarness = (options = {}) => {
     }
   }
 
-  const runtimePool = {
+  const runtimePool = options.runtimePool ?? {
     async ensure(id) {
       actions.push(`ensure:${id}`)
       await runStep(options.ensureSteps?.shift())
@@ -1003,6 +1004,70 @@ const originalLx = global.lx
       'dispose:stable-id:true',
     ])
     assert.strictEqual(directRemoveRuntime.getChangeEvents(), 1)
+
+    const removalCreationGate = createDeferred()
+    const removalPool = createPoolHarness({
+      autoInit: false,
+      createGate: removalCreationGate.promise,
+      disposeRejectIds: ['a'],
+      initialConfiguredIds: ['a'],
+    })
+    const removalEnsureError = removalPool.pool.ensure('a').then(
+      () => null,
+      error => error,
+    )
+    await removalPool.waitForCreateCall('a')
+    const creationRemovalRuntime = createRuntimeHarness({
+      initialApis: [{ id: 'a' }],
+      initialScripts: { a: 'script:a:old' },
+      runtimePool: removalPool.pool,
+    })
+    const removingDuringCreation = creationRemovalRuntime.runtime.removeApi(['a'])
+    removalCreationGate.resolve()
+    await assert.rejects(removingDuringCreation, /dispose a failed/)
+    await removalEnsureError
+    assert.deepStrictEqual(creationRemovalRuntime.getCurrentState(), {
+      apiList: [{ id: 'a' }],
+      scripts: new Map([['a', 'script:a:old']]),
+    })
+    const removalRecovery = removalPool.pool.ensure('a')
+    await removalPool.waitForRuntimeCreated('a', 2)
+    await removalPool.init('a', { sources: {} })
+    assert.strictEqual((await removalRecovery).id, 'a')
+    assert.strictEqual(removalPool.pool.getStatus('a').status, true)
+
+    const invalidationCreationGate = createDeferred()
+    const invalidationPool = createPoolHarness({
+      autoInit: false,
+      createGate: invalidationCreationGate.promise,
+      disposeRejectIds: ['a'],
+      initialConfiguredIds: ['a'],
+    })
+    const invalidationEnsureError = invalidationPool.pool.ensure('a').then(
+      () => null,
+      error => error,
+    )
+    await invalidationPool.waitForCreateCall('a')
+    const creationInvalidationRuntime = createRuntimeHarness({
+      initialApis: [{ id: 'a' }],
+      initialScripts: { a: 'script:a:old' },
+      replacementSteps: [[{ id: 'a' }]],
+      replacementScripts: [{ a: 'script:a:new' }],
+      runtimePool: invalidationPool.pool,
+    })
+    const invalidatingDuringCreation = creationInvalidationRuntime.runtime.replaceApisFromGitHub(makeInput())
+    invalidationCreationGate.resolve()
+    await assert.rejects(invalidatingDuringCreation, /dispose a failed/)
+    await invalidationEnsureError
+    assert.deepStrictEqual(creationInvalidationRuntime.getCurrentState(), {
+      apiList: [{ id: 'a' }],
+      scripts: new Map([['a', 'script:a:old']]),
+    })
+    const invalidationRecovery = invalidationPool.pool.ensure('a')
+    await invalidationPool.waitForRuntimeCreated('a', 2)
+    await invalidationPool.init('a', { sources: {} })
+    assert.strictEqual((await invalidationRecovery).id, 'a')
+    assert.strictEqual(invalidationPool.pool.getStatus('a').status, true)
 
     const selectedRuntime = createRuntimeHarness()
     await selectedRuntime.runtime.setApi('stable-id')

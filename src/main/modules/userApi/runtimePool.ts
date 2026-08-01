@@ -287,6 +287,16 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     return record.initPromise
   }
 
+  const awaitCancelledCreation = async(creating: RuntimeCreationState) => {
+    try {
+      await creating.promise
+    } catch (error) {
+      if (error instanceof Error && error.name == 'PlaybackSourceError' &&
+        'kind' in error && error.kind == 'sourceChanged') return
+      throw error
+    }
+  }
+
   const invalidate = async(apiId: string, kind: 'sourceChanged' | 'runtimeCrash') => {
     if (kind == 'sourceChanged') leasesByApiId.delete(apiId)
     const creating = creatingByApiId.get(apiId)
@@ -301,6 +311,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     )
     if (!record) {
       settleSource(apiId, failure)
+      if (creating) await awaitCancelledCreation(creating)
       return
     }
     if (kind == 'runtimeCrash') {
@@ -321,7 +332,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
       creating.disposeReason = 'explicit'
       creating.clearSession ||= options.clearSession
       settleSource(apiId, failure)
-      try { await creating.promise } catch (_) {}
+      await awaitCancelledCreation(creating)
       return
     }
     const record = recordsByApiId.get(apiId)
@@ -353,10 +364,10 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     const { apiId, requestId } = params
     const old = pendingByApiId.get(apiId)?.get(requestId)
     if (old) {
-      settlePending(apiId, requestId, {
+      return {
         ok: false,
-        error: normalizeRuntimeFailure(new Error('User API request replaced'), { apiId, cancelled: true }),
-      })
+        error: normalizeRuntimeFailure(new Error('User API request ID is already pending'), { apiId, cancelled: true }),
+      }
     }
     return new Promise(resolve => {
       let sourcePending = pendingByApiId.get(apiId)

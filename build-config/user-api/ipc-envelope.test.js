@@ -8,7 +8,16 @@ const loadHandlers = () => {
   const calls = []
   const parser = loadTsModule(path.join(__dirname, '../../src/main/modules/userApi/ipcValidation.ts'))
   const runtimePool = {
-    getStatus() {}, ensure() {}, request() {}, cancel() {}, acquireLease() {}, releaseLease() {}, releaseOwner() {},
+    getStatus(apiId) {
+      calls.push(['status', apiId])
+      return { apiId, status: true }
+    },
+    ensure(apiId) { calls.push(['ensure', apiId]) },
+    request() {},
+    cancel() {},
+    acquireLease(params, ownerId) { calls.push(['acquire', params, ownerId]) },
+    async releaseLease(params, ownerId) { calls.push(['release', params, ownerId]) },
+    releaseOwner() {},
   }
   const register = loadTsModule(path.join(__dirname, '../../src/main/modules/winMain/rendererEvent/userApi.ts'), {
     '@common/ipcNames': {
@@ -78,4 +87,61 @@ test('rejects malformed user API cancellation envelopes before dispatch', async(
   )
   await assert.rejects(async() => handlers.get('cancel')({ event: { sender }, params: { requestKey: 'old', extra: true } }), /Invalid User API cancellation payload/)
   assert.deepEqual(calls, [])
+})
+
+test('rejects malformed ensure IDs with a fixed error before pool dispatch', async() => {
+  const { handlers, calls } = loadHandlers()
+  const secret = `ensure-sentinel-${'x'.repeat(300)}`
+
+  await assert.rejects(
+    handlers.get('ensure')({ params: secret }),
+    error => error.message == 'Invalid User API ensure payload' && !error.message.includes(secret),
+  )
+  await assert.rejects(
+    handlers.get('ensure')({ params: { apiId: 'user_api/a', secret } }),
+    error => error.message == 'Invalid User API ensure payload' && !error.message.includes(secret),
+  )
+  assert.deepEqual(calls, [])
+})
+
+test('validates exact runtime lease envelopes before acquire and release dispatch', () => {
+  const { handlers, calls, sender } = loadHandlers()
+  const secret = 'lease-payload-must-not-appear'
+  const hostile = {}
+  Object.defineProperty(hostile, 'apiIds', {
+    enumerable: true,
+    get() { throw new Error(secret) },
+  })
+  Object.defineProperty(hostile, 'leaseId', {
+    enumerable: true,
+    value: 'lease-1',
+  })
+
+  for (const name of ['acquire', 'release']) {
+    assert.throws(
+      () => handlers.get(name)({
+        event: { sender },
+        params: { apiIds: ['user_api/a'], leaseId: 'lease-1', extra: secret },
+      }),
+      error => error.message == 'Invalid User API runtime lease payload' && !error.message.includes(secret),
+    )
+    assert.throws(
+      () => handlers.get(name)({ event: { sender }, params: hostile }),
+      error => error.message == 'Invalid User API runtime lease payload' && !error.message.includes(secret),
+    )
+  }
+  assert.deepEqual(calls, [])
+
+  handlers.get('acquire')({
+    event: { sender },
+    params: { apiIds: ['user_api/a', 'user_api/b'], leaseId: 'lease-1' },
+  })
+  handlers.get('release')({
+    event: { sender },
+    params: { apiIds: ['user_api/a'], leaseId: 'lease-1' },
+  })
+  assert.deepEqual(calls, [
+    ['acquire', { apiIds: ['user_api/a', 'user_api/b'], leaseId: 'lease-1' }, 31],
+    ['release', { apiIds: ['user_api/a'], leaseId: 'lease-1' }, 31],
+  ])
 })

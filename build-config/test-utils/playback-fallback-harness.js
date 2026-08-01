@@ -2691,6 +2691,16 @@ const createIntegrationHarness = (options = {}) => {
   let sessionCreateCount = 0
   let nextId = 0
   let playHandlers
+  const audioOperations = []
+  const currentTimeWrites = []
+  const mainAudio = new FakePlayerAudio(audioOperations, currentTimeWrites)
+  const preloadAudio = new FakeCoordinatorPreloadAudio(url => {
+    const songIdentity = urlIdentities.get(url)
+    if (!songIdentity) return
+    const binding = { songIdentity, url }
+    preloadBoundUrls.push(url)
+    preloadObserver.emit(binding)
+  })
 
   const createEventTarget = () => {
     const listeners = new Map()
@@ -2813,17 +2823,6 @@ const createIntegrationHarness = (options = {}) => {
   }
   pool = factories.runtimePool.createUserApiRuntimePool(poolDeps)
 
-  const cache = factories.player.cache.createPlaybackUrlCache({
-    read: async key => durableCache.get(key) ?? null,
-    save: async(musicInfo, quality, url) => { durableCache.set(`${musicInfo.id}_${quality}`, url) },
-    remove: async key => {
-      invalidatedCacheKeys.push(key)
-      invalidatedQualities.push(key.slice(key.lastIndexOf('_') + 1))
-      cacheInvalidationObserver.emit(key)
-      if (options.holdCacheInvalidation) await cacheInvalidationGate.promise
-      durableCache.delete(key)
-    },
-  })
   const adapter = factories.sourceAdapter.createPlaybackSourceAdapter({
     isCustomApi: apiId => registry.has(apiId),
     async ensureUserApi(apiId) {
@@ -2845,6 +2844,17 @@ const createIntegrationHarness = (options = {}) => {
     getBuiltinCapabilities: () => undefined,
     getBuiltinApi() { throw new Error('integration sources are custom') },
     serverBusyMessages: new Set(),
+  })
+  const cache = factories.player.cache.createPlaybackUrlCache({
+    read: async key => durableCache.get(key) ?? null,
+    save: async(musicInfo, quality, url) => { durableCache.set(`${musicInfo.id}_${quality}`, url) },
+    remove: async key => {
+      invalidatedCacheKeys.push(key)
+      invalidatedQualities.push(key.slice(key.lastIndexOf('_') + 1))
+      cacheInvalidationObserver.emit(key)
+      if (options.holdCacheInvalidation) await cacheInvalidationGate.promise
+      durableCache.delete(key)
+    },
   })
   const observedCreateResolveSession = input => {
     sessionCreateCount++
@@ -2883,9 +2893,6 @@ const createIntegrationHarness = (options = {}) => {
     ...sessionFactories,
   })
 
-  const audioOperations = []
-  const currentTimeWrites = []
-  const mainAudio = new FakePlayerAudio(audioOperations, currentTimeWrites)
   const baseResource = factories.player.player.createPlayerResourceController({
     audio: mainAudio,
     canonicalizeUrl: value => value,
@@ -2900,13 +2907,6 @@ const createIntegrationHarness = (options = {}) => {
       return context
     },
   }
-  const preloadAudio = new FakeCoordinatorPreloadAudio(url => {
-    const songIdentity = urlIdentities.get(url)
-    if (!songIdentity) return
-    const binding = { songIdentity, url }
-    preloadBoundUrls.push(url)
-    preloadObserver.emit(binding)
-  })
   const coordinator = factories.player.coordinator.createPlaybackResolutionCoordinator({
     createRequest: facade.createPlaybackRequest,
     createPreloadAudio: () => preloadAudio,

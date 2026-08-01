@@ -9,7 +9,7 @@ import { setUserApi } from '@renderer/core/apiSource'
 import apiSourceInfo from '@renderer/utils/musicSdk/api-source-info'
 import { reconcilePlaybackSourceRegistry } from '@common/utils/playbackSourceSetting'
 
-const sendUserApiRequest: typeof sendUserApiRequestRemote = async(data) => {
+const sendUserApiRequest = async(data: LX.UserApi.LegacyUserApiRequestParams): Promise<any> => {
   let stop: () => void
   return new Promise<void>((resolve, reject) => {
     stop = watch(() => appSetting['common.apiSource'], () => {

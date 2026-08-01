@@ -185,13 +185,13 @@ export default () => {
     void (async() => {
       await ensureContinuousNextSongs()
       if (!isPlaybackOwnershipCurrent(ownership)) return
-      await playNext(true)
+      await playNext({ automatic: true, reason: 'natural_end' })
     })()
     // })
   }
 
   const setProgress = (time: number) => {
-    window.app_event.setProgress(time)
+    window.app_event.setProgress(time, 'hotkey')
   }
   const handleSeekforward = () => {
     const seekOffset = 5

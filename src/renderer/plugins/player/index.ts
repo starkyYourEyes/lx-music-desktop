@@ -593,6 +593,33 @@ export const onWaiting = (callback: Noop) => {
   }
 }
 
+export const onSeeking = (callback: Noop) => {
+  if (!audio) throw new Error('audio not defined')
+
+  audio.addEventListener('seeking', callback)
+  return () => {
+    audio?.removeEventListener('seeking', callback)
+  }
+}
+
+export const onSeeked = (callback: Noop) => {
+  if (!audio) throw new Error('audio not defined')
+
+  audio.addEventListener('seeked', callback)
+  return () => {
+    audio?.removeEventListener('seeked', callback)
+  }
+}
+
+export const onRatechange = (callback: Noop) => {
+  if (!audio) throw new Error('audio not defined')
+
+  audio.addEventListener('ratechange', callback)
+  return () => {
+    audio?.removeEventListener('ratechange', callback)
+  }
+}
+
 // 可见性改变
 export const onVisibilityChange = (callback: Noop) => {
   document.addEventListener('visibilitychange', callback)

@@ -150,7 +150,7 @@ export default () => {
     setLyricPlaybackRate(room.playback.rate)
 
     if (shouldSeek) {
-      window.app_event.setProgress(remoteProgress, remoteDuration)
+      window.app_event.setProgress(remoteProgress, 'party', remoteDuration)
       setCurrentTime(remoteProgress)
     }
 

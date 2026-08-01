@@ -26,7 +26,7 @@ export default () => {
       // 如果加载超时，则尝试刷新URL
       if (prevTimeoutId == musicInfo.id) {
         prevTimeoutId = null
-        void playNext(true)
+        void playNext({ automatic: true, reason: 'load_timeout' })
       } else {
         prevTimeoutId = musicInfo.id
         if (playMusicInfo.musicInfo) setMusicUrl(playMusicInfo.musicInfo, true)
@@ -53,7 +53,7 @@ export default () => {
         setAllStatus('')
         return
       }
-      void playNext(true)
+      void playNext({ automatic: true, reason: 'error' })
     }, 5000)
   }
 
@@ -97,7 +97,7 @@ export default () => {
     if (appSetting['player.autoSkipOnError']) {
       if (document.hidden) {
         console.warn('error skip to next')
-        void playNext(true)
+        void playNext({ automatic: true, reason: 'error' })
       } else {
         setAllStatus(t('player__error'))
         setTimeout(addDelayNextTimeout)

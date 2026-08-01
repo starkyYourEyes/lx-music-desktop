@@ -72,7 +72,7 @@ export default {
     })
 
     const setProgress = num => {
-      window.app_event.setProgress(num)
+      window.app_event.setProgress(num, 'bar')
     }
 
     // const handleSetProgress = event => {

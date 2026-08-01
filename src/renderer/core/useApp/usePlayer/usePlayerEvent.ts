@@ -9,6 +9,9 @@ import {
   onCanplay,
   onEmptied,
   onWaiting,
+  onSeeking,
+  onSeeked,
+  onRatechange,
   getErrorCode,
 } from '@renderer/plugins/player'
 
@@ -56,6 +59,15 @@ export default () => {
     console.log('onWaiting')
     window.app_event.playerWaiting()
   })
+  const rOnSeeking = onSeeking(() => {
+    window.app_event.playerSeeking()
+  })
+  const rOnSeeked = onSeeked(() => {
+    window.app_event.playerSeeked()
+  })
+  const rOnRatechange = onRatechange(() => {
+    window.app_event.playerRatechange()
+  })
 
 
   onBeforeUnmount(() => {
@@ -68,5 +80,8 @@ export default () => {
     rOnCanplay()
     rOnEmptied()
     rOnWaiting()
+    rOnSeeking()
+    rOnSeeked()
+    rOnRatechange()
   })
 }

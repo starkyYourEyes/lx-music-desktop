@@ -57,7 +57,7 @@ export default () => {
   }
 
   const setProgress = (time: number) => {
-    window.app_event.setProgress(time)
+    window.app_event.setProgress(time, 'media_session')
   }
 
   const setStop = () => {

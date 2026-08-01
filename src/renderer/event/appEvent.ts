@@ -1,4 +1,5 @@
 import Event from './Event'
+import type { PlaybackSeekOrigin, PlaybackSkipReason } from '@common/storage/playback'
 
 
 // {
@@ -34,12 +35,16 @@ export class AppEvent extends Event {
     this.emit('musicToggled')
   }
 
+  playbackAdvance(options: { automatic: boolean, reason: PlaybackSkipReason | 'natural_end' }) {
+    this.emit('playbackAdvance', options)
+  }
+
   /**
    * 手动改变进度
    * @param progress 进度
    */
-  setProgress(progress: number, maxPlayTime?: number) {
-    this.emit('setProgress', progress, maxPlayTime)
+  setProgress(progress: number, origin: PlaybackSeekOrigin, maxPlayTime?: number) {
+    this.emit('setProgress', progress, origin, maxPlayTime)
   }
 
   /**
@@ -122,6 +127,18 @@ export class AppEvent extends Event {
 
   playerWaiting() {
     this.emit('playerWaiting')
+  }
+
+  playerSeeking() {
+    this.emit('playerSeeking')
+  }
+
+  playerSeeked() {
+    this.emit('playerSeeked')
+  }
+
+  playerRatechange() {
+    this.emit('playerRatechange')
   }
 
   playerDeviceChanged() {

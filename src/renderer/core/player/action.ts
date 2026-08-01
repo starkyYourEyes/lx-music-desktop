@@ -23,6 +23,7 @@ import { loveList } from '@renderer/store/list/state'
 import { addDislikeInfo } from '@renderer/core/dislikeList'
 import musicSdk from '@renderer/utils/musicSdk'
 import { assertApiSupport } from '@renderer/store/utils'
+import type { PlaybackSkipReason } from '@common/storage/playback'
 
 interface SetMusicUrlOptions {
   isRefresh?: boolean
@@ -34,6 +35,11 @@ interface PlayMusicByInfoOptions extends SetMusicUrlOptions {
   listId?: string | null
   isTempPlay?: boolean
   clearTempList?: boolean
+}
+
+export interface PlaybackAdvanceOptions {
+  automatic: boolean
+  reason: PlaybackSkipReason | 'natural_end'
 }
 
 let gettingUrlId = ''
@@ -86,7 +92,7 @@ const normalizePlayMusicByInfoOptions = (options?: PlayMusicByInfoOptions): Requ
   }
 }
 
-const createDelayNextTimeout = (delay: number) => {
+const createDelayNextTimeout = (delay: number, options: PlaybackAdvanceOptions) => {
   let timeout: NodeJS.Timeout | null
   const clearDelayNextTimeout = () => {
     if (timeout) {
@@ -101,7 +107,7 @@ const createDelayNextTimeout = (delay: number) => {
       timeout = null
       if (window.lx.isPlayedStop) return
       console.warn('delay next timeout timeout', delay)
-      void playNext(true)
+      void playNext(options)
     }, delay)
   }
 
@@ -111,8 +117,8 @@ const createDelayNextTimeout = (delay: number) => {
   }
 }
 
-const { addDelayNextTimeout, clearDelayNextTimeout } = createDelayNextTimeout(5000)
-const { addDelayNextTimeout: addLoadTimeout, clearDelayNextTimeout: clearLoadTimeout } = createDelayNextTimeout(100000)
+const { addDelayNextTimeout, clearDelayNextTimeout } = createDelayNextTimeout(5000, { automatic: true, reason: 'error' })
+const { addDelayNextTimeout: addLoadTimeout, clearDelayNextTimeout: clearLoadTimeout } = createDelayNextTimeout(100000, { automatic: true, reason: 'load_timeout' })
 
 const getPartyQueueCurrentIndex = () => {
   const room = party.room
@@ -334,7 +340,7 @@ const handleRestorePlay = async(restorePlayInfo: LX.Player.SavedPlayInfo) => {
 
   setImmediate(() => {
     if (!isSameMusicIdentity(currentMusicInfo, playMusicInfo.musicInfo)) return
-    window.app_event.setProgress(appSetting['player.isSavePlayTime'] ? restorePlayInfo.time : 0, restorePlayInfo.maxTime)
+    window.app_event.setProgress(appSetting['player.isSavePlayTime'] ? restorePlayInfo.time : 0, 'restore', restorePlayInfo.maxTime)
     window.app_event.pause()
   })
 
@@ -376,15 +382,21 @@ export const playListById = (listId: string, id: string) => {
   setPlayListId(listId)
   const currentMusicInfo = getList(listId).find(m => m.id == id)
   if (!currentMusicInfo) return
+  window.app_event.playbackAdvance({ automatic: false, reason: 'select' })
   setPlayMusicInfo(listId, currentMusicInfo)
   if (appSetting['player.isAutoCleanPlayedList'] || prevListId != listId) clearPlayedList()
   clearTempPlayeList()
   handlePlay()
 }
 
-export const playList = (listId: string, index: number) => {
+export const playList = (
+  listId: string,
+  index: number,
+  advanceOptions: PlaybackAdvanceOptions = { automatic: false, reason: 'select' },
+) => {
   const prevListId = playInfo.playerListId
   setPlayListId(listId)
+  window.app_event.playbackAdvance(advanceOptions)
   setPlayMusicInfo(listId, getList(listId)[index])
   if (appSetting['player.isAutoCleanPlayedList'] || prevListId != listId) clearPlayedList()
   clearTempPlayeList()
@@ -396,6 +408,7 @@ export const playMusicByInfo = (musicInfo: LX.Music.MusicInfo, options?: PlayMus
   if (normalizedOptions.listId != null || !normalizedOptions.isTempPlay) {
     setPlayListId(normalizedOptions.listId)
   }
+  window.app_event.playbackAdvance({ automatic: false, reason: 'select' })
   setPlayMusicInfo(normalizedOptions.listId, musicInfo, normalizedOptions.isTempPlay)
   if (normalizedOptions.clearTempList) clearTempPlayeList()
   handlePlay({
@@ -405,7 +418,8 @@ export const playMusicByInfo = (musicInfo: LX.Music.MusicInfo, options?: PlayMus
   })
 }
 
-const handleToggleStop = () => {
+const handleToggleStop = (options: PlaybackAdvanceOptions) => {
+  if (playMusicInfo.musicInfo) window.app_event.playbackAdvance(options)
   stop()
   setTimeout(() => {
     setPlayMusicInfo(null, null)
@@ -495,33 +509,36 @@ export const getNextPlayMusicInfo = async(): Promise<LX.Player.PlayMusicInfo | n
   return nextPlayMusicInfo
 }
 
-const handlePlayNext = (nextPlayMusicInfo: LX.Player.PlayMusicInfo) => {
+const handlePlayNext = (nextPlayMusicInfo: LX.Player.PlayMusicInfo, options: PlaybackAdvanceOptions) => {
+  window.app_event.playbackAdvance(options)
   setPlayMusicInfo(nextPlayMusicInfo.listId, nextPlayMusicInfo.musicInfo, nextPlayMusicInfo.isTempPlay)
   handlePlay()
 }
 
-export const playNext = async(isAutoToggle = false): Promise<void> => {
+export const playNext = async(
+  options: PlaybackAdvanceOptions = { automatic: false, reason: 'next' },
+): Promise<void> => {
   const partyQueuePlayMusicInfo = getPartyQueuePlayMusicInfo(1)
   if (partyQueuePlayMusicInfo) {
-    handlePlayNext(partyQueuePlayMusicInfo)
+    handlePlayNext(partyQueuePlayMusicInfo, options)
     return
   }
 
   if (tempPlayList.length) {
     const currentPlayMusicInfo = tempPlayList[0]
     removeTempPlayList(0)
-    handlePlayNext(currentPlayMusicInfo)
+    handlePlayNext(currentPlayMusicInfo, options)
     return
   }
 
   if (playMusicInfo.musicInfo == null) {
-    handleToggleStop()
+    handleToggleStop(options)
     return
   }
 
   const currentListId = playInfo.playerListId
   if (!currentListId) {
-    handleToggleStop()
+    handleToggleStop(options)
     return
   }
   const currentList = getList(currentListId)
@@ -547,13 +564,13 @@ export const playNext = async(isAutoToggle = false): Promise<void> => {
     }
 
     if (index < playedList.length) {
-      handlePlayNext(playedList[index])
+      handlePlayNext(playedList[index], options)
       return
     }
   }
 
   if (randomNextMusicInfo.info) {
-    handlePlayNext(randomNextMusicInfo.info)
+    handlePlayNext(randomNextMusicInfo.info, options)
     return
   }
 
@@ -566,14 +583,14 @@ export const playNext = async(isAutoToggle = false): Promise<void> => {
   })
 
   if (!filteredList.length) {
-    handleToggleStop()
+    handleToggleStop(options)
     return
   }
   if (playerIndex == -1 && filteredList.length) playerIndex = 0
   let nextIndex = playerIndex
 
   let togglePlayMethod = appSetting['player.togglePlayMethod']
-  if (!isAutoToggle) {
+  if (!options.automatic) {
     switch (togglePlayMethod) {
       case 'list':
       case 'singleLoop':
@@ -602,24 +619,26 @@ export const playNext = async(isAutoToggle = false): Promise<void> => {
     musicInfo: filteredList[nextIndex],
     listId: currentListId,
     isTempPlay: false,
-  })
+  }, options)
 }
 
-export const playPrev = async(isAutoToggle = false): Promise<void> => {
+export const playPrev = async(
+  options: PlaybackAdvanceOptions = { automatic: false, reason: 'previous' },
+): Promise<void> => {
   const partyQueuePlayMusicInfo = getPartyQueuePlayMusicInfo(-1)
   if (partyQueuePlayMusicInfo) {
-    handlePlayNext(partyQueuePlayMusicInfo)
+    handlePlayNext(partyQueuePlayMusicInfo, options)
     return
   }
 
   if (playMusicInfo.musicInfo == null) {
-    handleToggleStop()
+    handleToggleStop(options)
     return
   }
 
   const currentListId = playInfo.playerListId
   if (!currentListId) {
-    handleToggleStop()
+    handleToggleStop(options)
     return
   }
   const currentList = getList(currentListId)
@@ -645,7 +664,7 @@ export const playPrev = async(isAutoToggle = false): Promise<void> => {
     }
 
     if (index > -1) {
-      handlePlayNext(playedList[index])
+      handlePlayNext(playedList[index], options)
       return
     }
   }
@@ -658,7 +677,7 @@ export const playPrev = async(isAutoToggle = false): Promise<void> => {
     isNext: false,
   })
   if (!filteredList.length) {
-    handleToggleStop()
+    handleToggleStop(options)
     return
   }
 
@@ -666,7 +685,7 @@ export const playPrev = async(isAutoToggle = false): Promise<void> => {
   let nextIndex = playerIndex
   if (!playMusicInfo.isTempPlay) {
     let togglePlayMethod = appSetting['player.togglePlayMethod']
-    if (!isAutoToggle) {
+    if (!options.automatic) {
       switch (togglePlayMethod) {
         case 'list':
         case 'singleLoop':
@@ -694,7 +713,7 @@ export const playPrev = async(isAutoToggle = false): Promise<void> => {
     musicInfo: filteredList[nextIndex],
     listId: currentListId,
     isTempPlay: false,
-  })
+  }, options)
 }
 
 export const play = () => {
@@ -740,5 +759,5 @@ export const dislikeMusic = async() => {
   if (!playMusicInfo.musicInfo) return
   const currentMusicInfo = 'progress' in playMusicInfo.musicInfo ? playMusicInfo.musicInfo.metadata.musicInfo : playMusicInfo.musicInfo
   await addDislikeInfo([{ name: currentMusicInfo.name, singer: currentMusicInfo.singer }])
-  await playNext(true)
+  await playNext({ automatic: true, reason: 'dislike' })
 }

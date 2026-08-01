@@ -227,9 +227,9 @@ export const dislikeQQDailyRecommendMusic = (
       )
       clearPlayedList()
       if (remainingSongs.length) {
-        playList(LIST_IDS.TEMP, removedIndex % remainingSongs.length)
+        playList(LIST_IDS.TEMP, removedIndex % remainingSongs.length, { automatic: true, reason: 'dislike' })
       } else {
-        await playNext(true)
+        await playNext({ automatic: true, reason: 'dislike' })
       }
       return true
     })

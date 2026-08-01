@@ -190,7 +190,6 @@ const modules = {
     save_theme: 'save_theme',
     remove_theme: 'remove_theme',
     stage_theme_image: 'stage_theme_image',
-    promote_theme_image: 'promote_theme_image',
     discard_theme_image: 'discard_theme_image',
     get_run_temp_root: 'get_run_temp_root',
 

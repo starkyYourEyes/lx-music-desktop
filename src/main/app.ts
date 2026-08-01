@@ -50,6 +50,7 @@ export const initGlobalData = () => {
     worker: createWorkers(),
     storage: null,
     runTemp: null,
+    themeAssets: null,
     hotKey: {
       enable: true,
       config: {

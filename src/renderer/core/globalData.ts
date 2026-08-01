@@ -32,6 +32,16 @@ window.lx = {
 
 window.lxData = {}
 
-void getRunTempRoot().then(runTempRoot => window.lx.worker.main.configureRunTempRoot(runTempRoot))
+void getRunTempRoot()
+  .then(
+    ownership => window.lx.worker.main.configureRunTempRoot(ownership),
+    async error => {
+      console.error('Could not acquire local artwork storage', error)
+      await window.lx.worker.main.configureRunTempRoot(null)
+    },
+  )
+  .catch(error => {
+    console.error('Could not configure local artwork storage', error)
+  })
 
 window.ELECTRON_DISABLE_SECURITY_WARNINGS = process.env.ELECTRON_DISABLE_SECURITY_WARNINGS

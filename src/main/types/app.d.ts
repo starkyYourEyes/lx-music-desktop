@@ -10,6 +10,7 @@ import { type AccountRepository } from '@main/storage/accounts/accountRepository
 import { type StoragePaths } from '@main/utils/storagePaths'
 import { type PortableProfileStartupToken } from '@main/migration/portableProfile'
 import { type RunTempHandle } from '@main/utils/tempLifecycle'
+import { type ThemeAssetManager } from '@main/services/themeAssetManager'
 
 interface Lx {
   inited: boolean
@@ -35,6 +36,7 @@ interface Lx {
   }
   storage: StorageCoordinator | null
   runTemp: RunTempHandle | null
+  themeAssets: ThemeAssetManager | null
   credentialVault?: CredentialVault
   credentialMigration?: CredentialMigrationResult
   accountRepository?: AccountRepository

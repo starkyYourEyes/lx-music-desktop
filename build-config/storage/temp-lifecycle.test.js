@@ -14,8 +14,9 @@ process.env.TEMP = fixtureBase
 process.env.TMP = fixtureBase
 
 const modulePath = path.join(__dirname, '../../src/main/utils/tempLifecycle.ts')
-const loadLifecycle = () => loadTsModule(modulePath, {
+const loadLifecycle = (fsPromises = fsp) => loadTsModule(modulePath, {
   '@main/utils/storagePaths': loadTsModule(path.join(__dirname, '../../src/main/utils/storagePaths.ts')),
+  'node:fs/promises': fsPromises,
 })
 
 const exists = async(targetPath) => await fsp.lstat(targetPath).then(() => true, () => false)
@@ -52,11 +53,11 @@ test('startup scavenging removes a marked stale run but refuses an unmarked dire
     const staleRun = path.join(tempRoot, 'run-stale')
     const foreignRun = path.join(tempRoot, 'run-foreign')
     await fsp.mkdir(staleRun, { recursive: true })
-    await fsp.writeFile(path.join(staleRun, '.owner.v1.json'), JSON.stringify({ version: 1, runId: 'stale' }))
     await fsp.mkdir(foreignRun, { recursive: true })
     await fsp.writeFile(path.join(foreignRun, 'keep.txt'), 'preserve')
 
-    const { scavengeRunTempRoots } = loadLifecycle()
+    const { createRunTempHandle, scavengeRunTempRoots } = loadLifecycle()
+    await createRunTempHandle({ tempRoot, runTempRoot: staleRun, runId: 'stale' })
     await scavengeRunTempRoots(tempRoot)
 
     assert.equal(await exists(staleRun), false)
@@ -80,6 +81,115 @@ test('local artwork child is contained in its main-owned run directory', async()
     assert.equal(path.dirname(artwork), runTempRoot)
     assert.equal((await fsp.lstat(artwork)).isDirectory(), true)
     await assert.rejects(handle.createChild('artwork'), /run_temp_child_invalid/)
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('cleanup refuses a replacement directory with copied owner bytes', async() => {
+  // Catches cleanup that trusts copied marker contents instead of the run and marker node identities.
+  const fixture = createTestStorageRoot('temp-replaced-run')
+  try {
+    const tempRoot = path.join(fixture.path, 'temp')
+    const runTempRoot = path.join(tempRoot, 'run-current')
+    const originalRun = path.join(tempRoot, 'original-run-node')
+    const replacementSentinel = path.join(runTempRoot, 'replacement.txt')
+    await fsp.mkdir(runTempRoot, { recursive: true })
+    let armReplacement = false
+    let replaced = false
+    const injectedFs = {
+      ...fsp,
+      async readFile(targetPath, ...args) {
+        const bytes = await fsp.readFile(targetPath, ...args)
+        if (armReplacement && !replaced && path.basename(String(targetPath)) == '.owner.v1.json') {
+          replaced = true
+          await fsp.rename(runTempRoot, originalRun)
+          await fsp.mkdir(runTempRoot)
+          await fsp.writeFile(path.join(runTempRoot, '.owner.v1.json'), bytes)
+          await fsp.writeFile(replacementSentinel, 'preserve replacement')
+        }
+        return bytes
+      },
+    }
+    const { createRunTempHandle } = loadLifecycle(injectedFs)
+    const handle = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+    armReplacement = true
+
+    await assert.rejects(handle.cleanup(), /run_temp_(root|owner)_invalid/)
+
+    assert.equal(await fsp.readFile(replacementSentinel, 'utf8'), 'preserve replacement')
+    assert.equal(await exists(originalRun), true)
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('cleanup quarantines the owned run before recursive removal', async() => {
+  // Catches cleanup that recursively removes the published run path after another node appears there.
+  const fixture = createTestStorageRoot('temp-quarantine')
+  try {
+    const tempRoot = path.join(fixture.path, 'temp')
+    const runTempRoot = path.join(tempRoot, 'run-current')
+    const replacementSentinel = path.join(runTempRoot, 'replacement.txt')
+    await fsp.mkdir(runTempRoot, { recursive: true })
+    let injectedReplacement = false
+    const injectedFs = {
+      ...fsp,
+      async rename(source, target) {
+        await fsp.rename(source, target)
+        if (!injectedReplacement && path.resolve(String(source)) == path.resolve(runTempRoot)) {
+          injectedReplacement = true
+          await fsp.mkdir(runTempRoot)
+          await fsp.writeFile(replacementSentinel, 'preserve replacement')
+        }
+      },
+    }
+    const { createRunTempHandle } = loadLifecycle(injectedFs)
+    const handle = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+
+    await handle.cleanup()
+
+    assert.equal(injectedReplacement, true)
+    assert.equal(await fsp.readFile(replacementSentinel, 'utf8'), 'preserve replacement')
+    const quarantineEntries = (await fsp.readdir(tempRoot)).filter(name => name.includes('quarantine'))
+    assert.deepEqual(quarantineEntries, [])
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('cleanup restores a replacement moved by the quarantine rename race', async() => {
+  // Catches quarantine that strands an unowned replacement after it wins the validation-to-rename race.
+  const fixture = createTestStorageRoot('temp-quarantine-replacement')
+  try {
+    const tempRoot = path.join(fixture.path, 'temp')
+    const runTempRoot = path.join(tempRoot, 'run-current')
+    const parkedOriginal = path.join(tempRoot, 'parked-original')
+    const replacementSentinel = path.join(runTempRoot, 'replacement.txt')
+    await fsp.mkdir(runTempRoot, { recursive: true })
+    let swapped = false
+    const injectedFs = {
+      ...fsp,
+      async rename(source, target) {
+        if (!swapped && path.resolve(String(source)) == path.resolve(runTempRoot)) {
+          swapped = true
+          const markerBytes = await fsp.readFile(path.join(runTempRoot, '.owner.v1.json'))
+          await fsp.rename(runTempRoot, parkedOriginal)
+          await fsp.mkdir(runTempRoot)
+          await fsp.writeFile(path.join(runTempRoot, '.owner.v1.json'), markerBytes)
+          await fsp.writeFile(replacementSentinel, 'preserve replacement')
+        }
+        return fsp.rename(source, target)
+      },
+    }
+    const { createRunTempHandle } = loadLifecycle(injectedFs)
+    const handle = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+
+    await assert.rejects(handle.cleanup(), /run_temp_(root|owner)_invalid/)
+
+    assert.equal(swapped, true)
+    assert.equal(await fsp.readFile(replacementSentinel, 'utf8'), 'preserve replacement')
+    assert.equal(await exists(parkedOriginal), true)
   } finally {
     fixture.cleanup()
   }

@@ -18,6 +18,7 @@ import { showStorageRecovery } from '@main/startup/recovery'
 import { readLegacyDataSource } from '@main/migration/legacyData/source'
 import { acknowledgePortableProfileStartup } from '@main/migration/portableProfile'
 import { createRunTempHandle, scavengeRunTempRoots } from '@main/utils/tempLifecycle'
+import { createThemeAssetManager } from '@main/services/themeAssetManager'
 
 let isFinishingStorageShutdown = false
 
@@ -31,9 +32,16 @@ const getStorageCoordinator = () => {
         tempRoot: global.storagePaths.tempRoot,
         runTempRoot: global.storagePaths.runTempRoot,
       })
+      const themeAssets = createThemeAssetManager({
+        profileRoot: global.storagePaths.profileRoot,
+        runTemp: global.lx.runTemp,
+      })
+      await themeAssets.prepareThemeAssetStorage()
+      global.lx.themeAssets = themeAssets
     },
     cleanupTempLifecycle: async() => {
       const runTemp = global.lx.runTemp
+      global.lx.themeAssets = null
       global.lx.runTemp = null
       await runTemp?.cleanup()
     },

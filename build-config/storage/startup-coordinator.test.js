@@ -2,10 +2,12 @@ const assert = require('node:assert/strict')
 const childProcess = require('node:child_process')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
+const fsp = require('node:fs/promises')
 const Module = require('node:module')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
+const loadTsModule = require('../../scripts/test-utils/load-ts-module')
 
 // Storage coordinator tests run source TypeScript directly so they can inject
 // process boundaries without starting Electron or a worker thread.
@@ -807,6 +809,92 @@ describe('storage startup coordinator', () => {
     await assert.rejects(coordinator.shutdown(), /store_flush_failed/)
 
     assert.deepEqual(calls, ['stores:flush', 'db:close'])
+  })
+
+  it('cleans the owned run after database close while preserving the first shutdown failure', async() => {
+    // Catches an early shutdown throw that skips temp cleanup, or cleanup that replaces the first failure.
+    const fixtureRoot = tempDirectory('shutdown-temp-cleanup')
+    const tempRoot = path.join(fixtureRoot, 'temp')
+    const runTempRoot = path.join(tempRoot, 'run-current')
+    await fsp.mkdir(runTempRoot, { recursive: true })
+    const storagePathsModule = loadTsModule(path.join(__dirname, '../../src/main/utils/storagePaths.ts'))
+    const { createRunTempHandle } = loadTsModule(path.join(__dirname, '../../src/main/utils/tempLifecycle.ts'), {
+      '@main/utils/storagePaths': storagePathsModule,
+    })
+    const handle = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+    const firstFailure = new Error('first_store_failure')
+    const { calls, deps } = createDeps({
+      flushStores: async() => {
+        calls.push('stores:flush')
+        throw firstFailure
+      },
+      closeDatabase: async() => {
+        calls.push('db:close')
+        throw new Error('later_database_failure')
+      },
+      cleanupTempLifecycle: async() => {
+        calls.push('temp:cleanup')
+        await handle.cleanup()
+      },
+    })
+    const coordinator = createCoordinator(deps)
+    await coordinator.start()
+    calls.length = 0
+
+    await assert.rejects(coordinator.shutdown(), error => error === firstFailure)
+
+    assert.deepEqual(calls, ['stores:flush', 'db:close', 'temp:cleanup'])
+    assert.equal(fs.existsSync(runTempRoot), false)
+  })
+
+  it('cleans the owned run when marking the run clean fails', async() => {
+    // Catches a post-database markClean rejection that bypasses the temp lifecycle finally block.
+    const fixtureRoot = tempDirectory('shutdown-mark-cleanup')
+    const tempRoot = path.join(fixtureRoot, 'temp')
+    const runTempRoot = path.join(tempRoot, 'run-current')
+    await fsp.mkdir(runTempRoot, { recursive: true })
+    const storagePathsModule = loadTsModule(path.join(__dirname, '../../src/main/utils/storagePaths.ts'))
+    const { createRunTempHandle } = loadTsModule(path.join(__dirname, '../../src/main/utils/tempLifecycle.ts'), {
+      '@main/utils/storagePaths': storagePathsModule,
+    })
+    const handle = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+    const markFailure = new Error('run_state_clean_failed')
+    const { calls, deps } = createDeps({
+      cleanupTempLifecycle: async() => {
+        calls.push('temp:cleanup')
+        await handle.cleanup()
+      },
+    })
+    deps.runState.markClean = async() => {
+      calls.push('run-state:clean')
+      throw markFailure
+    }
+    const coordinator = createCoordinator(deps)
+    await coordinator.start()
+    calls.length = 0
+
+    await assert.rejects(coordinator.shutdown(), error => error === markFailure)
+
+    assert.deepEqual(calls, ['stores:flush', 'db:close', 'run-state:clean', 'temp:cleanup'])
+    assert.equal(fs.existsSync(runTempRoot), false)
+  })
+
+  it('rejects when temp cleanup is the only shutdown failure', async() => {
+    // Catches cleanup errors that are recorded after the last throw check and then silently resolved.
+    const cleanupFailure = new Error('shutdown_temp_cleanup_failed')
+    const { calls, deps } = createDeps({
+      cleanupTempLifecycle: async() => {
+        calls.push('temp:cleanup')
+        throw cleanupFailure
+      },
+    })
+    const coordinator = createCoordinator(deps)
+    await coordinator.start()
+    calls.length = 0
+
+    await assert.rejects(coordinator.shutdown(), error => error === cleanupFailure)
+
+    assert.deepEqual(calls, ['stores:flush', 'db:close', 'run-state:clean', 'temp:cleanup'])
   })
 })
 

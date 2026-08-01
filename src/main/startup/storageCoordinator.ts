@@ -537,9 +537,9 @@ export const createStorageCoordinator = (
           code: 'shutdown_flush_timeout',
           flusherNames: flusherResult.timedOut,
         })
-        failure = errorWithCode('shutdown_flush_timeout')
+        failure ??= errorWithCode('shutdown_flush_timeout')
       } else if (flusherResult.failed) {
-        failure = errorWithCode('shutdown_flusher_failed')
+        failure ??= errorWithCode('shutdown_flusher_failed')
       }
 
       try {
@@ -553,18 +553,23 @@ export const createStorageCoordinator = (
         failure ??= error instanceof Error ? error : errorWithCode('shutdown_database_close_failed')
       }
 
-      if (failure != null) throw failure
-      if (runHasStarted && startupReachedReady) await dependencies.runState.markClean()
-      if (portableProfileAcknowledgement != null) {
-        const acknowledgePortableProfile = portableProfileAcknowledgement
-        portableProfileAcknowledgement = null
-        await acknowledgePortableProfile()
-      }
       try {
-        await dependencies.cleanupTempLifecycle?.()
+        if (failure == null && runHasStarted && startupReachedReady) await dependencies.runState.markClean()
+        if (failure == null && portableProfileAcknowledgement != null) {
+          const acknowledgePortableProfile = portableProfileAcknowledgement
+          portableProfileAcknowledgement = null
+          await acknowledgePortableProfile()
+        }
       } catch (error) {
-        failure ??= error instanceof Error ? error : errorWithCode('shutdown_temp_cleanup_failed')
+        failure ??= error instanceof Error ? error : errorWithCode('shutdown_finalize_failed')
+      } finally {
+        try {
+          await dependencies.cleanupTempLifecycle?.()
+        } catch (error) {
+          failure ??= error instanceof Error ? error : errorWithCode('shutdown_temp_cleanup_failed')
+        }
       }
+      if (failure != null) throw failure
     })()
     return shutdownPromise
   }

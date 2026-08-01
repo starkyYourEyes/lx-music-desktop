@@ -17,6 +17,7 @@ import {
   type SettingsDocumentV1,
 } from '@main/storage/settings/document'
 import { normalizePlaybackSourceSetting } from '@common/utils/playbackSourceSetting'
+import type { ThemeAssetManager } from '@main/services/themeAssetManager'
 
 export const parseEnvParams = (argv = process.argv): { cmdParams: LX.CmdParams, deeplink: string | null } => {
   const cmdParams: LX.CmdParams = {}
@@ -314,27 +315,25 @@ export const openDevTools = (webContents: Electron.WebContents) => {
 
 
 let userThemes: LX.Theme[]
-export const getAllThemes = () => {
+let themeWriteTail: Promise<void> = Promise.resolve()
+
+const getUserThemes = (): LX.Theme[] => {
   userThemes ??= getStore(STORE_NAMES.THEME).get('themes') as (LX.Theme[] | null) ?? []
+  return userThemes
+}
+
+export const getAllThemes = () => {
   return {
     themes,
-    userThemes,
+    userThemes: getUserThemes(),
     dataPath: joinPath(global.storagePaths.profileRoot, 'assets', 'theme-images'),
   }
 }
 
-export const saveTheme = (theme: LX.Theme) => {
-  const targetTheme = userThemes.find(t => t.id === theme.id)
-  if (targetTheme) Object.assign(targetTheme, theme)
-  else userThemes.push(theme)
-  getStore(STORE_NAMES.THEME).set('themes', userThemes)
-}
-
-export const removeTheme = (id: string) => {
-  const index = userThemes.findIndex(t => t.id === id)
-  if (index < 0) return
-  userThemes.splice(index, 1)
-  getStore(STORE_NAMES.THEME).set('themes', userThemes)
+const serializeThemeWrite = async<T>(operation: () => Promise<T>): Promise<T> => {
+  const result = themeWriteTail.then(operation)
+  themeWriteTail = result.then(() => undefined, () => undefined)
+  return result
 }
 
 const copyTheme = (theme: LX.Theme): LX.Theme => {
@@ -347,6 +346,40 @@ const copyTheme = (theme: LX.Theme): LX.Theme => {
     },
   }
 }
+
+const persistTheme = async(theme: LX.Theme): Promise<LX.ThemeSaveResult> => {
+  const canonicalTheme = copyTheme(theme)
+  const nextThemes = getUserThemes().map(copyTheme)
+  const index = nextThemes.findIndex(item => item.id == canonicalTheme.id)
+  if (index < 0) nextThemes.push(canonicalTheme)
+  else nextThemes.splice(index, 1, canonicalTheme)
+  await getStore(STORE_NAMES.THEME).setDurable('themes', nextThemes)
+  userThemes = nextThemes
+  return { theme: canonicalTheme, userThemes: nextThemes }
+}
+
+export const saveTheme = async(
+  input: LX.ThemeSaveRequest,
+  themeAssets: ThemeAssetManager,
+): Promise<LX.ThemeSaveResult> => serializeThemeWrite(async() => {
+  const theme = copyTheme(input.theme)
+  if (input.stagingId == null) return persistTheme(theme)
+  return themeAssets.promoteThemeImage({ stagingId: input.stagingId }, async promoted => {
+    theme.config.extInfo['--background-image'] = promoted.fileName
+    return persistTheme(theme)
+  })
+})
+
+export const removeTheme = async(id: string): Promise<LX.Theme[]> => serializeThemeWrite(async() => {
+  const currentThemes = getUserThemes()
+  const index = currentThemes.findIndex(theme => theme.id == id)
+  if (index < 0) return currentThemes
+  const nextThemes = currentThemes.map(copyTheme)
+  nextThemes.splice(index, 1)
+  await getStore(STORE_NAMES.THEME).setDurable('themes', nextThemes)
+  userThemes = nextThemes
+  return nextThemes
+})
 export const getTheme = () => {
   // fs.promises.readdir()
   const shouldUseDarkColors = nativeTheme.shouldUseDarkColors

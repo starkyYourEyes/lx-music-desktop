@@ -142,7 +142,7 @@ import useCloseBtnColor from './useCloseBtnColor'
 import useMinBtnColor from './useMinBtnColor'
 import useHideBtnColor from './useHideBtnColor'
 import { appSetting, updateSetting } from '@renderer/store/setting'
-import { discardThemeImage, promoteThemeImage, removeTheme, saveTheme, showSelectDialog, stageThemeImage } from '@renderer/utils/ipc'
+import { discardThemeImage, removeTheme, saveTheme, showSelectDialog, stageThemeImage } from '@renderer/utils/ipc'
 import { dialog } from '@renderer/plugins/Dialog'
 import { themeInfo } from '@renderer/store'
 
@@ -167,7 +167,6 @@ export default {
     const preview = ref(false)
     const bgImg = ref('')
     let bgImgRaw = ''
-    let currentBgPath = ''
     let currentBgStagingId = ''
     const takeCurrentBgStagingId = () => {
       const stagingId = currentBgStagingId
@@ -256,7 +255,6 @@ export default {
       themeName.value = theme.name
       isDark.value = theme.isDark
       isDarkFont.value = theme.isDarkFont ?? false
-      currentBgPath = ''
       if (theme.config.extInfo['--background-image'] == 'none') {
         bgImg.value = ''
         bgImgRaw = ''
@@ -390,7 +388,7 @@ export default {
       if (previousStagingId) await discardThemeImage(previousStagingId)
       const staged = await stageThemeImage(path)
       currentBgStagingId = staged.stagingId
-      currentBgPath = bgImgRaw = staged.previewPath
+      bgImgRaw = staged.previewPath
       bgImg.value = encodePath(bgImgRaw)
       theme.config.extInfo['--background-image'] = 'none'
 
@@ -400,7 +398,6 @@ export default {
       if (currentBgStagingId) {
         void discardThemeImage(currentBgStagingId)
         takeCurrentBgStagingId()
-        currentBgPath = ''
       }
       bgImg.value = ''
       bgImgRaw = ''
@@ -432,23 +429,20 @@ export default {
       emit('update:modelValue', false)
     }
     // 保存
+    const commitTheme = async() => {
+      const stagingId = currentBgStagingId || undefined
+      const result = await saveTheme(theme, stagingId)
+      themeInfo.userThemes.splice(0, themeInfo.userThemes.length, ...result.userThemes)
+      if (stagingId != null && currentBgStagingId == stagingId) currentBgStagingId = ''
+      handlePreview(false)
+      emit('submit')
+      emit('update:modelValue', false)
+    }
     const handleSubmit = async() => {
       if (!themeName.value) return
       theme.name = themeName.value.substring(0, 20)
       // 保存新背景
-      if (currentBgStagingId) {
-        const promoted = await promoteThemeImage({ stagingId: currentBgStagingId, previewPath: currentBgPath })
-        takeCurrentBgStagingId()
-        theme.config.extInfo['--background-image'] = promoted.fileName
-      }
-      if (props.themeId) {
-        const index = themeInfo.userThemes.findIndex(t => t.id == theme.id)
-        if (index > -1) themeInfo.userThemes.splice(index, 1, theme)
-      } else themeInfo.userThemes.push(theme)
-      handlePreview(false)
-      await saveTheme(theme)
-      emit('submit')
-      emit('update:modelValue', false)
+      await commitTheme()
     }
     // 删除
     const handleRemove = async() => {
@@ -490,16 +484,7 @@ export default {
       theme.name = themeName.value.substring(0, 20)
       theme.id = 'user_theme_' + Date.now()
       // 保存新背景
-      if (currentBgStagingId) {
-        const promoted = await promoteThemeImage({ stagingId: currentBgStagingId, previewPath: currentBgPath })
-        takeCurrentBgStagingId()
-        theme.config.extInfo['--background-image'] = promoted.fileName
-      }
-      themeInfo.userThemes.push(theme)
-      handlePreview(false)
-      await saveTheme(theme)
-      emit('submit')
-      emit('update:modelValue', false)
+      await commitTheme()
     }
 
     return {

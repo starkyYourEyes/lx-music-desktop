@@ -578,21 +578,18 @@ export const getLyricEditedCount = async() => {
 }
 
 
-export const saveTheme = async(theme: LX.Theme) => {
-  return rendererInvoke<LX.Theme>(WIN_MAIN_RENDERER_EVENT_NAME.save_theme, theme)
+export const saveTheme = async(theme: LX.Theme, stagingId?: string) => {
+  return rendererInvoke<LX.ThemeSaveRequest, LX.ThemeSaveResult>(WIN_MAIN_RENDERER_EVENT_NAME.save_theme, { theme, stagingId })
 }
 export const stageThemeImage = async(sourcePath: string) => {
   return rendererInvoke<{ sourcePath: string }, LX.StagedThemeImage>(WIN_MAIN_RENDERER_EVENT_NAME.stage_theme_image, { sourcePath })
 }
-export const promoteThemeImage = async(staged: LX.StagedThemeImage) => {
-  return rendererInvoke<LX.StagedThemeImage, LX.PromotedThemeImage>(WIN_MAIN_RENDERER_EVENT_NAME.promote_theme_image, staged)
-}
 export const discardThemeImage = async(stagingId: string) => {
   return rendererInvoke<{ stagingId: string }>(WIN_MAIN_RENDERER_EVENT_NAME.discard_theme_image, { stagingId })
 }
-export const getRunTempRoot = async() => rendererInvoke<string>(WIN_MAIN_RENDERER_EVENT_NAME.get_run_temp_root)
+export const getRunTempRoot = async() => rendererInvoke<LX.RunTempChildOwnership>(WIN_MAIN_RENDERER_EVENT_NAME.get_run_temp_root)
 export const removeTheme = async(id: string) => {
-  return rendererInvoke<string>(WIN_MAIN_RENDERER_EVENT_NAME.remove_theme, id)
+  return rendererInvoke<string, LX.Theme[]>(WIN_MAIN_RENDERER_EVENT_NAME.remove_theme, id)
 }
 export const getThemes = async() => {
   return rendererInvoke<{ themes: LX.Theme[], userThemes: LX.Theme[], dataPath: string }>(WIN_MAIN_RENDERER_EVENT_NAME.get_themes)

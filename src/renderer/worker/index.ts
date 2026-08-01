@@ -1,9 +1,9 @@
 import { createMainWorker, createDownloadWorker } from './utils'
 
 
-export default (runTempRoot?: string) => {
+export default () => {
   return {
-    main: createMainWorker(runTempRoot),
+    main: createMainWorker(),
     download: createDownloadWorker(),
   }
 }

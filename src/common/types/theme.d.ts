@@ -298,9 +298,13 @@ declare namespace LX {
     stagingId: string
     previewPath: string
   }
-  interface PromotedThemeImage {
-    fileName: string
-    previewPath: string
+  interface ThemeSaveRequest {
+    theme: Theme
+    stagingId?: string
+  }
+  interface ThemeSaveResult {
+    theme: Theme
+    userThemes: Theme[]
   }
 
   interface ThemeSetting {

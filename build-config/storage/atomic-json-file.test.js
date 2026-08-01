@@ -442,6 +442,18 @@ describe('atomic JSON file', () => {
 })
 
 describe('Store atomic persistence', () => {
+  it('publishes a durable value only after atomic replacement succeeds', async() => {
+    // Catches an awaitable Store API that mutates observable memory before a failed durable write.
+    const { target } = await createFixture('store-durable-failure')
+    await fsp.writeFile(target, '{"value":1}')
+    const store = new Store(target, false, withFailingTempSync())
+
+    await assert.rejects(store.setDurable('value', 2), /Store persistence failed/)
+
+    assert.equal(store.get('value'), 1)
+    assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { value: 1 })
+  })
+
   it('updates memory immediately, queues a cloned snapshot, and flushes it', async() => {
     const { target } = await createFixture('store-clone')
     const store = new Store(target)

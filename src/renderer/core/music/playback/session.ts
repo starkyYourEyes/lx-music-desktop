@@ -617,15 +617,16 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
       }
       const attempt = activeAttempt
       if (attempt) {
-        const failure = failureData
-          ? normalizeFailure(Object.assign(new Error(failureData.message), failureData), attempt.apiId, candidate.platform)
-          : createPlaybackSourceError({
-            message: 'Playback candidate failed media validation',
-            scope: 'candidate',
-            kind: 'mediaValidation',
-            apiId: attempt.apiId,
-            platform: candidate.platform,
-          })
+        const suppliedMessage = typeof failureData?.message == 'string'
+          ? failureData.message.split(/\r?\n/, 1)[0].substring(0, 1024)
+          : ''
+        const failure = createPlaybackSourceError({
+          message: suppliedMessage || 'Playback candidate failed media validation',
+          scope: 'candidate',
+          kind: 'mediaValidation',
+          apiId: attempt.apiId,
+          platform: candidate.platform,
+        })
         attempt.failures.push(failure)
       }
       return 'resumed'

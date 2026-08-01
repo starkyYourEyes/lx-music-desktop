@@ -11,7 +11,10 @@ export const normalizeRuntimeFailure = (
   context: { apiId: string, kind?: LX.Playback.SourceFailureKind, cancelled?: boolean },
 ): LX.Playback.SourceFailureData => {
   const value = err != null && typeof err == 'object' ? err as Record<string, unknown> : {}
-  const statusCode = typeof value.statusCode == 'number' ? value.statusCode : undefined
+  const statusCode = typeof value.statusCode == 'number' &&
+    Number.isInteger(value.statusCode) && value.statusCode >= 100 && value.statusCode <= 599
+    ? value.statusCode
+    : undefined
   const message = firstLine(value.message, 1024) || 'Playback source request failed'
   const code = firstLine(value.code, 64).toUpperCase()
   const messageKey = message.trim().toLowerCase()

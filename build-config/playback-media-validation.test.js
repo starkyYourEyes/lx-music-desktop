@@ -4,6 +4,7 @@ const {
   createCacheHarness,
   createIntegrationHarness,
   createCoordinatorHarness,
+  createPlaybackPreloadAudioHarness,
   createPlayerHarness,
   createPreloadSchedulingHarness,
   createFakeClock,
@@ -19,6 +20,13 @@ const {
   toPlaybackCachePersistenceFailure,
   observePlaybackCachePersistence,
 } = require('./test-utils/playback-fallback-harness')
+
+test('preload validation audio mirrors the real player CORS mode', () => {
+  const audio = createPlaybackPreloadAudioHarness()
+  assert.equal(audio.muted, true)
+  assert.equal(audio.preload, 'auto')
+  assert.equal(audio.crossOrigin, 'anonymous')
+})
 
 test('candidate validation consumes error without legacy refresh skip or duplicate error', async() => {
   const harness = createPlayerHarness()
@@ -484,6 +492,18 @@ test('foreground adopts the same pending work while a matching preload is resolv
   assert.equal(harness.preloadValidator.bound, false)
 })
 
+test('different-song foreground replaces the obsolete preload exactly once', async() => {
+  const harness = createCoordinatorHarness()
+  const preload = await harness.startPreload(songA)
+
+  const foreground = await harness.startForeground(songB)
+
+  assert.notEqual(foreground.songIdentity, preload.songIdentity)
+  assert.deepEqual(harness.sessionCancelReasons, ['preloadReplaced'])
+  assert.equal(harness.preloadCanplay(preload), 'stale')
+  assert.equal(harness.createRequestCount, 2)
+})
+
 test('a session returned after its pending preload request was cancelled releases its lease once', async() => {
   const requestGate = deferred()
   const harness = createCoordinatorHarness({ createRequest: () => requestGate.promise })
@@ -582,6 +602,24 @@ test('promotion adopts the exact next-candidate promise after a preload media er
   assert.equal(harness.nextCandidateCount, 2)
   assert.deepEqual(harness.preloadValidator.boundUrls, ['https://a'])
   assert.equal(harness.createRequestCount, 1)
+})
+
+test('queued preload events cannot settle the next candidate binding', async() => {
+  const harness = createCoordinatorHarness({
+    sourceUrls: ['https://old', 'https://next'],
+  })
+  const first = await harness.startPreload(song)
+  const queuedCanplay = harness.queuePreloadEvent('canplay')
+
+  assert.equal(harness.preloadError(first), 'resumed')
+  await harness.flush()
+  const next = harness.currentPreloadCandidate()
+  assert.equal(next.url, 'https://next')
+
+  assert.equal(queuedCanplay(), 'stale')
+  assert.equal(harness.cacheCommitCount, 0)
+  assert.equal(harness.preloadCanplay(next), 'accepted')
+  assert.equal(harness.cacheCommitCount, 1)
 })
 
 test('a promoted validating preload retains its old settings snapshot', async() => {

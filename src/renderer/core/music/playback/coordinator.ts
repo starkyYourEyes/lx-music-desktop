@@ -107,13 +107,13 @@ interface ActiveResolution {
   pendingResource: Promise<DirectPlaybackResource | CandidatePlaybackResource> | null
   validated: ValidatedPlaybackResource | null
   validationTimer: ReturnType<typeof setTimeout> | null
-  preloadAudio: HTMLAudioElement | null
   cancelReason: PlaybackCancelReason | null
 }
 
 interface PreloadBinding {
   record: ActiveResolution
   resource: DirectPlaybackResource | CandidatePlaybackResource
+  audio: HTMLAudioElement
   handleError: () => 'resumed' | 'expired' | 'stale'
   handleCanplay: () => 'accepted' | 'expired' | 'stale'
 }
@@ -188,8 +188,6 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
   let foregroundHandlers: ForegroundResolutionHandlers | null = null
   let preloadBinding: PreloadBinding | null = null
   let disposed = false
-  const preloadAudio = deps.createPreloadAudio()
-  preloadAudio.muted = true
 
   const isCurrent = (record: ActiveResolution) => (
     record.owner == 'foreground' ? foreground == record : preload == record
@@ -203,13 +201,12 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
     const binding = preloadBinding
     clearValidationTimer(record)
     if (!binding || binding.record != record) return
-    preloadAudio.removeEventListener('error', binding.handleError)
-    preloadAudio.removeEventListener('canplay', binding.handleCanplay)
-    preloadAudio.pause()
-    preloadAudio.removeAttribute('src')
-    preloadAudio.load()
+    binding.audio.removeEventListener('error', binding.handleError)
+    binding.audio.removeEventListener('canplay', binding.handleCanplay)
+    binding.audio.pause()
+    binding.audio.removeAttribute('src')
+    binding.audio.load()
     preloadBinding = null
-    record.preloadAudio = null
   }
   const removeFromSlot = (record: ActiveResolution) => {
     if (foreground == record) foreground = null
@@ -256,7 +253,6 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
     pendingResource: null,
     validated: null,
     validationTimer: null,
-    preloadAudio: owner == 'preload' ? preloadAudio : null,
     cancelReason: null,
   })
   const matchesCandidate = (
@@ -379,16 +375,18 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
     resource: DirectPlaybackResource | CandidatePlaybackResource,
   ) => {
     detachPreloadValidator(record)
-    record.preloadAudio = preloadAudio
+    const audio = deps.createPreloadAudio()
+    audio.muted = true
     const binding: PreloadBinding = {
       record,
       resource,
+      audio,
       handleError: () => preloadError(binding),
       handleCanplay: () => preloadCanplay(binding),
     }
     preloadBinding = binding
-    preloadAudio.addEventListener('error', binding.handleError)
-    preloadAudio.addEventListener('canplay', binding.handleCanplay)
+    audio.addEventListener('error', binding.handleError)
+    audio.addEventListener('canplay', binding.handleCanplay)
     if (resource.kind == 'candidate') {
       const remaining = Math.max(0, resource.deadlineAt - deps.clock.now())
       record.validationTimer = deps.clock.setTimeout(() => {
@@ -407,8 +405,8 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
         }
       }, remaining)
     }
-    preloadAudio.src = resource.url
-    preloadAudio.load()
+    audio.src = resource.url
+    audio.load()
   }
 
   const installResolvedResource = (
@@ -541,6 +539,9 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
     if (disposed) throw createCancellationError()
     const identity = getPlaybackSongIdentity(input.musicInfo)
     const cancelReason = cancelReasonForResolveReason(input.reason)
+    if (preload && preload.identity != identity) {
+      closeRecord(preload, 'preloadReplaced', true)
+    }
     if (input.reason != 'initial' && preload?.identity == identity) {
       closeRecord(preload, cancelReason, true)
     }

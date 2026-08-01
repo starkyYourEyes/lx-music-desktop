@@ -342,6 +342,9 @@ const createPoolHarness = (options = {}) => {
         lifecycle.push(`create:${apiInfo.id}:${generation}`)
         notify(createWaiters, apiInfo.id, generation)
         if (options.createGate) await options.createGate
+        if (options.createRejectIds?.includes(apiInfo.id)) {
+          throw new Error(`create ${apiInfo.id} failed`)
+        }
         const windowTarget = eventTarget()
         const webContentsTarget = eventTarget()
         const runtime = {
@@ -521,6 +524,72 @@ const createPoolHarness = (options = {}) => {
     }
   } finally {
     global.lx = originalLx
+  }
+}
+
+const createRuntimePreloadFailureHarness = async(identity = { apiId: 'a', generation: 1 }) => {
+  const path = require('node:path')
+  const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  const names = {
+    initEnv: 'userApi_initEnv',
+    request: 'userApi_request',
+    response: 'userApi_response',
+    init: 'userApi_init',
+    proxyUpdate: 'userApi_proxyUpdate',
+    openDevTools: 'userApi_openDevTools',
+    showUpdateAlert: 'userApi_showUpdateAlert',
+  }
+  const listeners = new Map()
+  const exposed = new Map()
+  const sent = []
+  loadTsModule(path.join(__dirname, '../../src/main/modules/userApi/renderer/preload.js'), {
+    electron: {
+      contextBridge: { exposeInMainWorld: (name, value) => exposed.set(name, value) },
+      ipcRenderer: {
+        on: (name, handler) => listeners.set(name, handler),
+        send: (name, value) => sent.push({ name, value }),
+      },
+      webFrame: { executeJavaScript: async() => undefined },
+    },
+    needle: {},
+    tunnel: { httpOverHttp: () => undefined, httpsOverHttp: () => undefined },
+    '../rendererEvent/name': names,
+  })
+  listeners.get(names.initEnv)(null, {
+    identity,
+    apiInfo: {
+      id: identity.apiId,
+      name: 'A',
+      description: '',
+      version: '1',
+      author: 'test',
+      homepage: '',
+      script: '',
+    },
+    proxy: { host: '', port: '' },
+  })
+  const lx = exposed.get('lx')
+  await lx.send(lx.EVENT_NAMES.inited, {
+    sources: {
+      wy: { type: 'music', actions: ['musicUrl'], qualitys: ['128k'] },
+    },
+  })
+
+  return {
+    async reject(requestId, error) {
+      await lx.on(lx.EVENT_NAMES.request, async() => { throw error })
+      sent.length = 0
+      listeners.get(names.request)(null, {
+        requestId,
+        data: {
+          source: 'wy',
+          action: 'musicUrl',
+          info: { type: '128k' },
+        },
+      })
+      await new Promise(resolve => setImmediate(resolve))
+      return sent.find(item => item.name == names.response).value
+    },
   }
 }
 
@@ -1647,9 +1716,21 @@ const createCoordinatorHarness = (options = {}) => {
     emitFor(resource, name) {
       return this.bindings.get(resource.url)?.[name]?.() ?? 'stale'
     }
+
+    emit(name) {
+      return this.listeners.get(name)?.() ?? 'stale'
+    }
   }
 
-  const preloadAudio = new FakePreloadAudio()
+  const preloadAudios = []
+  const createPreloadAudio = () => {
+    const audio = new FakePreloadAudio()
+    preloadAudios.push(audio)
+    return audio
+  }
+  const emitPreloadFor = (resource, name) => (
+    [...preloadAudios].reverse().find(audio => audio.bindings.has(resource.url))?.emitFor(resource, name) ?? 'stale'
+  )
   const getDefaultSession = () => lazySession ??= createFakeSession(options.musicInfo ?? song)
   const createRequest = async input => {
     createRequestCount++
@@ -1673,7 +1754,7 @@ const createCoordinatorHarness = (options = {}) => {
   }
   const coordinator = coordinatorModule.createPlaybackResolutionCoordinator({
     createRequest,
-    createPreloadAudio: () => preloadAudio,
+    createPreloadAudio,
     detachForegroundResource(resource) {
       detachedForegroundUrls.push(resource.url)
       foregroundLifecycle.push(`detach:${resource.url}`)
@@ -1717,8 +1798,12 @@ const createCoordinatorHarness = (options = {}) => {
     cancelForeground: reason => coordinator.cancelForeground(reason),
     cancelPreload: reason => coordinator.cancelPreload(reason),
     dispose: () => coordinator.dispose(),
-    preloadCanplay: resource => preloadAudio.emitFor(resource, 'canplay'),
-    preloadError: resource => preloadAudio.emitFor(resource, 'error'),
+    preloadCanplay: resource => emitPreloadFor(resource, 'canplay'),
+    preloadError: resource => emitPreloadFor(resource, 'error'),
+    queuePreloadEvent(name) {
+      const audio = preloadAudios.at(-1)
+      return () => audio?.emit(name) ?? 'stale'
+    },
     currentCandidate: () => lastForegroundCandidate,
     currentPreloadCandidate: () => lastPreloadCandidate,
     waitForForegroundCandidate() {
@@ -1770,7 +1855,9 @@ const createCoordinatorHarness = (options = {}) => {
     deletedCacheKeys,
     requestedSourceIds,
     createdReasons,
-    preloadValidator: preloadAudio,
+    get preloadValidator() {
+      return preloadAudios.at(-1) ?? { bound: false, detached: true, boundUrls: [] }
+    },
     visibleErrorCount: 0,
   }
 }
@@ -1894,6 +1981,7 @@ const loadPlayerIntegrationFactories = () => {
     clearTimeout,
   }
   let playback
+  let playbackCoordinatorDeps
   try {
     playback = load('src/renderer/core/music/playback/index.ts', {
       '@common/utils': { encodePath: value => value, log: { debug: noop, error: noop } },
@@ -1915,7 +2003,10 @@ const loadPlayerIntegrationFactories = () => {
       './candidates': candidatesModule,
       './coordinator': {
         ...coordinatorModule,
-        createPlaybackResolutionCoordinator: () => ({}),
+        createPlaybackResolutionCoordinator: deps => {
+          playbackCoordinatorDeps = deps
+          return {}
+        },
       },
       './session': sessionModule,
       './sourceAdapter': { playbackSourceAdapter: playbackAdapter },
@@ -1934,6 +2025,25 @@ const loadPlayerIntegrationFactories = () => {
     cache: cacheModule,
     error: errorModule,
     identity,
+    createProductionPreloadAudio: () => playbackCoordinatorDeps.createPreloadAudio(),
+  }
+}
+
+const createPlaybackPreloadAudioHarness = () => {
+  const factories = loadPlayerIntegrationFactories()
+  const originalAudio = global.Audio
+  class FakeAudio {
+    constructor() {
+      this.muted = false
+      this.preload = ''
+      this.crossOrigin = null
+    }
+  }
+  global.Audio = FakeAudio
+  try {
+    return factories.createProductionPreloadAudio()
+  } finally {
+    global.Audio = originalAudio
   }
 }
 
@@ -3183,6 +3293,7 @@ module.exports = {
   songB,
   createRuntimeWindowHarness,
   createPoolHarness,
+  createRuntimePreloadFailureHarness,
   createAdapterHarness,
   createColdUserApiRegistryHarness,
   createPrimaryCapabilityHarness,
@@ -3198,6 +3309,7 @@ module.exports = {
   createMusicFacadeHarness,
   resolvePolicyForReason,
   createCoordinatorHarness,
+  createPlaybackPreloadAudioHarness,
   createPlayerHarness,
   createIntegrationHarness,
   createPreloadSchedulingHarness,

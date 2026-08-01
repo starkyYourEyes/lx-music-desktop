@@ -4,6 +4,7 @@ const {
   createFakeClock,
   createIntegrationHarness,
   createPoolHarness,
+  createRuntimePreloadFailureHarness,
   createRuntimeWindowHarness,
   deferred,
   songA,
@@ -175,6 +176,76 @@ test('same request ID in different sources cannot cross-settle', async() => {
   assert.deepEqual(await b, { ok: true, value: { source: 'b' } })
 })
 
+test('another owner cannot replace or consume a pending request with the same ID', async() => {
+  const harness = createPoolHarness({ autoInit: true })
+  const first = harness.pool.request({ apiId: 'a', requestId: 'collision', data: {} }, 11)
+  await harness.waitForPending('a', 'collision')
+
+  const collision = harness.pool.request({ apiId: 'a', requestId: 'collision', data: {} }, 12)
+  assert.equal(harness.respond('a', 'collision', 'first-owner'), true)
+
+  assert.deepEqual(await first, { ok: true, value: 'first-owner' })
+  assert.deepEqual(await collision, {
+    ok: false,
+    error: {
+      name: 'PlaybackSourceError',
+      message: 'User API request ID is already in use',
+      scope: 'candidate',
+      kind: 'request',
+      apiId: 'a',
+    },
+  })
+  assert.equal(harness.sentRequests.length, 1)
+})
+
+test('custom runtime failures cross IPC only as bounded metadata', async() => {
+  const harness = createPoolHarness({ autoInit: true })
+  const pending = harness.pool.request({ apiId: 'a', requestId: 'failure', data: {} }, 11)
+  await harness.waitForPending('a', 'failure')
+  const binding = harness.binding('a')
+  const runtime = await createRuntimePreloadFailureHarness({
+    apiId: 'a',
+    generation: binding.generation,
+  })
+  const envelope = await runtime.reject('failure', Object.assign(
+    new Error(`${'m'.repeat(1100)}\nprivate script`),
+    {
+      code: `${'c'.repeat(80)}\nprivate code`,
+      statusCode: 429,
+      arbitrary: { token: 'must not cross IPC' },
+    },
+  ))
+
+  assert.deepEqual(Object.keys(envelope).sort(), [
+    'code', 'data', 'identity', 'message', 'status', 'statusCode',
+  ])
+  assert.equal(envelope.message, 'm'.repeat(1024))
+  assert.equal(envelope.code, 'c'.repeat(64))
+  assert.equal(envelope.statusCode, 429)
+  assert.equal(harness.pool.acceptResponse(binding.webContentsId, envelope), true)
+  assert.deepEqual(await pending, {
+    ok: false,
+    error: {
+      name: 'PlaybackSourceError',
+      message: 'm'.repeat(1024),
+      scope: 'source',
+      kind: 'rateLimit',
+      apiId: 'a',
+      statusCode: 429,
+    },
+  })
+  assert.deepEqual(harness.loggedErrors, [])
+
+  const invalidStatus = await runtime.reject('invalid-status', {
+    message: 'invalid status',
+    code: 'RATE_LIMIT',
+    statusCode: 999,
+    arbitrary: 'must not cross IPC',
+  })
+  assert.equal(Object.prototype.hasOwnProperty.call(invalidStatus, 'statusCode'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(invalidStatus, 'arbitrary'), false)
+})
+
 test('invalidating one source rejects only that source', async() => {
   const harness = createPoolHarness({ autoInit: true })
   const a = harness.pool.request({ apiId: 'a', requestId: '1', data: {} }, 11)
@@ -311,6 +382,26 @@ test('deletion during creation destroys the late window before clearing its part
   await assert.rejects(ensuring)
   await deleting
   assert.deepEqual(harness.lifecycle, ['create:a:1', 'dispose:a:1', 'clearSession:a'])
+})
+
+test('deletion clears the partition once when runtime creation fails', async() => {
+  const gate = deferred()
+  const harness = createPoolHarness({
+    autoInit: false,
+    createGate: gate.promise,
+    createRejectIds: ['a'],
+  })
+  const ensuring = harness.pool.ensure('a')
+  const failed = assert.rejects(ensuring, /create a failed/)
+  await harness.waitForCreateCall('a')
+
+  const deleting = harness.pool.dispose('a', { clearSession: true })
+  gate.resolve()
+  await failed
+  await deleting
+
+  assert.deepEqual(harness.lifecycle, ['create:a:1', 'clearSession:a'])
+  assert.deepEqual(harness.clearedSessionIds, ['a'])
 })
 
 test('configuration removal waits for snapshotted session leases', async() => {

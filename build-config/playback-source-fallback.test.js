@@ -645,6 +645,40 @@ test('empty URL advances to the next candidate inside the same source', async() 
   assert.equal(candidate.platform, 'tx')
 })
 
+test('media rejection forces bounded candidate validation metadata', async() => {
+  const session = createSessionHarness({
+    sourceIds: ['primary'],
+    urls: { primary: 'https://bad' },
+  })
+  const candidate = await session.nextCandidate()
+  assert.equal(session.rejectMedia(candidate.candidateId, {
+    name: 'PlaybackSourceError',
+    message: `${'x'.repeat(1100)}\nprivate detail`,
+    scope: 'session',
+    kind: 'cancelled',
+    apiId: 'other-owner',
+    platform: 'kg',
+    statusCode: 418,
+    arbitrary: 'must not survive',
+  }), 'resumed')
+
+  let aggregate
+  await assert.rejects(session.nextCandidate(), error => {
+    aggregate = error
+    return error.scope == 'session' && error.kind == 'request'
+  })
+  const failure = aggregate.cause.find(item => item.message.startsWith('x'))
+  assert.equal(failure.name, 'PlaybackSourceError')
+  assert.equal(failure.message, 'x'.repeat(1024))
+  assert.equal(failure.scope, 'candidate')
+  assert.equal(failure.kind, 'mediaValidation')
+  assert.equal(failure.apiId, 'primary')
+  assert.equal(failure.platform, 'wy')
+  assert.equal(failure.statusCode, undefined)
+  assert.equal(failure.arbitrary, undefined)
+  assert.equal(failure.cause, undefined)
+})
+
 test('session cancellation never advances to a fallback', async() => {
   const session = createSessionHarness({ sourceIds: ['primary', 'fallback'] })
   session.cancel('songChanged')

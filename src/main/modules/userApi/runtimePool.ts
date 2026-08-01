@@ -39,6 +39,7 @@ interface RuntimeCreationState {
   disposeWhenIdle: boolean
   disposeReason: 'idle' | 'invalidate' | 'explicit' | null
   clearSession: boolean
+  clearSessionPromise: Promise<void> | null
 }
 
 export interface UserApiRuntimePoolDependencies {
@@ -109,6 +110,13 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     void promise.catch(reason => {
       deps.logError(label, reason)
     })
+  }
+
+  // Preserve one exact cleanup promise across concurrent disposal paths.
+  // eslint-disable-next-line @typescript-eslint/promise-function-async
+  const clearCreatingSession = (state: RuntimeCreationState): Promise<void> => {
+    if (!state.clearSession) return Promise.resolve()
+    return state.clearSessionPromise ??= deps.clearRuntimeSession(state.apiId)
   }
 
   const getBoundRecord = (
@@ -217,6 +225,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
       disposeWhenIdle: !configuredApiIds.has(apiId),
       disposeReason: null,
       clearSession: false,
+      clearSessionPromise: null,
     }
     state.promise = Promise.resolve().then(async() => {
       const runtime = await deps.createRuntimeWindow({
@@ -241,7 +250,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
       }
       if (creatingByApiId.get(apiId) != state || state.disposeReason != null) {
         await deps.disposeRuntimeWindow(runtime, { clearSession: false })
-        if (state.clearSession) await deps.clearRuntimeSession(apiId)
+        await clearCreatingSession(state)
         const failure = messageFailure(apiId, 'sourceChanged', 'User API source changed')
         throw Object.assign(new Error(failure.message), failure)
       }
@@ -322,6 +331,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
       creating.clearSession ||= options.clearSession
       settleSource(apiId, failure)
       try { await creating.promise } catch (_) {}
+      await clearCreatingSession(creating)
       return
     }
     const record = recordsByApiId.get(apiId)
@@ -353,6 +363,12 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     const { apiId, requestId } = params
     const old = pendingByApiId.get(apiId)?.get(requestId)
     if (old) {
+      if (old.ownerWebContentsId != ownerWebContentsId) {
+        return {
+          ok: false,
+          error: messageFailure(apiId, 'request', 'User API request ID is already in use'),
+        }
+      }
       settlePending(apiId, requestId, {
         ok: false,
         error: normalizeRuntimeFailure(new Error('User API request replaced'), { apiId, cancelled: true }),
@@ -461,7 +477,11 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     const record = getBoundRecord(senderId, envelope.identity)
     if (!record || record.initSettled) return false
     if (!envelope.status) {
-      failInitialization(record, { message: envelope.message })
+      failInitialization(record, {
+        message: envelope.message,
+        code: envelope.code,
+        statusCode: envelope.statusCode,
+      })
       return true
     }
     const apiInfo = deps.getApiInfo(record.apiId)
@@ -484,7 +504,11 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     if (envelope.status) return settlePending(record.apiId, requestId, { ok: true, value: result })
     return settlePending(record.apiId, requestId, {
       ok: false,
-      error: normalizeRuntimeFailure({ message: envelope.message }, { apiId: record.apiId }),
+      error: normalizeRuntimeFailure({
+        message: envelope.message,
+        code: envelope.code,
+        statusCode: envelope.statusCode,
+      }, { apiId: record.apiId }),
     })
   }
 

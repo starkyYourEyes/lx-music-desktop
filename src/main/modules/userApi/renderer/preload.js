@@ -5,10 +5,31 @@ import { createCipheriv, publicEncrypt, constants, randomBytes, createHash } fro
 import USER_API_RENDERER_EVENT_NAME from '../rendererEvent/name'
 import { httpOverHttp, httpsOverHttp } from 'tunnel'
 
+const firstLine = (value, limit) => (
+  typeof value == 'string' ? value.split(/\r?\n/, 1)[0].substring(0, limit) : ''
+)
+const boundedFailure = error => {
+  const value = error != null && typeof error == 'object' ? error : {}
+  const message = firstLine(value.message, 1024) || firstLine(error, 1024) || 'Playback source request failed'
+  const code = firstLine(value.code, 64)
+  const statusCode = Number.isInteger(value.statusCode) && value.statusCode >= 100 && value.statusCode <= 599
+    ? value.statusCode
+    : undefined
+  return {
+    message,
+    ...(code ? { code } : {}),
+    ...(statusCode == null ? {} : { statusCode }),
+  }
+}
 
 let runtimeIdentity = null
-const sendMessage = (action, data, status, message) => {
-  ipcRenderer.send(action, { identity: runtimeIdentity, data, status, message })
+const sendMessage = (action, data, status, error) => {
+  ipcRenderer.send(action, {
+    identity: runtimeIdentity,
+    data,
+    status,
+    ...(status ? {} : boundedFailure(error)),
+  })
 }
 
 let isInitedApi = false
@@ -66,8 +87,6 @@ const verifyLyricInfo = (info) => {
   }
 }
 
-const boundedMessage = error => String(error?.message ?? error ?? '').substring(0, 1024)
-
 const handleRequest = (context, { requestId, data }) => {
   // console.log(data)
   if (!events.request) return sendMessage(USER_API_RENDERER_EVENT_NAME.response, { requestId }, false, 'Request event is not defined')
@@ -106,10 +125,10 @@ const handleRequest = (context, { requestId, data }) => {
       }
       sendMessage(USER_API_RENDERER_EVENT_NAME.response, sendData, true)
     }).catch(err => {
-      sendMessage(USER_API_RENDERER_EVENT_NAME.response, { requestId }, false, boundedMessage(err))
+      sendMessage(USER_API_RENDERER_EVENT_NAME.response, { requestId }, false, err)
     })
   } catch (err) {
-    sendMessage(USER_API_RENDERER_EVENT_NAME.response, { requestId }, false, boundedMessage(err))
+    sendMessage(USER_API_RENDERER_EVENT_NAME.response, { requestId }, false, err)
   }
 }
 
@@ -158,8 +177,7 @@ const handleInit = (context, info) => {
       }
     }
   } catch (error) {
-    console.log(error)
-    sendMessage(USER_API_RENDERER_EVENT_NAME.init, { sources: {} }, false, boundedMessage(error))
+    sendMessage(USER_API_RENDERER_EVENT_NAME.init, { sources: {} }, false, error)
     return
   }
   sendMessage(USER_API_RENDERER_EVENT_NAME.init, { sources: sourceInfo.sources }, true)
@@ -184,7 +202,7 @@ const handleShowUpdateAlert = (data, resolve, reject) => {
 const onError = (errorMessage) => {
   if (isInitedApi) return
   isInitedApi = true
-  sendMessage(USER_API_RENDERER_EVENT_NAME.init, { sources: {} }, false, boundedMessage(errorMessage))
+  sendMessage(USER_API_RENDERER_EVENT_NAME.init, { sources: {} }, false, errorMessage)
 }
 
 const initEnv = ({ identity, apiInfo: userApi, proxy: nextProxy }) => {

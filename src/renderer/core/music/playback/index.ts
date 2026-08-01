@@ -248,6 +248,7 @@ export const playbackResolutionCoordinator = createPlaybackResolutionCoordinator
     const audio = new Audio()
     audio.muted = true
     audio.preload = 'auto'
+    audio.crossOrigin = 'anonymous'
     return audio
   },
   detachForegroundResource: clearResourceIf,

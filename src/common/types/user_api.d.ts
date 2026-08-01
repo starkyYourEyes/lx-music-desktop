@@ -112,6 +112,8 @@ declare namespace LX {
       identity: UserApiRuntimeIdentity
       status: boolean
       message?: string
+      code?: string
+      statusCode?: number
       data: T
     }
     type UserApiRuntimeInitEnvelope = UserApiRuntimeEnvelope<{

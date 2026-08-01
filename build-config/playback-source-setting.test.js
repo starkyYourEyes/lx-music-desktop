@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
+const fs = require('node:fs')
 const path = require('node:path')
 const loadTsModule = require('../scripts/test-utils/load-ts-module')
 
@@ -35,6 +36,20 @@ test('changing primary removes the new primary and never adds the old one', () =
     'common.apiSource': 'old',
     'common.apiFallbackSources': ['new', 'backup'],
     'common.apiFallbackMode': 'serial',
+  }, 'new'), {
+    'common.apiSource': 'new',
+    'common.apiFallbackSources': ['backup'],
+    'common.apiFallbackMode': 'serial',
+  })
+})
+
+test('changing primary returns only structured-clone-safe playback source fields', () => {
+  const unrelated = new Proxy({}, {})
+  assert.deepEqual(sourceSetting.changePrimaryPlaybackSource({
+    'common.apiSource': 'old',
+    'common.apiFallbackSources': ['new', 'backup'],
+    'common.apiFallbackMode': 'serial',
+    unrelated,
   }, 'new'), {
     'common.apiSource': 'new',
     'common.apiFallbackSources': ['backup'],
@@ -174,4 +189,12 @@ test('Add choices exclude primary selected and install-disabled sources but keep
     sourceSetting.getAddablePlaybackSources(sources, 'primary', ['selected']).map(({ id }) => id),
     ['runtime-failed'],
   )
+})
+
+test('the fallback add trigger cannot bubble into the document menu-close listener', () => {
+  const component = fs.readFileSync(path.join(
+    __dirname,
+    '../src/renderer/views/Setting/components/ApiFallbackSources.vue',
+  ), 'utf8')
+  assert.match(component, /@click\.stop="showAddMenu"/)
 })

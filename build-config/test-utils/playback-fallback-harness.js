@@ -341,7 +341,10 @@ const createPoolHarness = (options = {}) => {
       async createRuntimeWindow({ apiInfo, generation, hooks }) {
         lifecycle.push(`create:${apiInfo.id}:${generation}`)
         notify(createWaiters, apiInfo.id, generation)
-        if (options.createGate) await options.createGate
+        const createGate = typeof options.createGate == 'function'
+          ? options.createGate(apiInfo.id, generation)
+          : options.createGate
+        if (createGate) await createGate
         if (options.createRejectIds?.includes(apiInfo.id)) {
           throw new Error(`create ${apiInfo.id} failed`)
         }
@@ -369,6 +372,10 @@ const createPoolHarness = (options = {}) => {
       async initializeRuntimeWindow(runtime) {
         lifecycle.push(`send-init:${runtime.identity.apiId}:${runtime.identity.generation}`)
         notify(initializeWaiters, runtime.identity.apiId, runtime.identity.generation)
+        const initializeGate = typeof options.initializeGate == 'function'
+          ? options.initializeGate(runtime.identity.apiId, runtime.identity.generation)
+          : options.initializeGate
+        if (initializeGate) await initializeGate
         const queued = queuedInit.get(runtime.identity.apiId)
         if (queued) {
           queuedInit.delete(runtime.identity.apiId)

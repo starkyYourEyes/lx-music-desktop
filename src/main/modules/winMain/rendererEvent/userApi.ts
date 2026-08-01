@@ -21,6 +21,26 @@ const REPLACE_ERROR_LIMITS = {
   detail: 500,
 } as const
 
+const ENSURE_FAILURE_KINDS = new Set<LX.Playback.SourceFailureKind>([
+  'initialization',
+  'runtimeCrash',
+  'sourceChanged',
+  'timeout',
+])
+
+const getEnsureFailureKind = (
+  error: unknown,
+  apiId: string,
+): LX.Playback.SourceFailureKind => {
+  if (error == null || typeof error != 'object') return 'initialization'
+  const failure = error as Partial<LX.Playback.SourceFailureData>
+  if (failure.name != 'PlaybackSourceError' ||
+    failure.apiId != apiId ||
+    failure.kind == null ||
+    !ENSURE_FAILURE_KINDS.has(failure.kind)) return 'initialization'
+  return failure.kind
+}
+
 const getErrorText = (
   err: unknown,
   key: keyof typeof REPLACE_ERROR_LIMITS,
@@ -123,7 +143,13 @@ export default () => {
       await runtimePool.ensure(apiId)
       return { ok: true, value: runtimePool.getStatus(apiId) }
     } catch (error) {
-      return { ok: false, error: normalizeRuntimeFailure(error, { apiId, kind: 'initialization' }) }
+      return {
+        ok: false,
+        error: normalizeRuntimeFailure(error, {
+          apiId,
+          kind: getEnsureFailureKind(error, apiId),
+        }),
+      }
     }
   })
   mainOn<LX.UserApi.UserApiRequestCancelParams>(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api_cancel, ({ event, params }) => {

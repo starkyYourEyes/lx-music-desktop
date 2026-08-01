@@ -123,6 +123,120 @@ test('a failed initialization retires only that generation and a later ensure ca
   assert.deepEqual(harness.clearedSessionIds, [])
 })
 
+test('initialization times out after ten seconds, retires the generation, and permits retry', async() => {
+  const clock = createFakeClock(0)
+  const harness = createPoolHarness({ autoInit: false, initialConfiguredIds: ['a'], clock })
+  const first = harness.pool.ensure('a')
+  const firstOutcome = first.then(
+    () => ({ status: 'resolved' }),
+    error => ({ status: 'rejected', error }),
+  )
+  await harness.waitForInitializeCall('a', 1)
+
+  clock.advance(9_999)
+  await clock.flush()
+  assert.equal(await Promise.race([firstOutcome, Promise.resolve('pending')]), 'pending')
+
+  clock.advance(1)
+  await clock.flush()
+  const timedOut = await firstOutcome
+  assert.equal(timedOut.status, 'rejected')
+  assert.equal(timedOut.error.kind, 'timeout')
+  assert.equal(timedOut.error.scope, 'source')
+  assert.match(timedOut.error.message, /initialization timed out/i)
+  await harness.waitForDisposed('a', 1)
+  assert.deepEqual(harness.statusEvents.at(-1), {
+    apiId: 'a',
+    status: false,
+    message: 'User API initialization timed out',
+    apiInfo: { id: 'a', name: 'A', description: '', allowShowUpdateAlert: false, sources: {} },
+  })
+
+  const second = harness.pool.ensure('a')
+  await harness.waitForInitializeCall('a', 2)
+  await harness.init('a', { sources: {} })
+  assert.equal((await second).id, 'a')
+  assert.deepEqual(harness.createdGenerations('a'), [1, 2])
+})
+
+test('the ten-second initialization deadline includes runtime window creation', async() => {
+  const clock = createFakeClock(0)
+  const firstCreate = deferred()
+  const harness = createPoolHarness({
+    autoInit: false,
+    initialConfiguredIds: ['a'],
+    clock,
+    createGate: (_apiId, generation) => generation == 1 ? firstCreate.promise : undefined,
+  })
+  const first = harness.pool.ensure('a')
+  const firstOutcome = first.then(
+    () => ({ status: 'resolved' }),
+    error => ({ status: 'rejected', error }),
+  )
+  await harness.waitForCreateCall('a', 1)
+
+  clock.advance(10_000)
+  await clock.flush()
+  const atDeadline = await Promise.race([firstOutcome, Promise.resolve('pending')])
+  if (atDeadline == 'pending') firstCreate.resolve()
+  assert.notEqual(atDeadline, 'pending')
+  assert.equal(atDeadline.status, 'rejected')
+  assert.equal(atDeadline.error.kind, 'timeout')
+
+  const second = harness.pool.ensure('a')
+  await harness.waitForInitializeCall('a', 2)
+  await harness.init('a', { sources: {} })
+  assert.equal((await second).id, 'a')
+
+  firstCreate.resolve()
+  await harness.waitForDisposed('a', 1)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(harness.createdGenerations('a'), [2, 1])
+  assert.equal(harness.disposedGenerations.filter(generation => generation == 1).length, 1)
+  assert.equal(harness.lifecycle.includes('send-init:a:1'), false)
+  assert.equal(harness.pool.getStatus('a').status, true)
+  assert.equal(harness.statusEvents.at(-1).status, true)
+})
+
+test('the ten-second initialization deadline includes initialization dispatch', async() => {
+  const clock = createFakeClock(0)
+  const firstDispatch = deferred()
+  const harness = createPoolHarness({
+    autoInit: false,
+    initialConfiguredIds: ['a'],
+    clock,
+    initializeGate: (_apiId, generation) => generation == 1 ? firstDispatch.promise : undefined,
+  })
+  const first = harness.pool.ensure('a')
+  const firstOutcome = first.then(
+    () => ({ status: 'resolved' }),
+    error => ({ status: 'rejected', error }),
+  )
+  await harness.waitForInitializeCall('a', 1)
+
+  clock.advance(10_000)
+  await clock.flush()
+  const atDeadline = await Promise.race([firstOutcome, Promise.resolve('pending')])
+  if (atDeadline == 'pending') firstDispatch.resolve()
+  assert.notEqual(atDeadline, 'pending')
+  assert.equal(atDeadline.status, 'rejected')
+  assert.equal(atDeadline.error.kind, 'timeout')
+  await harness.waitForDisposed('a', 1)
+  await new Promise(resolve => setImmediate(resolve))
+
+  const second = harness.pool.ensure('a')
+  await harness.waitForInitializeCall('a', 2)
+  await harness.init('a', { sources: {} })
+  assert.equal((await second).id, 'a')
+
+  firstDispatch.reject(new Error('late initialization dispatch failure'))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(harness.createdGenerations('a'), [1, 2])
+  assert.equal(harness.disposedGenerations.filter(generation => generation == 1).length, 1)
+  assert.equal(harness.pool.getStatus('a').status, true)
+  assert.equal(harness.statusEvents.at(-1).status, true)
+})
+
 test('invalidation after initialize starts cannot publish the old generation', async() => {
   const harness = createPoolHarness({ autoInit: false, initialConfiguredIds: ['a'] })
   const oldEnsure = harness.pool.ensure('a')
@@ -346,6 +460,46 @@ test('invalidation during async window creation cannot install a stale record', 
   await currentEnsure
   assert.equal(harness.binding('a').generation, 2)
   assert.equal(harness.disposedGenerations.includes(1), true)
+})
+
+test('invalidation during blocked creation settles by the original deadline and lets retry proceed', async() => {
+  const clock = createFakeClock(0)
+  const firstCreate = deferred()
+  const harness = createPoolHarness({
+    autoInit: false,
+    initialConfiguredIds: ['a'],
+    clock,
+    createGate: (_apiId, generation) => generation == 1 ? firstCreate.promise : undefined,
+  })
+  const first = harness.pool.ensure('a')
+  const firstOutcome = first.then(
+    () => ({ status: 'resolved' }),
+    error => ({ status: 'rejected', error }),
+  )
+  await harness.waitForCreateCall('a', 1)
+  await harness.pool.invalidate('a', 'sourceChanged')
+  const retry = harness.pool.ensure('a')
+
+  clock.advance(9_999)
+  await clock.flush()
+  assert.equal(await Promise.race([firstOutcome, Promise.resolve('pending')]), 'pending')
+
+  clock.advance(1)
+  await clock.flush()
+  const atDeadline = await Promise.race([firstOutcome, Promise.resolve('pending')])
+  if (atDeadline == 'pending') firstCreate.resolve()
+  assert.notEqual(atDeadline, 'pending')
+  assert.equal(atDeadline.status, 'rejected')
+  assert.equal(atDeadline.error.kind, 'sourceChanged')
+
+  await harness.waitForInitializeCall('a', 2)
+  await harness.init('a', { sources: {} })
+  assert.equal((await retry).id, 'a')
+
+  firstCreate.resolve()
+  await harness.waitForDisposed('a', 1)
+  assert.equal(harness.lifecycle.includes('send-init:a:1'), false)
+  assert.equal(harness.pool.getStatus('a').status, true)
 })
 
 test('releasing the last owner during creation disposes the unconfigured runtime on arrival', async() => {

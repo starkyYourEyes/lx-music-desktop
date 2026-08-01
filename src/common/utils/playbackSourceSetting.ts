@@ -29,7 +29,6 @@ export const changePrimaryPlaybackSource = (
   setting: PlaybackSourceSetting,
   primaryId: string,
 ): PlaybackSourceSetting => ({
-  ...setting,
   'common.apiSource': primaryId,
   ...normalizePlaybackSourceSetting({ ...setting, 'common.apiSource': primaryId }),
 })

@@ -27,7 +27,7 @@ div(:class="$style.root")
     type="button" :class="$style.addButton" :disabled="!availableSources.length"
     :aria-label="availableSources.length ? $t('setting__basic_source_fallback_add') : $t('setting__basic_source_fallback_no_available')"
     :title="availableSources.length ? $t('setting__basic_source_fallback_add') : $t('setting__basic_source_fallback_no_available')"
-    @click="showAddMenu") {{ $t('setting__basic_source_fallback_add') }}
+    @click.stop="showAddMenu") {{ $t('setting__basic_source_fallback_add') }}
   base-menu(v-model="isShowAddMenu" :menus="availableSources" :xy="addMenuLocation" item-name="label" @menu-click="addSource")
 </template>
 

@@ -30,6 +30,7 @@ interface RuntimeRecord {
   disposing: boolean
   disposeWhenIdle: boolean
   initSettled: boolean
+  initTimeout: ReturnType<typeof setTimeout> | null
 }
 
 interface RuntimeCreationState {
@@ -37,9 +38,11 @@ interface RuntimeCreationState {
   generation: number
   promise: Promise<RuntimeRecord>
   disposeWhenIdle: boolean
-  disposeReason: 'idle' | 'invalidate' | 'explicit' | null
+  disposeReason: 'idle' | 'invalidate' | 'explicit' | 'timeout' | null
   clearSession: boolean
   clearSessionPromise: Promise<void> | null
+  timeoutPromise: Promise<never>
+  initTimeout: ReturnType<typeof setTimeout> | null
 }
 
 export interface UserApiRuntimePoolDependencies {
@@ -88,6 +91,8 @@ const messageFailure = (
   kind: LX.Playback.SourceFailureKind,
   message: string,
 ) => normalizeRuntimeFailure({ message }, { apiId, kind })
+
+const USER_API_INITIALIZATION_TIMEOUT = 10_000
 
 export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   const recordsByApiId = new Map<string, RuntimeRecord>()
@@ -157,7 +162,17 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   const rejectInit = (record: RuntimeRecord, failure: LX.Playback.SourceFailureData) => {
     if (record.initSettled) return
     record.initSettled = true
+    if (record.initTimeout != null) {
+      deps.clearTimeout(record.initTimeout)
+      record.initTimeout = null
+    }
     record.rejectInit(failure)
+  }
+
+  const clearCreationTimeout = (state: RuntimeCreationState) => {
+    if (state.initTimeout == null) return
+    deps.clearTimeout(state.initTimeout)
+    state.initTimeout = null
   }
 
   const removeRecord = (record: RuntimeRecord) => {
@@ -186,9 +201,13 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     return retiring
   }
 
-  const failInitialization = (record: RuntimeRecord, reason: unknown) => {
+  const failInitialization = (
+    record: RuntimeRecord,
+    reason: unknown,
+    kind: LX.Playback.SourceFailureKind = 'initialization',
+  ) => {
     if (recordsByApiId.get(record.apiId) != record || record.disposing) return
-    const failure = normalizeRuntimeFailure(reason, { apiId: record.apiId, kind: 'initialization' })
+    const failure = normalizeRuntimeFailure(reason, { apiId: record.apiId, kind })
     const apiInfo = deps.getApiInfo(record.apiId)
     record.status = { apiId: record.apiId, status: false, message: failure.message, ...(apiInfo ? { apiInfo } : {}) }
     deps.publishStatus({ ...record.status })
@@ -207,8 +226,10 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     if (record && !record.disposing) return record
     const creating = creatingByApiId.get(apiId)
     if (creating) {
-      if (creating.disposeReason == null || creating.disposeReason == 'idle') return creating.promise
-      try { await creating.promise } catch (_) {}
+      if (creating.disposeReason == null || creating.disposeReason == 'idle') {
+        return Promise.race([creating.promise, creating.timeoutPromise])
+      }
+      try { await Promise.race([creating.promise, creating.timeoutPromise]) } catch (_) {}
       return ensureRecord(apiId)
     }
     const apiInfo = deps.getApiInfo(apiId)
@@ -226,7 +247,32 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
       disposeReason: null,
       clearSession: false,
       clearSessionPromise: null,
+      timeoutPromise: null as unknown as Promise<never>,
+      initTimeout: null,
     }
+    let rejectTimeout!: (reason: LX.Playback.SourceFailureData) => void
+    state.timeoutPromise = new Promise<never>((_resolve, reject) => {
+      rejectTimeout = reject
+    })
+    state.initTimeout = deps.setTimeout(() => {
+      state.initTimeout = null
+      const failure = messageFailure(apiId, 'timeout', 'User API initialization timed out')
+      const record = recordsByApiId.get(apiId)
+      if (record?.generation == generation) {
+        failInitialization(record, failure, 'timeout')
+      } else {
+        if (creatingByApiId.get(apiId) != state) return
+        creatingByApiId.delete(apiId)
+        if (state.disposeReason == 'invalidate' || state.disposeReason == 'explicit') {
+          rejectTimeout(messageFailure(apiId, 'sourceChanged', 'User API source changed'))
+          return
+        }
+        state.disposeReason = 'timeout'
+        deps.publishStatus({ apiId, status: false, message: failure.message, apiInfo })
+        settleSource(apiId, failure)
+      }
+      rejectTimeout(failure)
+    }, USER_API_INITIALIZATION_TIMEOUT)
     state.promise = Promise.resolve().then(async() => {
       const runtime = await deps.createRuntimeWindow({
         apiInfo,
@@ -251,7 +297,9 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
       if (creatingByApiId.get(apiId) != state || state.disposeReason != null) {
         await deps.disposeRuntimeWindow(runtime, { clearSession: false })
         await clearCreatingSession(state)
-        const failure = messageFailure(apiId, 'sourceChanged', 'User API source changed')
+        const failure = state.disposeReason == 'timeout'
+          ? messageFailure(apiId, 'timeout', 'User API initialization timed out')
+          : messageFailure(apiId, 'sourceChanged', 'User API source changed')
         throw Object.assign(new Error(failure.message), failure)
       }
 
@@ -262,6 +310,8 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
         resolveInit = resolve
         rejectInitPromise = reject
       })
+      // Initialization dispatch can outlive the deadline before ensure() can await this promise.
+      void initPromise.catch(() => {})
       const nextRecord: RuntimeRecord = {
         apiId,
         generation,
@@ -273,7 +323,9 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
         disposing: false,
         disposeWhenIdle: state.disposeWhenIdle,
         initSettled: false,
+        initTimeout: state.initTimeout,
       }
+      state.initTimeout = null
       recordsByApiId.set(apiId, nextRecord)
       bindingsByWebContentsId.set(runtime.webContentsId, { apiId, generation })
       try {
@@ -284,11 +336,14 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
       }
       await disposeIfIdle(apiId)
       return nextRecord
+    }).catch(error => {
+      clearCreationTimeout(state)
+      throw error
     }).finally(() => {
       if (creatingByApiId.get(apiId) == state) creatingByApiId.delete(apiId)
     })
     creatingByApiId.set(apiId, state)
-    return state.promise
+    return Promise.race([state.promise, state.timeoutPromise])
   }
 
   const ensure = async(apiId: string) => {
@@ -491,6 +546,10 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     }
     const initializedInfo = { ...apiInfo, sources: envelope.data.sources }
     record.initSettled = true
+    if (record.initTimeout != null) {
+      deps.clearTimeout(record.initTimeout)
+      record.initTimeout = null
+    }
     record.status = { apiId: record.apiId, status: true, apiInfo: initializedInfo }
     deps.publishStatus({ ...record.status })
     record.resolveInit(initializedInfo)

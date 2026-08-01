@@ -5,12 +5,16 @@ const loadTsModule = require('../../scripts/test-utils/load-ts-module')
 const { createPoolHarness } = require('../test-utils/playback-fallback-harness')
 
 const removeEventName = 'remove_user_api'
+const ensureEventName = 'ensure_user_api'
 const createIpcNames = values => new Proxy(values, {
   get(target, property) {
     return Reflect.has(target, property) ? Reflect.get(target, property) : String(property)
   },
 })
-const winMainEventNames = createIpcNames({ remove_user_api: removeEventName })
+const winMainEventNames = createIpcNames({
+  remove_user_api: removeEventName,
+  ensure_user_api: ensureEventName,
+})
 const emptyEventNames = createIpcNames({})
 const hotKeyGroup = new Proxy({}, {
   get(_target, property) {
@@ -114,6 +118,51 @@ const createRendererRemoveHarness = rendererInvoke => loadTsModule(
   },
 )
 
+const createMainEnsureHarness = ensureImplementation => {
+  const registeredHandlers = new Map()
+  const runtimePool = {
+    async releaseOwner() {},
+    getStatus(apiId) { return { apiId, status: true } },
+    request() {},
+    ensure: ensureImplementation,
+    cancel() {},
+    acquireLease() {},
+    async releaseLease() {},
+  }
+  const runtimeErrors = loadTsModule(path.join(
+    __dirname,
+    '../../src/main/modules/userApi/runtimeError.ts',
+  ))
+  const runtime = loadTsModule(
+    path.join(__dirname, '../../src/main/modules/winMain/rendererEvent/userApi.ts'),
+    {
+      '@common/ipcNames': { WIN_MAIN_RENDERER_EVENT_NAME: winMainEventNames },
+      '@common/mainIpc': {
+        mainHandle(name, handler) { registeredHandlers.set(name, handler) },
+        mainOn() {},
+      },
+      '@common/utils': { log: { error() {} } },
+      '@main/modules/userApi': {
+        createReplacementFailureApiListCarrier: () => ({}),
+        getApiList() {},
+        importApi() {},
+        replaceApisFromGitHub() {},
+        removeApi() {},
+        setApi() {},
+        setAllowShowUpdateAlert() {},
+        takeReplacementFailureApiList() {},
+      },
+      '@main/modules/userApi/runtimeError': runtimeErrors,
+      '@main/modules/userApi/runtimePool': { getUserApiRuntimePool: () => runtimePool },
+      '@main/modules/winMain/main': { sendEvent() {} },
+    },
+  )
+  runtime.default()
+  const ensureHandler = registeredHandlers.get(ensureEventName)
+  assert.equal(typeof ensureHandler, 'function')
+  return apiId => ensureHandler({ params: apiId })
+}
+
 const retainedApiList = [{
   id: 'retained-source',
   name: 'Retained source',
@@ -169,6 +218,40 @@ test('update alerts and developer tools use the trusted sender binding', async()
   assert.equal(harness.alerts[0].name, 'Trusted A')
   assert.deepEqual(harness.devToolsIds, ['a'])
   assert.deepEqual(harness.proxyRecipients, ['a'])
+})
+
+test('the ensure IPC response preserves a trusted initialization timeout kind', async() => {
+  const timeoutFailure = {
+    name: 'PlaybackSourceError',
+    message: 'User API initialization timed out',
+    scope: 'source',
+    kind: 'timeout',
+    apiId: 'a',
+  }
+  const invoke = createMainEnsureHarness(async() => { throw timeoutFailure })
+
+  assert.deepEqual(await invoke('a'), { ok: false, error: timeoutFailure })
+})
+
+test('the ensure IPC response normalizes untrusted failures as initialization errors', async() => {
+  const failure = Object.assign(new Error(`${'m'.repeat(1100)}\nprivate details`), {
+    kind: 'timeout',
+    arbitrary: 'must not cross IPC',
+  })
+  const invoke = createMainEnsureHarness(async() => { throw failure })
+
+  const result = await invoke('a')
+  assert.deepEqual(result, {
+    ok: false,
+    error: {
+      name: 'PlaybackSourceError',
+      message: 'm'.repeat(1024),
+      scope: 'source',
+      kind: 'initialization',
+      apiId: 'a',
+    },
+  })
+  assert.equal(Object.prototype.hasOwnProperty.call(result.error, 'arbitrary'), false)
 })
 
 test('direct delete main handler returns a structured success result', async() => {

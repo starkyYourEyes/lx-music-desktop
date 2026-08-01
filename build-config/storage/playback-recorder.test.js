@@ -212,16 +212,76 @@ describe('pure playback recorder', () => {
     assert.equal(Object.hasOwn(lastCommand(state).request, 'fact'), false)
   })
 
-  it('keeps a retryable pre-play error pending until one final failure is emitted', () => {
+  it('keeps a retryable pre-play error pending without emitting persistence', () => {
     let state = reduce(createPlaybackRecorderState(), { type: 'start-requested', request: start() })
     state = reduce(state, { type: 'error', stage: 'url', code: null, recoverable: true, attempt: 1, monotonicMs: 500, positionMs: 0, occurredAtMs: 1700000000500 })
     assert.equal(state.phase, 'pending')
     assert.equal(state.pending.playbackGroupUuid, UUID)
     assert.equal(state.outbox.length, 0)
+  })
+
+  it('closes a private final pending error without persisting its track payload', () => {
+    let state = reduce(createPlaybackRecorderState(), {
+      type: 'start-requested',
+      request: start({ consent: { recentAllowed: true, statsAllowed: true, privateMode: true } }),
+    })
     state = reduce(state, { type: 'error', stage: 'url', code: null, recoverable: false, attempt: 2, monotonicMs: 600, positionMs: 0, occurredAtMs: 1700000000600 })
     assert.equal(state.phase, 'closing')
-    assert.equal(state.outbox.length, 1)
-    assert.equal(state.outbox[0].kind, 'preplay_failure')
+    assert.equal(state.pending, null)
+    assert.equal(state.session, null)
+    assert.deepEqual(state.outbox, [])
+    const afterRepeatedFinal = reduce(state, { type: 'error', stage: 'url', code: null, recoverable: false, attempt: 3, monotonicMs: 700, positionMs: 0, occurredAtMs: 1700000000700 })
+    assert.strictEqual(afterRepeatedFinal, state)
+  })
+
+  it('closes a both-disabled final pending error without persisting its track payload', () => {
+    let state = reduce(createPlaybackRecorderState(), {
+      type: 'start-requested',
+      request: start({ consent: { recentAllowed: false, statsAllowed: false, privateMode: false } }),
+    })
+    state = reduce(state, { type: 'error', stage: 'url', code: null, recoverable: false, attempt: 2, monotonicMs: 600, positionMs: 0, occurredAtMs: 1700000000600 })
+    assert.equal(state.phase, 'closing')
+    assert.equal(state.pending, null)
+    assert.equal(state.session, null)
+    assert.deepEqual(state.outbox, [])
+    const afterRepeatedFinal = reduce(state, { type: 'error', stage: 'url', code: null, recoverable: false, attempt: 3, monotonicMs: 700, positionMs: 0, occurredAtMs: 1700000000700 })
+    assert.strictEqual(afterRepeatedFinal, state)
+  })
+
+  it('emits exactly one pre-play failure for a recent-only final pending error', () => {
+    let state = reduce(createPlaybackRecorderState(), {
+      type: 'start-requested',
+      request: start({ consent: { recentAllowed: true, statsAllowed: false, privateMode: false } }),
+    })
+    state = reduce(state, { type: 'error', stage: 'url', code: null, recoverable: false, attempt: 2, monotonicMs: 600, positionMs: 0, occurredAtMs: 1700000000600 })
+    assert.equal(state.phase, 'closing')
+    assert.equal(state.pending, null)
+    assert.deepEqual(state.outbox.map(command => command.kind), ['preplay_failure'])
+    const afterRepeatedFinal = reduce(state, { type: 'error', stage: 'url', code: null, recoverable: false, attempt: 3, monotonicMs: 700, positionMs: 0, occurredAtMs: 1700000000700 })
+    assert.strictEqual(afterRepeatedFinal, state)
+  })
+
+  it('emits exactly one pre-play failure for a stats-only final pending error', () => {
+    let state = reduce(createPlaybackRecorderState(), {
+      type: 'start-requested',
+      request: start({ consent: { recentAllowed: false, statsAllowed: true, privateMode: false } }),
+    })
+    state = reduce(state, { type: 'error', stage: 'url', code: null, recoverable: false, attempt: 2, monotonicMs: 600, positionMs: 0, occurredAtMs: 1700000000600 })
+    assert.equal(state.phase, 'closing')
+    assert.equal(state.pending, null)
+    assert.deepEqual(state.outbox.map(command => command.kind), ['preplay_failure'])
+    const afterRepeatedFinal = reduce(state, { type: 'error', stage: 'url', code: null, recoverable: false, attempt: 3, monotonicMs: 700, positionMs: 0, occurredAtMs: 1700000000700 })
+    assert.strictEqual(afterRepeatedFinal, state)
+  })
+
+  it('emits exactly one pre-play failure for a both-enabled final pending error', () => {
+    let state = reduce(createPlaybackRecorderState(), { type: 'start-requested', request: start() })
+    state = reduce(state, { type: 'error', stage: 'url', code: null, recoverable: false, attempt: 2, monotonicMs: 600, positionMs: 0, occurredAtMs: 1700000000600 })
+    assert.equal(state.phase, 'closing')
+    assert.equal(state.pending, null)
+    assert.deepEqual(state.outbox.map(command => command.kind), ['preplay_failure'])
+    const afterRepeatedFinal = reduce(state, { type: 'error', stage: 'url', code: null, recoverable: false, attempt: 3, monotonicMs: 700, positionMs: 0, occurredAtMs: 1700000000700 })
+    assert.strictEqual(afterRepeatedFinal, state)
   })
 
   it('correlates delayed start results without regressing a newer group sequence', () => {

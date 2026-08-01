@@ -219,8 +219,10 @@ export const reduce = (state: PlaybackSessionState, action: PlaybackRecorderActi
       const fact: PlaybackFactV1 = { version: 1, type: 'error', stage: action.stage, code: action.code, recoverable: action.recoverable, attempt: action.attempt }
       if (state.phase == 'pending' && state.pending != null) {
         if (action.recoverable) return state
+        const closed = { ...state, pending: null, phase: 'closing' as const }
+        if (state.deliveryMode != 'activity') return closed
         const request = { ...state.pending, error: fact }
-        return { ...state, pending: null, phase: 'closing', outbox: [...state.outbox, { kind: 'preplay_failure', request }] }
+        return { ...closed, outbox: [...state.outbox, { kind: 'preplay_failure', request }] }
       }
       if (state.phase != 'playing' && state.phase != 'paused' && state.phase != 'buffering') return state
       const sampled = sampleAction(state, action)

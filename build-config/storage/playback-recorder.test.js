@@ -35,7 +35,7 @@ const start = (overrides = {}) => ({
   ...overrides,
 })
 
-const activityAck = (checkpointSeq = 0) => ({
+const activityAck = (checkpointSeq = 1) => ({
   mode: 'activity',
   ack: { playbackGroupUuid: UUID, sessionUuid: UUID_2, segmentNo: 0, checkpointSeq, cumulativePlayedMs: 0, cumulativeActiveMs: 0 },
 })
@@ -60,6 +60,20 @@ describe('pure playback recorder', () => {
     assert.equal(state.outbox.length, 1)
     assert.equal(state.outbox[0].kind, 'start')
     assert.equal(state.playbackGroupUuid, UUID)
+    assert.equal(state.checkpointSeq, 1)
+  })
+
+  it('reserves the worker start sequence before a delayed activity start result', () => {
+    let state = createPlaybackRecorderState()
+    state = reduce(state, { type: 'start-requested', request: start() })
+    state = reduce(state, { type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1 })
+    assert.equal(state.checkpointSeq, 1)
+    state = reduce(state, { type: 'pause', reason: 'user', monotonicMs: 1000, positionMs: 1000, occurredAtMs: 1700000001000 })
+    assert.equal(lastCommand(state).request.checkpoint.checkpointSeq, 2)
+    state = reduce(state, { type: 'start-result', result: activityAck(1) })
+    assert.equal(state.checkpointSeq, 2)
+    assert.equal(state.outbox.length, 1)
+    assert.deepEqual(state.outbox[0].request.fact, { version: 1, type: 'pause', reason: 'user' })
   })
 
   it('records only playing deltas across pause, resume, buffering, and rate changes', () => {
@@ -166,7 +180,7 @@ describe('pure playback recorder', () => {
     unsequencedStart = reduce(unsequencedStart, { type: 'start-requested', request: start() })
     unsequencedStart = reduce(unsequencedStart, { type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1 })
     unsequencedStart = reduce(unsequencedStart, { type: 'teardown', monotonicMs: 1000, positionMs: 1000, occurredAtMs: 1700000001000 })
-    unsequencedStart = reduce(unsequencedStart, { type: 'acknowledged', ack: { playbackGroupUuid: UUID, sessionUuid: UUID_2, segmentNo: 0, checkpointSeq: 1, cumulativePlayedMs: 1000, cumulativeActiveMs: 1000 } })
+    unsequencedStart = reduce(unsequencedStart, { type: 'acknowledged', ack: { playbackGroupUuid: UUID, sessionUuid: UUID_2, segmentNo: 0, checkpointSeq: 2, cumulativePlayedMs: 1000, cumulativeActiveMs: 1000 } })
     assert.equal(unsequencedStart.outbox.length, 1)
     assert.equal(unsequencedStart.outbox[0].kind, 'start')
   })
@@ -194,7 +208,7 @@ describe('pure playback recorder', () => {
     state = reduce(state, { type: 'periodic-checkpoint', monotonicMs: 4000, positionMs: 4000, occurredAtMs: 1700000004000 })
     assert.equal(state.cumulativePlayedMs, 4000)
     assert.equal(state.cumulativeActiveMs, 4000)
-    assert.equal(lastCommand(state).request.checkpoint.checkpointSeq, 1)
+    assert.equal(lastCommand(state).request.checkpoint.checkpointSeq, 2)
     assert.equal(Object.hasOwn(lastCommand(state).request, 'fact'), false)
   })
 
@@ -219,7 +233,7 @@ describe('pure playback recorder', () => {
     state = reduce(state, { type: 'periodic-checkpoint', monotonicMs: 3000, positionMs: 1000, occurredAtMs: 1700000003000 })
     state = reduce(state, { type: 'start-result', result: activityAck() })
     assert.equal(state.playbackGroupUuid, UUID_2)
-    assert.equal(state.checkpointSeq, 1)
+    assert.equal(state.checkpointSeq, 2)
     assert.equal(state.outbox.filter(command => command.kind == 'start').length, 1)
     assert.equal(state.outbox.find(command => command.kind == 'start').request.playbackGroupUuid, UUID_2)
   })
@@ -228,9 +242,9 @@ describe('pure playback recorder', () => {
     let state = playingState()
     state = reduce(state, { type: 'periodic-checkpoint', monotonicMs: 1000, positionMs: 1000, occurredAtMs: 1700000001000 })
     state = reduce(state, { type: 'periodic-checkpoint', monotonicMs: 2000, positionMs: 2000, occurredAtMs: 1700000002000 })
-    state = reduce(state, { type: 'acknowledged', ack: { playbackGroupUuid: UUID, sessionUuid: UUID_2, segmentNo: 0, checkpointSeq: 2, cumulativePlayedMs: 2000, cumulativeActiveMs: 2000 } })
-    state = reduce(state, { type: 'acknowledged', ack: { playbackGroupUuid: UUID, sessionUuid: UUID_2, segmentNo: 0, checkpointSeq: 1, cumulativePlayedMs: 1000, cumulativeActiveMs: 1000 } })
-    assert.equal(state.acknowledged.checkpointSeq, 2)
+    state = reduce(state, { type: 'acknowledged', ack: { playbackGroupUuid: UUID, sessionUuid: UUID_2, segmentNo: 0, checkpointSeq: 3, cumulativePlayedMs: 2000, cumulativeActiveMs: 2000 } })
+    state = reduce(state, { type: 'acknowledged', ack: { playbackGroupUuid: UUID, sessionUuid: UUID_2, segmentNo: 0, checkpointSeq: 2, cumulativePlayedMs: 1000, cumulativeActiveMs: 1000 } })
+    assert.equal(state.acknowledged.checkpointSeq, 3)
     assert.equal(state.outbox.length, 0)
   })
 
@@ -238,7 +252,7 @@ describe('pure playback recorder', () => {
     let state = playingState()
     state = reduce(state, { type: 'statistics-clear', monotonicMs: 1000, positionMs: 1000, occurredAtMs: 1700000001000 })
     assert.equal(state.playbackGroupUuid, UUID)
-    assert.equal(state.checkpointSeq, 1)
+    assert.equal(state.checkpointSeq, 2)
     assert.equal(state.cumulativePlayedMs, 1000)
     assert.equal(Object.hasOwn(lastCommand(state).request, 'fact'), false)
     state = reduce(state, { type: 'sample', monotonicMs: 2000, positionMs: 2000 })
@@ -261,14 +275,20 @@ describe('pure playback recorder', () => {
   })
 
   it('keeps private, resume-only, and activity policy combinations distinct', () => {
-    let privateState = playingState(undefined, { recentAllowed: true, statsAllowed: true, privateMode: true })
+    let privateState = createPlaybackRecorderState()
+    privateState = reduce(privateState, { type: 'start-requested', request: start({ consent: { recentAllowed: true, statsAllowed: true, privateMode: true } }) })
+    privateState = reduce(privateState, { type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1 })
+    assert.equal(privateState.checkpointSeq, 0)
+    privateState = reduce(privateState, { type: 'start-result', result: { mode: 'private', playbackGroupUuid: UUID, checkpointSeq: 0 } })
     privateState = reduce(privateState, { type: 'periodic-checkpoint', monotonicMs: 1000, positionMs: 1000, occurredAtMs: 1700000001000 })
     assert.equal(privateState.outbox.length, 0)
     assert.equal(privateState.cumulativePlayedMs, 1000)
+    assert.equal(privateState.checkpointSeq, 0)
 
     let resumeOnly = createPlaybackRecorderState()
     resumeOnly = reduce(resumeOnly, { type: 'start-requested', request: start({ consent: { recentAllowed: false, statsAllowed: false, privateMode: false } }) })
     resumeOnly = reduce(resumeOnly, { type: 'native-playing', monotonicMs: 0, positionMs: 0, playbackRate: 1 })
+    assert.equal(resumeOnly.checkpointSeq, 0)
     resumeOnly = reduce(resumeOnly, { type: 'start-result', result: { mode: 'resume-only', ack: { playbackGroupUuid: UUID, checkpointSeq: 0, positionMs: 0 } } })
     resumeOnly = reduce(resumeOnly, { type: 'periodic-checkpoint', monotonicMs: 1000, positionMs: 1000, occurredAtMs: 1700000001000 })
     assert.equal(lastCommand(resumeOnly).kind, 'resume')

@@ -132,6 +132,7 @@ export const reduce = (state: PlaybackSessionState, action: PlaybackRecorderActi
           phase: 'playing',
           pending: null,
           session,
+          checkpointSeq: state.deliveryMode == 'activity' ? Math.max(state.checkpointSeq, 1) : state.checkpointSeq,
           playbackRate: action.playbackRate,
           sample: { monotonicMs: action.monotonicMs, positionMs: action.positionMs },
           outbox: [...state.outbox, { kind: 'start', request: session }],

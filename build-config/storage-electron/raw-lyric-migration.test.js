@@ -196,11 +196,8 @@ describe('raw lyric cache migration', () => {
     const first = await migrateRawLyrics({ nowMs: 100 })
     assert.equal(first.status, 'complete')
 
-    const marker = db.prepare(`SELECT details_json AS detailsJson FROM migration_markers WHERE name = ?`).get('legacy_cache_v1.raw_lyrics')
-    const details = JSON.parse(marker.detailsJson)
-    details.targetRows = 2
-    db.prepare(`UPDATE migration_markers SET details_json = ? WHERE name = ?`)
-      .run(canonical(details), 'legacy_cache_v1.raw_lyrics')
+    db.prepare('INSERT INTO lyric(id, type, text, source) VALUES (?, ?, ?, ?)')
+      .run('marker-conflict-late', 'lyric', Buffer.from('late authoritative').toString('base64'), 'raw')
     await cacheDb.runCacheImmediate(cache => {
       cache.prepare(`UPDATE raw_lyrics SET text = ?, byte_size = ? WHERE provider = 'legacy' AND source_track_id = 'marker-conflict'`)
         .run('disposable', Buffer.byteLength('disposable'))

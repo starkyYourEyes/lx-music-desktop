@@ -13,6 +13,7 @@ const loadRendererIpc = results => loadTsModule(path.join(__dirname, '../../src/
   '@common/rendererIpc': {
     rendererInvoke: async() => results.shift(), rendererSend() {}, rendererOn() {}, rendererOff() {},
   },
+  '@common/storage/cache': { STORAGE_CACHE_GENERATION_EVENT: 'storage_cache_generation_v1' },
   '@common/ipcNames': {
     HOTKEY_RENDERER_EVENT_NAME: {},
     CMMON_EVENT_NAME: {},

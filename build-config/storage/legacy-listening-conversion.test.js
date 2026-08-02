@@ -1,9 +1,11 @@
 const assert = require('node:assert/strict')
+const path = require('node:path')
 const { describe, it } = require('node:test')
+const loadTsModule = require('../../scripts/test-utils/load-ts-module')
 
-describe('legacy listening conversion', async() => {
-  const { convertLegacyListeningStats } = await import('../../src/common/storage/legacyListening.ts')
+const { convertLegacyListeningStats } = loadTsModule(path.join(__dirname, '../../src/common/storage/legacyListening.ts'))
 
+describe('legacy listening conversion', () => {
   it('rounds fractional seconds to the nearest millisecond', () => {
     const result = convertLegacyListeningStats({
       totalSeconds: 1.2346,

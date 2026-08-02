@@ -85,6 +85,7 @@ const createRendererRemoveHarness = rendererInvoke => loadTsModule(
       rendererOn() {},
       rendererOff() {},
     },
+    '@common/storage/cache': { STORAGE_CACHE_GENERATION_EVENT: 'storage_cache_generation_v1' },
     '@common/ipcNames': {
       HOTKEY_RENDERER_EVENT_NAME: emptyEventNames,
       WIN_MAIN_RENDERER_EVENT_NAME: winMainEventNames,

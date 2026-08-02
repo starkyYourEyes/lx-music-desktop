@@ -51,12 +51,23 @@ interface BatchResult {
   before: Counts
   after: Counts
   selected: number
+  effects: DeletionEffects
   musicExpired: string[]
   musicEvicted: string[]
   rawExpired: string[]
   rawEvicted: string[]
   otherExpired: string[]
   otherEvicted: string[]
+}
+
+interface DeletionEffects {
+  musicUrlRows: number
+  rawLyricRows: number
+  rawLyricOwners: number
+  rawLyricBytes: number
+  otherSourceRows: number
+  otherSourceOwners: number
+  otherSourceBytes: number
 }
 
 const invalidInput = (): Error & { code: 'cache_prune_input_invalid' } =>
@@ -244,6 +255,22 @@ const quotaOwners = (
   return selected
 }
 
+const deletionEffects = (before: Counts, after: Counts): DeletionEffects => {
+  const effects = {
+    musicUrlRows: before.musicUrls.rows - after.musicUrls.rows,
+    rawLyricRows: before.rawLyrics.rows - after.rawLyrics.rows,
+    rawLyricOwners: before.rawLyrics.ownerGroups - after.rawLyrics.ownerGroups,
+    rawLyricBytes: before.rawLyrics.bytes - after.rawLyrics.bytes,
+    otherSourceRows: before.otherSources.rows - after.otherSources.rows,
+    otherSourceOwners: before.otherSources.ownerGroups - after.otherSources.ownerGroups,
+    otherSourceBytes: before.otherSources.bytes - after.otherSources.bytes,
+  }
+  if (Object.values(effects).some(value => !Number.isSafeInteger(value) || value < 0)) {
+    throw new Error('cache_policy_accounting_invalid')
+  }
+  return effects
+}
+
 const runBatch = (
   db: Database.Database,
   input: CachePruneInputV1,
@@ -254,50 +281,62 @@ const runBatch = (
   if (validateAccounting) validateGroupAccounting(db, utf8ByteLength)
   const before = counts(db)
   let remaining = input.batchSize
-  const musicExpired = selectExpiredUrls(db, input.nowMs, remaining)
+  let musicExpired: UrlRow[] = []
+  let musicEvicted: UrlRow[] = []
+  let rawExpired: OwnerRow[] = []
+  let rawEvicted: OwnerRow[] = []
+  let otherExpired: OwnerRow[] = []
+  let otherEvicted: OwnerRow[] = []
+
+  musicExpired = selectExpiredUrls(db, input.nowMs, remaining)
   deleteUrls(db, musicExpired)
   remaining -= musicExpired.length
-  let current = counts(db)
-  const musicEvicted = remaining == 0
-    ? []
-    : selectLruUrls(db, Math.min(remaining, Math.max(0, current.musicUrls.rows - policy.musicUrls.maxEntries)))
-  deleteUrls(db, musicEvicted)
-  remaining -= musicEvicted.length
-
   const rawThreshold = input.nowMs >= policy.rawLyrics.maxIdleMs
     ? input.nowMs - policy.rawLyrics.maxIdleMs
     : -1
-  const rawExpired = remaining == 0 ? [] : selectRawExpired(db, rawThreshold, remaining)
+  rawExpired = remaining == 0 ? [] : selectRawExpired(db, rawThreshold, remaining)
   deleteOwners(db, 'raw_lyric_groups', rawExpired)
   remaining -= rawExpired.length
-  current = counts(db)
-  const rawEvicted = remaining == 0 ? [] : quotaOwners(
-    selectRawLru(db, remaining),
-    current.rawLyrics,
-    policy.rawLyrics.maxTracks,
-    policy.rawLyrics.maxBytes,
-  )
-  deleteOwners(db, 'raw_lyric_groups', rawEvicted)
-  remaining -= rawEvicted.length
-
-  const otherExpired = remaining == 0 ? [] : selectOtherExpired(db, input.nowMs, remaining)
+  otherExpired = remaining == 0 ? [] : selectOtherExpired(db, input.nowMs, remaining)
   deleteOwners(db, 'other_source_groups', otherExpired)
-  remaining -= otherExpired.length
-  current = counts(db)
-  const otherEvicted = remaining == 0 ? [] : quotaOwners(
-    selectOtherLru(db, remaining),
-    current.otherSources,
-    Number.MAX_SAFE_INTEGER,
-    policy.otherSources.maxBytes,
-  )
-  deleteOwners(db, 'other_source_groups', otherEvicted)
+
+  const expiredSelected = musicExpired.length + rawExpired.length + otherExpired.length
+  if (expiredSelected == 0) {
+    remaining = input.batchSize
+    let current = counts(db)
+    musicEvicted = selectLruUrls(
+      db,
+      Math.min(remaining, Math.max(0, current.musicUrls.rows - policy.musicUrls.maxEntries)),
+    )
+    deleteUrls(db, musicEvicted)
+    remaining -= musicEvicted.length
+    current = counts(db)
+    rawEvicted = remaining == 0 ? [] : quotaOwners(
+      selectRawLru(db, remaining),
+      current.rawLyrics,
+      policy.rawLyrics.maxTracks,
+      policy.rawLyrics.maxBytes,
+    )
+    deleteOwners(db, 'raw_lyric_groups', rawEvicted)
+    remaining -= rawEvicted.length
+    current = counts(db)
+    otherEvicted = remaining == 0 ? [] : quotaOwners(
+      selectOtherLru(db, remaining),
+      current.otherSources,
+      Number.MAX_SAFE_INTEGER,
+      policy.otherSources.maxBytes,
+    )
+    deleteOwners(db, 'other_source_groups', otherEvicted)
+  }
 
   const selected = musicExpired.length + musicEvicted.length + rawExpired.length +
     rawEvicted.length + otherExpired.length + otherEvicted.length
+  const after = counts(db)
   return {
     before,
-    after: counts(db),
+    after,
     selected,
+    effects: deletionEffects(before, after),
     musicExpired: musicExpired.map(urlKey),
     musicEvicted: musicEvicted.map(urlKey),
     rawExpired: rawExpired.map(ownerKey),
@@ -310,13 +349,21 @@ const runBatch = (
 const report = (
   before: Counts,
   after: Counts,
-  aggregate: Omit<BatchResult, 'before' | 'after' | 'selected'>,
+  aggregate: {
+    effects: DeletionEffects
+    musicExpired: string[]
+    musicEvicted: string[]
+    rawExpired: string[]
+    rawEvicted: string[]
+    otherExpired: string[]
+    otherEvicted: string[]
+  },
 ): CachePruneReportV1 => ({
   status: 'completed',
   musicUrls: {
     rowsBefore: before.musicUrls.rows,
     rowsAfter: after.musicUrls.rows,
-    deletedRows: before.musicUrls.rows - after.musicUrls.rows,
+    deletedRows: aggregate.effects.musicUrlRows,
     expiredKeys: aggregate.musicExpired,
     evictedKeys: aggregate.musicEvicted,
   },
@@ -327,8 +374,9 @@ const report = (
     ownerGroupsAfter: after.rawLyrics.ownerGroups,
     bytesBefore: before.rawLyrics.bytes,
     bytesAfter: after.rawLyrics.bytes,
-    deletedRows: before.rawLyrics.rows - after.rawLyrics.rows,
-    deletedOwners: before.rawLyrics.ownerGroups - after.rawLyrics.ownerGroups,
+    deletedRows: aggregate.effects.rawLyricRows,
+    deletedOwners: aggregate.effects.rawLyricOwners,
+    deletedBytes: aggregate.effects.rawLyricBytes,
     expiredOwners: aggregate.rawExpired,
     evictedOwners: aggregate.rawEvicted,
   },
@@ -339,8 +387,9 @@ const report = (
     ownerGroupsAfter: after.otherSources.ownerGroups,
     bytesBefore: before.otherSources.bytes,
     bytesAfter: after.otherSources.bytes,
-    deletedRows: before.otherSources.rows - after.otherSources.rows,
-    deletedOwners: before.otherSources.ownerGroups - after.otherSources.ownerGroups,
+    deletedRows: aggregate.effects.otherSourceRows,
+    deletedOwners: aggregate.effects.otherSourceOwners,
+    deletedBytes: aggregate.effects.otherSourceBytes,
     expiredOwners: aggregate.otherExpired,
     evictedOwners: aggregate.otherEvicted,
   },
@@ -360,6 +409,15 @@ export const createCachePruner = ({
     let first: Counts | undefined
     let last: Counts | undefined
     const aggregate = {
+      effects: {
+        musicUrlRows: 0,
+        rawLyricRows: 0,
+        rawLyricOwners: 0,
+        rawLyricBytes: 0,
+        otherSourceRows: 0,
+        otherSourceOwners: 0,
+        otherSourceBytes: 0,
+      },
       musicExpired: [] as string[],
       musicEvicted: [] as string[],
       rawExpired: [] as string[],
@@ -368,10 +426,19 @@ export const createCachePruner = ({
       otherEvicted: [] as string[],
     }
     while (true) {
-      const result = await runImmediate(db => runBatch(db, input, policy, first == null, utf8ByteLength))
+      const result = await runImmediate(db => runBatch(
+        db,
+        input,
+        policy,
+        first == null,
+        utf8ByteLength,
+      ))
       if (result.status == 'unavailable') return result
       first ??= result.value.before
       last = result.value.after
+      for (const key of Object.keys(aggregate.effects) as Array<keyof DeletionEffects>) {
+        aggregate.effects[key] += result.value.effects[key]
+      }
       aggregate.musicExpired.push(...result.value.musicExpired)
       aggregate.musicEvicted.push(...result.value.musicEvicted)
       aggregate.rawExpired.push(...result.value.rawExpired)
@@ -425,15 +492,15 @@ export const createCachePruneScheduler = ({
   prune?: (input: CachePruneInputV1) => Promise<CachePruneResultV1>
   batchSize?: number
 } = {}) => {
-  let scheduled = false
+  let state: 'idle' | 'scheduled' | 'running' = 'idle'
   let idleRequested = false
   const writeGroups = new Set<CachePolicyGroup>()
 
   const requestRun = () => {
-    if (scheduled) return
-    scheduled = true
+    if (state != 'idle') return
+    state = 'scheduled'
     schedule(() => {
-      scheduled = false
+      state = 'running'
       const idle = idleRequested
       idleRequested = false
       const groups = [...writeGroups]
@@ -445,7 +512,10 @@ export const createCachePruneScheduler = ({
             !groups.some(group => exceedsTrigger(group, snapshot.value, policy))) return
         }
         await prune({ nowMs: now(), batchSize })
-      })().catch(() => {})
+      })().catch(() => {}).finally(() => {
+        state = 'idle'
+        if (idleRequested || writeGroups.size > 0) requestRun()
+      })
     })
   }
 

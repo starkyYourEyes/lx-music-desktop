@@ -196,6 +196,47 @@ describe('deterministic cache policy', () => {
     })
   })
 
+  it('exhausts expired work across every family before quota eviction starts', async() => {
+    await createFixture()
+    await seed(db => {
+      seedUrl(db, { track: 'a' })
+      seedUrl(db, { track: 'b' })
+      seedRaw(db, 'raw', 'expired', { lyric: 'old' }, {
+        accessed: nowMs - smallPolicy.rawLyrics.maxIdleMs,
+      })
+      seedOther(db, 'other', 'expired', ['old'], { expiry: nowMs })
+    })
+    const observations = []
+    const runImmediate = async operation => {
+      const result = await cacheDb.runCacheImmediate(operation)
+      if (result.status == 'completed' && result.value.selected > 0) {
+        const state = await cacheDb.runCacheRead(db => ({
+          urls: db.prepare(`SELECT count(*) AS count FROM music_urls`).get().count,
+          raw: db.prepare(`SELECT count(*) AS count FROM raw_lyric_groups`).get().count,
+          other: db.prepare(`SELECT count(*) AS count FROM other_source_groups`).get().count,
+        }))
+        assert.equal(state.status, 'hit')
+        observations.push(state.value)
+      }
+      return result
+    }
+
+    const result = await createPruner({
+      runImmediate,
+      policy: {
+        ...smallPolicy,
+        musicUrls: { ...smallPolicy.musicUrls, maxEntries: 1 },
+      },
+    }).prune({ nowMs, batchSize: 1 })
+
+    assert.equal(result.status, 'completed')
+    assert.deepEqual(observations.slice(0, 3), [
+      { urls: 2, raw: 0, other: 1 },
+      { urls: 2, raw: 0, other: 0 },
+      { urls: 1, raw: 0, other: 0 },
+    ])
+  })
+
   it('keeps exact cap boundaries and reports exact UTF-8 group sums', async() => {
     await createFixture()
     const rawRepository = require('../../src/main/worker/dbService/modules/lyric/raw/repository.ts')
@@ -263,6 +304,40 @@ describe('deterministic cache policy', () => {
     for (const batchSize of [0, 501, 1.5]) {
       await assert.rejects(pruner.prune({ nowMs, batchSize }), error => error?.code == 'cache_prune_input_invalid')
     }
+  })
+
+  it('counts actual deletions when a FIFO write lands between prune batches', async() => {
+    await createFixture()
+    await seed(db => {
+      for (const track of ['a', 'b', 'c']) seedUrl(db, { track })
+    })
+    let inserted = false
+    const runImmediate = async operation => {
+      const result = await cacheDb.runCacheImmediate(operation)
+      if (!inserted && result.status == 'completed' && result.value.musicEvicted.length == 1) {
+        inserted = true
+        await seed(db => seedUrl(db, { track: 'd', created: 30, accessed: 30 }))
+      }
+      return result
+    }
+
+    const result = await createPruner({
+      runImmediate,
+      policy: {
+        ...smallPolicy,
+        musicUrls: { ...smallPolicy.musicUrls, maxEntries: 1 },
+      },
+    }).prune({ nowMs, batchSize: 1 })
+
+    assert.equal(result.status, 'completed')
+    assert.equal(result.musicUrls.rowsBefore, 3)
+    assert.equal(result.musicUrls.rowsAfter, 1)
+    assert.deepEqual(result.musicUrls.evictedKeys, [
+      'tx:profile-v1:uin:7:a:320k',
+      'tx:profile-v1:uin:7:b:320k',
+      'tx:profile-v1:uin:7:c:320k',
+    ])
+    assert.equal(result.musicUrls.deletedRows, 3)
   })
 
   it('rolls back a complete bounded batch when any owner deletion fails', async() => {
@@ -389,6 +464,49 @@ describe('deterministic cache policy', () => {
       { nowMs: 123, batchSize: 100 },
       { nowMs: 123, batchSize: 100 },
     ])
+  })
+
+  it('coalesces requests through pending prune completion without overlap or lost wakeups', async() => {
+    const firstPrune = {}
+    firstPrune.promise = new Promise(resolve => { firstPrune.resolve = resolve })
+    const scheduled = []
+    let active = 0
+    let maxActive = 0
+    let pruneCalls = 0
+    const scheduler = lifecycleModule().createCachePruneScheduler({
+      schedule: task => { scheduled.push(task) },
+      prune: async() => {
+        pruneCalls++
+        active++
+        maxActive = Math.max(maxActive, active)
+        if (pruneCalls == 1) await firstPrune.promise
+        active--
+        return { status: 'completed' }
+      },
+    })
+
+    scheduler.requestIdle()
+    assert.equal(scheduled.length, 1)
+    scheduled.shift()()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(pruneCalls, 1)
+
+    scheduler.requestIdle()
+    scheduler.requestAfterWrite('musicUrls')
+    assert.equal(scheduled.length, 0)
+    firstPrune.resolve()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(scheduled.length, 1)
+    scheduled.shift()()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(pruneCalls, 2)
+
+    scheduler.requestIdle()
+    assert.equal(scheduled.length, 1)
+    scheduled.shift()()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(pruneCalls, 3)
+    assert.equal(maxActive, 1)
   })
 
   it('requests post-write pruning only after the gated URL write settles', async() => {

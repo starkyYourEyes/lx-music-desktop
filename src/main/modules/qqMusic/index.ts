@@ -435,8 +435,8 @@ export const createQQMusicAccountService = ({
     const account = getAccountData(accounts)
     const generation = ++loginGeneration
     await loginService.disposeAll()
-    await clearAccount()
-    await invalidateClearedAccount(account, generation)
+    if (generation != loginGeneration) return
+    await clearMatchingAccount(account, generation)
   }
 
   const cancelLoginQr = async(requestId: string) => {

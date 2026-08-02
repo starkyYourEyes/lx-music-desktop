@@ -59,6 +59,7 @@ export interface CachePruneReportV1 {
     bytesAfter: number
     deletedRows: number
     deletedOwners: number
+    deletedBytes: number
     expiredOwners: string[]
     evictedOwners: string[]
   }
@@ -71,6 +72,7 @@ export interface CachePruneReportV1 {
     bytesAfter: number
     deletedRows: number
     deletedOwners: number
+    deletedBytes: number
     expiredOwners: string[]
     evictedOwners: string[]
   }

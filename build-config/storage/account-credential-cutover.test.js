@@ -79,6 +79,7 @@ const createQQMusicService = ({
   credentialService = { getRefreshDueAt: () => null, refresh: async cookie => cookie },
   songService = { getGuessLikeSongs: async() => [] },
   invalidateMusicUrls = async() => 0,
+  disposeAll = async() => {},
 } = {}) => {
   const { createQQMusicAccountService } = require('../../src/main/modules/qqMusic/index.ts')
   const service = createQQMusicAccountService({
@@ -87,7 +88,7 @@ const createQQMusicService = ({
       createLoginQr: async() => ({ key: 'key', qrurl: '', qrimg: '' }),
       checkLoginQr: async() => loginResult,
       cancelLoginQr: async() => {},
-      disposeAll: async() => {},
+      disposeAll,
     },
     songService,
     dailyRecommendService: { getDailyRecommendSongs: async() => [] },
@@ -398,6 +399,36 @@ describe('account credential cutover', () => {
     clearGate.resolve()
     await Promise.all([loggingOut, checking])
 
+    assert.deepEqual(invalidations, [])
+  })
+
+  it('does not clear a replacement QQ account saved while old logout waits for login disposal', async() => {
+    const accounts = createRepository()
+    await saveAccount(accounts, 'qq_music', qqCookie('7', 'old'), { uin: '7', nickname: 'Old' })
+    const disposeStarted = deferred()
+    const disposeGate = deferred()
+    const invalidations = []
+    const { service } = createQQMusicService({
+      accounts,
+      loginResult: { state: 'success', message: 'new', cookie: qqCookie('8', 'new') },
+      disposeAll: async() => {
+        disposeStarted.resolve()
+        await disposeGate.promise
+      },
+      invalidateMusicUrls: async input => { invalidations.push(input); return 1 },
+    })
+
+    const loggingOut = service.logout()
+    await disposeStarted.promise
+    const requestId = '00000000-0000-4000-8000-000000000008'
+    await service.createLoginQr(requestId, 1)
+    assert.equal((await service.checkLoginQr(requestId)).isLoggedIn, true)
+    disposeGate.resolve()
+    await loggingOut
+
+    assert.equal(accounts.getCookie('qq_music'), qqCookie('8', 'new'))
+    assert.equal(accounts.getStatus('qq_music').profile.uin, '8')
+    assert.deepEqual(accounts.clears, [])
     assert.deepEqual(invalidations, [])
   })
 

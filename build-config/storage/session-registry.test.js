@@ -418,7 +418,7 @@ test('User API cleanup after external close reacquires ownership for a concurren
   assert.deepEqual(results.map(result => result.category), ['cache', 'cache-storage', 'code-cache'])
 })
 
-const createConcurrentDisposalHarness = async() => {
+const createConcurrentDisposalHarness = async({ externallyClose = true } = {}) => {
   const { createRuntimeWindowHarness } = require('../test-utils/playback-fallback-harness')
   const harness = createRuntimeWindowHarness()
   const registrations = []
@@ -434,7 +434,7 @@ const createConcurrentDisposalHarness = async() => {
     },
   }
   const runtime = await harness.create({ id: 'user_api/concurrent-disposal' }, 1)
-  runtime.window.destroy()
+  if (externallyClose) runtime.window.destroy()
   return {
     harness,
     registrations,
@@ -472,6 +472,40 @@ test('a concurrent cleanup request upgrades an in-flight disposal that began wit
   await withCleanup
   assert.deepEqual(context.runtime.session.cleanupCalls, ['cache', 'storage:cachestorage', 'code'])
   assert.equal(context.registrations[1].unregisterCalls, 1)
+})
+
+test('a next-microtask cleanup request joins a still-settling disposal', async() => {
+  const context = await createConcurrentDisposalHarness()
+  const withoutCleanup = context.harness.dispose(context.runtime, { clearSession: false })
+  let firstSettled = false
+  void withoutCleanup.then(() => { firstSettled = true })
+
+  await Promise.resolve()
+  assert.equal(firstSettled, false)
+  const withCleanup = context.harness.dispose(context.runtime, { clearSession: true })
+
+  assert.strictEqual(withoutCleanup, withCleanup)
+  await withCleanup
+  assert.deepEqual(context.runtime.session.cleanupCalls, ['cache', 'storage:cachestorage', 'code'])
+  assert.equal(context.registrations[1].unregisterCalls, 1)
+})
+
+test('cleanup arriving after core teardown joins before final disposal settlement', async() => {
+  const context = await createConcurrentDisposalHarness({ externallyClose: false })
+  const withoutCleanup = context.harness.dispose(context.runtime, { clearSession: false })
+  let firstSettled = false
+  void withoutCleanup.then(() => { firstSettled = true })
+
+  await Promise.resolve()
+  assert.equal(context.runtime.window.isDestroyed(), true)
+  assert.equal(firstSettled, false)
+  const withCleanup = context.harness.dispose(context.runtime, { clearSession: true })
+
+  assert.strictEqual(withoutCleanup, withCleanup)
+  await withCleanup
+  assert.deepEqual(context.runtime.session.cleanupCalls, ['cache', 'storage:cachestorage', 'code'])
+  assert.equal(context.registrations.length, 1)
+  assert.equal(context.registrations[0].unregisterCalls, 1)
 })
 
 test('shared User API disposal failure retains ownership and permits one later retry', async() => {

@@ -264,6 +264,7 @@ export const disposeRuntimeWindow = (
   runtime: UserApiRuntimeWindow,
   { clearSession: shouldClearSession }: { clearSession: boolean },
   dependencies?: UserApiRuntimeWindowDependencies,
+  // eslint-disable-next-line @typescript-eslint/promise-function-async -- Preserve synchronous validation and cached disposal promise identity.
 ): Promise<void> => {
   const activeDisposal = runtimeDisposals.get(runtime)
   if (activeDisposal) {

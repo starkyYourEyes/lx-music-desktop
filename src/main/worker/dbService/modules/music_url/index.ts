@@ -73,7 +73,7 @@ export const musicUrlPutSync = (db: Database.Database, input: MusicUrlPutInputV1
 
 export const musicUrlPut = async(input: MusicUrlPutInputV1): Promise<CacheWriteResult> => {
   expiryFor(parseMusicUrlPutInput(input))
-  const result = await runCacheWrite(db => musicUrlPutSync(db, input))
+  const result = await runCacheWrite(db => { musicUrlPutSync(db, input) })
   if (result.status == 'stored') scheduleCachePruneAfterWrite('musicUrls')
   return result
 }
@@ -88,15 +88,16 @@ export const musicUrlInvalidateAccount = async(input: MusicUrlAccountInvalidatio
 
 export const musicUrlInvalidateSource = async(input: MusicUrlSourceInvalidationV1): Promise<number> => {
   const parsed = parseMusicUrlSourceInvalidation(input)
-  const result = await runCacheImmediate(db => db.prepare(`DELETE FROM music_urls WHERE provider = ?`).run(parsed.provider).changes)
+  const result = await runCacheImmediate(db => db.prepare('DELETE FROM music_urls WHERE provider = ?').run(parsed.provider).changes)
   return result.status == 'completed' ? result.value : 0
 }
 
 export const musicUrlClear = async(): Promise<CacheWriteResult> => {
-  const result = await runCacheImmediate(db => { db.prepare(`DELETE FROM music_urls`).run() })
+  const result = await runCacheImmediate(db => { db.prepare('DELETE FROM music_urls').run() })
   return result.status == 'completed' ? { status: 'stored' } : result
 }
 
+// eslint-disable-next-line @typescript-eslint/promise-function-async -- Preserve the returned cache-operation promise identity.
 export const musicUrlCount = (): Promise<CacheReadResult<number>> => runCacheRead(db =>
-  (db.prepare(`SELECT count(*) AS count FROM music_urls`).get() as { count: number }).count,
+  (db.prepare('SELECT count(*) AS count FROM music_urls').get() as { count: number }).count,
 )

@@ -6,6 +6,9 @@ import { bootstrapDatabaseSchema, getPendingMigrations, getSchemaVersion, runMig
 import { migrations } from './migrations'
 import type { MigrationRunResult } from './migrations/types'
 import { verifyDatabase } from './verifyDB'
+import type * as CacheCutover from '../../migration/cache/cutover'
+import type * as CacheCleanupMigration from './migrations/0007_cache_cleanup'
+import type * as RawLyricRepository from './modules/lyric/raw/repository'
 import {
   acquireExpectedSqliteTarget,
   closeSqliteGuardDescriptor,
@@ -264,22 +267,26 @@ const freezeReadyResult = (result: DatabaseReadyResult): Readonly<DatabaseReadyR
   freezeStartupResult(result) as Readonly<DatabaseReadyResult>
 
 const enterRawLyricSchema7CacheOnly = (): void => {
-  const repository = require('./modules/lyric/raw/repository') as typeof import('./modules/lyric/raw/repository')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the raw-lyric schema transition cycle boundary.
+  const repository = require('./modules/lyric/raw/repository') as typeof RawLyricRepository
   repository.enterRawLyricSchema7CacheOnly()
 }
 
 const enterRawLyricCutoverPending = (): void => {
-  const repository = require('./modules/lyric/raw/repository') as typeof import('./modules/lyric/raw/repository')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the raw-lyric schema transition cycle boundary.
+  const repository = require('./modules/lyric/raw/repository') as typeof RawLyricRepository
   repository.enterRawLyricCutoverPending()
 }
 
 const restoreRawLyricSchema6Fallback = (): void => {
-  const repository = require('./modules/lyric/raw/repository') as typeof import('./modules/lyric/raw/repository')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the raw-lyric schema transition cycle boundary.
+  const repository = require('./modules/lyric/raw/repository') as typeof RawLyricRepository
   repository.restoreRawLyricSchema6Fallback()
 }
 
 const verifySchema7SteadyState = (db: Database.Database): void => {
-  const cutover = require('../../migration/cache/cutover') as typeof import('../../migration/cache/cutover')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the cache cutover loading boundary.
+  const cutover = require('../../migration/cache/cutover') as typeof CacheCutover
   cutover.verifySchema7SteadyState(db)
 }
 
@@ -639,7 +646,8 @@ const backupPathFor = (backupsRoot: string, readWriteMarkerSha256: string): stri
 )
 
 const cutoverBackupVerifier = (readWriteMarkerSha256: string): OnlineBackupVerifier => backupDb => {
-  const cutover = require('../../migration/cache/cutover') as typeof import('../../migration/cache/cutover')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the cache cutover loading boundary.
+  const cutover = require('../../migration/cache/cutover') as typeof CacheCutover
   cutover.verifyCutoverBackup(backupDb, readWriteMarkerSha256)
 }
 
@@ -680,7 +688,8 @@ const ensureCutoverBackup = async(
 const runCacheCutoverMigration = (db: Database.Database): MigrationRunResult => db.transaction(() => {
   const fromVersion = getSchemaVersion(db)
   if (fromVersion != 6) throw createDatabaseError('database_advance_schema_invalid')
-  const { migration7 } = require('./migrations/0007_cache_cleanup') as typeof import('./migrations/0007_cache_cleanup')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Load migration 7 only during the schema-6-to-7 transition.
+  const { migration7 } = require('./migrations/0007_cache_cleanup') as typeof CacheCleanupMigration
   const appliedAtMs = Date.now()
   if (!Number.isSafeInteger(appliedAtMs) || appliedAtMs < 0) {
     throw new Error('Migration 7 produced an invalid applied timestamp')
@@ -725,7 +734,8 @@ const performDatabaseAdvance = async(
   initialization: Readonly<ReadyInitialization>,
   generation: number,
 ): Promise<Readonly<DatabaseReadyResult>> => {
-  const cutover = require('../../migration/cache/cutover') as typeof import('../../migration/cache/cutover')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the cache cutover loading boundary.
+  const cutover = require('../../migration/cache/cutover') as typeof CacheCutover
   const currentVersion = getSchemaVersion(db)
   if (currentVersion == 7) {
     const { readWriteMarker } = cutover.verifySchema7SteadyState(db)
@@ -788,10 +798,12 @@ const resolveAdvance = (input: DatabaseAdvanceOptions): {
   } catch {
     return null
   }
-  if (resolvedBackupsRoot != readyInitialization.backupsRoot) return {
-    key: JSON.stringify([7, resolvedBackupsRoot]),
-    initialization: readyInitialization,
-    db: writeDb,
+  if (resolvedBackupsRoot != readyInitialization.backupsRoot) {
+    return {
+      key: JSON.stringify([7, resolvedBackupsRoot]),
+      initialization: readyInitialization,
+      db: writeDb,
+    }
   }
   return {
     key: JSON.stringify([7, resolvedBackupsRoot]),
@@ -802,6 +814,7 @@ const resolveAdvance = (input: DatabaseAdvanceOptions): {
 
 export const advanceAppDatabase = (
   input: DatabaseAdvanceOptions,
+  // eslint-disable-next-line @typescript-eslint/promise-function-async -- Preserve cached advance promise identity and synchronous validation.
 ): Promise<Readonly<DatabaseReadyResult>> => {
   const resolved = resolveAdvance(input)
   if (resolved == null) return Promise.reject(createDatabaseError('database_advance_invalid'))

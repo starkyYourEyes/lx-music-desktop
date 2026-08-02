@@ -10,6 +10,7 @@ import type {
 type PlainData = Record<string, unknown>
 
 const textBytes = (value: string): number => new TextEncoder().encode(value).byteLength
+// eslint-disable-next-line no-control-regex -- Cache keys must reject all ASCII control characters.
 const controlCharacters = /[\u0000-\u001f\u007f]/
 const musicUrlQualities = new Set(['128k', '320k', 'flac', 'flac24bit', '192k', 'ape', 'wav'])
 
@@ -54,8 +55,8 @@ const validQQMusicAccountScope = (value: unknown): value is string => {
 }
 
 const validProviderAccountScope = (provider: unknown, accountScope: unknown): provider is 'wy' | 'tx' =>
-  provider == 'wy' ? validNeteaseAccountScope(accountScope) :
-    provider == 'tx' && validQQMusicAccountScope(accountScope)
+  provider == 'wy' ? validNeteaseAccountScope(accountScope)
+    : provider == 'tx' && validQQMusicAccountScope(accountScope)
 
 const parseMusicUrlKey = (value: PlainData): Omit<MusicUrlGetInputV1, 'nowMs'> | null => {
   if (!validProviderAccountScope(value.provider, value.accountScope) ||

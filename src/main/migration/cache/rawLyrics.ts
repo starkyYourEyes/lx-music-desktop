@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto'
 import { canonicalJson, type JsonValue } from '../../../common/storage/canonicalJson'
 import { getAppDB } from '../../worker/dbService/db'
 import { putMigrationMarker } from '../../worker/dbService/migrate'
-import type { RawLyricTuple } from '../../worker/dbService/modules/lyric/raw/repository'
+import type * as RawLyricRepository from '../../worker/dbService/modules/lyric/raw/repository'
+
+type RawLyricTuple = RawLyricRepository.RawLyricTuple
 
 const markerName = 'legacy_cache_v1.raw_lyrics'
 const tupleEncoding = 'u32be-length-prefixed-utf8-v1'
@@ -17,11 +19,13 @@ export const canonicalRawLyricHash = (tuples: readonly RawLyricTuple[]): string 
     }
     return 0
   })
-  for (const tuple of sorted) for (const field of [tuple.provider, tuple.sourceTrackId, tuple.lyricType, tuple.text]) {
-    const value = Buffer.from(field, 'utf8')
-    const length = Buffer.allocUnsafe(4)
-    length.writeUInt32BE(value.length)
-    hash.update(length).update(value)
+  for (const tuple of sorted) {
+    for (const field of [tuple.provider, tuple.sourceTrackId, tuple.lyricType, tuple.text]) {
+      const value = Buffer.from(field, 'utf8')
+      const length = Buffer.allocUnsafe(4)
+      length.writeUInt32BE(value.length)
+      hash.update(length).update(value)
+    }
   }
   return hash.digest('hex')
 }
@@ -82,7 +86,7 @@ export const readAuthoritativeRawLyric = (sourceTrackId: string): LX.Music.Lyric
 export const readAuthoritativeRawInventory = (
   db = getAppDB(),
 ): { tuples: RawLyricTuple[], skippedInvalidRows: number } => {
-  const rows = db.prepare(`SELECT id, type, text FROM lyric WHERE source = 'raw' AND type IN ('lyric', 'tlyric', 'rlyric', 'lxlyric')`).all() as Array<{ id: unknown, type: unknown, text: unknown }>
+  const rows = db.prepare('SELECT id, type, text FROM lyric WHERE source = \'raw\' AND type IN (\'lyric\', \'tlyric\', \'rlyric\', \'lxlyric\')').all() as Array<{ id: unknown, type: unknown, text: unknown }>
   const tuples: RawLyricTuple[] = []
   const seen = new Map<string, Set<string>>()
   let skippedInvalidRows = 0
@@ -111,8 +115,16 @@ export const deleteAuthoritativeRawRows = (db = getAppDB()): number => {
 }
 
 const details = (sourceRows: number, sourceOwnerGroups: number, skippedInvalidRows: number, sourceSha256: string, targetRows: number, targetOwnerGroups: number, targetSha256: string): RawLyricMarkerDetails => ({
-  version: 1, provider: 'legacy', tupleEncoding, sourceRows, sourceOwnerGroups, skippedInvalidRows,
-  sourceSha256, targetRows, targetOwnerGroups, targetSha256,
+  version: 1,
+  provider: 'legacy',
+  tupleEncoding,
+  sourceRows,
+  sourceOwnerGroups,
+  skippedInvalidRows,
+  sourceSha256,
+  targetRows,
+  targetOwnerGroups,
+  targetSha256,
 })
 
 const completed = (status: 'complete' | 'already-complete', value: RawLyricMarkerDetails): RawLyricMigrationResult => ({
@@ -162,7 +174,8 @@ export const migrateRawLyrics = async(input: { nowMs: number }): Promise<RawLyri
   const inventory = readAuthoritativeRawInventory()
   const sourceGroups = new Set(inventory.tuples.map(row => row.sourceTrackId)).size
   const sourceSha256 = canonicalRawLyricHash(inventory.tuples)
-  const { attestRawProvider, replaceRawProvider } = require('../../worker/dbService/modules/lyric/raw/repository') as typeof import('../../worker/dbService/modules/lyric/raw/repository')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the schema-transition cache-module cycle boundary.
+  const { attestRawProvider, replaceRawProvider } = require('../../worker/dbService/modules/lyric/raw/repository') as typeof RawLyricRepository
   const existing = readRawLyricMarker()
   if (existing != null) {
     const current = parseRawLyricMarkerDetails(existing.detailsJson)

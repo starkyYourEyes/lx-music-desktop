@@ -19,7 +19,12 @@ import {
   type RawLyricMarkerDetails,
   type RawLyricMarkerRow,
 } from './rawLyrics'
-import type { CacheExecutionResult } from '../../worker/dbService/cacheDb'
+import type * as CacheDb from '../../worker/dbService/cacheDb'
+import type * as RawLyricRepository from '../../worker/dbService/modules/lyric/raw/repository'
+import type * as MusicUrlRepository from '../../worker/dbService/modules/music_url'
+import type * as OtherSourcesRepository from '../../worker/dbService/modules/music_other_source'
+
+type CacheExecutionResult<T> = CacheDb.CacheExecutionResult<T>
 
 export const READ_WRITE_MARKER_NAME = 'legacy_cache_v1.read_write_verified' as const
 export const CUTOVER_MARKER_NAME = 'legacy_cache_v1.cutover' as const
@@ -223,9 +228,12 @@ const smokeChecks = (evidence: TypedSmokeEvidence): [Phase4CheckV1, Phase4CheckV
 ]
 
 const executeTypedSmoke = (db: Database.Database): TypedSmokeEvidence => {
-  const { rawLyricGetSync, rawLyricPutSync } = require('../../worker/dbService/modules/lyric/raw/repository') as typeof import('../../worker/dbService/modules/lyric/raw/repository')
-  const { musicUrlGetSync, musicUrlPutSync } = require('../../worker/dbService/modules/music_url') as typeof import('../../worker/dbService/modules/music_url')
-  const { otherSourcesGetSync, otherSourcesPutSync } = require('../../worker/dbService/modules/music_other_source') as typeof import('../../worker/dbService/modules/music_other_source')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the lazy cache-module cycle boundary.
+  const { rawLyricGetSync, rawLyricPutSync } = require('../../worker/dbService/modules/lyric/raw/repository') as typeof RawLyricRepository
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the lazy cache-module cycle boundary.
+  const { musicUrlGetSync, musicUrlPutSync } = require('../../worker/dbService/modules/music_url') as typeof MusicUrlRepository
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the lazy cache-module cycle boundary.
+  const { otherSourcesGetSync, otherSourcesPutSync } = require('../../worker/dbService/modules/music_other_source') as typeof OtherSourcesRepository
   const rawInput = {
     provider: '__lx_phase4_smoke_v1__',
     sourceTrackId: 'raw',
@@ -276,12 +284,20 @@ const executeTypedSmoke = (db: Database.Database): TypedSmokeEvidence => {
     WHERE original_provider = ? AND original_track_id = ? AND candidate_track_id = ?
   `).get(otherIdentity.originalProvider, otherIdentity.originalTrackId, '__lx_phase4_smoke_v1__:old') as { count: number }).count == 0
 
+  const raw: JsonValue = {
+    identity: { provider: rawInput.provider, sourceTrackId: rawInput.sourceTrackId },
+    read: rawRead as unknown as JsonValue,
+    written: rawInput.lyrics,
+  }
+  const other: JsonValue = {
+    firstCandidates,
+    identity: otherIdentity,
+    readCandidates: readCandidates as unknown as JsonValue,
+    replacementCandidates,
+    staleCandidatesAbsent,
+  }
   return {
-    raw: {
-      identity: { provider: rawInput.provider, sourceTrackId: rawInput.sourceTrackId },
-      read: rawRead,
-      written: rawInput.lyrics,
-    } as JsonValue,
+    raw,
     url: {
       expiredReadMiss: expiredUrl == null,
       expiryGetNowMs: 1,
@@ -296,18 +312,13 @@ const executeTypedSmoke = (db: Database.Database): TypedSmokeEvidence => {
       providerExpiresAtMs: 1,
       putNowMs: 0,
     },
-    other: {
-      firstCandidates,
-      identity: otherIdentity,
-      readCandidates: readCandidates as unknown as JsonValue,
-      replacementCandidates,
-      staleCandidatesAbsent,
-    } as JsonValue,
+    other,
   }
 }
 
 export const runTypedCacheSmoke = async(): Promise<CacheExecutionResult<readonly Phase4CheckV1[]>> => {
-  const { runCacheRollbackOnly } = require('../../worker/dbService/cacheDb') as typeof import('../../worker/dbService/cacheDb')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the cache lifecycle loading boundary.
+  const { runCacheRollbackOnly } = require('../../worker/dbService/cacheDb') as typeof CacheDb
   const result = await runCacheRollbackOnly(executeTypedSmoke)
   if (result.status == 'unavailable') return result
   if (canonicalJson(result.value.raw) != canonicalJson(expectedEvidence.raw) ||
@@ -372,7 +383,8 @@ export const attestSchema6TypedOwnership = async(
   const rawDetails = rawMarkerDetails(rawMarker)
   const existing = readMarkerRow(db, READ_WRITE_MARKER_NAME)
   const verifiedExisting = existing == null ? null : verifyReadWriteMarker(db, rawMarker)
-  const { attestRawProvider } = require('../../worker/dbService/modules/lyric/raw/repository') as typeof import('../../worker/dbService/modules/lyric/raw/repository')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the cache-module cycle boundary.
+  const { attestRawProvider } = require('../../worker/dbService/modules/lyric/raw/repository') as typeof RawLyricRepository
   const target = await attestRawProvider('legacy')
   if (target.status == 'unavailable') return target
   if (target.status != 'hit' || target.value.rows != rawDetails.targetRows ||
@@ -460,7 +472,7 @@ const verifyLedger = (db: Database.Database, schemaVersion: 6 | 7): void => {
     if (row.version != migration.version || row.name != migration.name || row.checksum != migration.checksum ||
       !isSafeTimestamp(row.appliedAtMs)) throw failure('phase4_schema_invalid')
   }
-  const mirror = db.prepare(`SELECT field_value AS value FROM db_info WHERE field_name = 'version'`).all() as Array<{ value: unknown }>
+  const mirror = db.prepare('SELECT field_value AS value FROM db_info WHERE field_name = \'version\'').all() as Array<{ value: unknown }>
   if (mirror.length != 1 || mirror[0].value != String(schemaVersion)) throw failure('phase4_schema_invalid')
 }
 
@@ -544,7 +556,7 @@ export const verifySchema7SteadyState = (db: Database.Database): {
   const rawMarker = verifyRawMarker(db, 'schema7-historical')
   const readWriteMarker = verifyReadWriteMarker(db, rawMarker)
   const cutover = readCutoverMarker(db, readWriteMarker)
-  const ledger7 = db.prepare(`SELECT applied_at_ms AS appliedAtMs FROM schema_migrations WHERE version = 7`).get() as { appliedAtMs: unknown } | undefined
+  const ledger7 = db.prepare('SELECT applied_at_ms AS appliedAtMs FROM schema_migrations WHERE version = 7').get() as { appliedAtMs: unknown } | undefined
   if (ledger7 == null || ledger7.appliedAtMs != cutover.marker.completedAtMs) {
     throw failure('phase4_cutover_marker_invalid')
   }

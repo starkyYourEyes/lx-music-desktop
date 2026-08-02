@@ -1,5 +1,5 @@
-import fs from 'node:fs'
-import path from 'node:path'
+import type fs from 'node:fs'
+import type path from 'node:path'
 import type { CacheDiagnosticCodeV1 } from '../../common/storage/cache'
 import type { SessionCacheCategory, SessionClearResult, SessionRegistry } from './sessionRegistry'
 import { createCacheArtifactInventory } from './cacheArtifactInventory'
@@ -14,16 +14,16 @@ export interface CacheClearComponentResult {
 export interface CacheClearResult {
   status: 'cleared' | 'degraded'
   generation: number
-  components: ReadonlyArray<CacheClearComponentResult>
+  components: readonly CacheClearComponentResult[]
 }
 
 export interface CacheManager {
-  clearAll(): Promise<CacheClearResult>
+  clearAll: () => Promise<CacheClearResult>
 }
 
 interface CacheResetWorker {
-  beginCacheReset(): Promise<LX.DBService.CacheResetLease>
-  finishCacheReset(input: LX.DBService.CacheResetLease): Promise<LX.DBService.CacheOpenResult>
+  beginCacheReset: () => Promise<LX.DBService.CacheResetLease>
+  finishCacheReset: (input: LX.DBService.CacheResetLease) => Promise<LX.DBService.CacheOpenResult>
 }
 
 interface CacheManagerOptions {
@@ -120,6 +120,7 @@ export const createCacheManager = ({
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/promise-function-async -- Preserve the shared active-clear promise identity.
   const clearAll = (): Promise<CacheClearResult> => {
     if (activeClear != null) return activeClear
     const operation = runClear()

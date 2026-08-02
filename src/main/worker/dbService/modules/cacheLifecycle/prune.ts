@@ -109,11 +109,11 @@ const validateGroupAccounting = (
     throw new Error('cache_policy_accounting_invalid')
   }
   if (utf8ByteLength != null) {
-    const rawRows = db.prepare(`SELECT text, byte_size AS byteSize FROM raw_lyrics`).all() as Array<{
+    const rawRows = db.prepare('SELECT text, byte_size AS byteSize FROM raw_lyrics').all() as Array<{
       text: unknown
       byteSize: unknown
     }>
-    const otherRows = db.prepare(`SELECT candidate_json AS json, byte_size AS byteSize FROM other_sources`).all() as Array<{
+    const otherRows = db.prepare('SELECT candidate_json AS json, byte_size AS byteSize FROM other_sources').all() as Array<{
       json: unknown
       byteSize: unknown
     }>
@@ -134,12 +134,12 @@ const validateGroupAccounting = (
 }
 
 const counts = (db: Database.Database): Counts => {
-  const music = db.prepare(`SELECT count(*) AS rows FROM music_urls`).get() as { rows: unknown }
-  const rawRows = db.prepare(`SELECT count(*) AS rows FROM raw_lyrics`).get() as { rows: unknown }
+  const music = db.prepare('SELECT count(*) AS rows FROM music_urls').get() as { rows: unknown }
+  const rawRows = db.prepare('SELECT count(*) AS rows FROM raw_lyrics').get() as { rows: unknown }
   const rawGroups = db.prepare(`
     SELECT count(*) AS ownerGroups, coalesce(sum(byte_size), 0) AS bytes FROM raw_lyric_groups
   `).get() as { ownerGroups: unknown, bytes: unknown }
-  const otherRows = db.prepare(`SELECT count(*) AS rows FROM other_sources`).get() as { rows: unknown }
+  const otherRows = db.prepare('SELECT count(*) AS rows FROM other_sources').get() as { rows: unknown }
   const otherGroups = db.prepare(`
     SELECT count(*) AS ownerGroups, coalesce(sum(byte_size), 0) AS bytes FROM other_source_groups
   `).get() as { ownerGroups: unknown, bytes: unknown }
@@ -447,15 +447,17 @@ export const createCachePruner = ({
       aggregate.otherEvicted.push(...result.value.otherEvicted)
       if (result.value.selected == 0) break
     }
-    return report(first!, last!, aggregate)
+    return report(first, last, aggregate)
   },
 })
 
 const productionPruner = createCachePruner({ runImmediate: runCacheImmediate })
 
+// eslint-disable-next-line @typescript-eslint/promise-function-async -- Preserve the returned cache-operation promise identity.
 export const cachePrune = (input: CachePruneInputV1): Promise<CachePruneResultV1> =>
   productionPruner.prune(input)
 
+// eslint-disable-next-line @typescript-eslint/promise-function-async -- Preserve the returned cache-operation promise identity.
 export const runCachePolicySnapshot = (): Promise<CacheExecutionResult<Counts>> =>
   runCacheImmediate(db => counts(db))
 

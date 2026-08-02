@@ -18,7 +18,7 @@ export type CacheArtifactClearResult =
   }
 
 export interface CacheArtifactInventory {
-  clearOwnedArtifacts(): CacheArtifactClearResult
+  clearOwnedArtifacts: () => CacheArtifactClearResult
 }
 
 interface CacheArtifactInventoryOptions {

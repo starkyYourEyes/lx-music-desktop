@@ -10,6 +10,7 @@ const streamUrlKey = /^(?:url|playUrl|streamUrl|musicUrl|playbackUrl|audioUrl)$/
 const candidateKeys = new Set(['id', 'name', 'singer', 'source', 'interval', 'meta', 'rank'])
 const onlineSources = new Set(['kw', 'kg', 'tx', 'wy', 'mg'])
 const unsafeObjectKeys = new Set(['__proto__', 'prototype', 'constructor'])
+// eslint-disable-next-line no-control-regex -- Candidate identities must reject all ASCII control characters.
 const controlCharacters = /[\u0000-\u001f\u007f]/
 
 const invalid = (): Error & { code: 'other_sources_input_invalid' } => {
@@ -192,26 +193,29 @@ export const otherSourcesPutSync = (db: Database.Database, input: OtherSourcesPu
       candidate_track_id, candidate_json, byte_size
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
   `)
-  for (const candidate of candidates) insert.run(
-    parsed.originalProvider, parsed.originalTrackId, candidate.rank,
-    candidate.provider, candidate.trackId, candidate.json, candidate.bytes,
-  )
+  for (const candidate of candidates) {
+    insert.run(
+      parsed.originalProvider, parsed.originalTrackId, candidate.rank,
+      candidate.provider, candidate.trackId, candidate.json, candidate.bytes,
+    )
+  }
 }
 
 export const otherSourcesPut = async(input: OtherSourcesPutInputV1): Promise<CacheWriteResult> => {
   const parsed = parseOtherSourcesPutInput(input)
   sanitizeCandidates(parsed.candidates)
   expiryFor(parsed.nowMs)
-  const result = await runCacheImmediate(db => otherSourcesPutSync(db, input))
+  const result = await runCacheImmediate(db => { otherSourcesPutSync(db, input) })
   if (result.status == 'completed') scheduleCachePruneAfterWrite('otherSources')
   return result.status == 'completed' ? { status: 'stored' } : result
 }
 
 export const otherSourcesClear = async(): Promise<CacheWriteResult> => {
-  const result = await runCacheImmediate(db => { db.prepare(`DELETE FROM other_source_groups`).run() })
+  const result = await runCacheImmediate(db => { db.prepare('DELETE FROM other_source_groups').run() })
   return result.status == 'completed' ? { status: 'stored' } : result
 }
 
+// eslint-disable-next-line @typescript-eslint/promise-function-async -- Preserve the returned cache-operation promise identity.
 export const otherSourcesCount = (): Promise<CacheReadResult<number>> => runCacheRead(db =>
-  (db.prepare(`SELECT count(*) AS count FROM other_source_groups`).get() as { count: number }).count,
+  (db.prepare('SELECT count(*) AS count FROM other_source_groups').get() as { count: number }).count,
 )

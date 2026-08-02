@@ -11,12 +11,12 @@ export type SessionClearResult =
 
 export interface SessionRegistration {
   ready: Promise<void>
-  unregister(): void
+  unregister: () => void
 }
 
 export interface SessionRegistry {
-  register(input: { key: string, session: Electron.Session }): SessionRegistration
-  clearRegisteredCaches(): Promise<SessionClearResult[]>
+  register: (input: { key: string, session: Electron.Session }) => SessionRegistration
+  clearRegisteredCaches: () => Promise<SessionClearResult[]>
 }
 
 interface SessionRecord {
@@ -57,9 +57,9 @@ const categories: Array<{
 const deferred = <Value>(): Deferred<Value> => {
   let resolve!: (value: Value) => void
   let reject!: (reason?: unknown) => void
-  const promise = new Promise<Value>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise
-    reject = rejectPromise
+  const promise = new Promise<Value>((_resolve, _reject) => {
+    resolve = _resolve
+    reject = _reject
   })
   return { promise, resolve, reject }
 }
@@ -146,10 +146,12 @@ export const createSessionRegistry = (): SessionRegistry => {
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/promise-function-async -- Preserve the shared single-flight promise identity.
   const clearRegisteredCaches = (): Promise<SessionClearResult[]> => {
     if (activeClear) return activeClear.promise
 
     const completion = deferred<SessionClearResult[]>()
+    // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- The deferred signal intentionally has no value.
     const ready = deferred<void>()
     const initial = [...records.values()]
     const operation: ClearOperation = {

@@ -1146,11 +1146,7 @@ export const createCacheDatabaseService = (
         return value
       } catch (error) {
         if (transactionOpen) {
-          try {
-            db.exec('ROLLBACK')
-          } catch (rollbackError) {
-            throw rollbackError
-          }
+          db.exec('ROLLBACK')
         }
         throw error
       }

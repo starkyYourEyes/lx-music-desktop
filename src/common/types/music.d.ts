@@ -1,14 +1,17 @@
-declare namespace LX {
-  namespace Music {
-    interface MusicQualityType { // {"type": "128k", size: "3.56M"}
-      type: LX.Quality
-      size: string | null
-    }
-    interface MusicQualityTypeKg { // {"type": "128k", size: "3.56M"}
-      type: LX.Quality
-      size: string | null
-      hash: string
-    }
+import type * as CacheTypes from '../storage/cache'
+
+declare global {
+  namespace LX {
+    namespace Music {
+      interface MusicQualityType { // {"type": "128k", size: "3.56M"}
+        type: LX.Quality
+        size: string | null
+      }
+      interface MusicQualityTypeKg { // {"type": "128k", size: "3.56M"}
+        type: LX.Quality
+        size: string | null
+        hash: string
+      }
     type _MusicQualityType = Partial<Record<Quality, {
       size: string | null
     }>>
@@ -178,12 +181,13 @@ declare namespace LX {
       lyrics: string | null
     }
 
-    type MusicUrlKeyV1 = import('../storage/cache').MusicUrlKeyV1
-    type MusicUrlGetInputV1 = import('../storage/cache').MusicUrlGetInputV1
-    type MusicUrlPutInputV1 = import('../storage/cache').MusicUrlPutInputV1
-    type TrackIdentityV1 = import('../storage/cache').TrackIdentityV1
-    type OtherSourcesGetInputV1 = import('../storage/cache').OtherSourcesGetInputV1
-    type OtherSourcesPutInputV1 = import('../storage/cache').OtherSourcesPutInputV1
+    type MusicUrlKeyV1 = CacheTypes.MusicUrlKeyV1
+    type MusicUrlGetInputV1 = CacheTypes.MusicUrlGetInputV1
+    type MusicUrlPutInputV1 = CacheTypes.MusicUrlPutInputV1
+    type TrackIdentityV1 = CacheTypes.TrackIdentityV1
+    type OtherSourcesGetInputV1 = CacheTypes.OtherSourcesGetInputV1
+    type OtherSourcesPutInputV1 = CacheTypes.OtherSourcesPutInputV1
 
+    }
   }
 }

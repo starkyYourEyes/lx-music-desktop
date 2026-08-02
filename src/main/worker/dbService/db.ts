@@ -5,6 +5,14 @@ import { createOnlineBackup } from './databaseBackup'
 import { bootstrapDatabaseSchema, getPendingMigrations, getSchemaVersion, runMigrations } from './migrate'
 import { migrations } from './migrations'
 import { verifyDatabase } from './verifyDB'
+import {
+  acquireExpectedSqliteTarget,
+  closeSqliteGuardDescriptor,
+  prepareSqliteTarget,
+  resolveContainedPath,
+  validatePreparedSqliteTarget,
+  type SqliteTargetExpectation,
+} from './sqliteTarget'
 
 export type DatabaseRecoveryReason =
   | 'open_failed'
@@ -56,6 +64,7 @@ let initializationKey: string | null = null
 let initializationPromise: Promise<DatabaseStartupResult> | null = null
 let cachedStartupResult: DatabaseStartupResult | null = null
 let lifecycleGeneration = 0
+let readyInitialization: Readonly<{ cacheRoot: string, schemaVersion: number }> | null = null
 
 const pathExists = (filePath: string): boolean => {
   try {
@@ -64,181 +73,6 @@ const pathExists = (filePath: string): boolean => {
   } catch (error) {
     if (error != null && typeof error == 'object' && 'code' in error && error.code == 'ENOENT') return false
     throw error
-  }
-}
-
-const isMissing = (error: unknown): error is NodeJS.ErrnoException =>
-  error instanceof Error && 'code' in error && error.code == 'ENOENT'
-
-const isAlreadyExists = (error: unknown): error is NodeJS.ErrnoException =>
-  error instanceof Error && 'code' in error && error.code == 'EEXIST'
-
-const resolveContainedPath = (rootPath: string, childName: string): string => {
-  const root = path.resolve(rootPath)
-  const candidate = path.resolve(root, childName)
-  const relative = path.relative(root, candidate)
-  if (relative.startsWith(`..${path.sep}`) || relative == '..' || path.isAbsolute(relative)) {
-    throw new Error('path_outside_root')
-  }
-  return candidate
-}
-
-const isPathContained = (rootPath: string, candidatePath: string): boolean => {
-  const relative = path.relative(rootPath, candidatePath)
-  return relative == '' || (!relative.startsWith(`..${path.sep}`) && relative != '..' && !path.isAbsolute(relative))
-}
-
-type DatabaseTargetPreparation =
-  | {
-    ok: true
-    existed: boolean
-    realRoot: string
-    identity: DatabaseFileIdentity
-    guardDescriptor: number
-  }
-  | { ok: false, diagnostic: string }
-
-type DatabaseTargetExpectation = Pick<
-Extract<DatabaseTargetPreparation, { ok: true }>,
-'realRoot' | 'identity'
->
-
-interface DatabaseFileIdentity {
-  dev: number
-  ino: number
-}
-
-const databaseFileIdentity = (stats: fs.Stats): DatabaseFileIdentity => ({
-  dev: stats.dev,
-  ino: stats.ino,
-})
-
-const sameDatabaseFileIdentity = (left: DatabaseFileIdentity, right: DatabaseFileIdentity): boolean =>
-  left.dev == right.dev && left.ino == right.ino
-
-const closeDescriptorBestEffort = (descriptor: number | null): void => {
-  if (descriptor == null) return
-  try {
-    fs.closeSync(descriptor)
-  } catch {}
-}
-
-const validatePreparedDatabaseTarget = (
-  databasePath: string,
-  target: Extract<DatabaseTargetPreparation, { ok: true }>,
-): boolean => {
-  try {
-    const targetStats = fs.lstatSync(databasePath)
-    if (targetStats.isSymbolicLink() || !targetStats.isFile()) return false
-    if (!sameDatabaseFileIdentity(databaseFileIdentity(targetStats), target.identity)) return false
-    const guardStats = fs.fstatSync(target.guardDescriptor)
-    if (!guardStats.isFile()) return false
-    if (!sameDatabaseFileIdentity(databaseFileIdentity(guardStats), target.identity)) return false
-    return isPathContained(target.realRoot, fs.realpathSync(databasePath))
-  } catch {
-    return false
-  }
-}
-
-const acquireExpectedDatabaseTarget = (
-  databasePath: string,
-  expected: DatabaseTargetExpectation,
-): Extract<DatabaseTargetPreparation, { ok: true }> | null => {
-  let guardDescriptor: number | null = null
-  try {
-    const targetStats = fs.lstatSync(databasePath)
-    if (targetStats.isSymbolicLink() || !targetStats.isFile()) return null
-    if (!sameDatabaseFileIdentity(databaseFileIdentity(targetStats), expected.identity)) return null
-    if (!isPathContained(expected.realRoot, fs.realpathSync(databasePath))) return null
-
-    const noFollow = fs.constants.O_NOFOLLOW ?? 0
-    guardDescriptor = fs.openSync(databasePath, fs.constants.O_RDONLY | noFollow)
-    const guardedTarget = {
-      ok: true as const,
-      existed: true,
-      realRoot: expected.realRoot,
-      identity: expected.identity,
-      guardDescriptor,
-    }
-    if (!validatePreparedDatabaseTarget(databasePath, guardedTarget)) {
-      closeDescriptorBestEffort(guardDescriptor)
-      return null
-    }
-    return guardedTarget
-  } catch {
-    closeDescriptorBestEffort(guardDescriptor)
-    return null
-  }
-}
-
-const prepareDatabaseTarget = (dataPath: string, databasePath: string): DatabaseTargetPreparation => {
-  const directoryPath = path.dirname(databasePath)
-  let guardDescriptor: number | null = null
-  try {
-    fs.mkdirSync(directoryPath, { recursive: true })
-    const realRoot = fs.realpathSync(dataPath)
-    const realDirectory = fs.realpathSync(directoryPath)
-    if (!isPathContained(realRoot, realDirectory)) return { ok: false, diagnostic: 'open.path_invalid' }
-
-    let targetStats: fs.Stats | null = null
-    try {
-      targetStats = fs.lstatSync(databasePath)
-    } catch (error) {
-      if (!isMissing(error)) return { ok: false, diagnostic: 'open.target_inspect_failed' }
-    }
-
-    if (targetStats != null) {
-      if (targetStats.isSymbolicLink()) return { ok: false, diagnostic: 'open.target_symlink' }
-      if (!targetStats.isFile()) return { ok: false, diagnostic: 'open.target_not_regular' }
-      const realTarget = fs.realpathSync(databasePath)
-      if (!isPathContained(realRoot, realTarget)) return { ok: false, diagnostic: 'open.path_invalid' }
-      const noFollow = fs.constants.O_NOFOLLOW ?? 0
-      guardDescriptor = fs.openSync(databasePath, fs.constants.O_RDONLY | noFollow)
-      const guardStats = fs.fstatSync(guardDescriptor)
-      if (!guardStats.isFile() ||
-        !sameDatabaseFileIdentity(databaseFileIdentity(guardStats), databaseFileIdentity(targetStats))) {
-        closeDescriptorBestEffort(guardDescriptor)
-        return { ok: false, diagnostic: 'open.target_changed' }
-      }
-      return {
-        ok: true,
-        existed: true,
-        realRoot,
-        identity: databaseFileIdentity(guardStats),
-        guardDescriptor,
-      }
-    }
-
-    try {
-      guardDescriptor = fs.openSync(databasePath, 'wx', 0o600)
-    } catch (error) {
-      return {
-        ok: false,
-        diagnostic: isAlreadyExists(error) ? 'open.reserve_conflict' : 'open.reserve_failed',
-      }
-    }
-    const guardStats = fs.fstatSync(guardDescriptor)
-    const reservedStats = fs.lstatSync(databasePath)
-    if (reservedStats.isSymbolicLink() || !reservedStats.isFile() || !guardStats.isFile() ||
-      !sameDatabaseFileIdentity(databaseFileIdentity(reservedStats), databaseFileIdentity(guardStats))) {
-      closeDescriptorBestEffort(guardDescriptor)
-      return { ok: false, diagnostic: 'open.reserved_target_invalid' }
-    }
-    const realTarget = fs.realpathSync(databasePath)
-    if (!isPathContained(realRoot, realTarget)) {
-      closeDescriptorBestEffort(guardDescriptor)
-      return { ok: false, diagnostic: 'open.path_invalid' }
-    }
-    return {
-      ok: true,
-      existed: false,
-      realRoot,
-      identity: databaseFileIdentity(guardStats),
-      guardDescriptor,
-    }
-  } catch {
-    closeDescriptorBestEffort(guardDescriptor)
-    return { ok: false, diagnostic: 'open.target_inspect_failed' }
   }
 }
 
@@ -286,6 +120,7 @@ export const close = (): void => {
     initializationKey = null
     initializationPromise = null
     cachedStartupResult = null
+    readyInitialization = null
     health = { status: 'closed' }
   }
   if (failure instanceof Error) throw failure
@@ -302,7 +137,7 @@ const allocateBackupPath = (
   const timestamp = Date.now()
   for (let counter = 0; counter < Number.MAX_SAFE_INTEGER; counter++) {
     const name = `lx.data.db.pre-migration-v${fromVersion}-to-v${toVersion}.${timestamp}-${counter}.backup`
-    const candidate = resolveContainedPath(resolvedBackupDir, name)
+    const candidate = resolveContainedPath(resolvedBackupDir, name, path)
     if (!pathExists(candidate)) return candidate
   }
   throw new Error('backup_name_exhausted')
@@ -311,14 +146,17 @@ const allocateBackupPath = (
 const reopenReadOnly = (
   databasePath: string,
   nativeOptions: { nativeBinding?: string },
-  expectedTarget: DatabaseTargetExpectation,
+  expectedTarget: SqliteTargetExpectation,
 ): { db: Database.Database | null, diagnostic: string | null } => {
-  const guardedTarget = acquireExpectedDatabaseTarget(databasePath, expectedTarget)
+  const guardedTarget = acquireExpectedSqliteTarget(databasePath, expectedTarget, {
+    fileSystem: fs,
+    pathModule: path,
+  })
   if (guardedTarget == null) return { db: null, diagnostic: 'readonly_reopen.failed' }
   let db: Database.Database | null = null
   try {
     db = new Database(databasePath, { ...nativeOptions, readonly: true, fileMustExist: true })
-    if (!validatePreparedDatabaseTarget(databasePath, guardedTarget)) {
+    if (!validatePreparedSqliteTarget(databasePath, guardedTarget, { fileSystem: fs, pathModule: path })) {
       throw new Error('readonly_target_changed')
     }
     db.pragma('foreign_keys = ON')
@@ -329,7 +167,7 @@ const reopenReadOnly = (
     closeConnection(db)
     return { db: null, diagnostic: 'readonly_reopen.failed' }
   } finally {
-    closeDescriptorBestEffort(guardedTarget.guardDescriptor)
+    closeSqliteGuardDescriptor(fs, guardedTarget.guardDescriptor)
   }
 }
 
@@ -340,8 +178,9 @@ const enterRecovery = (
   diagnostics: string[],
   localWriteDb: Database.Database | null,
   nativeOptions: { nativeBinding?: string },
-  recoveryTarget: DatabaseTargetExpectation | null,
+  recoveryTarget: SqliteTargetExpectation | null,
 ): DatabaseStartupResult => {
+  readyInitialization = null
   const writeClose = closeConnection(localWriteDb)
   if (writeClose.closed && initializingDb == localWriteDb) initializingDb = null
   writeDb = null
@@ -439,7 +278,7 @@ const initializeDatabase = async(
   let databasePath: string
   let nativeOptions: { nativeBinding?: string } = {}
   try {
-    databasePath = resolveContainedPath(path.resolve(options.dataPath), 'lx.data.db')
+    databasePath = resolveContainedPath(path.resolve(options.dataPath), 'lx.data.db', path)
     path.resolve(options.cacheRoot)
     path.resolve(options.backupsRoot)
     nativeOptions = getNativeOptions()
@@ -450,14 +289,17 @@ const initializeDatabase = async(
     return enterRecovery('open_failed', fallbackPath, null, ['open.path_invalid'], null, nativeOptions, null)
   }
 
-  const target = prepareDatabaseTarget(path.resolve(options.dataPath), databasePath)
+  const target = prepareSqliteTarget(path.resolve(options.dataPath), databasePath, {
+    fileSystem: fs,
+    pathModule: path,
+  })
   if (!target.ok) {
     return enterRecovery('open_failed', databasePath, null, [target.diagnostic], null, nativeOptions, null)
   }
   const existed = target.existed
 
-  if (!validatePreparedDatabaseTarget(databasePath, target)) {
-    closeDescriptorBestEffort(target.guardDescriptor)
+  if (!validatePreparedSqliteTarget(databasePath, target, { fileSystem: fs, pathModule: path })) {
+    closeSqliteGuardDescriptor(fs, target.guardDescriptor)
     return enterRecovery('open_failed', databasePath, null, ['open.target_changed'], null, nativeOptions, null)
   }
 
@@ -469,8 +311,8 @@ const initializeDatabase = async(
       fileMustExist: true,
     })
     initializingDb = localWriteDb
-    if (!validatePreparedDatabaseTarget(databasePath, target)) {
-      closeDescriptorBestEffort(target.guardDescriptor)
+    if (!validatePreparedSqliteTarget(databasePath, target, { fileSystem: fs, pathModule: path })) {
+      closeSqliteGuardDescriptor(fs, target.guardDescriptor)
       return enterRecovery(
         'open_failed',
         databasePath,
@@ -482,12 +324,16 @@ const initializeDatabase = async(
       )
     }
     targetValidatedAfterOpen = true
-    closeDescriptorBestEffort(target.guardDescriptor)
+    closeSqliteGuardDescriptor(fs, target.guardDescriptor)
     localWriteDb.pragma('foreign_keys = ON')
     localWriteDb.pragma('journal_mode = WAL')
   } catch {
-    const targetIsValid = targetValidatedAfterOpen || validatePreparedDatabaseTarget(databasePath, target)
-    closeDescriptorBestEffort(target.guardDescriptor)
+    const targetIsValid = targetValidatedAfterOpen || validatePreparedSqliteTarget(
+      databasePath,
+      target,
+      { fileSystem: fs, pathModule: path },
+    )
+    closeSqliteGuardDescriptor(fs, target.guardDescriptor)
     return enterRecovery(
       'open_failed',
       databasePath,
@@ -615,6 +461,7 @@ const initializeDatabase = async(
   initializingDb = null
   recoveryDb = null
   health = { status: 'ready', readOnly: false, schemaVersion }
+  readyInitialization = Object.freeze({ cacheRoot: options.cacheRoot, schemaVersion })
   return { status: 'ready', existed, schemaVersion, migratedVersions, backupPath }
 }
 
@@ -656,6 +503,17 @@ export const getAppDB = (): Database.Database => {
 }
 
 export const getDB = getAppDB
+
+export const getDatabaseInitialization = (): Readonly<{ cacheRoot: string, schemaVersion: 6 | 7 }> => {
+  if (health.status != 'ready' || writeDb == null || readyInitialization == null ||
+    (readyInitialization.schemaVersion != 6 && readyInitialization.schemaVersion != 7)) {
+    throw createDatabaseError('database_not_ready')
+  }
+  return Object.freeze({
+    cacheRoot: readyInitialization.cacheRoot,
+    schemaVersion: readyInitialization.schemaVersion,
+  })
+}
 
 export const getDatabaseHealth = (): DatabaseHealth => health.status == 'recovery'
   ? { ...health, diagnostics: [...health.diagnostics] }

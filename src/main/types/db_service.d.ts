@@ -19,6 +19,30 @@ declare namespace LX {
       completedAtMs: number
     }
 
+    type CacheLifecycleState = 'closed' | 'opening' | 'ready' | 'unavailable' | 'resetting'
+
+    type CacheDiagnosticCode =
+      | 'cache_phase3_prerequisite_invalid'
+      | 'cache_target_invalid'
+      | 'cache_open_failed'
+      | 'cache_schema_invalid'
+      | 'cache_integrity_failed'
+      | 'cache_operation_failed'
+      | 'cache_close_failed'
+      | 'cache_delete_failed'
+      | 'cache_reopen_failed'
+      | 'cache_capacity_unavailable'
+
+    interface CacheOpenResult {
+      status: 'ready' | 'created' | 'recreated' | 'unavailable'
+      schemaVersion: 1 | null
+      diagnostic: CacheDiagnosticCode | null
+    }
+
+    interface CacheResetLease {
+      resetId: string
+    }
+
     interface MusicInfoOrder {
       listId: string
       musicInfoId: string

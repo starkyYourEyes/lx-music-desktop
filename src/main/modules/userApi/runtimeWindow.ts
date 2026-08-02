@@ -61,6 +61,11 @@ const runtimeListeners = new WeakMap<UserApiRuntimeWindow, {
   renderProcessGone: (_event: Electron.Event, details: Electron.RenderProcessGoneDetails) => void
 }>()
 const runtimeRegistrations = new WeakMap<UserApiRuntimeWindow, SessionRegistration>()
+interface RuntimeDisposalState {
+  promise: Promise<void>
+  clearSession: boolean
+}
+const runtimeDisposals = new WeakMap<UserApiRuntimeWindow, RuntimeDisposalState>()
 
 const readRuntimeHtml = async() => {
   if (runtimeHtml) return runtimeHtml
@@ -255,38 +260,53 @@ export const initializeRuntimeWindow = async(
   })
 }
 
-export const disposeRuntimeWindow = async(
+export const disposeRuntimeWindow = (
   runtime: UserApiRuntimeWindow,
   { clearSession: shouldClearSession }: { clearSession: boolean },
   dependencies?: UserApiRuntimeWindowDependencies,
 ): Promise<void> => {
-  if (disposedRuntimes.has(runtime)) return
+  if (disposedRuntimes.has(runtime)) return Promise.resolve()
+  const activeDisposal = runtimeDisposals.get(runtime)
+  if (activeDisposal) {
+    activeDisposal.clearSession ||= shouldClearSession
+    return activeDisposal.promise
+  }
   const deps = getDependencies(dependencies)
-  detachRuntimeListeners(runtime)
-  try {
-    if (!runtime.window.isDestroyed()) runtime.window.destroy()
-  } catch (err) {
-    attachRuntimeListeners(runtime)
-    pendingRuntimes.set(runtime.identity.apiId, runtime)
-    throw err
+  const disposalState = {} as RuntimeDisposalState
+  disposalState.clearSession = shouldClearSession
+  disposalState.promise = Promise.resolve().then(async() => {
+    detachRuntimeListeners(runtime)
+    try {
+      if (!runtime.window.isDestroyed()) runtime.window.destroy()
+    } catch (err) {
+      attachRuntimeListeners(runtime)
+      pendingRuntimes.set(runtime.identity.apiId, runtime)
+      throw err
+    }
+    runtimeListeners.delete(runtime)
+    if (pendingRuntimes.get(runtime.identity.apiId) == runtime) {
+      pendingRuntimes.delete(runtime.identity.apiId)
+    }
+    let registration = runtimeRegistrations.get(runtime)
+    if (disposalState.clearSession && !registration) {
+      registration = deps.sessionRegistry.register({
+        key: getRuntimeSessionKey(runtime.partition),
+        session: runtime.session,
+      })
+      runtimeRegistrations.set(runtime, registration)
+      await registration.ready
+    }
+    if (disposalState.clearSession) await clearSession(runtime.session, deps)
+    registration?.unregister()
+    runtimeRegistrations.delete(runtime)
+    disposedRuntimes.add(runtime)
+  })
+  runtimeDisposals.set(runtime, disposalState)
+  const clearDisposalState = () => {
+    if (runtimeDisposals.get(runtime) == disposalState) runtimeDisposals.delete(runtime)
   }
-  runtimeListeners.delete(runtime)
-  if (pendingRuntimes.get(runtime.identity.apiId) == runtime) {
-    pendingRuntimes.delete(runtime.identity.apiId)
-  }
-  let registration = runtimeRegistrations.get(runtime)
-  if (shouldClearSession && !registration) {
-    registration = deps.sessionRegistry.register({
-      key: getRuntimeSessionKey(runtime.partition),
-      session: runtime.session,
-    })
-    runtimeRegistrations.set(runtime, registration)
-    await registration.ready
-  }
-  if (shouldClearSession) await clearSession(runtime.session, deps)
-  registration?.unregister()
-  runtimeRegistrations.delete(runtime)
-  disposedRuntimes.add(runtime)
+  void disposalState.promise.then(clearDisposalState, clearDisposalState)
+  return disposalState.promise
 }
 
 export const clearRuntimeSession = async(

@@ -418,6 +418,96 @@ test('User API cleanup after external close reacquires ownership for a concurren
   assert.deepEqual(results.map(result => result.category), ['cache', 'cache-storage', 'code-cache'])
 })
 
+const createConcurrentDisposalHarness = async() => {
+  const { createRuntimeWindowHarness } = require('../test-utils/playback-fallback-harness')
+  const harness = createRuntimeWindowHarness()
+  const registrations = []
+  let nextReady = Promise.resolve()
+  harness.deps.sessionRegistry = {
+    register(input) {
+      const registration = { input, unregisterCalls: 0, ready: nextReady }
+      registrations.push(registration)
+      return {
+        ready: registration.ready,
+        unregister() { registration.unregisterCalls++ },
+      }
+    },
+  }
+  const runtime = await harness.create({ id: 'user_api/concurrent-disposal' }, 1)
+  runtime.window.destroy()
+  return {
+    harness,
+    registrations,
+    runtime,
+    setNextReady(ready) { nextReady = ready },
+  }
+}
+
+test('concurrent User API cleanup after external close shares readiness and one disposal', async() => {
+  const gate = deferred()
+  const context = await createConcurrentDisposalHarness()
+  context.setNextReady(gate.promise)
+
+  const first = context.harness.dispose(context.runtime, { clearSession: true })
+  const second = context.harness.dispose(context.runtime, { clearSession: true })
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.strictEqual(first, second)
+  assert.deepEqual(context.runtime.session.cleanupCalls, [])
+  assert.equal(context.registrations[1].unregisterCalls, 0)
+
+  gate.resolve()
+  await Promise.all([first, second])
+  assert.deepEqual(context.runtime.session.cleanupCalls, ['cache', 'storage:cachestorage', 'code'])
+  assert.equal(context.registrations[1].unregisterCalls, 1)
+})
+
+test('a concurrent cleanup request upgrades an in-flight disposal that began without clearing', async() => {
+  const context = await createConcurrentDisposalHarness()
+
+  const withoutCleanup = context.harness.dispose(context.runtime, { clearSession: false })
+  const withCleanup = context.harness.dispose(context.runtime, { clearSession: true })
+
+  assert.strictEqual(withoutCleanup, withCleanup)
+  await withCleanup
+  assert.deepEqual(context.runtime.session.cleanupCalls, ['cache', 'storage:cachestorage', 'code'])
+  assert.equal(context.registrations[1].unregisterCalls, 1)
+})
+
+test('shared User API disposal failure retains ownership and permits one later retry', async() => {
+  const context = await createConcurrentDisposalHarness()
+  const cleanupFailure = new Error('fixed cleanup observer failure')
+  let shouldFail = true
+  let cacheCalls = 0
+  context.runtime.session.clearCache = async() => {
+    cacheCalls++
+    if (shouldFail) throw new Error('private cache failure')
+  }
+  context.harness.deps.logError = () => {
+    if (shouldFail) throw cleanupFailure
+  }
+
+  const first = context.harness.dispose(context.runtime, { clearSession: true })
+  const second = context.harness.dispose(context.runtime, { clearSession: true })
+  assert.strictEqual(first, second)
+  await assert.rejects(first, error => error === cleanupFailure)
+  await assert.rejects(second, error => error === cleanupFailure)
+  assert.equal(context.registrations[1].unregisterCalls, 0)
+  assert.equal(cacheCalls, 1)
+
+  shouldFail = false
+  const retry = context.harness.dispose(context.runtime, { clearSession: true })
+  assert.notStrictEqual(retry, first)
+  await retry
+  assert.equal(cacheCalls, 2)
+  assert.equal(context.registrations.length, 2)
+  assert.equal(context.registrations[1].unregisterCalls, 1)
+
+  await context.harness.dispose(context.runtime, { clearSession: true })
+  assert.equal(cacheCalls, 2)
+  assert.equal(context.registrations[1].unregisterCalls, 1)
+})
+
 test('main window construction waits for readiness and releases its matching token on close', async() => {
   const gate = deferred()
   const registrations = []

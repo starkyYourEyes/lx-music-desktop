@@ -27,6 +27,10 @@ const activeDestinations = new Set<string>()
 const NO_FOLLOW = fs.constants.O_NOFOLLOW ?? 0
 const SQLITE_SIDECAR_SUFFIXES = ['-wal', '-shm', '-journal'] as const
 const SNAPSHOT_WRITE_CHUNK_BYTES = 1024 * 1024
+const SINGLE_LINK = [1n] as const
+const PUBLISHED_LINKS = [2n] as const
+const REUSABLE_LINKS = [1n, 2n] as const
+const STAGE_NAME_PATTERN = /^\.lx-backup-[0-9a-f]{32}\.stage$/
 
 const failure = (code: string): Error => new Error(code)
 
@@ -56,8 +60,11 @@ const closeDescriptor = (descriptor: number): void => {
   } catch {}
 }
 
-const assertPrivateRegularFile = (stats: fs.BigIntStats): void => {
-  if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink != 1n ||
+const assertPrivateRegularFile = (
+  stats: fs.BigIntStats,
+  allowedLinkCounts: readonly bigint[] = SINGLE_LINK,
+): void => {
+  if (!stats.isFile() || stats.isSymbolicLink() || !allowedLinkCounts.includes(stats.nlink) ||
     (process.platform != 'win32' && (stats.mode & 0o077n) != 0n)) {
     throw failure('backup_file_ownership_invalid')
   }
@@ -101,12 +108,16 @@ const assertDirectChild = (root: RootGuard, filePath: string): void => {
   if (!samePath(path.dirname(realFilePath), root.realPath)) throw failure('backup_path_invalid')
 }
 
-const assertFileGuard = (root: RootGuard, file: FileGuard): fs.BigIntStats => {
+const assertFileGuard = (
+  root: RootGuard,
+  file: FileGuard,
+  allowedLinkCounts: readonly bigint[] = SINGLE_LINK,
+): fs.BigIntStats => {
   assertRootGuard(root)
   const guarded = fs.fstatSync(file.descriptor, { bigint: true })
   const current = fs.lstatSync(file.path, { bigint: true })
-  assertPrivateRegularFile(guarded)
-  assertPrivateRegularFile(current)
+  assertPrivateRegularFile(guarded, allowedLinkCounts)
+  assertPrivateRegularFile(current, allowedLinkCounts)
   if (!sameIdentity(identityOf(guarded), file.identity) ||
     !sameIdentity(identityOf(current), file.identity)) {
     throw failure('backup_file_identity_changed')
@@ -197,18 +208,48 @@ const openAttemptStage = (root: RootGuard): FileGuard => {
   throw failure('backup_stage_reservation_failed')
 }
 
-const openExistingFileGuard = (root: RootGuard, filePath: string): FileGuard => {
+const openExistingFileGuard = (
+  root: RootGuard,
+  filePath: string,
+  allowedLinkCounts: readonly bigint[] = SINGLE_LINK,
+): FileGuard => {
   assertRootGuard(root)
   const before = fs.lstatSync(filePath, { bigint: true })
-  assertPrivateRegularFile(before)
+  assertPrivateRegularFile(before, allowedLinkCounts)
   const descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | NO_FOLLOW)
   const file = { descriptor, identity: identityOf(before), path: filePath }
   try {
-    assertFileGuard(root, file)
+    assertFileGuard(root, file, allowedLinkCounts)
     return file
   } catch (error) {
     closeDescriptor(descriptor)
     throw error
+  }
+}
+
+const assertRetainedStageLink = (root: RootGuard, file: FileGuard): void => {
+  // A reusable two-link final must be paired with the attempt's retained random stage.
+  assertFileGuard(root, file, PUBLISHED_LINKS)
+  assertRootGuard(root)
+  let retainedStage: FileGuard | null = null
+  try {
+    for (const name of fs.readdirSync(root.path)) {
+      if (!STAGE_NAME_PATTERN.test(name)) continue
+      const stagePath = path.join(root.path, name)
+      if (samePath(stagePath, file.path)) continue
+      const stats = fs.lstatSync(stagePath, { bigint: true })
+      if (!sameIdentity(identityOf(stats), file.identity)) continue
+      if (retainedStage != null) throw failure('backup_file_ownership_invalid')
+      retainedStage = openExistingFileGuard(root, stagePath, PUBLISHED_LINKS)
+      if (!sameIdentity(retainedStage.identity, file.identity)) {
+        throw failure('backup_file_ownership_invalid')
+      }
+    }
+    if (retainedStage == null) throw failure('backup_file_ownership_invalid')
+    assertFileGuard(root, retainedStage, PUBLISHED_LINKS)
+    assertFileGuard(root, file, PUBLISHED_LINKS)
+  } finally {
+    if (retainedStage != null) closeDescriptor(retainedStage.descriptor)
   }
 }
 
@@ -237,15 +278,16 @@ const verifyGuardedBackup = (
   file: FileGuard,
   nativeOptions: { nativeBinding?: string },
   verify?: OnlineBackupVerifier,
+  allowedLinkCounts: readonly bigint[] = SINGLE_LINK,
 ): void => {
   assertNoSqliteSidecars(file.path)
-  assertFileGuard(root, file)
+  assertFileGuard(root, file, allowedLinkCounts)
   let verificationDb: Database.Database | null = null
   let sidecars: FileGuard[] = []
   let verificationError: Error | null = null
   try {
     verificationDb = new Database(file.path, { ...nativeOptions, readonly: true, fileMustExist: true })
-    assertFileGuard(root, file)
+    assertFileGuard(root, file, allowedLinkCounts)
     if (verificationDb.pragma('quick_check', { simple: true }) != 'ok') {
       throw failure('backup_quick_check_failed')
     }
@@ -273,7 +315,7 @@ const verifyGuardedBackup = (
   }
   const operationError = verificationError ?? captureError ?? closeError ?? cleanupError
   if (operationError != null) throw operationError
-  assertFileGuard(root, file)
+  assertFileGuard(root, file, allowedLinkCounts)
   assertNoSqliteSidecars(file.path)
 }
 
@@ -303,24 +345,6 @@ const removeExactOwnedFile = (root: RootGuard, file: FileGuard): boolean => {
   }
 }
 
-const removeExactOwnedLink = (root: RootGuard, file: FileGuard): boolean => {
-  try {
-    assertRootGuard(root)
-    const guarded = fs.fstatSync(file.descriptor, { bigint: true })
-    const current = fs.lstatSync(file.path, { bigint: true })
-    for (const stats of [guarded, current]) {
-      if (!stats.isFile() || stats.isSymbolicLink() ||
-        (process.platform != 'win32' && (stats.mode & 0o077n) != 0n) ||
-        !sameIdentity(identityOf(stats), file.identity)) return false
-    }
-    assertDirectChild(root, file.path)
-    fs.unlinkSync(file.path)
-    return true
-  } catch {
-    return false
-  }
-}
-
 export function verifyOnlineBackup(
   destination: string,
   nativeOptions: { nativeBinding?: string } = {},
@@ -330,8 +354,13 @@ export function verifyOnlineBackup(
   const root = openRootGuard(path.dirname(resolvedDestination))
   let file: FileGuard | null = null
   try {
-    file = openExistingFileGuard(root, resolvedDestination)
-    verifyGuardedBackup(root, file, nativeOptions, verify)
+    file = openExistingFileGuard(root, resolvedDestination, REUSABLE_LINKS)
+    const stats = assertFileGuard(root, file, REUSABLE_LINKS)
+    const hasRetainedStage = stats.nlink == 2n
+    const linkState = hasRetainedStage ? PUBLISHED_LINKS : SINGLE_LINK
+    if (hasRetainedStage) assertRetainedStageLink(root, file)
+    verifyGuardedBackup(root, file, nativeOptions, verify, linkState)
+    if (hasRetainedStage) assertRetainedStageLink(root, file)
   } finally {
     if (file != null) closeDescriptor(file.descriptor)
     closeDescriptor(root.descriptor)
@@ -351,8 +380,6 @@ export async function createOnlineBackup(
 
   let root: RootGuard | null = null
   let stage: FileGuard | null = null
-  let final: FileGuard | null = null
-  let finalVerified = false
   try {
     fs.mkdirSync(path.dirname(resolvedDestination), { recursive: true })
     root = openRootGuard(path.dirname(resolvedDestination))
@@ -367,20 +394,11 @@ export async function createOnlineBackup(
     assertRootGuard(root)
     assertPathAbsent(resolvedDestination)
     assertFileGuard(root, stage)
-    final = { descriptor: stage.descriptor, identity: stage.identity, path: resolvedDestination }
+    const final = { descriptor: stage.descriptor, identity: stage.identity, path: resolvedDestination }
     fs.linkSync(stage.path, resolvedDestination)
     assertLinkedStageAndFinal(root, stage, resolvedDestination)
-    fs.unlinkSync(stage.path)
-    assertFileGuard(root, final)
-    verifyGuardedBackup(root, final, nativeOptions, verify)
-    finalVerified = true
-    assertFileGuard(root, final)
-  } catch (error) {
-    if (root != null) {
-      if (final != null && !finalVerified) removeExactOwnedLink(root, final)
-      if (stage != null) removeExactOwnedLink(root, stage)
-    }
-    throw error
+    verifyGuardedBackup(root, final, nativeOptions, verify, PUBLISHED_LINKS)
+    assertLinkedStageAndFinal(root, stage, resolvedDestination)
   } finally {
     if (stage != null) closeDescriptor(stage.descriptor)
     if (root != null) closeDescriptor(root.descriptor)

@@ -4,6 +4,7 @@ import path from 'node:path'
 import { createOnlineBackup, verifyOnlineBackup, type OnlineBackupVerifier } from './databaseBackup'
 import { bootstrapDatabaseSchema, getPendingMigrations, getSchemaVersion, runMigrations } from './migrate'
 import { migrations } from './migrations'
+import type { MigrationRunResult } from './migrations/types'
 import { verifyDatabase } from './verifyDB'
 import {
   acquireExpectedSqliteTarget,
@@ -676,6 +677,27 @@ const ensureCutoverBackup = async(
   return backupPath
 }
 
+const runCacheCutoverMigration = (db: Database.Database): MigrationRunResult => db.transaction(() => {
+  const fromVersion = getSchemaVersion(db)
+  if (fromVersion != 6) throw createDatabaseError('database_advance_schema_invalid')
+  const { migration7 } = require('./migrations/0007_cache_cleanup') as typeof import('./migrations/0007_cache_cleanup')
+  const appliedAtMs = Date.now()
+  if (!Number.isSafeInteger(appliedAtMs) || appliedAtMs < 0) {
+    throw new Error('Migration 7 produced an invalid applied timestamp')
+  }
+  const context = Object.freeze({ appliedAtMs })
+  migration7.up(db, context)
+  db.prepare(`
+    INSERT INTO schema_migrations (version, name, checksum, applied_at_ms)
+    VALUES (?, ?, ?, ?)
+  `).run(migration7.version, migration7.name, migration7.checksum, appliedAtMs)
+  if (db.prepare("UPDATE db_info SET field_value = ? WHERE field_name = 'version'").run('7').changes != 1) {
+    throw new Error('Migration 7 could not update the legacy version mirror')
+  }
+  migration7.verify?.(db, context)
+  return { fromVersion: 6, toVersion: 7, applied: [7] }
+})()
+
 const publishSchema7 = (
   initialization: Readonly<ReadyInitialization>,
   backupPath: string | null,
@@ -730,9 +752,7 @@ const performDatabaseAdvance = async(
 
   enterRawLyricCutoverPending()
   try {
-    const { migration7 } = require('./migrations/0007_cache_cleanup') as typeof import('./migrations/0007_cache_cleanup')
-    const advanceMigrations = [...migrations.filter(migration => migration.version < 7), migration7]
-    const migration = runMigrations(db, advanceMigrations, { targetSchemaVersion: 7 })
+    const migration = runCacheCutoverMigration(db)
     if (migration.fromVersion != 6 || migration.toVersion != 7 ||
       migration.applied.length != 1 || migration.applied[0] != 7) {
       throw createDatabaseError('database_advance_migration_invalid')

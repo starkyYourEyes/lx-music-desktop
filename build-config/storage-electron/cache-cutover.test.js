@@ -66,6 +66,35 @@ const markerRow = (db, name) => db.prepare(`
   FROM migration_markers WHERE name = ?
 `).get(name) ?? null
 
+const rebindRawMarkerChain = (db, mutateRawDetails) => {
+  const rawMarker = markerRow(db, 'legacy_cache_v1.raw_lyrics')
+  const rawDetails = JSON.parse(rawMarker.detailsJson)
+  mutateRawDetails(rawDetails)
+  rawMarker.detailsJson = canonical(rawDetails)
+  rawMarker.sourceSha256 = rawDetails.sourceSha256
+  db.prepare(`
+    UPDATE migration_markers SET source_sha256 = ?, details_json = ? WHERE name = ?
+  `).run(rawMarker.sourceSha256, rawMarker.detailsJson, rawMarker.name)
+
+  const readWriteMarker = markerRow(db, 'legacy_cache_v1.read_write_verified')
+  const readWriteDetails = JSON.parse(readWriteMarker.detailsJson)
+  readWriteDetails.rawMarkerSha256 = markerHash(rawMarker)
+  readWriteMarker.detailsJson = canonical(readWriteDetails)
+  readWriteMarker.sourceSha256 = framedHash('lx.storage.phase4.read-write-details.v1', readWriteDetails)
+  db.prepare(`
+    UPDATE migration_markers SET source_sha256 = ?, details_json = ? WHERE name = ?
+  `).run(readWriteMarker.sourceSha256, readWriteMarker.detailsJson, readWriteMarker.name)
+
+  const cutoverMarker = markerRow(db, 'legacy_cache_v1.cutover')
+  const cutoverDetails = JSON.parse(cutoverMarker.detailsJson)
+  cutoverDetails.readWriteMarkerSha256 = markerHash(readWriteMarker)
+  cutoverMarker.detailsJson = canonical(cutoverDetails)
+  cutoverMarker.sourceSha256 = framedHash('lx.storage.phase4.cutover-details.v1', cutoverDetails)
+  db.prepare(`
+    UPDATE migration_markers SET source_sha256 = ?, details_json = ? WHERE name = ?
+  `).run(cutoverMarker.sourceSha256, cutoverMarker.detailsJson, cutoverMarker.name)
+}
+
 const phase3Marker = () => {
   const detailsJson = canonical({
     version: 1,
@@ -319,8 +348,16 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
     assert.equal(db.prepare('SELECT applied_at_ms AS appliedAtMs FROM schema_migrations WHERE version = 7').get().appliedAtMs, cutoverMarker.completedAtMs)
 
     const backupName = `lx.data.db.pre-migration-v6-to-v7.${markerHash(readWriteMarker)}.backup`
-    assert.deepEqual(fs.readdirSync(paths.backupsRoot), [backupName])
-    assert.equal(fs.statSync(path.join(paths.backupsRoot, backupName)).nlink, 1)
+    const backupArtifacts = fs.readdirSync(paths.backupsRoot)
+    const stageName = backupArtifacts.find(name => /^\.lx-backup-[0-9a-f]{32}\.stage$/.test(name))
+    assert.equal(typeof stageName, 'string')
+    assert.deepEqual(backupArtifacts.sort(), [stageName, backupName].sort())
+    const stageStat = fs.lstatSync(path.join(paths.backupsRoot, stageName), { bigint: true })
+    const finalStat = fs.lstatSync(path.join(paths.backupsRoot, backupName), { bigint: true })
+    assert.equal(stageStat.nlink, 2n)
+    assert.equal(finalStat.nlink, 2n)
+    assert.equal(stageStat.dev, finalStat.dev)
+    assert.equal(stageStat.ino, finalStat.ino)
 
     const smokeResidue = await cacheDb.runCacheRead(cache => ({
       raw: cache.prepare("SELECT count(*) AS count FROM raw_lyric_groups WHERE provider = '__lx_phase4_smoke_v1__'").get().count,
@@ -526,7 +563,11 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
     const winnerAfter = fs.lstatSync(winnerPath, { bigint: true })
     assert.equal(winnerAfter.dev, winnerIdentity.dev)
     assert.equal(winnerAfter.ino, winnerIdentity.ino)
-    assert.deepEqual(fs.readdirSync(paths.backupsRoot), [path.basename(winnerPath)])
+    const backupArtifacts = fs.readdirSync(paths.backupsRoot)
+    const stageName = backupArtifacts.find(name => /^\.lx-backup-[0-9a-f]{32}\.stage$/.test(name))
+    assert.equal(typeof stageName, 'string')
+    assert.deepEqual(backupArtifacts.sort(), [stageName, path.basename(winnerPath)].sort())
+    assert.equal(fs.lstatSync(path.join(paths.backupsRoot, stageName), { bigint: true }).nlink, 1n)
   })
 
   it('reuses immutable attestation after a pre-migration failure and rolls migration 7 back before one retry', async() => {
@@ -560,7 +601,7 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
 
     assert.deepEqual(await phase4.initializePhase4(), { schemaVersion: 7, typedOwnershipVerified: true })
     assert.equal(attempts, 1)
-    assert.equal(fs.readdirSync(paths.backupsRoot).length, 1)
+    assert.equal(fs.readdirSync(paths.backupsRoot).length, 2)
     assert.deepEqual(markerRow(db, 'legacy_cache_v1.read_write_verified'), readWriteBefore)
   })
 
@@ -585,7 +626,9 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
       const ledgerAfterCommit = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()
       const cutoverAfterCommit = markerRow(db, 'legacy_cache_v1.cutover')
       const backupsAfterCommit = fs.readdirSync(paths.backupsRoot)
-      const backupPath = path.join(paths.backupsRoot, backupsAfterCommit[0])
+      const backupName = backupsAfterCommit.find(name => name.endsWith('.backup'))
+      assert.equal(typeof backupName, 'string')
+      const backupPath = path.join(paths.backupsRoot, backupName)
       const backupBytes = fs.readFileSync(backupPath)
 
       fs.writeFileSync(backupPath, 'invalid replacement')
@@ -631,7 +674,7 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
     const advanced = await first
     assert.equal(advanced.schemaVersion, 7)
     assert.equal(dbService.getAppDB(), db)
-    assert.equal(fs.readdirSync(paths.backupsRoot).length, 1)
+    assert.equal(fs.readdirSync(paths.backupsRoot).length, 2)
   })
 
   it('relaunches exact schema 7 without replaying migration or backup and reruns live typed smoke', async() => {
@@ -657,6 +700,52 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
     assert.deepEqual(dbService.getAppDB().prepare('SELECT * FROM schema_migrations ORDER BY version').all(), ledgerBefore)
     assert.deepEqual(await loadPhase4().initializePhase4(), { schemaVersion: 7, typedOwnershipVerified: true })
     assert.equal((await cacheDb.runCacheRead(cache => cache.prepare('SELECT count(*) AS count FROM raw_lyric_groups').get().count)).status, 'hit')
+  })
+
+  it('rejects a schema-7 relaunch whose raw marker claims unequal source and target rows', async() => {
+    const paths = await createSchema6Fixture('cache-cutover-impossible-raw-marker')
+    seedLyrics(dbService.getAppDB())
+    assert.equal((await loadPhase4().initializePhase4()).schemaVersion, 7)
+    await closeServices()
+    const cacheBefore = fs.readFileSync(paths.cachePath)
+
+    const direct = new Database(paths.databasePath)
+    rebindRawMarkerChain(direct, rawDetails => { rawDetails.targetRows = rawDetails.sourceRows + 1 })
+    direct.close()
+
+    const relaunched = await dbService.init({
+      dataPath: paths.profileRoot,
+      cacheRoot: paths.cacheRoot,
+      backupsRoot: paths.backupsRoot,
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
+    assert.equal(relaunched.status, 'recovery')
+    assert.deepEqual(fs.readFileSync(paths.cachePath), cacheBefore)
+  })
+
+  it('rejects a schema-7 relaunch whose raw marker claims unequal source and target owner groups', async() => {
+    const paths = await createSchema6Fixture('cache-cutover-impossible-owner-marker')
+    seedLyrics(dbService.getAppDB())
+    assert.equal((await loadPhase4().initializePhase4()).schemaVersion, 7)
+    await closeServices()
+    const cacheBefore = fs.readFileSync(paths.cachePath)
+
+    const direct = new Database(paths.databasePath)
+    rebindRawMarkerChain(direct, rawDetails => {
+      rawDetails.targetOwnerGroups = rawDetails.sourceOwnerGroups + 1
+    })
+    direct.close()
+
+    const relaunched = await dbService.init({
+      dataPath: paths.profileRoot,
+      cacheRoot: paths.cacheRoot,
+      backupsRoot: paths.backupsRoot,
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
+    assert.equal(relaunched.status, 'recovery')
+    assert.deepEqual(fs.readFileSync(paths.cachePath), cacheBefore)
   })
 
   it('keeps a schema-7 relaunch cache-only when the preserved cache is unavailable', async() => {

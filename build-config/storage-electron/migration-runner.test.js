@@ -360,6 +360,19 @@ describe('database migrations', () => {
     assert.equal(hasObject(bootstrapDb, 'migration_seven'), false)
   })
 
+  it('refuses an explicit schema-7 target through the generic migration runner', () => {
+    const db = createLegacyDatabase('2')
+    const registry = [migration3, migration4, migration5, migration6, migration7]
+
+    assert.throws(
+      () => runMigrations(db, registry, { targetSchemaVersion: 7, now: () => 1000 }),
+      /target schema version 7/i,
+    )
+    assert.equal(hasObject(db, 'schema_migrations'), false)
+    assert.equal(hasObject(db, 'migration_seven'), false)
+    assert.equal(readLegacyVersion(db), '2')
+  })
+
   it('rejects migration targets outside an inclusive contiguous boundary', () => {
     const registry = [migration3, migration4]
     for (const targetSchemaVersion of [1, 2.5, 5, Number.POSITIVE_INFINITY]) {

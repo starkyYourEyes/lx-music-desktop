@@ -135,7 +135,9 @@ export const parseRawLyricMarkerDetails = (value: string): RawLyricMarkerDetails
   const counts = [row.sourceRows, row.sourceOwnerGroups, row.skippedInvalidRows, row.targetRows, row.targetOwnerGroups]
   if (Object.keys(row).sort().join(',') != expected.join(',') || row.version != 1 || row.provider != 'legacy' || row.tupleEncoding != tupleEncoding ||
     !counts.every(value => typeof value == 'number' && Number.isSafeInteger(value) && value >= 0) ||
-    ![row.sourceSha256, row.targetSha256].every(value => typeof value == 'string' && /^[a-f0-9]{64}$/.test(value)) || row.sourceSha256 != row.targetSha256) throw failure('raw_lyric_marker_invalid')
+    ![row.sourceSha256, row.targetSha256].every(value => typeof value == 'string' && /^[a-f0-9]{64}$/.test(value)) ||
+    row.sourceRows != row.targetRows || row.sourceOwnerGroups != row.targetOwnerGroups ||
+    row.sourceSha256 != row.targetSha256) throw failure('raw_lyric_marker_invalid')
   return row as unknown as RawLyricMarkerDetails
 }
 

@@ -2,6 +2,7 @@ import { getFontSizeWithScreen } from '@renderer/utils'
 import {
   minWindow,
   onFocus,
+  onStorageCacheGeneration,
   onSettingChanged,
   onThemeChange,
   onTrayMenuNavigate,
@@ -10,6 +11,7 @@ import {
   setFullScreen,
   showHideWindowToggle,
 } from '@renderer/utils/ipc'
+import { adoptCacheGeneration } from '@renderer/core/music/utils'
 import {
   isFullscreen,
   themeId,
@@ -112,6 +114,10 @@ export default () => {
     clearDownKeys()
   })
 
+  const rCacheGeneration = onStorageCacheGeneration(({ params: generation }) => {
+    adoptCacheGeneration(generation)
+  })
+
   const rThemeChange = onThemeChange(({ params: setting }) => {
     // console.log(setting)
     if (themeShouldUseDarkColors.value == setting.shouldUseDarkColors) {
@@ -152,6 +158,7 @@ export default () => {
     document.body.removeEventListener('click', handleBodyClick)
     rSetConfig()
     rFocus()
+    rCacheGeneration()
     rThemeChange()
     rTrayMenuNavigate()
   })

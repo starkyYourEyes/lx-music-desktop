@@ -1,3 +1,7 @@
+export const STORAGE_CACHE_GENERATION_EVENT = 'storage_cache_generation_v1' as const
+
+export type StorageCacheGenerationV1 = number
+
 export interface MusicUrlKeyV1 {
   provider: string
   accountScope: string

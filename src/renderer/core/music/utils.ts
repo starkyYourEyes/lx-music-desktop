@@ -18,7 +18,14 @@ import { apis } from '@renderer/utils/musicSdk/api-source'
 
 
 const getOtherSourcePromises = new Map()
+let storageCacheGeneration = 0
 export const existTimeExp = /\[\d{1,2}:.*\d{1,4}\]/
+
+export const adoptCacheGeneration = (generation: number): void => {
+  if (!Number.isSafeInteger(generation) || generation <= storageCacheGeneration) return
+  storageCacheGeneration = generation
+  getOtherSourcePromises.clear()
+}
 
 const getTrackIdentity = (musicInfo: LX.Music.MusicInfo | LX.Download.ListItem): TrackIdentityV1 => {
   const info = 'progress' in musicInfo ? musicInfo.metadata.musicInfo : musicInfo
@@ -48,9 +55,11 @@ export const getMusicUrlCacheKey = (
 }
 
 export const getOtherSource = async(musicInfo: LX.Music.MusicInfo | LX.Download.ListItem, isRefresh = false): Promise<LX.Music.MusicInfoOnline[]> => {
+  const startingGeneration = storageCacheGeneration
   const identity = getTrackIdentity(musicInfo)
   if (!isRefresh) {
     const persisted = await getOtherSourcesFromCache(identity)
+    if (startingGeneration != storageCacheGeneration) return getOtherSource(musicInfo, isRefresh)
     if (persisted.length) return persisted
   }
   const key = getTrackIdentityKey(identity)
@@ -92,10 +101,14 @@ export const getOtherSource = async(musicInfo: LX.Music.MusicInfo | LX.Download.
       if (timeout) clearTimeout(timeout)
     })
   }).then((otherSource) => {
-    void putOtherSourcesInCache(identity, otherSource).catch(() => {})
+    if (startingGeneration == storageCacheGeneration) {
+      void putOtherSourcesInCache(identity, otherSource).catch(() => {})
+    }
     return otherSource
   }).finally(() => {
-    if (getOtherSourcePromises.has(key)) getOtherSourcePromises.delete(key)
+    if (startingGeneration == storageCacheGeneration && getOtherSourcePromises.get(key) === promise) {
+      getOtherSourcePromises.delete(key)
+    }
   })
   getOtherSourcePromises.set(key, promise)
   return promise

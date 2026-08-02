@@ -19,12 +19,22 @@ import { readLegacyDataSource } from '@main/migration/legacyData/source'
 import { acknowledgePortableProfileStartup } from '@main/migration/portableProfile'
 import { createRunTempHandle, scavengeRunTempRoots } from '@main/utils/tempLifecycle'
 import { createThemeAssetManager } from '@main/services/themeAssetManager'
+import { createCacheManager } from '@main/services/cacheManager'
+import { STORAGE_CACHE_GENERATION_EVENT } from '@common/storage/cache'
+import { sendEvent } from '@main/modules/winMain/main'
 
 let isFinishingStorageShutdown = false
 
 const getStorageCoordinator = () => {
   const portableProfileStartup = global.portableProfileStartup
+  global.lx.cacheManager ??= createCacheManager({
+    cacheRoot: global.storagePaths.cacheRoot,
+    worker: global.lx.worker.dbService,
+    sessionRegistry: global.lx.sessionRegistry,
+    publishGeneration: generation => { sendEvent(STORAGE_CACHE_GENERATION_EVENT, generation) },
+  })
   global.lx.storage ??= createStorageCoordinator({
+    cacheManager: global.lx.cacheManager,
     runState: createRunState({ runtimeRoot: global.storagePaths.runtimeRoot }),
     initializeTempLifecycle: async() => {
       await scavengeRunTempRoots(global.storagePaths.tempRoot)

@@ -6,13 +6,26 @@ import * as hotKeys from '@common/hotKey'
 import { APP_EVENT_NAMES, DATA_KEYS } from '@common/constants'
 import type { ListeningTimeStats } from '@common/utils/listeningTime'
 import type { StorageCapabilitiesV1, StorageRequestV1 } from '@common/storage/contracts'
-import type { CacheReadResultV1, MusicUrlKeyV1, TrackIdentityV1 } from '@common/storage/cache'
+import {
+  STORAGE_CACHE_GENERATION_EVENT,
+  type CacheReadResultV1,
+  type MusicUrlKeyV1,
+  type StorageCacheGenerationV1,
+  type TrackIdentityV1,
+} from '@common/storage/cache'
 import type { LocalStateSnapshotV1 } from '@common/storage/stateContracts'
 import { getLocalState, setLocalState } from './storageState'
 
 export { registerShutdownFlusher } from './shutdown'
 
 type RemoveListener = () => void
+
+export const onStorageCacheGeneration = (
+  listener: LX.IpcRendererEventListenerParams<StorageCacheGenerationV1>,
+): RemoveListener => {
+  rendererOn(STORAGE_CACHE_GENERATION_EVENT, listener)
+  return () => { rendererOff(STORAGE_CACHE_GENERATION_EVENT, listener) }
+}
 
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
 

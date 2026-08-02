@@ -20,6 +20,7 @@ import type { CachePhasePrerequisiteV1 } from '../../common/storage/cachePhase'
 import type { Phase3CredentialHealth, Phase3PlaybackSmokeEvidence } from './phase3Attestation'
 import type { PortableProfileStartupToken } from '../migration/portableProfile'
 import type { RawLyricMigrationResult } from '../migration/cache/rawLyrics'
+import type { CacheManager } from '../services/cacheManager'
 
 export type StorageRecoveryTarget =
   | {
@@ -46,6 +47,7 @@ export type StorageStartupOutcome =
   | { status: 'fatal', reason: string }
 
 export interface StorageCoordinator {
+  readonly cacheManager: CacheManager
   start: () => Promise<StorageStartupOutcome>
   registerShutdownFlusher: (name: string, flush: () => Promise<void>) => () => void
   shutdown: () => Promise<void>
@@ -74,6 +76,7 @@ interface ShutdownDiagnostic {
 }
 
 export interface StorageCoordinatorDependencies {
+  cacheManager: CacheManager
   runState: RunStateStore
   initializeTempLifecycle?: () => Promise<void>
   cleanupTempLifecycle?: () => Promise<void>
@@ -650,5 +653,5 @@ export const createStorageCoordinator = (
     return shutdownPromise
   }
 
-  return { start, registerShutdownFlusher, shutdown }
+  return { cacheManager: dependencies.cacheManager, start, registerShutdownFlusher, shutdown }
 }

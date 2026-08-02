@@ -12,6 +12,7 @@ import { type PortableProfileStartupToken } from '@main/migration/portableProfil
 import { type RunTempHandle } from '@main/utils/tempLifecycle'
 import { type ThemeAssetManager } from '@main/services/themeAssetManager'
 import { type SessionRegistry } from '@main/services/sessionRegistry'
+import { type CacheManager } from '@main/services/cacheManager'
 
 interface Lx {
   inited: boolean
@@ -36,6 +37,7 @@ interface Lx {
     dbService: DBSeriveTypes
   }
   sessionRegistry: SessionRegistry
+  cacheManager?: CacheManager
   storage: StorageCoordinator | null
   runTemp: RunTempHandle | null
   themeAssets: ThemeAssetManager | null

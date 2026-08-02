@@ -80,11 +80,17 @@ export default () => {
                         },
                       },
                       // eslint-disable-next-line @typescript-eslint/promise-function-async
-                    }).then(res => {
-                      // console.log(res)
-                      return { type, url: res.data.url }
+                    }).then((res: { data: LX.UserApi.MusicUrlResponseData }) => {
+                      if (res.data.source != null && res.data.source != source) {
+                        throw new Error('Invalid User API music URL provenance')
+                      }
+                      return {
+                        type: res.data.type ?? type,
+                        url: res.data.url,
+                        source: res.data.source ?? source,
+                        persistentCache: false as const,
+                      }
                     }).catch(async err => {
-                      console.log(err.message)
                       return Promise.reject(err)
                     }),
                   }

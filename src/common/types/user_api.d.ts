@@ -106,6 +106,12 @@ declare namespace LX {
     type UserApiRequestResult<T = any> =
       | { ok: true, value: T }
       | { ok: false, error: LX.Playback.SourceFailureData }
+    interface MusicUrlResponseData {
+      source: LX.Source
+      type: LX.Quality
+      url: string
+      persistentCache: false
+    }
     type UserApiEnsureResult =
       | { ok: true, value: UserApiStatus }
       | { ok: false, error: LX.Playback.SourceFailureData }

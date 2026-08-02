@@ -26,5 +26,12 @@ declare namespace LX {
         qualitys: LX.Quality[]
       }>>
     }
+
+    interface MusicUrlResult {
+      type: LX.Quality
+      url: string
+      source: LX.Source
+      persistentCache: boolean
+    }
   }
 }

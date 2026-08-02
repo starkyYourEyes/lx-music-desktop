@@ -5,6 +5,7 @@ declare global {
   //   list: typeof list
   // }
   namespace LX {
-    type WorkerDBSeriveListTypes = workerDBSeriveTypes
+    type WorkerDBServiceTypes = workerDBSeriveTypes
+    type WorkerDBSeriveListTypes = WorkerDBServiceTypes
   }
 }

@@ -178,15 +178,12 @@ declare namespace LX {
       lyrics: string | null
     }
 
-    interface MusicUrlInfo {
-      id: string
-      url: string
-    }
-
-    interface MusicInfoOtherSourceSave {
-      id: string
-      list: MusicInfoOnline[]
-    }
+    type MusicUrlKeyV1 = import('../storage/cache').MusicUrlKeyV1
+    type MusicUrlGetInputV1 = import('../storage/cache').MusicUrlGetInputV1
+    type MusicUrlPutInputV1 = import('../storage/cache').MusicUrlPutInputV1
+    type TrackIdentityV1 = import('../storage/cache').TrackIdentityV1
+    type OtherSourcesGetInputV1 = import('../storage/cache').OtherSourcesGetInputV1
+    type OtherSourcesPutInputV1 = import('../storage/cache').OtherSourcesPutInputV1
 
   }
 }

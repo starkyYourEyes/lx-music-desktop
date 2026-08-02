@@ -6,6 +6,7 @@ import * as hotKeys from '@common/hotKey'
 import { APP_EVENT_NAMES, DATA_KEYS } from '@common/constants'
 import type { ListeningTimeStats } from '@common/utils/listeningTime'
 import type { StorageCapabilitiesV1, StorageRequestV1 } from '@common/storage/contracts'
+import type { CacheReadResultV1, MusicUrlKeyV1, TrackIdentityV1 } from '@common/storage/cache'
 import type { LocalStateSnapshotV1 } from '@common/storage/stateContracts'
 import { getLocalState, setLocalState } from './storageState'
 
@@ -43,20 +44,25 @@ export const sendInited = () => {
   rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.inited)
 }
 
-export const getOtherSource = async(id: string): Promise<LX.Music.MusicInfoOnline[]> => {
-  return rendererInvoke<string, LX.Music.MusicInfoOnline[]>(WIN_MAIN_RENDERER_EVENT_NAME.get_other_source, id)
+export const getOtherSourcesFromCache = async(identity: TrackIdentityV1): Promise<LX.Music.MusicInfoOnline[]> => {
+  const result = await rendererInvoke<LX.Music.OtherSourcesGetInputV1, CacheReadResultV1<LX.Music.MusicInfoOnline[]>>(
+    WIN_MAIN_RENDERER_EVENT_NAME.other_sources_get,
+    { ...identity, nowMs: Date.now() },
+  )
+  return result.status == 'hit' ? result.value : []
 }
-export const saveOtherSource = async(id: string, sourceInfo: LX.Music.MusicInfoOnline[]) => {
-  await rendererInvoke<LX.Music.MusicInfoOtherSourceSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_other_source, {
-    id,
-    list: sourceInfo,
+export const putOtherSourcesInCache = async(identity: TrackIdentityV1, candidates: LX.Music.MusicInfoOnline[]) => {
+  await rendererInvoke<LX.Music.OtherSourcesPutInputV1>(WIN_MAIN_RENDERER_EVENT_NAME.other_sources_put, {
+    ...identity,
+    candidates: toCloneable(candidates),
+    nowMs: Date.now(),
   })
 }
 export const clearOtherSource = async() => {
-  await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.clear_other_source)
+  await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.other_sources_clear)
 }
 export const getOtherSourceCount = async() => {
-  return rendererInvoke<number>(WIN_MAIN_RENDERER_EVENT_NAME.get_other_source_count)
+  return rendererInvoke<number>(WIN_MAIN_RENDERER_EVENT_NAME.other_sources_count)
 }
 
 // export const updateDislikeInfo = async(dislikeInfo: LX.Dislike.ListItem[]) => {
@@ -609,8 +615,12 @@ export const getThemes = async() => {
  * @param type URL音质
  * @returns
  */
-export const getMusicUrl = async(musicInfo: LX.Music.MusicInfo, type: LX.Quality): Promise<string> => {
-  return rendererInvoke<string, string>(WIN_MAIN_RENDERER_EVENT_NAME.get_music_url, `${musicInfo.id}_${type}`)
+export const getMusicUrl = async(key: MusicUrlKeyV1): Promise<string> => {
+  const result = await rendererInvoke<LX.Music.MusicUrlGetInputV1, CacheReadResultV1<string>>(
+    WIN_MAIN_RENDERER_EVENT_NAME.music_url_get,
+    { ...key, nowMs: Date.now() },
+  )
+  return result.status == 'hit' ? result.value : ''
 }
 
 /**
@@ -619,21 +629,23 @@ export const getMusicUrl = async(musicInfo: LX.Music.MusicInfo, type: LX.Quality
  * @param type URL音质
  * @param url 歌曲URL
  */
-export const saveMusicUrl = async(musicInfo: LX.Music.MusicInfo, type: LX.Quality, url: string) => {
-  await rendererInvoke<LX.Music.MusicUrlInfo>(WIN_MAIN_RENDERER_EVENT_NAME.save_music_url, {
-    id: `${musicInfo.id}_${type}`,
+export const saveMusicUrl = async(key: MusicUrlKeyV1, url: string, providerExpiresAtMs?: number) => {
+  await rendererInvoke<LX.Music.MusicUrlPutInputV1>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_put, {
+    ...key,
     url,
+    nowMs: Date.now(),
+    ...(providerExpiresAtMs == null ? {} : { providerExpiresAtMs }),
   })
 }
 /**
  * 清理所有缓存的歌曲URL
  */
 export const clearMusicUrl = async() => {
-  await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.clear_music_url)
+  await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.music_url_clear)
 }
 
 export const getMusicUrlCount = async() => {
-  return rendererInvoke<number>(WIN_MAIN_RENDERER_EVENT_NAME.get_music_url_count)
+  return rendererInvoke<number>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_count)
 }
 
 export const testWebDAV = async(config: LX.Music.WebDAVConfig) => {

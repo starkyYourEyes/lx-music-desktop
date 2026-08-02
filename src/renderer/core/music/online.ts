@@ -12,31 +12,8 @@ import {
   handleGetOnlineMusicUrl,
   handleGetOnlinePicUrl,
   getCachedLyricInfo,
+  getMusicUrlCacheKey,
 } from './utils'
-
-/* export const setMusicUrl = ({ musicInfo, type, url }: {
-  musicInfo: LX.Music.MusicInfo
-  type: LX.Quality
-  url: string
-}) => {
-  saveMusicUrl(musicInfo, type, url)
-}
-
-export const setPic = (datas: {
-  listId: string
-  musicInfo: LX.Music.MusicInfo
-  url: string
-}) => {
-  datas.musicInfo.img = datas.url
-  updateMusicInfo({
-    listId: datas.listId,
-    id: datas.musicInfo.songmid,
-    data: { img: datas.url },
-    musicInfo: datas.musicInfo,
-  })
-}
- */
-
 
 export const getMusicUrl = async({ musicInfo, quality, isRefresh, allowToggleSource = true, onToggleSource = () => {} }: {
   musicInfo: LX.Music.MusicInfoOnline
@@ -52,12 +29,15 @@ export const getMusicUrl = async({ musicInfo, quality, isRefresh, allowToggleSou
   //   // return Promise.reject(new Error('该歌曲没有可播放的音频'))
   // }
   const targetQuality = quality ?? getPlayQuality(appSetting['player.playQuality'], musicInfo)
-  const cachedUrl = await getStoreMusicUrl(musicInfo, targetQuality)
+  const cacheKey = getMusicUrlCacheKey(musicInfo, targetQuality)
+  const cachedUrl = cacheKey == null ? '' : await getStoreMusicUrl(cacheKey)
   if (cachedUrl && !isRefresh) return cachedUrl
 
-  return handleGetOnlineMusicUrl({ musicInfo, quality, onToggleSource, isRefresh, allowToggleSource }).then(({ url, quality: targetQuality, musicInfo: targetMusicInfo, isFromCache }) => {
-    if (targetMusicInfo.id != musicInfo.id && !isFromCache) void saveMusicUrl(targetMusicInfo, targetQuality, url)
-    void saveMusicUrl(musicInfo, targetQuality, url)
+  return handleGetOnlineMusicUrl({ musicInfo, quality, onToggleSource, isRefresh, allowToggleSource }).then(({ url, quality: targetQuality, musicInfo: targetMusicInfo, isFromCache, persistentCache }) => {
+    if (!isFromCache) {
+      const targetCacheKey = getMusicUrlCacheKey(targetMusicInfo, targetQuality, persistentCache)
+      if (targetCacheKey != null) void saveMusicUrl(targetCacheKey, url).catch(() => {})
+    }
     return url
   })
 }

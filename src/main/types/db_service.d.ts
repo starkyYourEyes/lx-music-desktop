@@ -87,11 +87,6 @@ declare namespace LX {
       source: 'raw' | 'edited'
     }
 
-    interface MusicUrlInfo {
-      id: string
-      url: string
-    }
-
     interface DownloadMusicInfo {
       id: string
       isComplate: 0 | 1
@@ -112,11 +107,6 @@ declare namespace LX {
       // type: 'music'
       content: string
       // meta: string | null
-    }
-
-    interface MusicInfoOtherSource extends Omit<MusicInfoOnline, 'listId'> {
-      source_id: string
-      order: number
     }
 
   }

@@ -83,8 +83,10 @@ const handleRequest = (context, { requestId, data }) => {
             source: data.source,
             action: data.action,
             data: {
+              source: data.source,
               type: data.info.type,
               url: response,
+              persistentCache: false,
             },
           }
           break

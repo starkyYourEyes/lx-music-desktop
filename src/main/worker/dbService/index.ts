@@ -4,7 +4,7 @@ import {
   init,
 } from './db'
 import { exposeWorker } from '../utils/worker'
-import { list, lyric, music_url, music_other_source, download, dislike_list, account_profile, app_state, playback, phase3, cacheLifecycle } from './modules/index'
+import { list, lyric, musicUrlCache, otherSourceCache, download, dislike_list, account_profile, app_state, playback, phase3, cacheLifecycle } from './modules/index'
 import type { CachePhasePrerequisiteV1 } from '../../../common/storage/cachePhase'
 import { closeCacheDatabase } from './cacheDb'
 
@@ -32,13 +32,13 @@ const common = {
   getDatabaseHealth,
 }
 
-exposeWorker(Object.assign(common, list, lyric, music_url, music_other_source, download, dislike_list, account_profile, app_state, playback, phase3, cacheLifecycle))
+exposeWorker(Object.assign(common, list, lyric, musicUrlCache, otherSourceCache, download, dislike_list, account_profile, app_state, playback, phase3, cacheLifecycle))
 
 export type workerDBSeriveTypes = typeof common
   & typeof list
   & typeof lyric
-  & typeof music_url
-  & typeof music_other_source
+  & typeof musicUrlCache
+  & typeof otherSourceCache
   & typeof download
   & typeof dislike_list
   & typeof account_profile

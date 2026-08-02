@@ -94,7 +94,12 @@ test('request and cancellation keep the API identity captured by the source clos
       apiId: 'user_api/a',
       requestId: harness.requests[0].requestId,
     }])
-    assert.deepEqual(await request.promise, { type: '320k', url: 'https://media.test/song' })
+    assert.deepEqual(await request.promise, {
+      type: '320k',
+      url: 'https://media.test/song',
+      source: 'wy',
+      persistentCache: false,
+    })
   } finally {
     harness.restore()
   }

@@ -557,21 +557,24 @@ const closeHandle = (db: Database.Database | null): { closed: boolean, error: un
 const restoreMovedArtifact = (
   quarantinePath: string,
   publishedPath: string,
-  expected: CacheArtifactSnapshot,
+  movedIdentity: SqliteFileIdentity,
   fileSystem: typeof fs,
-): void => {
+): boolean => {
   try {
     const moved = fileSystem.lstatSync(quarantinePath)
-    if (moved.isSymbolicLink() || !isExclusiveSqliteFile(moved) ||
-      !sameSqliteFileIdentity(sqliteFileIdentity(moved), expected.identity)) return
+    if (!sameSqliteFileIdentity(sqliteFileIdentity(moved), movedIdentity)) return false
     try {
       fileSystem.lstatSync(publishedPath)
-      return
+      return false
     } catch (error) {
-      if (!isMissing(error)) return
+      if (!isMissing(error)) return false
     }
     fileSystem.renameSync(quarantinePath, publishedPath)
-  } catch {}
+    const restored = fileSystem.lstatSync(publishedPath)
+    return sameSqliteFileIdentity(sqliteFileIdentity(restored), movedIdentity)
+  } catch {
+    return false
+  }
 }
 
 const isolateCacheArtifacts = (
@@ -605,18 +608,28 @@ const isolateCacheArtifacts = (
       if (sourceCode(error) == 'EEXIST') throw fixedError('cache_target_invalid')
       throw fixedError('cache_delete_failed')
     }
-    let movedIsExpected = false
+    let movedIdentity: SqliteFileIdentity | null = null
     try {
       const moved = fileSystem.lstatSync(quarantinePath)
-      movedIsExpected = !moved.isSymbolicLink() && isExclusiveSqliteFile(moved) &&
+      movedIdentity = sqliteFileIdentity(moved)
+      const movedIsExpected = !moved.isSymbolicLink() && isExclusiveSqliteFile(moved) &&
         sameSqliteFileIdentity(sqliteFileIdentity(moved), expected.identity)
       if (!movedIsExpected || !validateCacheRoot(root, fileSystem)) {
-        restoreMovedArtifact(quarantinePath, current.path, expected, fileSystem)
+        restoreMovedArtifact(quarantinePath, current.path, movedIdentity, fileSystem)
+        throw fixedError('cache_target_invalid')
+      }
+      const beforeUnlink = fileSystem.lstatSync(quarantinePath)
+      if (beforeUnlink.isSymbolicLink() || !isExclusiveSqliteFile(beforeUnlink) ||
+        !sameSqliteFileIdentity(sqliteFileIdentity(beforeUnlink), movedIdentity) ||
+        !validateCacheRoot(root, fileSystem)) {
+        restoreMovedArtifact(quarantinePath, current.path, movedIdentity, fileSystem)
         throw fixedError('cache_target_invalid')
       }
       fileSystem.unlinkSync(quarantinePath)
     } catch (error) {
-      if (movedIsExpected) restoreMovedArtifact(quarantinePath, current.path, expected, fileSystem)
+      if (movedIdentity != null) {
+        restoreMovedArtifact(quarantinePath, current.path, movedIdentity, fileSystem)
+      }
       if (sourceCode(error) == 'cache_target_invalid') throw error
       throw fixedError('cache_delete_failed')
     }
@@ -1001,7 +1014,11 @@ export const createCacheDatabaseService = (
   const runCacheImmediate = async <T>(
     operation: (db: CacheDatabaseHandle) => T,
   ): Promise<CacheExecutionResult<T>> => enqueue(() => {
-    const result = runReadyOperation(db => db.transaction(() => operation(db)).immediate())
+    const result = runReadyOperation(db => db.transaction(() => {
+      const value = operation(db)
+      if (isThenable(value)) throw fixedError('cache_operation_failed')
+      return value
+    }).immediate())
     return result.ok
       ? { status: 'completed', value: result.value }
       : { status: 'unavailable', code: result.diagnostic }

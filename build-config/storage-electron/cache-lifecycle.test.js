@@ -297,6 +297,53 @@ describe('serialized cache lifecycle', () => {
     }
   })
 
+  it('rolls back synchronous writes when an immediate callback returns a thenable', async() => {
+    const { cachePath } = await createFixture('cache-immediate-thenable-rollback')
+    class CommitThenableDatabase {
+      constructor(filename, options) {
+        const db = new Database(filename, options)
+        const nativeTransaction = db.transaction.bind(db)
+        db.transaction = operation => {
+          const run = mode => (...args) => {
+            let value
+            nativeTransaction((...operationArgs) => {
+              value = operation(...operationArgs)
+            })[mode](...args)
+            return value
+          }
+          const transaction = run('default')
+          transaction.deferred = run('deferred')
+          transaction.immediate = run('immediate')
+          transaction.exclusive = run('exclusive')
+          return transaction
+        }
+        return db
+      }
+    }
+    const service = createService({ DatabaseImplementation: CommitThenableDatabase })
+    assert.equal((await service.openCacheDatabase()).status, 'created')
+
+    assert.deepEqual(await service.runCacheImmediate(async db => {
+      db.prepare(`
+        INSERT INTO raw_lyric_groups(
+          provider, source_track_id, byte_size, created_at_ms, last_accessed_at_ms
+        ) VALUES ('async-tx', 'must-roll-back', 0, 1, 1)
+      `).run()
+      await Promise.resolve()
+      return 'unexpected'
+    }), { status: 'unavailable', code: 'cache_operation_failed' })
+
+    const inspection = new Database(cachePath, { readonly: true, fileMustExist: true })
+    try {
+      assert.equal(inspection.prepare(`
+        SELECT count(*) count FROM raw_lyric_groups
+        WHERE provider = 'async-tx' AND source_track_id = 'must-roll-back'
+      `).get().count, 0)
+    } finally {
+      inspection.close()
+    }
+  })
+
   it('detects target replacement before a repository callback and never deletes the replacement', async() => {
     const { fixture, cachePath } = await createFixture('cache-callback-swap')
     let activeDb

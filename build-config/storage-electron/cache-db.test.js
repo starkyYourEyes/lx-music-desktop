@@ -22,6 +22,12 @@ require.extensions['.ts'] = (module, filename) => {
 
 const Database = require('better-sqlite3')
 const dbService = require('../../src/main/worker/dbService/db.ts')
+const {
+  CACHE_MIGRATION_CHECKSUM,
+  CACHE_MIGRATION_NAME,
+  CACHE_SCHEMA_VERSION,
+} = require('../../src/main/worker/dbService/cacheMigrate.ts')
+const { CACHE_SCHEMA_SOURCE } = require('../../src/main/worker/dbService/cacheTables.ts')
 const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const cacheModulePath = '../../src/main/worker/dbService/cacheDb.ts'
@@ -40,6 +46,16 @@ const sha256Text = value => crypto.createHash('sha256').update(value, 'utf8').di
 const sha256File = filename => fs.existsSync(filename)
   ? crypto.createHash('sha256').update(fs.readFileSync(filename)).digest('hex')
   : null
+
+const nodeIdentity = filename => {
+  const stat = fs.lstatSync(filename, { bigint: true })
+  return { dev: stat.dev, ino: stat.ino }
+}
+
+const fileNodeSnapshot = filename => ({
+  ...nodeIdentity(filename),
+  bytes: fs.readFileSync(filename),
+})
 
 const appFingerprint = databasePath => Object.fromEntries([
   databasePath,
@@ -163,6 +179,22 @@ const rewriteTableSql = (db, table, from, to) => {
     db.pragma(`schema_version = ${schemaVersion + 1}`)
   } finally {
     db.pragma('writable_schema = OFF')
+  }
+}
+
+const createCacheFromSchemaSource = (cachePath, schemaSource) => {
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true })
+  const db = new Database(cachePath)
+  try {
+    db.pragma('foreign_keys = ON')
+    db.exec(schemaSource)
+    db.prepare(`
+      INSERT INTO cache_schema_migrations(version, name, checksum, applied_at_ms)
+      VALUES (?, ?, ?, ?)
+    `).run(CACHE_SCHEMA_VERSION, CACHE_MIGRATION_NAME, CACHE_MIGRATION_CHECKSUM, 1)
+    db.pragma(`user_version = ${CACHE_SCHEMA_VERSION}`)
+  } finally {
+    db.close()
   }
 }
 
@@ -690,6 +722,109 @@ describe('guarded cache database', () => {
     }
   })
 
+  it('rejects table-level semantics outside the canonical cache v1 DDL', async(t) => {
+    const cases = [
+      {
+        name: 'deferred foreign key',
+        table: 'raw_lyrics',
+        from: 'REFERENCES raw_lyric_groups(provider, source_track_id) ON DELETE CASCADE',
+        to: `REFERENCES raw_lyric_groups(provider, source_track_id) ON DELETE CASCADE
+    DEFERRABLE INITIALLY DEFERRED`,
+        forbidden: /DEFERRABLE/i,
+      },
+      {
+        name: 'primary-key conflict clause',
+        table: 'raw_lyric_groups',
+        from: 'PRIMARY KEY(provider, source_track_id)',
+        to: 'PRIMARY KEY(provider, source_track_id) ON CONFLICT REPLACE',
+        forbidden: /ON CONFLICT/i,
+      },
+      {
+        name: 'STRICT table option',
+        table: 'music_urls',
+        from: 'PRIMARY KEY(provider, account_scope, source_track_id, quality)\n)',
+        to: 'PRIMARY KEY(provider, account_scope, source_track_id, quality)\n) STRICT',
+        forbidden: /\bSTRICT\b/i,
+      },
+      {
+        name: 'WITHOUT ROWID table option',
+        table: 'other_source_groups',
+        from: 'PRIMARY KEY(original_provider, original_track_id)\n)',
+        to: 'PRIMARY KEY(original_provider, original_track_id)\n) WITHOUT ROWID',
+        forbidden: /WITHOUT\s+ROWID/i,
+      },
+    ]
+
+    for (const testCase of cases) {
+      await t.test(testCase.name, async() => {
+        const { cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-table-ddl' })
+        const cachePath = path.join(cacheRoot, 'cache.db')
+        const mutatedSource = CACHE_SCHEMA_SOURCE.replace(testCase.from, testCase.to)
+        assert.notEqual(mutatedSource, CACHE_SCHEMA_SOURCE)
+        createCacheFromSchemaSource(cachePath, mutatedSource)
+        const before = appFingerprint(appDbPath)
+        const preflight = new Database(cachePath, { readonly: true, fileMustExist: true })
+        try {
+          const { verifyCacheSchema } = require('../../src/main/worker/dbService/cacheSchemaContract.ts')
+          assert.deepEqual(verifyCacheSchema(preflight), {
+            ok: false, diagnostic: 'cache_schema_invalid',
+          })
+        } finally {
+          preflight.close()
+        }
+        const replacement = createCacheService()
+
+        assert.deepEqual(await replacement.openCacheDatabase(), {
+          status: 'recreated', schemaVersion: 1, diagnostic: null,
+        })
+        const check = new Database(cachePath, { readonly: true, fileMustExist: true })
+        try {
+          const sql = check.prepare(`
+            SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?
+          `).get(testCase.table).sql
+          assert.equal(testCase.forbidden.test(sql), false)
+        } finally {
+          check.close()
+        }
+        assert.deepEqual(appFingerprint(appDbPath), before)
+      })
+    }
+  })
+
+  it('accepts canonical table DDL after stable whitespace and identifier-quote normalization', async() => {
+    const { cacheRoot } = await createAppFixture({ prefix: 'cache-table-ddl-normalization' })
+    const seed = createCacheService()
+    assert.equal((await seed.openCacheDatabase()).status, 'created')
+    await seed.closeCacheDatabase()
+    const cachePath = path.join(cacheRoot, 'cache.db')
+    const tamper = new Database(cachePath)
+    try {
+      rewriteTableSql(tamper, 'raw_lyric_groups',
+        'CREATE TABLE raw_lyric_groups (', 'create\n  table "raw_lyric_groups" (')
+      rewriteTableSql(tamper, 'raw_lyric_groups',
+        'provider TEXT NOT NULL,', '[provider] text not null,')
+      rewriteTableSql(tamper, 'raw_lyric_groups',
+        'source_track_id TEXT NOT NULL,', '`source_track_id` TEXT NOT NULL,')
+      rewriteTableSql(tamper, 'raw_lyric_groups',
+        'PRIMARY KEY(provider, source_track_id)', 'primary key([provider], "source_track_id")')
+      tamper.pragma('wal_checkpoint(TRUNCATE)')
+    } finally {
+      tamper.close()
+    }
+    const inspection = new Database(cachePath, { readonly: true, fileMustExist: true })
+    try {
+      const { verifyCacheSchema } = require('../../src/main/worker/dbService/cacheSchemaContract.ts')
+      assert.deepEqual(verifyCacheSchema(inspection), { ok: true })
+      assert.deepEqual(verifyCacheSchema(inspection), { ok: true })
+    } finally {
+      inspection.close()
+    }
+    const service = createCacheService()
+    assert.deepEqual(await service.openCacheDatabase(), {
+      status: 'ready', schemaVersion: 1, diagnostic: null,
+    })
+  })
+
   it('rejects link and non-file cache targets without changing their targets or the app database', async(t) => {
     const directoryCase = await createAppFixture({ prefix: 'cache-invalid-directory' })
     fs.mkdirSync(directoryCase.cacheRoot, { recursive: true })
@@ -864,6 +999,110 @@ describe('guarded cache database', () => {
     assert.equal(swapped, true)
     assert.equal(sha256File(external), externalBefore)
     assert.deepEqual(appFingerprint(appDbPath), before)
+  })
+
+  it('restores the exact artifact moved by an isolation-boundary replacement', async() => {
+    const { fixture, cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-isolate-artifact-swap' })
+    fs.mkdirSync(cacheRoot, { recursive: true })
+    const cachePath = path.join(cacheRoot, 'cache.db')
+    const parked = path.join(fixture.path, 'parked-owned-cache.db')
+    const external = path.join(fixture.path, 'external-replacement.db')
+    const quarantineId = '11111111-1111-4111-8111-111111111111'
+    const quarantinePath = path.join(cacheRoot, `.cache.db.isolate-${quarantineId}`)
+    fs.writeFileSync(cachePath, 'owned-corrupt-cache-6C42')
+    fs.writeFileSync(external, 'external-replacement-6C42')
+    const ownedBefore = fileNodeSnapshot(cachePath)
+    const externalBefore = fileNodeSnapshot(external)
+    const appBefore = appFingerprint(appDbPath)
+    const unlinkedQuarantines = []
+    let replacementBeforeMove
+    let injected = false
+    const swappingFs = {
+      ...fs,
+      renameSync(source, destination) {
+        if (!injected && path.resolve(source) == path.resolve(cachePath) &&
+          path.resolve(destination) == path.resolve(quarantinePath)) {
+          fs.renameSync(cachePath, parked)
+          fs.linkSync(external, cachePath)
+          replacementBeforeMove = fileNodeSnapshot(cachePath)
+          injected = true
+        }
+        return fs.renameSync(source, destination)
+      },
+      unlinkSync(filename) {
+        if (path.resolve(filename) == path.resolve(quarantinePath)) unlinkedQuarantines.push(filename)
+        return fs.unlinkSync(filename)
+      },
+    }
+    const service = createCacheService({
+      fileSystem: swappingFs,
+      randomUUID: () => quarantineId,
+    })
+
+    assert.deepEqual(await service.openCacheDatabase(), {
+      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_target_invalid',
+    })
+    assert.equal(injected, true)
+    assert.deepEqual(unlinkedQuarantines, [])
+    assert.equal(fs.existsSync(cachePath), true, 'moved replacement was not restored')
+    assert.deepEqual(fileNodeSnapshot(cachePath), replacementBeforeMove)
+    assert.deepEqual(fileNodeSnapshot(external), externalBefore)
+    assert.deepEqual(fileNodeSnapshot(parked), ownedBefore)
+    assert.equal(fs.existsSync(quarantinePath), false)
+    assert.deepEqual(appFingerprint(appDbPath), appBefore)
+  })
+
+  it('restores the exact artifact moved after a cache-root replacement', async() => {
+    const { fixture, cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-isolate-root-swap' })
+    fs.mkdirSync(cacheRoot, { recursive: true })
+    const cachePath = path.join(cacheRoot, 'cache.db')
+    const parkedRoot = path.join(fixture.path, 'parked-owned-cache-root')
+    const quarantineId = '22222222-2222-4222-8222-222222222222'
+    const quarantinePath = path.join(cacheRoot, `.cache.db.isolate-${quarantineId}`)
+    fs.writeFileSync(cachePath, 'owned-corrupt-cache-root-9E17')
+    const ownedRootBefore = nodeIdentity(cacheRoot)
+    const ownedBefore = fileNodeSnapshot(cachePath)
+    const appBefore = appFingerprint(appDbPath)
+    const unlinkedQuarantines = []
+    let replacementRootBefore
+    let replacementBeforeMove
+    let injected = false
+    const swappingFs = {
+      ...fs,
+      renameSync(source, destination) {
+        if (!injected && path.resolve(source) == path.resolve(cachePath) &&
+          path.resolve(destination) == path.resolve(quarantinePath)) {
+          fs.renameSync(cacheRoot, parkedRoot)
+          fs.mkdirSync(cacheRoot)
+          fs.writeFileSync(cachePath, 'replacement-root-cache-9E17')
+          replacementRootBefore = nodeIdentity(cacheRoot)
+          replacementBeforeMove = fileNodeSnapshot(cachePath)
+          injected = true
+        }
+        return fs.renameSync(source, destination)
+      },
+      unlinkSync(filename) {
+        if (path.resolve(filename) == path.resolve(quarantinePath)) unlinkedQuarantines.push(filename)
+        return fs.unlinkSync(filename)
+      },
+    }
+    const service = createCacheService({
+      fileSystem: swappingFs,
+      randomUUID: () => quarantineId,
+    })
+
+    assert.deepEqual(await service.openCacheDatabase(), {
+      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_target_invalid',
+    })
+    assert.equal(injected, true)
+    assert.deepEqual(unlinkedQuarantines, [])
+    assert.deepEqual(nodeIdentity(cacheRoot), replacementRootBefore)
+    assert.equal(fs.existsSync(cachePath), true, 'root replacement artifact was not restored')
+    assert.deepEqual(fileNodeSnapshot(cachePath), replacementBeforeMove)
+    assert.deepEqual(nodeIdentity(parkedRoot), ownedRootBefore)
+    assert.deepEqual(fileNodeSnapshot(path.join(parkedRoot, 'cache.db')), ownedBefore)
+    assert.equal(fs.existsSync(quarantinePath), false)
+    assert.deepEqual(appFingerprint(appDbPath), appBefore)
   })
 
   it('maps open failures to fixed non-secret diagnostics and preserves authoritative access', async(t) => {

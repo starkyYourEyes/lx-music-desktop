@@ -4,6 +4,7 @@ import {
   CACHE_MIGRATION_NAME,
   CACHE_SCHEMA_VERSION,
 } from './cacheMigrate'
+import { CACHE_SCHEMA_SOURCE } from './cacheTables'
 import type { SchemaContract } from './schemaContract'
 import { verifyDatabaseAgainstContract } from './verifyDB'
 
@@ -295,6 +296,84 @@ const readCommentEnd = (sql: string, start: number): number | null => {
   return null
 }
 
+const splitSqlStatements = (sql: string): string[] => {
+  const statements: string[] = []
+  let start = 0
+  for (let index = 0; index < sql.length;) {
+    const character = sql[index]
+    if (character == "'" || character == '"' || character == '`' || character == '[') {
+      index = readQuotedEnd(sql, index)
+      continue
+    }
+    const commentEnd = readCommentEnd(sql, index)
+    if (commentEnd != null) {
+      index = commentEnd
+      continue
+    }
+    if (character == ';') {
+      const statement = sql.slice(start, index).trim()
+      if (statement.length > 0) statements.push(statement)
+      start = index + 1
+    }
+    index++
+  }
+  const trailing = sql.slice(start).trim()
+  if (trailing.length > 0) statements.push(trailing)
+  return statements
+}
+
+const normalizeQuotedToken = (sql: string, start: number, end: number): string => {
+  const delimiter = sql[start] == '[' ? ']' : sql[start]
+  const value = sql.slice(start + 1, end - 1).split(`${delimiter}${delimiter}`).join(delimiter)
+  if (sql[start] == "'") return `'${value.split("'").join("''")}'`
+  return value.toLowerCase()
+}
+
+const normalizeTableSql = (sql: string): string => {
+  const tokens: string[] = []
+  const pairedOperators = new Set(['>=', '<=', '<>', '!=', '==', '||', '->'])
+  for (let index = 0; index < sql.length;) {
+    const character = sql[index]
+    if (/\s/.test(character)) {
+      index++
+      continue
+    }
+    if (character == "'" || character == '"' || character == '`' || character == '[') {
+      const end = readQuotedEnd(sql, index)
+      tokens.push(normalizeQuotedToken(sql, index, end))
+      index = end
+      continue
+    }
+    const commentEnd = readCommentEnd(sql, index)
+    if (commentEnd != null) {
+      index = commentEnd
+      continue
+    }
+    if (isSqlWordCharacter(character)) {
+      let end = index + 1
+      while (isSqlWordCharacter(sql[end])) end++
+      tokens.push(sql.slice(index, end).toLowerCase())
+      index = end
+      continue
+    }
+    const paired = sql.slice(index, index + 2)
+    if (pairedOperators.has(paired)) {
+      tokens.push(paired)
+      index += 2
+      continue
+    }
+    if (character != ';' || sql.slice(index + 1).trim().length > 0) tokens.push(character)
+    index++
+  }
+  return tokens.join(' ')
+}
+
+const expectedTableSql = new Map<string, string>()
+for (const statement of splitSqlStatements(CACHE_SCHEMA_SOURCE)) {
+  const table = /^CREATE\s+TABLE\s+([a-z_][a-z0-9_]*)/i.exec(statement)?.[1]
+  if (table != null) expectedTableSql.set(table, normalizeTableSql(statement))
+}
+
 const countCheckExpressions = (sql: string): number => {
   let count = 0
   for (let index = 0; index < sql.length;) {
@@ -409,7 +488,7 @@ export const verifyCacheSchema = (db: Database.Database): CacheSchemaVerificatio
       const tableSql = (db.prepare(`
         SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?
       `).get(table) as SchemaSqlRow | undefined)?.sql
-      if (tableSql == null ||
+      if (tableSql == null || normalizeTableSql(tableSql) != expectedTableSql.get(table) ||
         countCheckExpressions(tableSql) != (cacheCheckContract.tables.find(value => value.name == table)?.checks?.length ?? 0)) {
         return { ok: false, diagnostic: 'cache_schema_invalid' }
       }

@@ -22,10 +22,21 @@ const lyricInfo = (rows: ReadonlyArray<{ lyricType: LyricKey, text: string }>): 
   return result
 }
 
+const decodeLegacyText = (value: unknown): string | null => {
+  if (typeof value != 'string' || value.length % 4 != 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return null
+  const bytes = Buffer.from(value, 'base64')
+  if (bytes.toString('base64') != value) return null
+  const text = bytes.toString('utf8')
+  return Buffer.from(text, 'utf8').equals(bytes) ? text : null
+}
+
 const appRaw = (id: string): LX.Music.LyricInfo | null => {
   const rows = getAppDB().prepare(`SELECT type, text FROM lyric WHERE id = ? AND source = 'raw'`).all(id) as Array<{ type: LyricKey, text: string }>
-  if (!rows.length) return null
-  return lyricInfo(rows.map(row => ({ lyricType: row.type, text: Buffer.from(row.text, 'base64').toString('utf8') })))
+  const valid = rows.flatMap(row => {
+    const text = decodeLegacyText(row.text)
+    return text == null ? [] : [{ lyricType: row.type, text }]
+  })
+  return valid.length ? lyricInfo(valid) : null
 }
 
 const bytes = (text: string): number => Buffer.byteLength(text, 'utf8')

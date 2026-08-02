@@ -28,7 +28,7 @@ const failure = (code: string): Error & { code: string } => Object.assign(new Er
 const safeNow = (value: unknown): value is number => typeof value == 'number' && Number.isSafeInteger(value) && value >= 0
 const validId = (value: unknown): value is string => typeof value == 'string' && value.length > 0 && value.length <= 1024
 const decode = (value: unknown): string | null => {
-  if (typeof value != 'string' || value.length == 0 || value.length % 4 != 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return null
+  if (typeof value != 'string' || value.length % 4 != 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return null
   const bytes = Buffer.from(value, 'base64')
   if (bytes.toString('base64') != value) return null
   const text = bytes.toString('utf8')
@@ -70,7 +70,8 @@ export const migrateRawLyrics = async(input: { nowMs: number }): Promise<RawLyri
   const inventory = source()
   const sourceGroups = new Set(inventory.tuples.map(row => row.sourceTrackId)).size
   const sourceSha256 = canonicalRawLyricHash(inventory.tuples)
-  const existing = getMigrationMarker(getAppDB(), markerName)
+  let existing
+  try { existing = getMigrationMarker(getAppDB(), markerName) } catch { throw failure('raw_lyric_marker_invalid') }
   if (existing != null) {
     const current = parseDetails(existing.detailsJson)
     if (existing.sourceSha256 != sourceSha256 || current.sourceSha256 != sourceSha256 || current.sourceRows != inventory.tuples.length || current.sourceOwnerGroups != sourceGroups || current.skippedInvalidRows != inventory.skippedInvalidRows) throw failure('raw_lyric_marker_conflict')
@@ -84,6 +85,13 @@ export const migrateRawLyrics = async(input: { nowMs: number }): Promise<RawLyri
     if (canonicalJson(exact as unknown as JsonValue) != canonicalJson(value as unknown as JsonValue)) throw failure('raw_lyric_marker_conflict')
     return { status: 'already-complete', ...value }
   }
-  putMigrationMarker(getAppDB(), { name: markerName, sourceSha256, completedAtMs: input.nowMs, detailsJson: canonicalJson(value as unknown as JsonValue) })
+  const marker = { name: markerName, sourceSha256, completedAtMs: input.nowMs, detailsJson: canonicalJson(value as unknown as JsonValue) }
+  putMigrationMarker(getAppDB(), marker)
+  let stored
+  try { stored = getMigrationMarker(getAppDB(), markerName) } catch { throw failure('raw_lyric_marker_invalid') }
+  if (stored == null || stored.name != marker.name || stored.sourceSha256 != marker.sourceSha256 ||
+    stored.completedAtMs != marker.completedAtMs || stored.detailsJson != marker.detailsJson) {
+    throw failure('raw_lyric_marker_invalid')
+  }
   return { status: 'complete', ...value }
 }

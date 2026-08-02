@@ -376,7 +376,7 @@ interface ProductionCacheLifecycle {
     schemaVersion: 1 | null
     diagnostic: string | null
   }>
-  migrateRawLyrics: (input: { nowMs: number }) => Promise<unknown> | unknown
+  migrateRawLyrics?: (input: { nowMs: number }) => Promise<unknown> | unknown
 }
 
 const cacheDiagnosticCodes = new Set([
@@ -395,7 +395,7 @@ const getProductionCacheLifecycle = (): ProductionCacheLifecycle | null => {
   if (typeof globalThis.lx == 'undefined') return null
   const repository = globalThis.lx.worker?.dbService
   if (repository == null || typeof repository.getCachePhasePrerequisite != 'function' ||
-    typeof repository.openCacheDatabase != 'function' || typeof repository.migrateRawLyrics != 'function') {
+    typeof repository.openCacheDatabase != 'function') {
     throw errorWithCode('cache_phase4_result_invalid')
   }
   return repository
@@ -506,6 +506,7 @@ export const createStorageCoordinator = (
               throw errorWithCode('cache_phase4_result_invalid')
             }
             if (cacheResult.status == 'unavailable') return { schemaVersion: database.schemaVersion }
+            if (typeof productionCache.migrateRawLyrics != 'function') throw errorWithCode('cache_phase4_result_invalid')
             const migrationResult = await productionCache.migrateRawLyrics({ nowMs: dependencies.now?.() ?? Date.now() })
             if (!isValidRawLyricMigrationResult(migrationResult)) throw errorWithCode('cache_phase4_result_invalid')
             return { schemaVersion: database.schemaVersion }

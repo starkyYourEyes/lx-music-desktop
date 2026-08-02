@@ -82,6 +82,8 @@ const createMigration = (version, name, up = () => {}) => ({
 
 const migration4 = createMigration(4, 'test_four', db => db.exec('CREATE TABLE migration_four (id INTEGER PRIMARY KEY)'))
 const migration5 = createMigration(5, 'test_five', db => db.exec('CREATE TABLE migration_five (id INTEGER PRIMARY KEY)'))
+const migration6 = createMigration(6, 'test_six', db => db.exec('CREATE TABLE migration_six (id INTEGER PRIMARY KEY)'))
+const migration7 = createMigration(7, 'test_seven', db => db.exec('CREATE TABLE migration_seven (id INTEGER PRIMARY KEY)'))
 
 const readLegacyVersion = db => db.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value
 const readLedger = db => db.prepare('SELECT version, name, checksum, applied_at_ms FROM schema_migrations ORDER BY version').all()
@@ -164,6 +166,65 @@ describe('database migrations', () => {
     )
     assert.equal(readLegacyVersion(db), '3')
     assert.equal(getSchemaVersion(db), 3)
+  })
+
+  it('samples and freezes one migration timestamp before up and verifies after ledger and mirror writes', () => {
+    const db = createLegacyDatabase('2')
+    const observations = []
+    let sampled = false
+    let upContext
+    const contextualMigration = {
+      version: 3,
+      name: 'contextual_three',
+      checksum: checksum('contextual migration three'),
+      up(database, context) {
+        observations.push('up')
+        assert.equal(sampled, true)
+        assert.equal(Object.isFrozen(context), true)
+        assert.equal(context.appliedAtMs, 4321)
+        assert.equal(hasObject(database, 'contextual_three'), false)
+        upContext = context
+        database.exec('CREATE TABLE contextual_three (id INTEGER PRIMARY KEY)')
+      },
+      verify(database, context) {
+        observations.push('verify')
+        assert.equal(context, upContext)
+        assert.deepEqual(readLedger(database), [{
+          version: 3,
+          name: 'contextual_three',
+          checksum: checksum('contextual migration three'),
+          applied_at_ms: 4321,
+        }])
+        assert.equal(readLegacyVersion(database), '3')
+      },
+    }
+
+    assert.deepEqual(runMigrations(db, [contextualMigration], {
+      now: () => {
+        sampled = true
+        observations.push('timestamp')
+        return 4321
+      },
+    }), { fromVersion: 2, toVersion: 3, applied: [3] })
+    assert.deepEqual(observations, ['timestamp', 'up', 'verify'])
+  })
+
+  it('rolls back migration, ledger, and mirror when post-ledger verification fails', () => {
+    const db = createLegacyDatabase('2')
+    const migration = {
+      version: 3,
+      name: 'verify_failure',
+      checksum: checksum('verify failure'),
+      up(database) { database.exec('CREATE TABLE verify_failure (id INTEGER PRIMARY KEY)') },
+      verify() { throw new Error('injected post-ledger verification failure') },
+    }
+    assert.throws(
+      () => runMigrations(db, [migration], { now: () => 9 }),
+      /injected post-ledger verification failure/,
+    )
+    assert.equal(hasObject(db, 'verify_failure'), false)
+    assert.equal(hasObject(db, 'schema_migrations'), false)
+    assert.equal(readLegacyVersion(db), '2')
   })
 
   it('rolls back bootstrap and every pending migration when a later migration fails', () => {
@@ -274,6 +335,29 @@ describe('database migrations', () => {
     assert.deepEqual(readLedger(db).map(row => row.version), [3, 4, 5])
     assert.equal(hasObject(db, 'migration_five'), true)
     assert.equal(readLegacyVersion(db), '5')
+  })
+
+  it('caps every omitted-target migration entry point at schema 6', () => {
+    const registry = [migration3, migration4, migration5, migration6, migration7]
+    const pendingDb = createLegacyDatabase('2')
+    assert.deepEqual(getPendingMigrations(pendingDb, registry).map(migration => migration.version), [3, 4, 5, 6])
+
+    const runnerDb = createLegacyDatabase('2')
+    assert.deepEqual(runMigrations(runnerDb, registry, { now: () => 1000 }), {
+      fromVersion: 2,
+      toVersion: 6,
+      applied: [3, 4, 5, 6],
+    })
+    assert.equal(hasObject(runnerDb, 'migration_seven'), false)
+
+    const bootstrapDb = new Database(':memory:')
+    databases.push(bootstrapDb)
+    assert.deepEqual(bootstrapDatabaseSchema(bootstrapDb, registry, { now: () => 1000 }), {
+      fromVersion: 2,
+      toVersion: 6,
+      applied: [3, 4, 5, 6],
+    })
+    assert.equal(hasObject(bootstrapDb, 'migration_seven'), false)
   })
 
   it('rejects migration targets outside an inclusive contiguous boundary', () => {
@@ -500,7 +584,7 @@ describe('database migrations', () => {
     })
     const db = dbService.getAppDB()
     databases.push(db)
-    const latestSchemaVersion = migrations.at(-1).version
+    const targetMigrations = migrations.filter(migration => migration.version <= 6)
 
     assert.equal(result.status, 'ready')
     assert.deepEqual({
@@ -510,15 +594,15 @@ describe('database migrations', () => {
       backupPath: result.backupPath,
     }, {
       existed: false,
-      schemaVersion: latestSchemaVersion,
+      schemaVersion: 6,
       migratedVersions: [],
       backupPath: null,
     })
-    assert.equal(dbService.getDB(), db)
-    assert.equal(getSchemaVersion(db), latestSchemaVersion)
+    assert.equal(dbService.getAppDB(), db)
+    assert.equal(getSchemaVersion(db), 6)
     assert.deepEqual(
       readLedger(db).map(row => [row.version, row.name, row.checksum]),
-      migrations.map(migration => [migration.version, migration.name, migration.checksum]),
+      targetMigrations.map(migration => [migration.version, migration.name, migration.checksum]),
     )
     assert.equal(db.pragma('foreign_keys', { simple: true }), 1)
     assert.equal(db.pragma('journal_mode', { simple: true }), 'wal')

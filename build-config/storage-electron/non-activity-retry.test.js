@@ -93,7 +93,7 @@ const createFixture = async() => {
       ...options,
     })
   }
-  return { configPath, profileDataPath, runMigration, db: dbService.getDB() }
+  return { configPath, profileDataPath, runMigration, db: dbService.getAppDB() }
 }
 
 const countRows = (db, table) => db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count

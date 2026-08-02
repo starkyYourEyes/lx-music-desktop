@@ -1,17 +1,36 @@
+import { createHash } from 'node:crypto'
 import { canonicalJson, type JsonValue } from '../../../common/storage/canonicalJson'
 import { getAppDB } from '../../worker/dbService/db'
-import { getMigrationMarker, putMigrationMarker } from '../../worker/dbService/migrate'
-import { attestRawProvider, canonicalRawLyricHash, replaceRawProvider, type RawLyricTuple } from '../../worker/dbService/modules/lyric/raw/repository'
+import { putMigrationMarker } from '../../worker/dbService/migrate'
+import type { RawLyricTuple } from '../../worker/dbService/modules/lyric/raw/repository'
 
 const markerName = 'legacy_cache_v1.raw_lyrics'
 const tupleEncoding = 'u32be-length-prefixed-utf8-v1'
 const keys = new Set(['lyric', 'tlyric', 'rlyric', 'lxlyric'])
 
+export const canonicalRawLyricHash = (tuples: readonly RawLyricTuple[]): string => {
+  const hash = createHash('sha256')
+  const sorted = [...tuples].sort((left, right) => {
+    for (const field of ['provider', 'sourceTrackId', 'lyricType'] as const) {
+      const compared = Buffer.compare(Buffer.from(left[field], 'utf8'), Buffer.from(right[field], 'utf8'))
+      if (compared) return compared
+    }
+    return 0
+  })
+  for (const tuple of sorted) for (const field of [tuple.provider, tuple.sourceTrackId, tuple.lyricType, tuple.text]) {
+    const value = Buffer.from(field, 'utf8')
+    const length = Buffer.allocUnsafe(4)
+    length.writeUInt32BE(value.length)
+    hash.update(length).update(value)
+  }
+  return hash.digest('hex')
+}
+
 export type RawLyricMigrationResult =
   | { status: 'complete' | 'already-complete', sourceRows: number, sourceOwnerGroups: number, skippedInvalidRows: number, sourceSha256: string, targetRows: number, targetOwnerGroups: number, targetSha256: string }
   | { status: 'unavailable', code: LX.DBService.CacheDiagnosticCode }
 
-interface Details {
+export interface RawLyricMarkerDetails {
   version: 1
   provider: 'legacy'
   tupleEncoding: typeof tupleEncoding
@@ -22,6 +41,13 @@ interface Details {
   targetRows: number
   targetOwnerGroups: number
   targetSha256: string
+}
+
+export interface RawLyricMarkerRow {
+  name: typeof markerName
+  sourceSha256: string
+  completedAtMs: number
+  detailsJson: string
 }
 
 const failure = (code: string): Error & { code: string } => Object.assign(new Error(code), { code })
@@ -35,8 +61,28 @@ const decode = (value: unknown): string | null => {
   return Buffer.from(text, 'utf8').equals(bytes) ? text : null
 }
 
-const source = (): { tuples: RawLyricTuple[], skippedInvalidRows: number } => {
-  const rows = getAppDB().prepare(`SELECT id, type, text FROM lyric WHERE source = 'raw' AND type IN ('lyric', 'tlyric', 'rlyric', 'lxlyric')`).all() as Array<{ id: unknown, type: unknown, text: unknown }>
+export const readAuthoritativeRawLyric = (sourceTrackId: string): LX.Music.LyricInfo | null => {
+  if (!validId(sourceTrackId)) throw failure('raw_lyric_input_invalid')
+  const rows = getAppDB().prepare(`
+    SELECT type, text FROM lyric
+    WHERE id = ? AND source = 'raw' AND type IN ('lyric', 'tlyric', 'rlyric', 'lxlyric')
+  `).all(sourceTrackId) as Array<{ type: unknown, text: unknown }>
+  const result: LX.Music.LyricInfo = { lyric: '' }
+  let found = false
+  for (const row of rows) {
+    const text = decode(row.text)
+    if (text == null || typeof row.type != 'string' || !keys.has(row.type)) continue
+    found = true
+    if (row.type == 'lyric') result.lyric = text
+    else result[row.type as Exclude<RawLyricTuple['lyricType'], 'lyric'>] = text
+  }
+  return found ? result : null
+}
+
+export const readAuthoritativeRawInventory = (
+  db = getAppDB(),
+): { tuples: RawLyricTuple[], skippedInvalidRows: number } => {
+  const rows = db.prepare(`SELECT id, type, text FROM lyric WHERE source = 'raw' AND type IN ('lyric', 'tlyric', 'rlyric', 'lxlyric')`).all() as Array<{ id: unknown, type: unknown, text: unknown }>
   const tuples: RawLyricTuple[] = []
   const seen = new Map<string, Set<string>>()
   let skippedInvalidRows = 0
@@ -52,12 +98,24 @@ const source = (): { tuples: RawLyricTuple[], skippedInvalidRows: number } => {
   return { tuples, skippedInvalidRows }
 }
 
-const details = (sourceRows: number, sourceOwnerGroups: number, skippedInvalidRows: number, sourceSha256: string, targetRows: number, targetOwnerGroups: number, targetSha256: string): Details => ({
+export const countAuthoritativeRawRows = (db = getAppDB()): number => {
+  const count = (db.prepare("SELECT count(*) AS count FROM lyric WHERE source = 'raw'").get() as { count: unknown }).count
+  if (!safeNow(count)) throw failure('raw_lyric_attestation_failed')
+  return count
+}
+
+export const deleteAuthoritativeRawRows = (db = getAppDB()): number => {
+  const deleted = db.prepare("DELETE FROM lyric WHERE source = 'raw'").run().changes
+  if (!safeNow(deleted)) throw failure('raw_lyric_attestation_failed')
+  return deleted
+}
+
+const details = (sourceRows: number, sourceOwnerGroups: number, skippedInvalidRows: number, sourceSha256: string, targetRows: number, targetOwnerGroups: number, targetSha256: string): RawLyricMarkerDetails => ({
   version: 1, provider: 'legacy', tupleEncoding, sourceRows, sourceOwnerGroups, skippedInvalidRows,
   sourceSha256, targetRows, targetOwnerGroups, targetSha256,
 })
 
-const completed = (status: 'complete' | 'already-complete', value: Details): RawLyricMigrationResult => ({
+const completed = (status: 'complete' | 'already-complete', value: RawLyricMarkerDetails): RawLyricMigrationResult => ({
   status,
   sourceRows: value.sourceRows,
   sourceOwnerGroups: value.sourceOwnerGroups,
@@ -68,7 +126,7 @@ const completed = (status: 'complete' | 'already-complete', value: Details): Raw
   targetSha256: value.targetSha256,
 })
 
-const parseDetails = (value: string): Details => {
+export const parseRawLyricMarkerDetails = (value: string): RawLyricMarkerDetails => {
   let parsed: unknown
   try { parsed = JSON.parse(value) } catch { throw failure('raw_lyric_marker_invalid') }
   if (parsed == null || Array.isArray(parsed) || Object.getPrototypeOf(parsed) != Object.prototype) throw failure('raw_lyric_marker_invalid')
@@ -78,31 +136,34 @@ const parseDetails = (value: string): Details => {
   if (Object.keys(row).sort().join(',') != expected.join(',') || row.version != 1 || row.provider != 'legacy' || row.tupleEncoding != tupleEncoding ||
     !counts.every(value => typeof value == 'number' && Number.isSafeInteger(value) && value >= 0) ||
     ![row.sourceSha256, row.targetSha256].every(value => typeof value == 'string' && /^[a-f0-9]{64}$/.test(value)) || row.sourceSha256 != row.targetSha256) throw failure('raw_lyric_marker_invalid')
-  return row as unknown as Details
+  return row as unknown as RawLyricMarkerDetails
 }
 
-const getRawLyricMarker = () => {
-  const db = getAppDB()
+export const readRawLyricMarker = (db = getAppDB()): RawLyricMarkerRow | null => {
   const stored = db.prepare(`
-    SELECT details_json AS detailsJson FROM migration_markers WHERE name = ?
-  `).get(markerName) as { detailsJson: unknown } | undefined
+    SELECT name, source_sha256 AS sourceSha256, completed_at_ms AS completedAtMs,
+      details_json AS detailsJson
+    FROM migration_markers WHERE name = ?
+  `).get(markerName) as Record<string, unknown> | undefined
   if (stored == null) return null
-  let marker
-  try { marker = getMigrationMarker(db, markerName) } catch { throw failure('raw_lyric_marker_invalid') }
-  if (marker == null || typeof stored.detailsJson != 'string') throw failure('raw_lyric_marker_invalid')
-  const parsed = parseDetails(stored.detailsJson)
+  if (stored.name != markerName || typeof stored.sourceSha256 != 'string' || !/^[a-f0-9]{64}$/.test(stored.sourceSha256) ||
+    typeof stored.completedAtMs != 'number' || !Number.isSafeInteger(stored.completedAtMs) || stored.completedAtMs < 0 ||
+    typeof stored.detailsJson != 'string') throw failure('raw_lyric_marker_invalid')
+  const parsed = parseRawLyricMarkerDetails(stored.detailsJson)
   if (stored.detailsJson != canonicalJson(parsed as unknown as JsonValue)) throw failure('raw_lyric_marker_invalid')
-  return { ...marker, detailsJson: stored.detailsJson }
+  if (stored.sourceSha256 != parsed.sourceSha256) throw failure('raw_lyric_marker_invalid')
+  return stored as unknown as RawLyricMarkerRow
 }
 
 export const migrateRawLyrics = async(input: { nowMs: number }): Promise<RawLyricMigrationResult> => {
   if (input == null || Object.keys(input).length != 1 || !safeNow(input.nowMs)) throw failure('raw_lyric_migration_invalid')
-  const inventory = source()
+  const inventory = readAuthoritativeRawInventory()
   const sourceGroups = new Set(inventory.tuples.map(row => row.sourceTrackId)).size
   const sourceSha256 = canonicalRawLyricHash(inventory.tuples)
-  const existing = getRawLyricMarker()
+  const { attestRawProvider, replaceRawProvider } = require('../../worker/dbService/modules/lyric/raw/repository') as typeof import('../../worker/dbService/modules/lyric/raw/repository')
+  const existing = readRawLyricMarker()
   if (existing != null) {
-    const current = parseDetails(existing.detailsJson)
+    const current = parseRawLyricMarkerDetails(existing.detailsJson)
     if (existing.sourceSha256 != sourceSha256 || current.sourceSha256 != sourceSha256 || current.sourceRows != inventory.tuples.length || current.sourceOwnerGroups != sourceGroups || current.skippedInvalidRows != inventory.skippedInvalidRows) throw failure('raw_lyric_marker_conflict')
     const expected = details(inventory.tuples.length, sourceGroups, inventory.skippedInvalidRows, sourceSha256, inventory.tuples.length, sourceGroups, sourceSha256)
     if (canonicalJson(current as unknown as JsonValue) != canonicalJson(expected as unknown as JsonValue)) throw failure('raw_lyric_marker_conflict')
@@ -121,7 +182,7 @@ export const migrateRawLyrics = async(input: { nowMs: number }): Promise<RawLyri
   }
   const marker = { name: markerName, sourceSha256, completedAtMs: input.nowMs, detailsJson: canonicalJson(value as unknown as JsonValue) }
   putMigrationMarker(getAppDB(), marker)
-  const stored = getRawLyricMarker()
+  const stored = readRawLyricMarker()
   if (stored == null || stored.name != marker.name || stored.sourceSha256 != marker.sourceSha256 ||
     stored.completedAtMs != marker.completedAtMs || stored.detailsJson != marker.detailsJson) {
     throw failure('raw_lyric_marker_invalid')

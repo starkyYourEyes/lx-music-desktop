@@ -1,3 +1,4 @@
+import type Database from 'better-sqlite3'
 import type { OtherSourcesGetInputV1, OtherSourcesPutInputV1 } from '../../../../../common/storage/cache'
 import { parseOtherSourcesGetInput, parseOtherSourcesPutInput } from '../../../../../common/storage/cacheValidation'
 import { runCacheImmediate, runCacheRead, type CacheReadResult, type CacheWriteResult } from '../../cacheDb'
@@ -112,85 +113,96 @@ const expiryFor = (nowMs: number): number => {
   return expiry
 }
 
-export const otherSourcesGet = async(input: OtherSourcesGetInputV1): Promise<CacheReadResult<LX.Music.MusicInfoOnline[]>> => {
+export const otherSourcesGetSync = (
+  db: Database.Database,
+  input: OtherSourcesGetInputV1,
+): LX.Music.MusicInfoOnline[] | null => {
   const parsed = parseOtherSourcesGetInput(input)
-  return runCacheRead(db => {
-    const group = db.prepare(`
-      SELECT byte_size AS byteSize, expires_at_ms AS expiresAtMs FROM other_source_groups
-      WHERE original_provider = ? AND original_track_id = ?
-    `).get(parsed.originalProvider, parsed.originalTrackId) as { byteSize: number, expiresAtMs: number } | undefined
-    if (group == null) return null
-    if (!Number.isSafeInteger(group.byteSize) || group.byteSize < 0 ||
-      !Number.isSafeInteger(group.expiresAtMs) || group.expiresAtMs < 0) {
+  const group = db.prepare(`
+    SELECT byte_size AS byteSize, expires_at_ms AS expiresAtMs FROM other_source_groups
+    WHERE original_provider = ? AND original_track_id = ?
+  `).get(parsed.originalProvider, parsed.originalTrackId) as { byteSize: number, expiresAtMs: number } | undefined
+  if (group == null) return null
+  if (!Number.isSafeInteger(group.byteSize) || group.byteSize < 0 ||
+    !Number.isSafeInteger(group.expiresAtMs) || group.expiresAtMs < 0) {
+    throw new Error('other_sources_cache_invalid')
+  }
+  if (group.expiresAtMs <= parsed.nowMs) return null
+  const rows = db.prepare(`
+    SELECT rank, candidate_provider AS candidateProvider, candidate_track_id AS candidateTrackId,
+      candidate_json AS candidateJson, byte_size AS byteSize
+    FROM other_sources
+    WHERE original_provider = ? AND original_track_id = ? ORDER BY rank
+  `).all(parsed.originalProvider, parsed.originalTrackId) as Array<{
+    rank: number
+    candidateProvider: string
+    candidateTrackId: string
+    candidateJson: string
+    byteSize: number
+  }>
+  if (rows.length == 0) throw new Error('other_sources_cache_invalid')
+  const candidates = rows.map(row => {
+    if (!Number.isSafeInteger(row.rank) || row.rank < 0 || !Number.isSafeInteger(row.byteSize) || row.byteSize < 0 ||
+      typeof row.candidateJson != 'string') throw new Error('other_sources_cache_invalid')
+    const stored = plainData(JSON.parse(row.candidateJson))
+    if (stored == null || Object.hasOwn(stored, 'rank')) throw new Error('other_sources_cache_invalid')
+    const candidate = sanitizeCandidates([{ ...stored, rank: row.rank }])[0]
+    if (candidate.provider != row.candidateProvider || candidate.trackId != row.candidateTrackId ||
+      candidate.json != row.candidateJson || candidate.bytes != row.byteSize) {
       throw new Error('other_sources_cache_invalid')
     }
-    if (group.expiresAtMs <= parsed.nowMs) return null
-    const rows = db.prepare(`
-      SELECT rank, candidate_provider AS candidateProvider, candidate_track_id AS candidateTrackId,
-        candidate_json AS candidateJson, byte_size AS byteSize
-      FROM other_sources
-      WHERE original_provider = ? AND original_track_id = ? ORDER BY rank
-    `).all(parsed.originalProvider, parsed.originalTrackId) as Array<{
-      rank: number
-      candidateProvider: string
-      candidateTrackId: string
-      candidateJson: string
-      byteSize: number
-    }>
-    if (rows.length == 0) throw new Error('other_sources_cache_invalid')
-    const candidates = rows.map(row => {
-      if (!Number.isSafeInteger(row.rank) || row.rank < 0 || !Number.isSafeInteger(row.byteSize) || row.byteSize < 0 ||
-        typeof row.candidateJson != 'string') throw new Error('other_sources_cache_invalid')
-      const stored = plainData(JSON.parse(row.candidateJson))
-      if (stored == null || Object.hasOwn(stored, 'rank')) throw new Error('other_sources_cache_invalid')
-      const candidate = sanitizeCandidates([{ ...stored, rank: row.rank }])[0]
-      if (candidate.provider != row.candidateProvider || candidate.trackId != row.candidateTrackId ||
-        candidate.json != row.candidateJson || candidate.bytes != row.byteSize) {
-        throw new Error('other_sources_cache_invalid')
-      }
-      return candidate
-    })
-    if (candidates.reduce((sum, candidate) => sum + candidate.bytes, 0) != group.byteSize) {
-      throw new Error('other_sources_cache_invalid')
-    }
-    db.prepare(`
-      UPDATE other_source_groups
-      SET last_accessed_at_ms = CASE WHEN last_accessed_at_ms > ? THEN last_accessed_at_ms ELSE ? END
-      WHERE original_provider = ? AND original_track_id = ?
-    `).run(parsed.nowMs, parsed.nowMs, parsed.originalProvider, parsed.originalTrackId)
-    return candidates.map(candidate => candidate.value)
+    return candidate
   })
+  if (candidates.reduce((sum, candidate) => sum + candidate.bytes, 0) != group.byteSize) {
+    throw new Error('other_sources_cache_invalid')
+  }
+  db.prepare(`
+    UPDATE other_source_groups
+    SET last_accessed_at_ms = CASE WHEN last_accessed_at_ms > ? THEN last_accessed_at_ms ELSE ? END
+    WHERE original_provider = ? AND original_track_id = ?
+  `).run(parsed.nowMs, parsed.nowMs, parsed.originalProvider, parsed.originalTrackId)
+  return candidates.map(candidate => candidate.value)
+}
+
+export const otherSourcesGet = async(input: OtherSourcesGetInputV1): Promise<CacheReadResult<LX.Music.MusicInfoOnline[]>> => {
+  parseOtherSourcesGetInput(input)
+  return runCacheRead(db => otherSourcesGetSync(db, input))
+}
+
+export const otherSourcesPutSync = (db: Database.Database, input: OtherSourcesPutInputV1): void => {
+  const parsed = parseOtherSourcesPutInput(input)
+  const candidates = sanitizeCandidates(parsed.candidates)
+  const expiresAtMs = expiryFor(parsed.nowMs)
+  db.prepare(`
+    DELETE FROM other_source_groups WHERE original_provider = ? AND original_track_id = ?
+  `).run(parsed.originalProvider, parsed.originalTrackId)
+  if (candidates.length == 0) return
+  db.prepare(`
+    INSERT INTO other_source_groups(
+      original_provider, original_track_id, byte_size, expires_at_ms, created_at_ms, last_accessed_at_ms
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    parsed.originalProvider, parsed.originalTrackId,
+    candidates.reduce((sum, candidate) => sum + candidate.bytes, 0),
+    expiresAtMs, parsed.nowMs, parsed.nowMs,
+  )
+  const insert = db.prepare(`
+    INSERT INTO other_sources(
+      original_provider, original_track_id, rank, candidate_provider,
+      candidate_track_id, candidate_json, byte_size
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `)
+  for (const candidate of candidates) insert.run(
+    parsed.originalProvider, parsed.originalTrackId, candidate.rank,
+    candidate.provider, candidate.trackId, candidate.json, candidate.bytes,
+  )
 }
 
 export const otherSourcesPut = async(input: OtherSourcesPutInputV1): Promise<CacheWriteResult> => {
   const parsed = parseOtherSourcesPutInput(input)
-  const candidates = sanitizeCandidates(parsed.candidates)
-  const expiresAtMs = expiryFor(parsed.nowMs)
-  const result = await runCacheImmediate(db => {
-    db.prepare(`
-      DELETE FROM other_source_groups WHERE original_provider = ? AND original_track_id = ?
-    `).run(parsed.originalProvider, parsed.originalTrackId)
-    if (candidates.length == 0) return
-    db.prepare(`
-      INSERT INTO other_source_groups(
-        original_provider, original_track_id, byte_size, expires_at_ms, created_at_ms, last_accessed_at_ms
-      ) VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      parsed.originalProvider, parsed.originalTrackId,
-      candidates.reduce((sum, candidate) => sum + candidate.bytes, 0),
-      expiresAtMs, parsed.nowMs, parsed.nowMs,
-    )
-    const insert = db.prepare(`
-      INSERT INTO other_sources(
-        original_provider, original_track_id, rank, candidate_provider,
-        candidate_track_id, candidate_json, byte_size
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `)
-    for (const candidate of candidates) insert.run(
-      parsed.originalProvider, parsed.originalTrackId, candidate.rank,
-      candidate.provider, candidate.trackId, candidate.json, candidate.bytes,
-    )
-  })
+  sanitizeCandidates(parsed.candidates)
+  expiryFor(parsed.nowMs)
+  const result = await runCacheImmediate(db => otherSourcesPutSync(db, input))
   if (result.status == 'completed') scheduleCachePruneAfterWrite('otherSources')
   return result.status == 'completed' ? { status: 'stored' } : result
 }

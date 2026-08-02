@@ -90,7 +90,7 @@ const createFixture = async(prefix = 'cache-lifecycle') => {
     previousShutdownWasClean: true,
     targetSchemaVersion: 6,
   })
-  assert.equal(startup.status, 'ready')
+  assert.equal(startup.status, 'ready', JSON.stringify(startup))
   const value = marker()
   dbService.getAppDB().prepare(`
     INSERT INTO migration_markers(name, source_sha256, completed_at_ms, details_json)
@@ -640,7 +640,7 @@ describe('serialized cache lifecycle', () => {
     }
   })
 
-  it('opens the production cache after the coordinator gate and keeps degraded cache startup authoritative-ready', async() => {
+  it('initializes production Phase 4 after the coordinator gate and keeps degraded cache startup authoritative-ready', async() => {
     originalGlobalLx = globalThis.lx
     const calls = []
     globalThis.lx = {
@@ -655,12 +655,10 @@ describe('serialized cache lifecycle', () => {
               completedAtMs: 1,
             }
           },
-          openCacheDatabase: async function() {
+          initializePhase4: async function() {
             assert.equal(arguments.length, 0)
-            calls.push('cache:open')
-            return {
-              status: 'unavailable', schemaVersion: null, diagnostic: 'cache_capacity_unavailable',
-            }
+            calls.push('cache:initialize')
+            return { schemaVersion: 6, typedOwnershipVerified: false }
           },
         },
       },
@@ -692,11 +690,11 @@ describe('serialized cache lifecycle', () => {
 
     assert.deepEqual(await coordinator.start(), { status: 'ready', schemaVersion: 6 })
     assert.deepEqual(calls, [
-      'phase3:complete', 'cache:prerequisite', 'cache:open', 'settings:init',
+      'phase3:complete', 'cache:prerequisite', 'cache:initialize', 'settings:init',
     ])
   })
 
-  it('rejects an unknown production cache diagnostic at the coordinator boundary', async() => {
+  it('rejects an unknown production Phase 4 payload at the coordinator boundary', async() => {
     originalGlobalLx = globalThis.lx
     let settingsCalls = 0
     globalThis.lx = {
@@ -708,8 +706,8 @@ describe('serialized cache lifecycle', () => {
             sourceSha256: 'f'.repeat(64),
             completedAtMs: 1,
           }),
-          openCacheDatabase: async() => ({
-            status: 'unavailable', schemaVersion: null, diagnostic: 'private-cache-worker-payload',
+          initializePhase4: async() => ({
+            status: 'unavailable', code: 'private-cache-worker-payload',
           }),
         },
       },
@@ -745,7 +743,7 @@ describe('serialized cache lifecycle', () => {
     assert.equal(settingsCalls, 0)
   })
 
-  it('rejects a prerequisite-fatal diagnostic returned as a degraded cache result', async() => {
+  it('rejects a prerequisite-fatal worker payload returned as a degraded Phase 4 result', async() => {
     originalGlobalLx = globalThis.lx
     let settingsCalls = 0
     globalThis.lx = {
@@ -757,8 +755,8 @@ describe('serialized cache lifecycle', () => {
             sourceSha256: 'f'.repeat(64),
             completedAtMs: 1,
           }),
-          openCacheDatabase: async() => ({
-            status: 'unavailable', schemaVersion: null, diagnostic: 'cache_phase3_prerequisite_invalid',
+          initializePhase4: async() => ({
+            status: 'unavailable', code: 'cache_phase3_prerequisite_invalid',
           }),
         },
       },
@@ -779,10 +777,10 @@ describe('serialized cache lifecycle', () => {
       sourceSha256: 'f'.repeat(64),
       completedAtMs: 1,
     })
-    const open = async() => ({ status: 'ready', schemaVersion: 1, diagnostic: null })
+    const initialize = async() => ({ schemaVersion: 6, typedOwnershipVerified: false })
     const cases = [
-      { name: 'missing prerequisite reader', dbService: { openCacheDatabase: open } },
-      { name: 'missing cache opener', dbService: { getCachePhasePrerequisite: prerequisite } },
+      { name: 'missing prerequisite reader', dbService: { initializePhase4: initialize } },
+      { name: 'missing Phase 4 initializer', dbService: { getCachePhasePrerequisite: prerequisite } },
     ]
 
     for (const testCase of cases) {

@@ -1,4 +1,4 @@
-import { getDB } from '../../db'
+import { getAppDB } from '../../db'
 import {
   createQueryStatement,
   createInsertStatement,
@@ -21,7 +21,7 @@ export const queryDownloadList = () => {
  * @param mInfos 列表
  */
 export const insertDownloadList = (mInfos: LX.DBService.DownloadMusicInfo[], listPositions: Array<{ id: string, position: number }>) => {
-  const db = getDB()
+  const db = getAppDB()
   const insertStatement = createInsertStatement()
   const updatePositionStatement = createUpdatePositionStatement()
   db.transaction((mInfos: LX.DBService.DownloadMusicInfo[]) => {
@@ -35,7 +35,7 @@ export const insertDownloadList = (mInfos: LX.DBService.DownloadMusicInfo[], lis
  * @param ids 列表
  */
 export const deleteDownloadList = (ids: string[]) => {
-  const db = getDB()
+  const db = getAppDB()
   const deleteStatement = createDeleteStatement()
   db.transaction((ids: string[]) => {
     for (const id of ids) deleteStatement.run(id)
@@ -47,7 +47,7 @@ export const deleteDownloadList = (ids: string[]) => {
  * @param urlInfo 列表
  */
 export const updateDownloadList = (urlInfo: LX.DBService.DownloadMusicInfo[]) => {
-  const db = getDB()
+  const db = getAppDB()
   const updateStatement = createUpdateStatement()
   db.transaction((urlInfo: LX.DBService.DownloadMusicInfo[]) => {
     for (const info of urlInfo) updateStatement.run(info)

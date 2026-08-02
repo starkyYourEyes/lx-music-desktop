@@ -43,7 +43,7 @@ describe('account profile storage', () => {
     assert.equal(result.status, 'ready')
     assert.equal(result.schemaVersion, 6)
     assert.deepEqual(result.migratedVersions, [])
-    assert.equal(getSchemaVersion(dbService.getDB()), 6)
+    assert.equal(getSchemaVersion(dbService.getAppDB()), 6)
 
     repo.upsertAccountProfile({
       provider: 'qq_music',
@@ -68,7 +68,7 @@ describe('account profile storage', () => {
       /public account profile/i,
     )
 
-    const directInsert = dbService.getDB().prepare(`
+    const directInsert = dbService.getAppDB().prepare(`
       INSERT INTO account_profiles (provider, profile_json, updated_at_ms)
       VALUES (?, ?, ?)
     `)
@@ -112,7 +112,7 @@ describe('account profile storage', () => {
 
     repo.migrateLegacyAccountProfiles({ rows: [legacyRow], marker })
     assert.deepEqual(repo.getAccountProfile('netease'), legacyRow)
-    assert.equal(dbService.getDB().prepare('SELECT COUNT(*) AS count FROM migration_markers WHERE name = ?').get(marker.name).count, 1)
+    assert.equal(dbService.getAppDB().prepare('SELECT COUNT(*) AS count FROM migration_markers WHERE name = ?').get(marker.name).count, 1)
 
     const refreshedRow = {
       provider: 'netease',

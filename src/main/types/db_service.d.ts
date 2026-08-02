@@ -19,6 +19,11 @@ declare namespace LX {
       completedAtMs: number
     }
 
+    interface CachePhase4Result {
+      schemaVersion: 6 | 7
+      typedOwnershipVerified: boolean
+    }
+
     type CacheLifecycleState = 'closed' | 'opening' | 'ready' | 'unavailable' | 'resetting'
 
     type CacheDiagnosticCode =

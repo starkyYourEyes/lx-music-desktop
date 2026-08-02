@@ -48,7 +48,7 @@ const createStore = async() => {
     targetSchemaVersion: 6,
   })
   assert.equal(result.status, 'ready')
-  return dbService.getDB()
+  return dbService.getAppDB()
 }
 
 const putMarker = (db, name, sourceSha256, details = { version: 1 }) => db.prepare(`

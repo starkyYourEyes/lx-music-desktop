@@ -6,7 +6,7 @@ import type {
   PlaybackResumeAckV1,
   PlaybackTrackV1,
 } from '../../../../../common/storage/playback'
-import { getDB } from '../../db'
+import { getAppDB } from '../../db'
 import {
   SELECT_RESUME_ROW,
   SELECT_SESSION_ACK,
@@ -37,7 +37,7 @@ export interface ResumeRow {
 }
 
 export const immediate = <T>(callback: (db: Database.Database) => T): T => {
-  const db = getDB()
+  const db = getAppDB()
   return db.transaction(() => callback(db)).immediate()
 }
 

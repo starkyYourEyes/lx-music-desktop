@@ -14,7 +14,7 @@ import {
   parsePlaybackVacuumEligibilityCommand,
   parsePlaybackVacuumEligibilityResult,
 } from '../../../../../common/storage/playbackValidation'
-import { getDB } from '../../db'
+import { getAppDB } from '../../db'
 import { immediate } from './dbHelper'
 
 const RETENTION_AGE_MS = 365 * 24 * 60 * 60 * 1000
@@ -175,7 +175,7 @@ export const playbackGetVacuumEligibility = (
   value: PlaybackVacuumEligibilityCommandV1,
 ): PlaybackVacuumEligibilityResultV1 => {
   parsePlaybackVacuumEligibilityCommand(value)
-  const db = getDB()
+  const db = getAppDB()
   const pageCount = db.pragma('page_count', { simple: true }) as number
   const freelistCount = db.pragma('freelist_count', { simple: true }) as number
   const pageSize = db.pragma('page_size', { simple: true }) as number

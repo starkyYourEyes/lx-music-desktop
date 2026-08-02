@@ -25,7 +25,7 @@ import {
 } from '../../../../../common/storage/playbackValidation'
 import { canonicalJson, type JsonValue } from '../../../../../common/storage/canonicalJson'
 import { phase3Evidence } from '../../../../../common/storage/phase3'
-import { getDB } from '../../db'
+import { getAppDB } from '../../db'
 import {
   exactRecord,
   getResumeRow,
@@ -565,17 +565,17 @@ const recentInTransaction = (
 }
 
 export const playbackGetRecent = (value: { version: 1, limit: number }): RecentTrackV1[] => {
-  return recentInTransaction(getDB(), value)
+  return recentInTransaction(getAppDB(), value)
 }
 
 export const playbackGetListeningStats = (value?: unknown): ListeningStatsV1 => {
   if (value !== undefined) throw new Error('Invalid playback listening query')
-  return readListeningStats(getDB())
+  return readListeningStats(getAppDB())
 }
 
 export const playbackGetResume = (value?: unknown): PlaybackResumeV1 | null => {
   if (value !== undefined) throw new Error('Invalid playback resume query')
-  const row = getResumeRow(getDB())
+  const row = getResumeRow(getAppDB())
   if (row == null) return null
   return parsePlaybackResume({
     version: 1,
@@ -630,7 +630,7 @@ type PlaybackTypedSmokeFailPoint = 'parser' | 'result' | 'rollback'
 export const runPlaybackTypedSmokeForTest = (
   options: { failAt?: PlaybackTypedSmokeFailPoint } = {},
 ): PlaybackTypedSmokeV1 => {
-  const db = getDB()
+  const db = getAppDB()
   const before = smokeSnapshot(db)
   if (options.failAt == 'parser') {
     try {

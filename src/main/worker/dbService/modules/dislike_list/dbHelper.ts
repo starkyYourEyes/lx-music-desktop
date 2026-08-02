@@ -1,5 +1,5 @@
 // import type Database from 'better-sqlite3'
-import { getDB } from '../../db'
+import { getAppDB } from '../../db'
 import {
   createQueryStatement,
   createInsertStatement,
@@ -21,7 +21,7 @@ export const queryDislikeList = () => {
  * @param infos 列表
  */
 export const insertDislikeList = async(infos: LX.DBService.DislikeInfo[]) => {
-  const db = getDB()
+  const db = getAppDB()
   const insertStatement = createInsertStatement()
   db.transaction((infos: LX.DBService.DislikeInfo[]) => {
     for (const info of infos) insertStatement.run(info)
@@ -33,7 +33,7 @@ export const insertDislikeList = async(infos: LX.DBService.DislikeInfo[]) => {
  * @param infos 列表
  */
 export const overwirteDislikeList = async(infos: LX.DBService.DislikeInfo[]) => {
-  const db = getDB()
+  const db = getAppDB()
   const clearStatement = createClearStatement()
   const insertStatement = createInsertStatement()
   db.transaction((infos: LX.DBService.DislikeInfo[]) => {
@@ -47,7 +47,7 @@ export const overwirteDislikeList = async(infos: LX.DBService.DislikeInfo[]) => 
 //  * @param ids 列表
 //  */
 // export const deleteDislikeList = (ids: string[]) => {
-//   const db = getDB()
+//   const db = getAppDB()
 //   const deleteStatement = createDeleteStatement()
 //   db.transaction((ids: string[]) => {
 //     for (const id of ids) deleteStatement.run(BigInt(id))
@@ -59,7 +59,7 @@ export const overwirteDislikeList = async(infos: LX.DBService.DislikeInfo[]) => 
 //  * @param urlInfo 列表
 //  */
 // export const updateDislikeList = async(infos: LX.DBService.DislikeInfo[]) => {
-//   const db = getDB()
+//   const db = getAppDB()
 //   const updateStatement = createUpdateStatement()
 //   db.transaction((infos: LX.DBService.DislikeInfo[]) => {
 //     for (const info of infos) updateStatement.run(info)

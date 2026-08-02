@@ -1,0 +1,787 @@
+const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
+const fs = require('node:fs')
+const path = require('node:path')
+const { afterEach, describe, it } = require('node:test')
+const Database = require('better-sqlite3')
+const typescript = require('typescript')
+
+// Electron ABI tests transpile source modules in-process.
+// eslint-disable-next-line n/no-deprecated-api
+require.extensions['.ts'] = (module, filename) => {
+  const output = typescript.transpileModule(fs.readFileSync(filename, 'utf8'), {
+    compilerOptions: {
+      target: typescript.ScriptTarget.ESNext,
+      module: typescript.ModuleKind.CommonJS,
+      esModuleInterop: true,
+    },
+  }).outputText
+  module._compile(output, filename)
+}
+
+const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
+const dbService = require('../../src/main/worker/dbService/db.ts')
+const cacheDb = require('../../src/main/worker/dbService/cacheDb.ts')
+
+const fixtures = []
+const modulePaths = [
+  '../../src/main/worker/dbService/modules/phase4/index.ts',
+  '../../src/main/migration/cache/cutover.ts',
+  '../../src/main/worker/dbService/migrations/0007_cache_cleanup.ts',
+  '../../src/main/worker/dbService/modules/lyric/raw/repository.ts',
+  '../../src/main/migration/cache/rawLyrics.ts',
+]
+
+const canonical = value => {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
+  if (value != null && typeof value == 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+const framedHash = (domain, payload) => {
+  const domainBytes = Buffer.from(domain, 'utf8')
+  const jsonBytes = Buffer.from(canonical(payload), 'utf8')
+  const domainLength = Buffer.alloc(4)
+  const jsonLength = Buffer.alloc(4)
+  domainLength.writeUInt32BE(domainBytes.length)
+  jsonLength.writeUInt32BE(jsonBytes.length)
+  return crypto.createHash('sha256')
+    .update(domainLength).update(domainBytes)
+    .update(jsonLength).update(jsonBytes)
+    .digest('hex')
+}
+
+const markerHash = row => framedHash('lx.storage.marker-row.v1', {
+  completedAtMs: row.completedAtMs,
+  detailsJson: row.detailsJson,
+  name: row.name,
+  sourceSha256: row.sourceSha256,
+})
+
+const markerRow = (db, name) => db.prepare(`
+  SELECT name, source_sha256 AS sourceSha256, completed_at_ms AS completedAtMs,
+    details_json AS detailsJson
+  FROM migration_markers WHERE name = ?
+`).get(name) ?? null
+
+const phase3Marker = () => {
+  const detailsJson = canonical({
+    version: 1,
+    checks: [
+      { name: 'credentials', version: 1, state: 'complete', evidenceSha256: 'a'.repeat(64) },
+      { name: 'account-profile', version: 1, state: 'complete', evidenceSha256: 'b'.repeat(64) },
+      { name: 'phase2-storage', version: 1, state: 'complete', evidenceSha256: 'c'.repeat(64) },
+      { name: 'playback-activity', version: 1, state: 'complete', evidenceSha256: 'd'.repeat(64) },
+      { name: 'quarantine', version: 1, state: 'complete', evidenceSha256: 'e'.repeat(64) },
+      { name: 'playback-writer', version: 1, state: 'complete', evidenceSha256: 'f'.repeat(64) },
+      { name: 'playback-reader', version: 1, state: 'complete', evidenceSha256: '0'.repeat(64) },
+    ],
+  })
+  return {
+    name: 'legacy_data_v1.cross_artifact_complete',
+    sourceSha256: crypto.createHash('sha256').update(detailsJson).digest('hex'),
+    completedAtMs: 1,
+    detailsJson,
+  }
+}
+
+const putPhase3Marker = db => {
+  const value = phase3Marker()
+  db.prepare(`
+    INSERT INTO migration_markers(name, source_sha256, completed_at_ms, details_json)
+    VALUES (?, ?, ?, ?)
+  `).run(value.name, value.sourceSha256, value.completedAtMs, value.detailsJson)
+}
+
+const createSchema6Fixture = async(prefix = 'cache-cutover') => {
+  const fixture = createTestStorageRoot(prefix)
+  fixtures.push(fixture)
+  const profileRoot = path.join(fixture.path, 'profile')
+  const cacheRoot = path.join(fixture.path, 'cache')
+  const backupsRoot = path.join(fixture.path, 'backups')
+  const result = await dbService.init({
+    dataPath: profileRoot,
+    cacheRoot,
+    backupsRoot,
+    previousShutdownWasClean: true,
+    targetSchemaVersion: 6,
+  })
+  assert.equal(result.status, 'ready')
+  assert.equal(result.schemaVersion, 6)
+  putPhase3Marker(dbService.getAppDB())
+  return {
+    fixture,
+    profileRoot,
+    cacheRoot,
+    backupsRoot,
+    databasePath: path.join(profileRoot, 'lx.data.db'),
+    cachePath: path.join(cacheRoot, 'cache.db'),
+  }
+}
+
+const seedLyrics = db => {
+  const insert = db.prepare('INSERT INTO lyric(id, source, type, text) VALUES (?, ?, ?, ?)')
+  insert.run('raw-track', 'raw', 'lyric', Buffer.from('raw lyric').toString('base64'))
+  insert.run('raw-track', 'raw', 'tlyric', Buffer.from('raw translation').toString('base64'))
+  insert.run('edited-track', 'edited', 'lyric', Buffer.from('edited lyric').toString('base64'))
+  return db.prepare("SELECT id, source, type, text FROM lyric WHERE source = 'edited' ORDER BY rowid").all()
+}
+
+const loadPhase4 = () => require('../../src/main/worker/dbService/modules/phase4/index.ts')
+const loadRawMigration = () => require('../../src/main/migration/cache/rawLyrics.ts')
+const loadRawRepository = () => require('../../src/main/worker/dbService/modules/lyric/raw/repository.ts')
+
+const closeServices = async() => {
+  try { await cacheDb.closeCacheDatabase() } catch {}
+  try { dbService.close() } catch {}
+}
+
+afterEach(async() => {
+  await closeServices()
+  for (const fixture of fixtures.splice(0).reverse()) fixture.cleanup()
+  for (const modulePath of modulePaths) {
+    try { delete require.cache[require.resolve(modulePath)] } catch {}
+  }
+})
+
+const rawEvidence = {
+  identity: { provider: '__lx_phase4_smoke_v1__', sourceTrackId: 'raw' },
+  read: { lyric: 'phase4-raw-lyric-v1', tlyric: 'phase4-raw-tlyric-v1' },
+  written: { lyric: 'phase4-raw-lyric-v1', tlyric: 'phase4-raw-tlyric-v1' },
+}
+
+const urlEvidence = {
+  expiredReadMiss: true,
+  expiryGetNowMs: 1,
+  freshGetNowMs: 0,
+  freshReadMatched: true,
+  identity: {
+    accountScope: 'profile-v1:user-id:9007199254740991',
+    provider: 'wy',
+    quality: '128k',
+    sourceTrackId: '__lx_phase4_smoke_v1__:url',
+  },
+  providerExpiresAtMs: 1,
+  putNowMs: 0,
+}
+
+const firstCandidates = [{
+  id: '__lx_phase4_smoke_v1__:old',
+  interval: '00:01',
+  meta: { albumName: 'phase4-old' },
+  name: 'phase4-old',
+  singer: 'phase4',
+  source: 'wy',
+}]
+
+const replacementCandidates = [
+  {
+    id: '__lx_phase4_smoke_v1__:new-b',
+    interval: '00:02',
+    meta: { albumName: 'phase4-new-b' },
+    name: 'phase4-new-b',
+    singer: 'phase4',
+    source: 'wy',
+  },
+  {
+    id: '__lx_phase4_smoke_v1__:new-a',
+    interval: '00:03',
+    meta: { albumName: 'phase4-new-a' },
+    name: 'phase4-new-a',
+    singer: 'phase4',
+    source: 'wy',
+  },
+]
+
+const otherEvidence = {
+  firstCandidates,
+  identity: { originalProvider: '__lx_phase4_smoke_v1__', originalTrackId: 'other' },
+  readCandidates: replacementCandidates,
+  replacementCandidates,
+  staleCandidatesAbsent: true,
+}
+
+describe('typed cache ownership and guarded schema-7 cutover', () => {
+  it('refuses direct target 7 before creating or mutating the authoritative database', async() => {
+    const fixture = createTestStorageRoot('cache-cutover-direct-target')
+    fixtures.push(fixture)
+    const profileRoot = path.join(fixture.path, 'profile')
+    await assert.rejects(dbService.init({
+      dataPath: profileRoot,
+      cacheRoot: path.join(fixture.path, 'cache'),
+      backupsRoot: path.join(fixture.path, 'backups'),
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 7,
+    }), error => error?.code == 'database_direct_schema7_forbidden')
+    assert.equal(fs.existsSync(profileRoot), false)
+  })
+
+  it('refuses omitted, stale, and future normal-init targets before creating storage', async() => {
+    for (const targetSchemaVersion of [undefined, 5, 8, '6', '7']) {
+      const fixture = createTestStorageRoot(`cache-cutover-invalid-init-target-${String(targetSchemaVersion)}`)
+      fixtures.push(fixture)
+      const profileRoot = path.join(fixture.path, 'profile')
+      const options = {
+        dataPath: profileRoot,
+        cacheRoot: path.join(fixture.path, 'cache'),
+        backupsRoot: path.join(fixture.path, 'backups'),
+        previousShutdownWasClean: true,
+        targetSchemaVersion,
+      }
+      if (targetSchemaVersion === undefined) delete options.targetSchemaVersion
+
+      try {
+        await assert.rejects(
+          dbService.init(options),
+          error => error?.code == 'database_initialization_invalid',
+        )
+        assert.equal(fs.existsSync(profileRoot), false)
+      } finally {
+        await closeServices()
+      }
+    }
+  })
+
+  it('attests exact typed evidence, advances the same handle, and commits the cutover atomically', async() => {
+    const paths = await createSchema6Fixture('cache-cutover-success')
+    const db = dbService.getAppDB()
+    const editedBefore = seedLyrics(db)
+    const connectionIdentity = dbService.getAppDB()
+    const schema6Snapshot = await dbService.init({
+      dataPath: paths.profileRoot,
+      cacheRoot: paths.cacheRoot,
+      backupsRoot: paths.backupsRoot,
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
+
+    assert.deepEqual(await loadPhase4().initializePhase4(), {
+      schemaVersion: 7,
+      typedOwnershipVerified: true,
+    })
+
+    assert.equal(dbService.getAppDB(), connectionIdentity)
+    assert.equal(schema6Snapshot.schemaVersion, 6)
+    assert.equal(dbService.getDatabaseHealth().schemaVersion, 7)
+    assert.equal(db.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value, '7')
+    assert.equal(loadRawMigration().countAuthoritativeRawRows(db), 0)
+    assert.deepEqual(db.prepare("SELECT id, source, type, text FROM lyric WHERE source = 'edited' ORDER BY rowid").all(), editedBefore)
+    for (const name of ['index_music_info_other_source', 'music_info_other_source', 'music_url']) {
+      assert.equal(db.prepare('SELECT 1 FROM sqlite_master WHERE name = ?').get(name), undefined)
+    }
+
+    const rawMarker = markerRow(db, 'legacy_cache_v1.raw_lyrics')
+    const readWriteMarker = markerRow(db, 'legacy_cache_v1.read_write_verified')
+    const readWriteDetails = {
+      cacheSchemaVersion: 1,
+      checks: [
+        {
+          evidenceSha256: framedHash('lx.storage.phase4.smoke-evidence.v1/raw-lyric-write-read', rawEvidence),
+          name: 'raw-lyric-write-read',
+          version: 1,
+        },
+        {
+          evidenceSha256: framedHash('lx.storage.phase4.smoke-evidence.v1/music-url-write-read-expiry', urlEvidence),
+          name: 'music-url-write-read-expiry',
+          version: 1,
+        },
+        {
+          evidenceSha256: framedHash('lx.storage.phase4.smoke-evidence.v1/other-sources-atomic-replace-read', otherEvidence),
+          name: 'other-sources-atomic-replace-read',
+          version: 1,
+        },
+      ],
+      completedAtMs: readWriteMarker.completedAtMs,
+      rawMarkerSha256: markerHash(rawMarker),
+      version: 1,
+    }
+    assert.equal(readWriteMarker.detailsJson, canonical(readWriteDetails))
+    assert.equal(
+      readWriteMarker.sourceSha256,
+      framedHash('lx.storage.phase4.read-write-details.v1', readWriteDetails),
+    )
+
+    const cutoverMarker = markerRow(db, 'legacy_cache_v1.cutover')
+    const cutoverDetails = {
+      completedAtMs: cutoverMarker.completedAtMs,
+      fromSchemaVersion: 6,
+      rawLyricsDeletedRows: 2,
+      readWriteMarkerSha256: markerHash(readWriteMarker),
+      removedObjects: ['index_music_info_other_source', 'music_info_other_source', 'music_url'],
+      toSchemaVersion: 7,
+      version: 1,
+    }
+    assert.equal(cutoverMarker.detailsJson, canonical(cutoverDetails))
+    assert.equal(cutoverMarker.sourceSha256, framedHash('lx.storage.phase4.cutover-details.v1', cutoverDetails))
+    assert.notEqual(cutoverMarker.sourceSha256, cutoverDetails.readWriteMarkerSha256)
+    assert.equal(db.prepare('SELECT applied_at_ms AS appliedAtMs FROM schema_migrations WHERE version = 7').get().appliedAtMs, cutoverMarker.completedAtMs)
+
+    const backupName = `lx.data.db.pre-migration-v6-to-v7.${markerHash(readWriteMarker)}.backup`
+    assert.deepEqual(fs.readdirSync(paths.backupsRoot), [backupName])
+    assert.equal(fs.statSync(path.join(paths.backupsRoot, backupName)).nlink, 1)
+
+    const smokeResidue = await cacheDb.runCacheRead(cache => ({
+      raw: cache.prepare("SELECT count(*) AS count FROM raw_lyric_groups WHERE provider = '__lx_phase4_smoke_v1__'").get().count,
+      urls: cache.prepare("SELECT count(*) AS count FROM music_urls WHERE source_track_id = '__lx_phase4_smoke_v1__:url'").get().count,
+      other: cache.prepare("SELECT count(*) AS count FROM other_source_groups WHERE original_provider = '__lx_phase4_smoke_v1__'").get().count,
+    }))
+    assert.deepEqual(smokeResidue, { status: 'hit', value: { raw: 0, urls: 0, other: 0 } })
+    const laterStartup = await dbService.init({
+      dataPath: paths.profileRoot,
+      cacheRoot: paths.cacheRoot,
+      backupsRoot: paths.backupsRoot,
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
+    assert.equal(schema6Snapshot.schemaVersion, 6)
+    assert.equal(laterStartup.schemaVersion, 7)
+  })
+
+  it('keeps schema 6 and the healthy cache ready for every logical typed smoke mismatch', async t => {
+    const cases = [
+      {
+        name: 'raw lyric write/read',
+        sql: `CREATE TRIGGER phase4_raw_mismatch AFTER INSERT ON raw_lyrics
+          WHEN NEW.provider = '__lx_phase4_smoke_v1__'
+          BEGIN UPDATE raw_lyrics SET text = 'mismatch' WHERE provider = NEW.provider AND source_track_id = NEW.source_track_id; END`,
+      },
+      {
+        name: 'URL write/read/expiry',
+        sql: `CREATE TRIGGER phase4_url_mismatch AFTER INSERT ON music_urls
+          WHEN NEW.source_track_id = '__lx_phase4_smoke_v1__:url'
+          BEGIN UPDATE music_urls SET url = 'https://phase4.invalid/mismatch' WHERE source_track_id = NEW.source_track_id; END`,
+      },
+      {
+        name: 'alternate-source atomic replace/read',
+        sql: `CREATE TRIGGER phase4_other_mismatch AFTER INSERT ON other_sources
+          WHEN NEW.candidate_track_id = '__lx_phase4_smoke_v1__:new-b'
+          BEGIN DELETE FROM other_sources WHERE original_provider = NEW.original_provider AND original_track_id = NEW.original_track_id AND rank = NEW.rank; END`,
+      },
+    ]
+
+    for (const testCase of cases) await t.test(testCase.name, async() => {
+      await createSchema6Fixture(`cache-cutover-smoke-${testCase.name.replace(/[^a-z]+/gi, '-')}`)
+      const db = dbService.getAppDB()
+      seedLyrics(db)
+      assert.equal((await cacheDb.openCacheDatabase()).status, 'created')
+      assert.equal((await loadRawMigration().migrateRawLyrics({ nowMs: 10 })).status, 'complete')
+      assert.equal((await cacheDb.runCacheWrite(cache => cache.exec(testCase.sql))).status, 'stored')
+
+      await assert.rejects(
+        loadPhase4().initializePhase4(),
+        error => error?.code == 'phase4_cache_smoke_failed' && error?.message == 'phase4_cache_smoke_failed',
+      )
+      assert.equal(dbService.getDatabaseInitialization().schemaVersion, 6)
+      assert.equal(loadRawMigration().countAuthoritativeRawRows(db), 2)
+      assert.equal(markerRow(db, 'legacy_cache_v1.read_write_verified'), null)
+      assert.equal(await cacheDb.getCacheLifecycleState(), 'ready')
+
+      await closeServices()
+    })
+  })
+
+  it('rejects a conflicting raw marker before writing typed ownership', async() => {
+    await createSchema6Fixture('cache-cutover-raw-marker-conflict')
+    const db = dbService.getAppDB()
+    seedLyrics(db)
+    assert.equal((await cacheDb.openCacheDatabase()).status, 'created')
+    assert.equal((await loadRawMigration().migrateRawLyrics({ nowMs: 10 })).status, 'complete')
+    db.prepare('INSERT INTO lyric(id, source, type, text) VALUES (?, ?, ?, ?)')
+      .run('late-raw-track', 'raw', 'lyric', Buffer.from('late raw lyric').toString('base64'))
+
+    await assert.rejects(
+      loadPhase4().initializePhase4(),
+      error => error?.code == 'raw_lyric_marker_conflict',
+    )
+    assert.equal(dbService.getDatabaseInitialization().schemaVersion, 6)
+    assert.equal(loadRawMigration().countAuthoritativeRawRows(db), 3)
+    assert.equal(markerRow(db, 'legacy_cache_v1.read_write_verified'), null)
+    assert.equal(markerRow(db, 'legacy_cache_v1.cutover'), null)
+    assert.equal(await cacheDb.getCacheLifecycleState(), 'ready')
+    assert.equal(loadRawRepository().getRawLyricFallbackState(), 'schema6-fallback')
+  })
+
+  it('rejects a malformed existing typed marker before opening or repairing the cache', async() => {
+    const paths = await createSchema6Fixture('cache-cutover-malformed-existing-marker')
+    const db = dbService.getAppDB()
+    seedLyrics(db)
+    const phase4 = loadPhase4()
+    const originalAdvance = dbService.advanceAppDatabase
+    dbService.advanceAppDatabase = async() => {
+      throw Object.assign(new Error('stop-after-attestation'), { code: 'stop-after-attestation' })
+    }
+    try {
+      await assert.rejects(phase4.initializePhase4(), /stop-after-attestation/)
+    } finally {
+      dbService.advanceAppDatabase = originalAdvance
+    }
+    assert.notEqual(markerRow(db, 'legacy_cache_v1.read_write_verified'), null)
+
+    await cacheDb.closeCacheDatabase()
+    const invalidCache = Buffer.from('preserve-cache-before-marker-validation')
+    fs.writeFileSync(paths.cachePath, invalidCache)
+    db.prepare(`
+      UPDATE migration_markers SET details_json = ?
+      WHERE name = 'legacy_cache_v1.read_write_verified'
+    `).run('{"version":1}')
+
+    await assert.rejects(
+      phase4.initializePhase4(),
+      error => error?.code == 'phase4_read_write_marker_invalid',
+    )
+    assert.equal(await cacheDb.getCacheLifecycleState(), 'closed')
+    assert.deepEqual(fs.readFileSync(paths.cachePath), invalidCache)
+    assert.equal(dbService.getDatabaseInitialization().schemaVersion, 6)
+  })
+
+  it('preserves an unavailable cache and retains schema-6 authoritative fallback', async() => {
+    const paths = await createSchema6Fixture('cache-cutover-unavailable-schema6')
+    const db = dbService.getAppDB()
+    seedLyrics(db)
+    fs.mkdirSync(paths.cacheRoot, { recursive: true })
+    const invalidCache = Buffer.from('preserve-invalid-schema6-cache')
+    fs.writeFileSync(paths.cachePath, invalidCache)
+
+    assert.deepEqual(await loadPhase4().initializePhase4(), {
+      schemaVersion: 6,
+      typedOwnershipVerified: false,
+    })
+    assert.deepEqual(fs.readFileSync(paths.cachePath), invalidCache)
+    assert.equal(loadRawMigration().countAuthoritativeRawRows(db), 2)
+    assert.equal(markerRow(db, 'legacy_cache_v1.raw_lyrics'), null)
+    assert.equal(markerRow(db, 'legacy_cache_v1.read_write_verified'), null)
+    assert.equal(await cacheDb.getCacheLifecycleState(), 'unavailable')
+    assert.equal(loadRawRepository().getRawLyricFallbackState(), 'schema6-fallback')
+    assert.deepEqual(await loadRawRepository().rawLyricGet({
+      provider: 'tx', sourceTrackId: 'raw-track', nowMs: 100,
+    }), {
+      status: 'hit',
+      value: { lyric: 'raw lyric', tlyric: 'raw translation' },
+    })
+  })
+
+  it('preserves schema 6 and a raced winner when backup publication loses the hard-link race', async() => {
+    const paths = await createSchema6Fixture('cache-cutover-backup-link-race')
+    const db = dbService.getAppDB()
+    seedLyrics(db)
+    const rawRepository = loadRawRepository()
+    const rawMigration = loadRawMigration()
+    const winnerBytes = Buffer.from('raced cutover backup winner must remain byte-identical')
+    const originalLinkSync = fs.linkSync
+    let sourceBytesBefore
+    let ledgerBefore
+    let markersBefore
+    let rawInventoryBefore
+    let rawRowCountBefore
+    let fallbackBefore
+    let winnerPath
+    let winnerIdentity
+
+    fs.linkSync = (sourcePath, destinationPath) => {
+      if (path.resolve(path.dirname(destinationPath)) == path.resolve(paths.backupsRoot)) {
+        sourceBytesBefore = fs.readFileSync(paths.databasePath)
+        ledgerBefore = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()
+        markersBefore = db.prepare(`
+          SELECT name, source_sha256 AS sourceSha256, completed_at_ms AS completedAtMs,
+            details_json AS detailsJson
+          FROM migration_markers ORDER BY name
+        `).all()
+        rawInventoryBefore = rawMigration.readAuthoritativeRawInventory(db)
+        rawRowCountBefore = rawMigration.countAuthoritativeRawRows(db)
+        fallbackBefore = rawRepository.getRawLyricFallbackState()
+        winnerPath = path.resolve(destinationPath)
+        fs.writeFileSync(winnerPath, winnerBytes, { flag: 'wx', mode: 0o600 })
+        winnerIdentity = fs.lstatSync(winnerPath, { bigint: true })
+      }
+      return originalLinkSync(sourcePath, destinationPath)
+    }
+
+    try {
+      await assert.rejects(
+        loadPhase4().initializePhase4(),
+        error => error?.code == 'database_advance_backup_invalid',
+      )
+    } finally {
+      fs.linkSync = originalLinkSync
+    }
+
+    assert.equal(typeof winnerPath, 'string')
+    assert.equal(dbService.getDatabaseInitialization().schemaVersion, 6)
+    assert.equal(db.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value, '6')
+    assert.deepEqual(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all(), ledgerBefore)
+    assert.deepEqual(db.prepare(`
+      SELECT name, source_sha256 AS sourceSha256, completed_at_ms AS completedAtMs,
+        details_json AS detailsJson
+      FROM migration_markers ORDER BY name
+    `).all(), markersBefore)
+    assert.deepEqual(rawMigration.readAuthoritativeRawInventory(db), rawInventoryBefore)
+    assert.equal(rawMigration.countAuthoritativeRawRows(db), rawRowCountBefore)
+    assert.equal(rawRepository.getRawLyricFallbackState(), fallbackBefore)
+    assert.equal(fallbackBefore, 'schema6-fallback')
+    assert.deepEqual(fs.readFileSync(paths.databasePath), sourceBytesBefore)
+    assert.equal(markerRow(db, 'legacy_cache_v1.cutover'), null)
+    assert.equal(fs.readFileSync(winnerPath).equals(winnerBytes), true)
+    const winnerAfter = fs.lstatSync(winnerPath, { bigint: true })
+    assert.equal(winnerAfter.dev, winnerIdentity.dev)
+    assert.equal(winnerAfter.ino, winnerIdentity.ino)
+    assert.deepEqual(fs.readdirSync(paths.backupsRoot), [path.basename(winnerPath)])
+  })
+
+  it('reuses immutable attestation after a pre-migration failure and rolls migration 7 back before one retry', async() => {
+    const paths = await createSchema6Fixture('cache-cutover-retry')
+    const db = dbService.getAppDB()
+    seedLyrics(db)
+    const phase4 = loadPhase4()
+    const originalAdvance = dbService.advanceAppDatabase
+    dbService.advanceAppDatabase = async() => { throw Object.assign(new Error('injected-before-advance'), { code: 'injected-before-advance' }) }
+    await assert.rejects(phase4.initializePhase4(), /injected-before-advance/)
+    const readWriteBefore = markerRow(db, 'legacy_cache_v1.read_write_verified')
+    assert.notEqual(readWriteBefore, null)
+    assert.equal(dbService.getDatabaseInitialization().schemaVersion, 6)
+    dbService.advanceAppDatabase = originalAdvance
+
+    const migration7 = require('../../src/main/worker/dbService/migrations/0007_cache_cleanup.ts').migration7
+    const originalUp = migration7.up
+    let attempts = 0
+    migration7.up = function(database, context) {
+      attempts++
+      originalUp.call(this, database, context)
+      throw new Error('injected-inside-migration-7')
+    }
+    await assert.rejects(phase4.initializePhase4(), /injected-inside-migration-7/)
+    migration7.up = originalUp
+    assert.equal(attempts, 1)
+    assert.equal(dbService.getDatabaseInitialization().schemaVersion, 6)
+    assert.equal(loadRawMigration().countAuthoritativeRawRows(db), 2)
+    assert.equal(markerRow(db, 'legacy_cache_v1.cutover'), null)
+    assert.deepEqual(markerRow(db, 'legacy_cache_v1.read_write_verified'), readWriteBefore)
+
+    assert.deepEqual(await phase4.initializePhase4(), { schemaVersion: 7, typedOwnershipVerified: true })
+    assert.equal(attempts, 1)
+    assert.equal(fs.readdirSync(paths.backupsRoot).length, 1)
+    assert.deepEqual(markerRow(db, 'legacy_cache_v1.read_write_verified'), readWriteBefore)
+  })
+
+  it('publishes an already-committed schema 7 on retry without replaying migration or backup', async() => {
+    const paths = await createSchema6Fixture('cache-cutover-publication-retry')
+    const db = dbService.getAppDB()
+    seedLyrics(db)
+    const phase4 = loadPhase4()
+    const rawRepository = loadRawRepository()
+    const originalPublishFallback = rawRepository.enterRawLyricSchema7CacheOnly
+    let publicationAttempts = 0
+    rawRepository.enterRawLyricSchema7CacheOnly = () => {
+      publicationAttempts++
+      if (publicationAttempts == 1) throw new Error('injected-after-migration-7-commit')
+      return originalPublishFallback()
+    }
+
+    try {
+      await assert.rejects(phase4.initializePhase4(), /injected-after-migration-7-commit/)
+      assert.equal(db.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value, '7')
+      assert.equal(rawRepository.getRawLyricFallbackState(), 'cutover-pending-cache-only')
+      const ledgerAfterCommit = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()
+      const cutoverAfterCommit = markerRow(db, 'legacy_cache_v1.cutover')
+      const backupsAfterCommit = fs.readdirSync(paths.backupsRoot)
+      const backupPath = path.join(paths.backupsRoot, backupsAfterCommit[0])
+      const backupBytes = fs.readFileSync(backupPath)
+
+      fs.writeFileSync(backupPath, 'invalid replacement')
+      await assert.rejects(
+        phase4.initializePhase4(),
+        error => error?.code == 'database_advance_backup_invalid',
+      )
+      assert.equal(publicationAttempts, 1)
+      assert.equal(rawRepository.getRawLyricFallbackState(), 'cutover-pending-cache-only')
+      fs.writeFileSync(backupPath, backupBytes)
+
+      assert.deepEqual(await phase4.initializePhase4(), { schemaVersion: 7, typedOwnershipVerified: true })
+      assert.equal(publicationAttempts, 2)
+      assert.equal(rawRepository.getRawLyricFallbackState(), 'schema7-cache-only')
+      assert.deepEqual(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all(), ledgerAfterCommit)
+      assert.deepEqual(markerRow(db, 'legacy_cache_v1.cutover'), cutoverAfterCommit)
+      assert.deepEqual(fs.readdirSync(paths.backupsRoot), backupsAfterCommit)
+    } finally {
+      rawRepository.enterRawLyricSchema7CacheOnly = originalPublishFallback
+    }
+  })
+
+  it('deduplicates identical same-connection advances and rejects conflicting backup roots', async() => {
+    const paths = await createSchema6Fixture('cache-cutover-concurrent-advance')
+    const db = dbService.getAppDB()
+    seedLyrics(db)
+    assert.equal((await cacheDb.openCacheDatabase()).status, 'created')
+    assert.equal((await loadRawMigration().migrateRawLyrics({ nowMs: 10 })).status, 'complete')
+    const cutover = require('../../src/main/migration/cache/cutover.ts')
+    assert.equal((await cutover.attestSchema6TypedOwnership(db, 20)).status, 'completed')
+    loadRawRepository().enterRawLyricCutoverPending()
+
+    const first = dbService.advanceAppDatabase({ targetSchemaVersion: 7, backupsRoot: paths.backupsRoot })
+    const second = dbService.advanceAppDatabase({ targetSchemaVersion: 7, backupsRoot: paths.backupsRoot })
+    assert.equal(first, second)
+    await assert.rejects(
+      dbService.advanceAppDatabase({
+        targetSchemaVersion: 7,
+        backupsRoot: path.join(paths.fixture.path, 'other-backups'),
+      }),
+      error => error?.code == 'database_advance_conflict',
+    )
+    const advanced = await first
+    assert.equal(advanced.schemaVersion, 7)
+    assert.equal(dbService.getAppDB(), db)
+    assert.equal(fs.readdirSync(paths.backupsRoot).length, 1)
+  })
+
+  it('relaunches exact schema 7 without replaying migration or backup and reruns live typed smoke', async() => {
+    const paths = await createSchema6Fixture('cache-cutover-relaunch')
+    seedLyrics(dbService.getAppDB())
+    assert.deepEqual(await loadPhase4().initializePhase4(), { schemaVersion: 7, typedOwnershipVerified: true })
+    const backupNames = fs.readdirSync(paths.backupsRoot)
+    const ledgerBefore = dbService.getAppDB().prepare('SELECT * FROM schema_migrations ORDER BY version').all()
+
+    await closeServices()
+    const relaunched = await dbService.init({
+      dataPath: paths.profileRoot,
+      cacheRoot: paths.cacheRoot,
+      backupsRoot: paths.backupsRoot,
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
+    assert.equal(relaunched.status, 'ready')
+    assert.equal(relaunched.schemaVersion, 7)
+    assert.deepEqual(relaunched.migratedVersions, [])
+    assert.equal(relaunched.backupPath, null)
+    assert.deepEqual(fs.readdirSync(paths.backupsRoot), backupNames)
+    assert.deepEqual(dbService.getAppDB().prepare('SELECT * FROM schema_migrations ORDER BY version').all(), ledgerBefore)
+    assert.deepEqual(await loadPhase4().initializePhase4(), { schemaVersion: 7, typedOwnershipVerified: true })
+    assert.equal((await cacheDb.runCacheRead(cache => cache.prepare('SELECT count(*) AS count FROM raw_lyric_groups').get().count)).status, 'hit')
+  })
+
+  it('keeps a schema-7 relaunch cache-only when the preserved cache is unavailable', async() => {
+    const paths = await createSchema6Fixture('cache-cutover-degraded-relaunch')
+    const db = dbService.getAppDB()
+    seedLyrics(db)
+    assert.deepEqual(await loadPhase4().initializePhase4(), { schemaVersion: 7, typedOwnershipVerified: true })
+    await closeServices()
+
+    const invalidCache = Buffer.from('preserve-invalid-schema7-cache')
+    fs.writeFileSync(paths.cachePath, invalidCache)
+    const relaunched = await dbService.init({
+      dataPath: paths.profileRoot,
+      cacheRoot: paths.cacheRoot,
+      backupsRoot: paths.backupsRoot,
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
+    assert.equal(relaunched.status, 'ready')
+    assert.equal(relaunched.schemaVersion, 7)
+    assert.deepEqual(await loadPhase4().initializePhase4(), {
+      schemaVersion: 7,
+      typedOwnershipVerified: false,
+    })
+    assert.deepEqual(fs.readFileSync(paths.cachePath), invalidCache)
+    dbService.getAppDB().prepare('INSERT INTO lyric(id, source, type, text) VALUES (?, ?, ?, ?)')
+      .run('schema7-degraded-raw', 'raw', 'lyric', Buffer.from('must-not-read').toString('base64'))
+
+    const originalGetAppDB = dbService.getAppDB
+    const relaunchedDb = originalGetAppDB()
+    const sql = []
+    dbService.getAppDB = () => new Proxy(relaunchedDb, {
+      get(target, property, receiver) {
+        if (property == 'prepare') return statement => {
+          sql.push(statement)
+          return target.prepare(statement)
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    })
+    try {
+      assert.deepEqual(await loadRawRepository().rawLyricGet({
+        provider: 'tx', sourceTrackId: 'schema7-degraded-raw', nowMs: 100,
+      }), { status: 'miss' })
+    } finally {
+      dbService.getAppDB = originalGetAppDB
+    }
+    assert.equal(sql.some(statement => /\bFROM\s+lyric\b/i.test(statement)), false)
+  })
+
+  it('rejects a mismatched schema-7 cutover before opening or mutating cache.db', async() => {
+    const paths = await createSchema6Fixture('cache-cutover-invalid-relaunch')
+    seedLyrics(dbService.getAppDB())
+    assert.equal((await loadPhase4().initializePhase4()).schemaVersion, 7)
+    await closeServices()
+    const cacheBefore = fs.readFileSync(paths.cachePath)
+    const direct = new Database(paths.databasePath)
+    direct.prepare("UPDATE migration_markers SET source_sha256 = ? WHERE name = 'legacy_cache_v1.cutover'").run('0'.repeat(64))
+    direct.close()
+
+    const relaunched = await dbService.init({
+      dataPath: paths.profileRoot,
+      cacheRoot: paths.cacheRoot,
+      backupsRoot: paths.backupsRoot,
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
+    assert.equal(relaunched.status, 'recovery')
+    assert.deepEqual(fs.readFileSync(paths.cachePath), cacheBefore)
+  })
+
+  it('rejects a version above the known registry without touching cache.db', async() => {
+    const paths = await createSchema6Fixture('cache-cutover-future-schema')
+    seedLyrics(dbService.getAppDB())
+    assert.equal((await loadPhase4().initializePhase4()).schemaVersion, 7)
+    await closeServices()
+    const cacheBefore = fs.readFileSync(paths.cachePath)
+    const direct = new Database(paths.databasePath)
+    direct.prepare(`
+      INSERT INTO schema_migrations(version, name, checksum, applied_at_ms)
+      VALUES (8, 'future_schema', ?, 1)
+    `).run('f'.repeat(64))
+    direct.prepare("UPDATE db_info SET field_value = '8' WHERE field_name = 'version'").run()
+    direct.close()
+
+    const relaunched = await dbService.init({
+      dataPath: paths.profileRoot,
+      cacheRoot: paths.cacheRoot,
+      backupsRoot: paths.backupsRoot,
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
+    assert.equal(relaunched.status, 'recovery')
+    assert.equal(relaunched.reason, 'schema_invalid')
+    assert.deepEqual(relaunched.diagnostics, ['schema.verify_failed'])
+    assert.deepEqual(fs.readFileSync(paths.cachePath), cacheBefore)
+  })
+
+  it('never falls back to authoritative raw lyrics after a verified cutover', async() => {
+    await createSchema6Fixture('cache-cutover-cache-only')
+    const db = dbService.getAppDB()
+    seedLyrics(db)
+    assert.equal((await loadPhase4().initializePhase4()).schemaVersion, 7)
+    db.prepare('INSERT INTO lyric(id, source, type, text) VALUES (?, ?, ?, ?)')
+      .run('post-cutover-raw', 'raw', 'lyric', Buffer.from('must-not-read').toString('base64'))
+    await loadRawRepository().rawLyricClear()
+
+    const originalGetAppDB = dbService.getAppDB
+    const sql = []
+    dbService.getAppDB = () => new Proxy(db, {
+      get(target, property, receiver) {
+        if (property == 'prepare') return statement => {
+          sql.push(statement)
+          return target.prepare(statement)
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    })
+    try {
+      assert.deepEqual(await loadRawRepository().rawLyricGet({
+        provider: 'tx', sourceTrackId: 'post-cutover-raw', nowMs: 100,
+      }), { status: 'miss' })
+    } finally {
+      dbService.getAppDB = originalGetAppDB
+    }
+    assert.equal(sql.some(statement => /\bFROM\s+lyric\b/i.test(statement)), false)
+  })
+})

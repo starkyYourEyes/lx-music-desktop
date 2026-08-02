@@ -1,12 +1,12 @@
-import { getDB } from '../../db'
+import { getAppDB } from '../../db'
 import type { LocalStateRow, PlaylistMetadataRow, SearchHistoryRow } from './index'
 
-export const createGetLocalStateStatement = () => getDB().prepare<[], LocalStateRow>(`
+export const createGetLocalStateStatement = () => getAppDB().prepare<[], LocalStateRow>(`
   SELECT key, version, value_json AS valueJson, updated_at_ms AS updatedAtMs
   FROM local_state
 `)
 
-export const createUpsertLocalStateStatement = () => getDB().prepare<[LocalStateRow]>(`
+export const createUpsertLocalStateStatement = () => getAppDB().prepare<[LocalStateRow]>(`
   INSERT INTO local_state (key, version, value_json, updated_at_ms)
   VALUES (@key, @version, @valueJson, @updatedAtMs)
   ON CONFLICT(key) DO UPDATE SET
@@ -15,9 +15,9 @@ export const createUpsertLocalStateStatement = () => getDB().prepare<[LocalState
     updated_at_ms = excluded.updated_at_ms
 `)
 
-export const createClearLocalStateStatement = () => getDB().prepare('DELETE FROM local_state')
+export const createClearLocalStateStatement = () => getAppDB().prepare('DELETE FROM local_state')
 
-export const createGetPlaylistMetadataStatement = () => getDB().prepare<[], PlaylistMetadataRow>(`
+export const createGetPlaylistMetadataStatement = () => getAppDB().prepare<[], PlaylistMetadataRow>(`
   SELECT
     playlist_id AS playlistId,
     is_auto_update AS isAutoUpdate,
@@ -28,15 +28,15 @@ export const createGetPlaylistMetadataStatement = () => getDB().prepare<[], Play
   ORDER BY playlist_id
 `)
 
-export const createGetPlaylistMetadataCountStatement = () => getDB().prepare<[], { count: number }>(`
+export const createGetPlaylistMetadataCountStatement = () => getAppDB().prepare<[], { count: number }>(`
   SELECT COUNT(*) AS count FROM playlist_metadata
 `)
 
-export const createHasPlaylistMetadataStatement = () => getDB().prepare<[string], { present: 1 }>(`
+export const createHasPlaylistMetadataStatement = () => getAppDB().prepare<[string], { present: 1 }>(`
   SELECT 1 AS present FROM playlist_metadata WHERE playlist_id = ?
 `)
 
-export const createUpsertPlaylistMetadataStatement = () => getDB().prepare<[PlaylistMetadataRow]>(`
+export const createUpsertPlaylistMetadataStatement = () => getAppDB().prepare<[PlaylistMetadataRow]>(`
   INSERT INTO playlist_metadata (
     playlist_id, is_auto_update, update_time_ms, profile_json, updated_at_ms
   ) VALUES (
@@ -49,13 +49,13 @@ export const createUpsertPlaylistMetadataStatement = () => getDB().prepare<[Play
     updated_at_ms = excluded.updated_at_ms
 `)
 
-export const createDeletePlaylistMetadataStatement = () => getDB().prepare<[string]>(`
+export const createDeletePlaylistMetadataStatement = () => getAppDB().prepare<[string]>(`
   DELETE FROM playlist_metadata WHERE playlist_id = ?
 `)
 
-export const createClearPlaylistMetadataStatement = () => getDB().prepare('DELETE FROM playlist_metadata')
+export const createClearPlaylistMetadataStatement = () => getAppDB().prepare('DELETE FROM playlist_metadata')
 
-export const createGetSearchHistoryStatement = () => getDB().prepare<[], SearchHistoryRow>(`
+export const createGetSearchHistoryStatement = () => getAppDB().prepare<[], SearchHistoryRow>(`
   SELECT
     term,
     recency_seq AS recencySeq,
@@ -65,7 +65,7 @@ export const createGetSearchHistoryStatement = () => getDB().prepare<[], SearchH
   ORDER BY recency_seq DESC
 `)
 
-export const createGetSearchHistoryTermStatement = () => getDB().prepare<[string], SearchHistoryRow>(`
+export const createGetSearchHistoryTermStatement = () => getAppDB().prepare<[string], SearchHistoryRow>(`
   SELECT
     term,
     recency_seq AS recencySeq,
@@ -75,22 +75,22 @@ export const createGetSearchHistoryTermStatement = () => getDB().prepare<[string
   WHERE term = ?
 `)
 
-export const createGetMaxSearchRecencyStatement = () => getDB().prepare<[], { recencySeq: number | null }>(`
+export const createGetMaxSearchRecencyStatement = () => getAppDB().prepare<[], { recencySeq: number | null }>(`
   SELECT MAX(recency_seq) AS recencySeq FROM search_history
 `)
 
-export const createInsertSearchHistoryStatement = () => getDB().prepare<[SearchHistoryRow]>(`
+export const createInsertSearchHistoryStatement = () => getAppDB().prepare<[SearchHistoryRow]>(`
   INSERT INTO search_history (term, recency_seq, last_used_at_ms, use_count)
   VALUES (@term, @recencySeq, @lastUsedAtMs, @useCount)
 `)
 
-export const createDeleteSearchHistoryTermStatement = () => getDB().prepare<[string]>(`
+export const createDeleteSearchHistoryTermStatement = () => getAppDB().prepare<[string]>(`
   DELETE FROM search_history WHERE term = ?
 `)
 
-export const createClearSearchHistoryStatement = () => getDB().prepare('DELETE FROM search_history')
+export const createClearSearchHistoryStatement = () => getAppDB().prepare('DELETE FROM search_history')
 
-export const createTrimSearchHistoryStatement = () => getDB().prepare(`
+export const createTrimSearchHistoryStatement = () => getAppDB().prepare(`
   DELETE FROM search_history
   WHERE recency_seq NOT IN (
     SELECT recency_seq FROM search_history ORDER BY recency_seq DESC LIMIT 15

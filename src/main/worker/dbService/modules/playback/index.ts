@@ -8,7 +8,7 @@ import {
 import type { LegacyListeningImportV1 } from '../../../../../common/storage/legacyListening'
 import type { PlaybackTrackV1 } from '../../../../../common/storage/playback'
 import { parsePlaybackTrack } from '../../../../../common/storage/playbackValidation'
-import { getDB } from '../../db'
+import { getAppDB } from '../../db'
 import { getMigrationMarker, putMigrationMarker } from '../../migrate'
 import type { MigrationMarker } from '../../migrations/types'
 
@@ -209,7 +209,7 @@ const normalizeImport = (value: unknown): NormalizedImport => {
 
 const resolveResume = (resume: LegacyPlaybackResumeHintV1 | null): ResolvedResume | null => {
   if (resume == null) return null
-  const rows = getDB().prepare(`
+  const rows = getAppDB().prepare(`
     SELECT music.source, music.id AS sourceTrackId
     FROM my_list_music_info_order ordering
     JOIN my_list_music_info music
@@ -275,7 +275,7 @@ const assertSame = (expected: unknown, actual: unknown, field: string): void => 
 }
 
 const trackId = (source: string, sourceTrackId: string): number => {
-  const row = getDB().prepare(`
+  const row = getAppDB().prepare(`
     SELECT track_id AS trackId FROM track_snapshots WHERE source = ? AND source_track_id = ?
   `).get(source, sourceTrackId) as { trackId?: unknown } | undefined
   if (row == null || !isSafeInteger(row.trackId, -Number.MAX_SAFE_INTEGER)) {
@@ -285,7 +285,7 @@ const trackId = (source: string, sourceTrackId: string): number => {
 }
 
 const verifyTarget = (input: NormalizedImport, resume: ResolvedResume | null): void => {
-  const recent = getDB().prepare(`
+  const recent = getAppDB().prepare(`
     SELECT track.source, track.source_track_id AS sourceTrackId, track.name, track.singer,
       track.duration_ms AS durationMs, track.playable_payload_json AS playablePayloadJson,
       track.updated_at_ms AS trackUpdatedAtMs, recent.recency_seq AS recencySeq,
@@ -320,7 +320,7 @@ const verifyTarget = (input: NormalizedImport, resume: ResolvedResume | null): v
     recentUpdatedAtMs: 0,
   })), recent, 'recent')
 
-  const daily = getDB().prepare(`
+  const daily = getAppDB().prepare(`
     SELECT local_day AS localDay, baseline_played_ms AS baselinePlayedMs,
       live_played_ms AS livePlayedMs, baseline_active_ms AS baselineActiveMs,
       live_active_ms AS liveActiveMs, updated_at_ms AS updatedAtMs
@@ -334,7 +334,7 @@ const verifyTarget = (input: NormalizedImport, resume: ResolvedResume | null): v
     updatedAtMs: 0,
   })), daily, 'daily')
 
-  const listeningTracks = (getDB().prepare(`
+  const listeningTracks = (getAppDB().prepare(`
     SELECT track.source, track.source_track_id AS sourceTrackId, track.name, track.singer,
       track.duration_ms AS durationMs, track.playable_payload_json AS playablePayloadJson,
       track.updated_at_ms AS trackUpdatedAtMs,
@@ -397,7 +397,7 @@ const verifyTarget = (input: NormalizedImport, resume: ResolvedResume | null): v
     }
   }).sort(compareLegacyPlaybackTrack), listeningTracks, 'tracks')
 
-  const totals = getDB().prepare(`
+  const totals = getAppDB().prepare(`
     SELECT baseline_played_ms AS baselinePlayedMs, live_played_ms AS livePlayedMs,
       baseline_active_ms AS baselineActiveMs, live_active_ms AS liveActiveMs,
       updated_at_ms AS updatedAtMs FROM activity_totals WHERE id = 1
@@ -410,7 +410,7 @@ const verifyTarget = (input: NormalizedImport, resume: ResolvedResume | null): v
     updatedAtMs: 0,
   }, totals, 'totals')
 
-  const storedResume = getDB().prepare(`
+  const storedResume = getAppDB().prepare(`
     SELECT source, source_track_id AS sourceTrackId, list_id AS listId, index_hint AS indexHint,
       position_ms AS positionMs, duration_ms AS durationMs, checkpoint_seq AS checkpointSeq,
       updated_at_ms AS updatedAtMs FROM playback_resume_state WHERE id = 1
@@ -428,7 +428,7 @@ const verifyTarget = (input: NormalizedImport, resume: ResolvedResume | null): v
 }
 
 const replaceTarget = (input: NormalizedImport, resume: ResolvedResume | null): void => {
-  const db = getDB()
+  const db = getAppDB()
   db.prepare('DELETE FROM recent_tracks').run()
   db.prepare('DELETE FROM listening_daily').run()
   db.prepare('DELETE FROM listening_tracks').run()
@@ -516,8 +516,8 @@ export const importLegacyPlaybackActivity = (value: unknown): LegacyPlaybackActi
   if (legacyPlaybackActivitySha256(input) != input.sourceSha256) {
     throw new Error('Legacy playback activity hash mismatch')
   }
-  const transaction = getDB().transaction((): LegacyPlaybackActivityImportResultV1 => {
-    const existing = getMigrationMarker(getDB(), ACTIVITY_MARKER_NAME)
+  const transaction = getAppDB().transaction((): LegacyPlaybackActivityImportResultV1 => {
+    const existing = getMigrationMarker(getAppDB(), ACTIVITY_MARKER_NAME)
     if (existing != null && existing.sourceSha256 != input.sourceSha256) {
       throw new Error(`Migration marker ${ACTIVITY_MARKER_NAME} source conflict`)
     }
@@ -532,7 +532,7 @@ export const importLegacyPlaybackActivity = (value: unknown): LegacyPlaybackActi
     if (input.failAt == 'inside-transaction') throw new Error('injected failure')
     verifyTarget(input, resume)
     if (input.failAt == 'before-marker') throw new Error('injected failure')
-    putMigrationMarker(getDB(), {
+    putMigrationMarker(getAppDB(), {
       name: ACTIVITY_MARKER_NAME,
       sourceSha256: input.sourceSha256,
       completedAtMs: input.completedAtMs,
@@ -544,7 +544,7 @@ export const importLegacyPlaybackActivity = (value: unknown): LegacyPlaybackActi
 }
 
 export const getPlaybackActivityMigrationMarker = (): MigrationMarker | null =>
-  getMigrationMarker(getDB(), ACTIVITY_MARKER_NAME)
+  getMigrationMarker(getAppDB(), ACTIVITY_MARKER_NAME)
 
 export {
   playbackCommit,

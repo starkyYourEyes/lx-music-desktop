@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { canonicalJson, type JsonValue } from './canonicalJson'
 import {
   phase3ManifestJson,
   phase3ManifestSha256,
@@ -24,6 +26,24 @@ export interface CachePhasePrerequisiteV1 {
   markerName: typeof CROSS_ARTIFACT_MARKER_NAME
   sourceSha256: string
   completedAtMs: number
+}
+
+export interface CachePhase4Result {
+  schemaVersion: 6 | 7
+  typedOwnershipVerified: boolean
+}
+
+export const storageFramedSha256 = (domain: string, payload: JsonValue): string => {
+  const domainBytes = Buffer.from(domain, 'utf8')
+  const jsonBytes = Buffer.from(canonicalJson(payload), 'utf8')
+  const domainLength = Buffer.allocUnsafe(4)
+  const jsonLength = Buffer.allocUnsafe(4)
+  domainLength.writeUInt32BE(domainBytes.length)
+  jsonLength.writeUInt32BE(jsonBytes.length)
+  return createHash('sha256')
+    .update(domainLength).update(domainBytes)
+    .update(jsonLength).update(jsonBytes)
+    .digest('hex')
 }
 
 const isPlainRecord = (value: unknown): value is Record<string, unknown> =>

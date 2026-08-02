@@ -168,7 +168,7 @@ const createAppDbFixture = async() => {
   const startup = await workerDbService.init(options)
   assert.equal(startup.status, 'ready')
   return {
-    db: workerDbService.getDB(),
+    db: workerDbService.getAppDB(),
     options,
     appDbPath: path.join(fixture.path, 'lx.data.db'),
   }
@@ -235,17 +235,6 @@ const createDeps = (overrides = {}) => {
 
 const createCoordinator = deps => require(coordinatorPath).createStorageCoordinator(deps)
 
-const completeRawLyricMigration = {
-  status: 'complete',
-  sourceRows: 1,
-  sourceOwnerGroups: 1,
-  skippedInvalidRows: 0,
-  sourceSha256: '1'.repeat(64),
-  targetRows: 1,
-  targetOwnerGroups: 1,
-  targetSha256: '1'.repeat(64),
-}
-
 const installProductionCache = repository => {
   globalThis.lx = { worker: { dbService: repository } }
 }
@@ -308,7 +297,7 @@ describe('storage startup coordinator', () => {
         initializePhase4: async() => {
           calls.push('phase4:initialize')
           db.exec('CREATE TABLE phase4_mutation_sentinel(value TEXT)')
-          return { schemaVersion: 7 }
+          return { schemaVersion: 7, typedOwnershipVerified: true }
         },
       })
 
@@ -329,8 +318,8 @@ describe('storage startup coordinator', () => {
       getCachePhasePrerequisite: () => phase3Worker.getCachePhasePrerequisite(),
       initializePhase4: async() => {
         calls.push('phase4:initialize')
-        workerDbService.getDB().exec('CREATE TABLE phase4_mutation_sentinel(value TEXT)')
-        return { schemaVersion: 7 }
+        workerDbService.getAppDB().exec('CREATE TABLE phase4_mutation_sentinel(value TEXT)')
+        return { schemaVersion: 7, typedOwnershipVerified: true }
       },
     })
 
@@ -347,9 +336,10 @@ describe('storage startup coordinator', () => {
         calls.push('cache:prerequisite')
         return { version: 1, markerName: 'legacy_data_v1.cross_artifact_complete', sourceSha256: 'f'.repeat(64), completedAtMs: 1 }
       },
-      initializePhase4: async prerequisite => {
-        calls.push(`phase4:initialize:${prerequisite.markerName}`)
-        return { schemaVersion: 7 }
+      initializePhase4: async function() {
+        assert.equal(arguments.length, 0)
+        calls.push('phase4:initialize')
+        return { schemaVersion: 7, typedOwnershipVerified: true }
       },
     })
 
@@ -357,10 +347,55 @@ describe('storage startup coordinator', () => {
 
     assert.deepEqual(result, { status: 'ready', schemaVersion: 7 })
     assert.ok(calls.indexOf('phase3:attestation') < calls.indexOf('cache:prerequisite'))
-    assert.ok(calls.indexOf('cache:prerequisite') < calls.indexOf('phase4:initialize:legacy_data_v1.cross_artifact_complete'))
+    assert.ok(calls.indexOf('cache:prerequisite') < calls.indexOf('phase4:initialize'))
   })
 
-  it('runs the default Phase 4 path in prerequisite-open-migrate-settings order', async() => {
+  it('requires the exact Phase 4 result contract', async t => {
+    const cases = [
+      { name: 'missing ownership', value: { schemaVersion: 7 } },
+      { name: 'extra field', value: { schemaVersion: 7, typedOwnershipVerified: true, extra: true } },
+      { name: 'invalid ownership type', value: { schemaVersion: 7, typedOwnershipVerified: 'true' } },
+      { name: 'schema 6 cannot be verified', value: { schemaVersion: 6, typedOwnershipVerified: true } },
+      { name: 'non-plain object', value: Object.assign(Object.create(null), { schemaVersion: 7, typedOwnershipVerified: true }) },
+    ]
+    for (const testCase of cases) await t.test(testCase.name, async() => {
+      const { deps } = createDeps({ initializePhase4: async() => testCase.value })
+      assert.deepEqual(await createCoordinator(deps).start(), {
+        status: 'fatal', reason: 'cache_phase4_result_invalid',
+      })
+    })
+  })
+
+  it('arms portable acknowledgement only for verified schema 7', async t => {
+    const cases = [
+      { name: 'schema 6 degraded', phase4: { schemaVersion: 6, typedOwnershipVerified: false }, acknowledgements: 0 },
+      { name: 'schema 7 degraded', phase4: { schemaVersion: 7, typedOwnershipVerified: false }, acknowledgements: 0 },
+      { name: 'schema 7 verified', phase4: { schemaVersion: 7, typedOwnershipVerified: true }, acknowledgements: 1 },
+    ]
+    for (const testCase of cases) await t.test(testCase.name, async() => {
+      let acknowledgements = 0
+      const { deps } = createDeps({ initializePhase4: async() => testCase.phase4 })
+      deps.portableProfileToken = Object.freeze({
+        version: 1,
+        portableRoot: 'C:\\portable-fixture',
+        promotionRunId: 'promotion-run',
+        startupRunId: 'startup-run',
+        destinationIdentity: Object.freeze({ dev: '1', ino: '2' }),
+      })
+      deps.acknowledgePortableProfileStartup = async() => {
+        acknowledgements++
+        return { state: 'typed-only-acknowledged' }
+      }
+      const coordinator = createCoordinator(deps)
+      assert.deepEqual(await coordinator.start(), {
+        status: 'ready', schemaVersion: testCase.phase4.schemaVersion,
+      })
+      await coordinator.shutdown()
+      assert.equal(acknowledgements, testCase.acknowledgements)
+    })
+  })
+
+  it('runs the default Phase 4 worker in prerequisite-initialize-settings order', async() => {
     const { calls, deps } = createDeps({
       initDatabase: async() => ({ ...readyResult, schemaVersion: 6 }),
       verifyPhase2Storage: async() => {},
@@ -372,27 +407,24 @@ describe('storage startup coordinator', () => {
         calls.push('cache:prerequisite')
         return { version: 1, markerName: 'legacy_data_v1.cross_artifact_complete', sourceSha256: 'f'.repeat(64), completedAtMs: 1 }
       },
-      openCacheDatabase: async() => {
-        calls.push('cache:open')
-        return { status: 'created', schemaVersion: 1, diagnostic: null }
-      },
-      migrateRawLyrics: async input => {
-        calls.push(`raw-lyrics:migrate:${input.nowMs}`)
-        return completeRawLyricMigration
+      initializePhase4: async function() {
+        assert.equal(arguments.length, 0)
+        calls.push('cache:initialize')
+        return { schemaVersion: 6, typedOwnershipVerified: false }
       },
     })
 
     assert.deepEqual(await createCoordinator(deps).start(), { status: 'ready', schemaVersion: 6 })
     assert.deepEqual(calls.filter(call => [
-      'phase3:attestation', 'cache:prerequisite', 'cache:open', 'raw-lyrics:migrate:1',
+      'phase3:attestation', 'cache:prerequisite', 'cache:initialize',
       'settings:init', 'modules:register', 'app:inited',
     ].includes(call)), [
-      'phase3:attestation', 'cache:prerequisite', 'cache:open', 'raw-lyrics:migrate:1',
+      'phase3:attestation', 'cache:prerequisite', 'cache:initialize',
       'settings:init', 'modules:register', 'app:inited',
     ])
   })
 
-  it('skips raw lyric migration when cache open is unavailable and reaches ready', async() => {
+  it('keeps authoritative startup ready when the Phase 4 worker reports degraded schema 6', async() => {
     const { calls, deps } = createDeps({
       initDatabase: async() => ({ ...readyResult, schemaVersion: 6 }),
       verifyPhase2Storage: async() => {},
@@ -403,23 +435,19 @@ describe('storage startup coordinator', () => {
         calls.push('cache:prerequisite')
         return { version: 1, markerName: 'legacy_data_v1.cross_artifact_complete', sourceSha256: 'f'.repeat(64), completedAtMs: 1 }
       },
-      openCacheDatabase: async() => {
-        calls.push('cache:open:unavailable')
-        return { status: 'unavailable', schemaVersion: null, diagnostic: 'cache_integrity_failed' }
-      },
-      migrateRawLyrics: async() => {
-        calls.push('raw-lyrics:migrate')
-        return completeRawLyricMigration
+      initializePhase4: async() => {
+        calls.push('cache:initialize:degraded')
+        return { schemaVersion: 6, typedOwnershipVerified: false }
       },
     })
 
     assert.deepEqual(await createCoordinator(deps).start(), { status: 'ready', schemaVersion: 6 })
-    assert.deepEqual(calls.filter(call => call.startsWith('cache:') || call.startsWith('raw-lyrics:') || call == 'settings:init'), [
-      'cache:prerequisite', 'cache:open:unavailable', 'settings:init',
+    assert.deepEqual(calls.filter(call => call.startsWith('cache:') || call == 'settings:init'), [
+      'cache:prerequisite', 'cache:initialize:degraded', 'settings:init',
     ])
   })
 
-  it('continues startup when raw lyric migration makes cache unavailable', async() => {
+  it('propagates schema 7 when the Phase 4 worker reports degraded typed ownership', async() => {
     const { calls, deps } = createDeps({
       initDatabase: async() => ({ ...readyResult, schemaVersion: 6 }),
       verifyPhase2Storage: async() => {},
@@ -430,28 +458,24 @@ describe('storage startup coordinator', () => {
         calls.push('cache:prerequisite')
         return { version: 1, markerName: 'legacy_data_v1.cross_artifact_complete', sourceSha256: 'f'.repeat(64), completedAtMs: 1 }
       },
-      openCacheDatabase: async() => {
-        calls.push('cache:open')
-        return { status: 'ready', schemaVersion: 1, diagnostic: null }
-      },
-      migrateRawLyrics: async() => {
-        calls.push('raw-lyrics:unavailable')
-        return { status: 'unavailable', code: 'cache_capacity_unavailable' }
+      initializePhase4: async() => {
+        calls.push('cache:initialize:degraded-schema7')
+        return { schemaVersion: 7, typedOwnershipVerified: false }
       },
     })
 
-    assert.deepEqual(await createCoordinator(deps).start(), { status: 'ready', schemaVersion: 6 })
-    assert.deepEqual(calls.filter(call => call.startsWith('cache:') || call.startsWith('raw-lyrics:') || call == 'settings:init'), [
-      'cache:prerequisite', 'cache:open', 'raw-lyrics:unavailable', 'settings:init',
+    assert.deepEqual(await createCoordinator(deps).start(), { status: 'ready', schemaVersion: 7 })
+    assert.deepEqual(calls.filter(call => call.startsWith('cache:') || call == 'settings:init'), [
+      'cache:prerequisite', 'cache:initialize:degraded-schema7', 'settings:init',
     ])
   })
 
-  it('maps malformed and logically impossible raw lyric results to a fixed Phase 4 fatal code', async() => {
+  it('maps malformed production Phase 4 results to a fixed fatal code', async() => {
     const cases = [
       { name: 'malformed', result: { status: 'complete' } },
-      { name: 'row mismatch', result: { ...completeRawLyricMigration, targetRows: 2 } },
-      { name: 'hash mismatch', result: { ...completeRawLyricMigration, targetSha256: '2'.repeat(64) } },
-      { name: 'extra field', result: { ...completeRawLyricMigration, provider: 'legacy' } },
+      { name: 'missing ownership', result: { schemaVersion: 6 } },
+      { name: 'impossible ownership', result: { schemaVersion: 6, typedOwnershipVerified: true } },
+      { name: 'extra field', result: { schemaVersion: 7, typedOwnershipVerified: true, provider: 'legacy' } },
     ]
     for (const testCase of cases) {
       const { calls, deps } = createDeps({
@@ -461,8 +485,7 @@ describe('storage startup coordinator', () => {
       delete deps.getCachePhasePrerequisite
       installProductionCache({
         getCachePhasePrerequisite: async() => ({ version: 1, markerName: 'legacy_data_v1.cross_artifact_complete', sourceSha256: 'f'.repeat(64), completedAtMs: 1 }),
-        openCacheDatabase: async() => ({ status: 'ready', schemaVersion: 1, diagnostic: null }),
-        migrateRawLyrics: async() => testCase.result,
+        initializePhase4: async() => testCase.result,
       })
 
       assert.deepEqual(await createCoordinator(deps).start(), { status: 'fatal', reason: 'cache_phase4_result_invalid' }, testCase.name)
@@ -477,14 +500,15 @@ describe('storage startup coordinator', () => {
       const { calls, deps } = createDeps({
         initDatabase: async() => ({ ...readyResult, schemaVersion: 6 }),
         verifyPhase2Storage: async() => {},
-        initializePhase4: async prerequisite => {
-          calls.push(`custom-phase4:${prerequisite.markerName}`)
-          return { schemaVersion: 7 }
+        initializePhase4: async function() {
+          assert.equal(arguments.length, 0)
+          calls.push('custom-phase4')
+          return { schemaVersion: 7, typedOwnershipVerified: true }
         },
       })
 
       assert.deepEqual(await createCoordinator(deps).start(), { status: 'ready', schemaVersion: 7 }, production)
-      assert.equal(calls.includes('custom-phase4:legacy_data_v1.cross_artifact_complete'), true, production)
+      assert.equal(calls.includes('custom-phase4'), true, production)
     }
   })
 
@@ -711,7 +735,7 @@ describe('storage startup coordinator', () => {
     deps.initializePhase4 = async() => {
       calls.push('phase4:initialize')
       fs.writeFileSync(path.join(paths.profileRoot, 'lx.data.db'), 'typed-database')
-      return { schemaVersion: 7 }
+      return { schemaVersion: 7, typedOwnershipVerified: true }
     }
     deps.portableProfileToken = prepared.token
     deps.acknowledgePortableProfileStartup = async token => {
@@ -750,7 +774,7 @@ describe('storage startup coordinator', () => {
     const first = createDeps()
     first.deps.initializePhase4 = async() => {
       fs.writeFileSync(path.join(paths.profileRoot, 'lx.data.db'), 'typed-after-unclean-startup')
-      return { schemaVersion: 7 }
+      return { schemaVersion: 7, typedOwnershipVerified: true }
     }
     first.deps.portableProfileToken = firstPreparation.token
     first.deps.acknowledgePortableProfileStartup = token => acknowledgePortableProfileStartup(token, { logger })
@@ -762,7 +786,7 @@ describe('storage startup coordinator', () => {
     const retry = preparePortableProfile({ ...paths, runId: 'startup-2', logger })
     assert.equal(retry.state, 'already-promoted')
     const second = createDeps()
-    second.deps.initializePhase4 = async() => ({ schemaVersion: 7 })
+    second.deps.initializePhase4 = async() => ({ schemaVersion: 7, typedOwnershipVerified: true })
     second.deps.portableProfileToken = retry.token
     second.deps.acknowledgePortableProfileStartup = token => acknowledgePortableProfileStartup(token, { logger })
     const retryCoordinator = createCoordinator(second.deps)
@@ -824,7 +848,7 @@ describe('storage startup coordinator', () => {
       await t.test(scenario.name, async() => {
         let acknowledgements = 0
         const { deps } = createDeps({ shutdownTimeoutMs: 20 })
-        deps.initializePhase4 = async() => ({ schemaVersion: 7 })
+        deps.initializePhase4 = async() => ({ schemaVersion: 7, typedOwnershipVerified: true })
         deps.portableProfileToken = Object.freeze({
           version: 1,
           portableRoot: 'C:\\portable-fixture',
@@ -857,7 +881,7 @@ describe('storage startup coordinator', () => {
     const logger = { info() {}, warn() {}, error() {} }
     const prepared = preparePortableProfile({ ...paths, runId: 'startup-1', logger })
     const { calls, deps } = createDeps()
-    deps.initializePhase4 = async() => ({ schemaVersion: 7 })
+    deps.initializePhase4 = async() => ({ schemaVersion: 7, typedOwnershipVerified: true })
     deps.portableProfileToken = prepared.token
     deps.acknowledgePortableProfileStartup = async() => {
       calls.push('portable:acknowledge')
@@ -892,7 +916,7 @@ describe('storage startup coordinator', () => {
     })
     const acknowledgements = []
     const { deps } = createDeps()
-    deps.initializePhase4 = async() => ({ schemaVersion: 7 })
+    deps.initializePhase4 = async() => ({ schemaVersion: 7, typedOwnershipVerified: true })
     deps.portableProfileToken = originalToken
     deps.acknowledgePortableProfileStartup = async token => {
       acknowledgements.push(['original', token])

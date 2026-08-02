@@ -42,7 +42,7 @@ const createStore = async() => {
     targetSchemaVersion: 6,
   })
   assert.equal(result.status, 'ready')
-  return dbService.getDB()
+  return dbService.getAppDB()
 }
 
 const track = id => ({
@@ -387,7 +387,7 @@ describe('idle vacuum eligibility', () => {
       targetSchemaVersion: 6,
     })
     assert.equal(startup.status, 'ready')
-    db = dbService.getDB()
+    db = dbService.getAppDB()
     assert.equal(db.pragma('page_count', { simple: true }), before.pageCount)
     assert.equal(db.pragma('freelist_count', { simple: true }), before.freelistCount)
 

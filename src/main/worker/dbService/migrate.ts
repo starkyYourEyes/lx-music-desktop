@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3'
 import { canonicalJson, type JsonValue } from '../../../common/storage/canonicalJson'
 import tables, { LEGACY_DB_VERSION } from './tables'
 import { migrations } from './migrations'
-import type { MigrationMarker, MigrationRunResult, SchemaMigration } from './migrations/types'
+import type { MigrationContext, MigrationMarker, MigrationRunResult, SchemaMigration } from './migrations/types'
 
 const FIRST_MIGRATION_VERSION = 3
 const checksumPattern = /^[0-9a-f]{64}$/
@@ -88,7 +88,7 @@ const validateTarget = (
   requestedTarget: number | undefined,
 ): number => {
   const highestVersion = registry[registry.length - 1].version
-  const target = requestedTarget ?? highestVersion
+  const target = requestedTarget ?? Math.max(currentVersion, Math.min(highestVersion, 6))
   const isBoundary = target == currentVersion || registry.some(migration => migration.version == target)
   if (!Number.isSafeInteger(target) || target < currentVersion || target > highestVersion || !isBoundary) {
     throw new Error(`Invalid target schema version ${String(target)}`)
@@ -161,15 +161,17 @@ const applyMigrations = (
   const insert = db.prepare('INSERT INTO schema_migrations (version, name, checksum, applied_at_ms) VALUES (?, ?, ?, ?)')
   const updateMirror = db.prepare('UPDATE db_info SET field_value = ? WHERE field_name = \'version\'')
   for (const migration of pending) {
-    migration.up(db)
     const appliedAtMs = (options?.now ?? Date.now)()
     if (!Number.isSafeInteger(appliedAtMs) || appliedAtMs < 0) {
       throw new Error(`Migration ${migration.version} produced an invalid applied timestamp`)
     }
+    const context: MigrationContext = Object.freeze({ appliedAtMs })
+    migration.up(db, context)
     insert.run(migration.version, migration.name, migration.checksum, appliedAtMs)
     if (updateMirror.run(String(migration.version)).changes != 1) {
       throw new Error(`Migration ${migration.version} could not update the legacy version mirror`)
     }
+    migration.verify?.(db, context)
     appliedVersions.push(migration.version)
     toVersion = migration.version
   }
@@ -247,4 +249,4 @@ export const putMigrationMarker = (db: Database.Database, marker: MigrationMarke
   `).run(normalized.name, normalized.sourceSha256, normalized.completedAtMs, normalized.detailsJson)
 }
 
-export default (db: Database.Database): MigrationRunResult => runMigrations(db, migrations)
+export default (db: Database.Database): MigrationRunResult => runMigrations(db, migrations, { targetSchemaVersion: 6 })

@@ -71,6 +71,7 @@ export interface CacheRepositoryGate {
   runCacheRead: <T>(operation: (db: CacheDatabaseHandle) => T | null | undefined) => Promise<CacheReadResult<T>>
   runCacheWrite: (operation: (db: CacheDatabaseHandle) => void) => Promise<CacheWriteResult>
   runCacheImmediate: <T>(operation: (db: CacheDatabaseHandle) => T) => Promise<CacheExecutionResult<T>>
+  runCacheRollbackOnly: <T>(operation: (db: CacheDatabaseHandle) => T) => Promise<CacheExecutionResult<T>>
 }
 
 type CacheDatabaseConstructor = new(filename: string, options?: Database.Options) => Database.Database
@@ -1130,6 +1131,35 @@ export const createCacheDatabaseService = (
       : { status: 'unavailable', code: result.diagnostic }
   })
 
+  const runCacheRollbackOnly = async <T>(
+    operation: (db: CacheDatabaseHandle) => T,
+  ): Promise<CacheExecutionResult<T>> => enqueue(() => {
+    const result = runReadyOperation(db => {
+      let transactionOpen = false
+      try {
+        db.exec('BEGIN IMMEDIATE')
+        transactionOpen = true
+        const value = operation(db)
+        if (isThenable(value)) throw fixedError('cache_operation_failed')
+        db.exec('ROLLBACK')
+        transactionOpen = false
+        return value
+      } catch (error) {
+        if (transactionOpen) {
+          try {
+            db.exec('ROLLBACK')
+          } catch (rollbackError) {
+            throw rollbackError
+          }
+        }
+        throw error
+      }
+    })
+    return result.ok
+      ? { status: 'completed', value: result.value }
+      : { status: 'unavailable', code: result.diagnostic }
+  })
+
   return {
     openCacheDatabase,
     closeCacheDatabase,
@@ -1139,6 +1169,7 @@ export const createCacheDatabaseService = (
     runCacheRead,
     runCacheWrite,
     runCacheImmediate,
+    runCacheRollbackOnly,
   }
 }
 
@@ -1152,3 +1183,5 @@ export const getCacheLifecycleState = cacheDatabaseService.getCacheLifecycleStat
 export const runCacheRead = cacheDatabaseService.runCacheRead
 export const runCacheWrite = cacheDatabaseService.runCacheWrite
 export const runCacheImmediate = cacheDatabaseService.runCacheImmediate
+// Worker-private: this callback gate is deliberately not re-exported through modules/index.ts.
+export const runCacheRollbackOnly = cacheDatabaseService.runCacheRollbackOnly

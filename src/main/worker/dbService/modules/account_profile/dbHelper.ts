@@ -6,7 +6,7 @@ import {
 import { normalizePublicAccountProfile } from '../../../../../common/storage/accountProfile'
 import { sha256Canonical, type JsonValue } from '../../../../../common/storage/canonicalJson'
 import type { AccountProfileProvider, AccountProfileRow } from './index'
-import { getDB } from '../../db'
+import { getAppDB } from '../../db'
 import { getMigrationMarker, putMigrationMarker } from '../../migrate'
 import type { MigrationMarker } from '../../migrations/types'
 
@@ -57,7 +57,7 @@ export const deleteAccountProfile = (provider: AccountProfileProvider): void => 
 
 export const migrateAccountProfileRows = (rows: AccountProfileRow[], marker: MigrationMarker): void => {
   for (const row of rows) assertRow(row)
-  const db = getDB()
+  const db = getAppDB()
   db.transaction(() => {
     const existing = getMigrationMarker(db, marker.name)
     if (existing != null) {

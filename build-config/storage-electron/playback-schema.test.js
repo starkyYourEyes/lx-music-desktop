@@ -152,7 +152,7 @@ const openDatabase = () => {
   return db
 }
 
-const bootstrap = targetSchemaVersion => {
+const bootstrap = (targetSchemaVersion = 6) => {
   const db = openDatabase()
   const result = bootstrapDatabaseSchema(db, migrations, { targetSchemaVersion, now: () => 1000 })
   return { db, result }
@@ -294,9 +294,9 @@ const rebuildResumeState = (db, checkpointDefinition) => db.exec(`
 describe('playback activity schema migration', () => {
   it('upgrades an authoritative v5 database to v6 exactly once', () => {
     const { db } = bootstrap(5)
-    const upgrade = runMigrations(db, migrations, { now: () => 2000 })
+    const upgrade = runMigrations(db, migrations, { targetSchemaVersion: 6, now: () => 2000 })
     const ledgerAfterUpgrade = db.prepare('SELECT version, name, checksum, applied_at_ms FROM schema_migrations ORDER BY version').all()
-    const rerun = runMigrations(db, migrations, { now: () => 3000 })
+    const rerun = runMigrations(db, migrations, { targetSchemaVersion: 6, now: () => 3000 })
 
     assert.deepEqual(upgrade, { fromVersion: 5, toVersion: 6, applied: [6] })
     assert.equal(getSchemaVersion(db), 6)

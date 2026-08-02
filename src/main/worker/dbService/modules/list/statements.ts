@@ -1,4 +1,4 @@
-import { getDB } from '../../db'
+import { getAppDB } from '../../db'
 
 
 /**
@@ -6,7 +6,7 @@ import { getDB } from '../../db'
  * @returns 查询语句
  */
 export const createListQueryStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[]>(`
     SELECT "id", "name", "source", "sourceListId", "position", "locationUpdateTime"
     FROM "main"."my_list"
@@ -18,7 +18,7 @@ export const createListQueryStatement = () => {
  * @returns 插入语句
  */
 export const createListInsertStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[LX.DBService.UserListInfo]>(`
     INSERT INTO "main"."my_list" ("id", "name", "source", "sourceListId", "position", "locationUpdateTime")
     VALUES (@id, @name, @source, @sourceListId, @position, @locationUpdateTime)`)
@@ -29,7 +29,7 @@ export const createListInsertStatement = () => {
  * @returns 清空语句
  */
 export const createListClearStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[]>('DELETE FROM "main"."my_list"')
 }
 
@@ -38,7 +38,7 @@ export const createListClearStatement = () => {
  * @returns 删除语句
  */
 export const createListDeleteStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[string]>('DELETE FROM "main"."my_list" WHERE "id"=?')
 }
 
@@ -47,7 +47,7 @@ export const createListDeleteStatement = () => {
  * @returns 更新语句
  */
 export const createListUpdateStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[LX.DBService.UserListInfo]>(`
     UPDATE "main"."my_list"
     SET "name"=@name, "source"=@source, "sourceListId"=@sourceListId, "locationUpdateTime"=@locationUpdateTime
@@ -59,7 +59,7 @@ export const createListUpdateStatement = () => {
  * @returns 查询语句
  */
 export const createMusicInfoQueryStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[LX.DBService.MusicInfoQuery]>(`
     SELECT mInfo."id", mInfo."name", mInfo."singer", mInfo."source", mInfo."interval", mInfo."meta"
     FROM my_list_music_info mInfo
@@ -75,7 +75,7 @@ export const createMusicInfoQueryStatement = () => {
  * @returns 插入语句
  */
 export const createMusicInfoInsertStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[LX.DBService.MusicInfo]>(`
     INSERT INTO "main"."my_list_music_info" ("id", "listId", "name", "singer", "source", "interval", "meta")
     VALUES (@id, @listId, @name, @singer, @source, @interval, @meta)`)
@@ -86,7 +86,7 @@ export const createMusicInfoInsertStatement = () => {
  * @returns 更新语句
  */
 export const createMusicInfoUpdateStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[LX.DBService.MusicInfo]>(`
     UPDATE "main"."my_list_music_info"
     SET "name"=@name, "singer"=@singer, "source"=@source, "interval"=@interval, "meta"=@meta
@@ -99,7 +99,7 @@ export const createMusicInfoUpdateStatement = () => {
  * @returns 删除语句
  */
 export const createMusicInfoClearStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[]>('DELETE FROM "main"."my_list_music_info"')
 }
 
@@ -108,7 +108,7 @@ export const createMusicInfoClearStatement = () => {
  * @returns 删除语句
  */
 export const createMusicInfoDeleteByListIdStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[string]>('DELETE FROM "main"."my_list_music_info" WHERE "listId"=?')
 }
 
@@ -117,7 +117,7 @@ export const createMusicInfoDeleteByListIdStatement = () => {
  * @returns 删除语句
  */
 export const createMusicInfoDeleteStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[LX.DBService.MusicInfoRemove]>('DELETE FROM "main"."my_list_music_info" WHERE "id"=@id AND "listId"=@listId')
 }
 
@@ -126,7 +126,7 @@ export const createMusicInfoDeleteStatement = () => {
  * @returns 删除语句
  */
 export const createMusicInfoByListAndMusicInfoIdQueryStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[LX.DBService.ListMusicInfoQuery]>(`SELECT "id", "name", "singer", "source", "interval", "meta"
     FROM "main"."my_list_music_info"
     WHERE "id"=@musicInfoId
@@ -138,7 +138,7 @@ export const createMusicInfoByListAndMusicInfoIdQueryStatement = () => {
  * @returns 删除语句
  */
 export const createMusicInfoByMusicInfoIdQueryStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[string]>(`SELECT "id", "name", "singer", "source", "interval", "meta", "listId"
     FROM "main"."my_list_music_info"
     WHERE "id"=?`)
@@ -150,7 +150,7 @@ export const createMusicInfoByMusicInfoIdQueryStatement = () => {
  * @returns 插入语句
  */
 export const createMusicInfoOrderInsertStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[LX.DBService.MusicInfoOrder]>(`
     INSERT INTO "main"."my_list_music_info_order" ("listId", "musicInfoId", "order")
     VALUES (@listId, @musicInfoId, @order)`)
@@ -161,7 +161,7 @@ export const createMusicInfoOrderInsertStatement = () => {
  * @returns 删除语句
  */
 export const createMusicInfoOrderClearStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[]>('DELETE FROM "main"."my_list_music_info_order"')
 }
 
@@ -170,7 +170,7 @@ export const createMusicInfoOrderClearStatement = () => {
  * @returns 删除语句
  */
 export const createMusicInfoOrderDeleteByListIdStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[string]>('DELETE FROM "main"."my_list_music_info_order" WHERE "listId"=?')
 }
 
@@ -179,7 +179,7 @@ export const createMusicInfoOrderDeleteByListIdStatement = () => {
  * @returns 删除语句
  */
 export const createMusicInfoOrderDeleteStatement = () => {
-  const db = getDB()
+  const db = getAppDB()
   return db.prepare<[LX.DBService.MusicInfoRemove]>('DELETE FROM "main"."my_list_music_info_order" WHERE "musicInfoId"=@id AND "listId"=@listId')
 }
 

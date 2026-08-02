@@ -1,3 +1,4 @@
+import type Database from 'better-sqlite3'
 import type {
   MusicUrlAccountInvalidationV1,
   MusicUrlGetInputV1,
@@ -26,47 +27,53 @@ const expiryFor = (input: MusicUrlPutInputV1): number => {
   return expiry
 }
 
-export const musicUrlGet = async(input: MusicUrlGetInputV1): Promise<CacheReadResult<string>> => {
+export const musicUrlGetSync = (db: Database.Database, input: MusicUrlGetInputV1): string | null => {
   const parsed = parseMusicUrlGetInput(input)
-  return runCacheRead(db => {
-    const row = db.prepare(`
-      SELECT url, expires_at_ms AS expiresAtMs FROM music_urls
-      WHERE provider = ? AND account_scope = ? AND source_track_id = ? AND quality = ?
-    `).get(parsed.provider, parsed.accountScope, parsed.sourceTrackId, parsed.quality) as { url: string, expiresAtMs: number } | undefined
-    if (row == null) return null
-    if (typeof row.url != 'string' || row.url.length == 0 ||
-      !Number.isSafeInteger(row.expiresAtMs) || row.expiresAtMs < 0) {
-      throw new Error('music_url_cache_invalid')
-    }
-    if (row.expiresAtMs <= parsed.nowMs) return null
-    db.prepare(`
-      UPDATE music_urls
-      SET last_accessed_at_ms = CASE WHEN last_accessed_at_ms > ? THEN last_accessed_at_ms ELSE ? END
-      WHERE provider = ? AND account_scope = ? AND source_track_id = ? AND quality = ?
-    `).run(parsed.nowMs, parsed.nowMs, parsed.provider, parsed.accountScope, parsed.sourceTrackId, parsed.quality)
-    return row.url
-  })
+  const row = db.prepare(`
+    SELECT url, expires_at_ms AS expiresAtMs FROM music_urls
+    WHERE provider = ? AND account_scope = ? AND source_track_id = ? AND quality = ?
+  `).get(parsed.provider, parsed.accountScope, parsed.sourceTrackId, parsed.quality) as { url: string, expiresAtMs: number } | undefined
+  if (row == null) return null
+  if (typeof row.url != 'string' || row.url.length == 0 ||
+    !Number.isSafeInteger(row.expiresAtMs) || row.expiresAtMs < 0) {
+    throw new Error('music_url_cache_invalid')
+  }
+  if (row.expiresAtMs <= parsed.nowMs) return null
+  db.prepare(`
+    UPDATE music_urls
+    SET last_accessed_at_ms = CASE WHEN last_accessed_at_ms > ? THEN last_accessed_at_ms ELSE ? END
+    WHERE provider = ? AND account_scope = ? AND source_track_id = ? AND quality = ?
+  `).run(parsed.nowMs, parsed.nowMs, parsed.provider, parsed.accountScope, parsed.sourceTrackId, parsed.quality)
+  return row.url
+}
+
+export const musicUrlGet = async(input: MusicUrlGetInputV1): Promise<CacheReadResult<string>> => {
+  parseMusicUrlGetInput(input)
+  return runCacheRead(db => musicUrlGetSync(db, input))
+}
+
+export const musicUrlPutSync = (db: Database.Database, input: MusicUrlPutInputV1): void => {
+  const parsed = parseMusicUrlPutInput(input)
+  const expiresAtMs = expiryFor(parsed)
+  db.prepare(`
+    INSERT INTO music_urls(
+      provider, account_scope, source_track_id, quality, url,
+      expires_at_ms, created_at_ms, last_accessed_at_ms
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(provider, account_scope, source_track_id, quality) DO UPDATE SET
+      url = excluded.url,
+      expires_at_ms = excluded.expires_at_ms,
+      created_at_ms = excluded.created_at_ms,
+      last_accessed_at_ms = excluded.last_accessed_at_ms
+  `).run(
+    parsed.provider, parsed.accountScope, parsed.sourceTrackId, parsed.quality, parsed.url,
+    expiresAtMs, parsed.nowMs, parsed.nowMs,
+  )
 }
 
 export const musicUrlPut = async(input: MusicUrlPutInputV1): Promise<CacheWriteResult> => {
-  const parsed = parseMusicUrlPutInput(input)
-  const expiresAtMs = expiryFor(parsed)
-  const result = await runCacheWrite(db => {
-    db.prepare(`
-      INSERT INTO music_urls(
-        provider, account_scope, source_track_id, quality, url,
-        expires_at_ms, created_at_ms, last_accessed_at_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(provider, account_scope, source_track_id, quality) DO UPDATE SET
-        url = excluded.url,
-        expires_at_ms = excluded.expires_at_ms,
-        created_at_ms = excluded.created_at_ms,
-        last_accessed_at_ms = excluded.last_accessed_at_ms
-    `).run(
-      parsed.provider, parsed.accountScope, parsed.sourceTrackId, parsed.quality, parsed.url,
-      expiresAtMs, parsed.nowMs, parsed.nowMs,
-    )
-  })
+  expiryFor(parseMusicUrlPutInput(input))
+  const result = await runCacheWrite(db => musicUrlPutSync(db, input))
   if (result.status == 'stored') scheduleCachePruneAfterWrite('musicUrls')
   return result
 }

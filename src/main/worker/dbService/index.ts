@@ -1,14 +1,15 @@
 import {
+  advanceAppDatabase,
   close as closeAppDatabase,
   getDatabaseHealth,
   init,
 } from './db'
 import { exposeWorker } from '../utils/worker'
-import { list, lyric, musicUrlCache, otherSourceCache, download, dislike_list, account_profile, app_state, playback, phase3, cacheLifecycle } from './modules/index'
-import type { CachePhasePrerequisiteV1 } from '../../../common/storage/cachePhase'
+import { list, lyric, musicUrlCache, otherSourceCache, download, dislike_list, account_profile, app_state, playback, phase3, phase4, cacheLifecycle } from './modules/index'
+import type { CachePhase4Result, CachePhasePrerequisiteV1 } from '../../../common/storage/cachePhase'
 import { closeCacheDatabase } from './cacheDb'
 
-export { init }
+export { advanceAppDatabase, init }
 
 const close = async(): Promise<void> => {
   let failure: unknown | null = null
@@ -28,11 +29,12 @@ const close = async(): Promise<void> => {
 
 const common = {
   init,
+  advanceAppDatabase,
   close,
   getDatabaseHealth,
 }
 
-exposeWorker(Object.assign(common, list, lyric, musicUrlCache, otherSourceCache, download, dislike_list, account_profile, app_state, playback, phase3, cacheLifecycle))
+exposeWorker(Object.assign(common, list, lyric, musicUrlCache, otherSourceCache, download, dislike_list, account_profile, app_state, playback, phase3, phase4, cacheLifecycle))
 
 export type workerDBSeriveTypes = typeof common
   & typeof list
@@ -45,6 +47,8 @@ export type workerDBSeriveTypes = typeof common
   & typeof app_state
   & typeof playback
   & typeof phase3
+  & typeof phase4
   & typeof cacheLifecycle
 
 export type WorkerCachePhasePrerequisite = CachePhasePrerequisiteV1
+export type WorkerCachePhase4Result = CachePhase4Result

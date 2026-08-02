@@ -1,5 +1,5 @@
 import type { MigrationMarker } from '../../migrations/types'
-import { getDB } from '../../db'
+import { getAppDB } from '../../db'
 import { getMigrationMarker } from '../../migrate'
 import {
   createPhase3Manifest,
@@ -38,7 +38,7 @@ const prerequisite = <T extends Phase3PrerequisiteV1['markerName']>(
 ): Phase3PrerequisiteV1 & { markerName: T } => {
   let marker: MigrationMarker | null
   try {
-    marker = getMigrationMarker(getDB(), markerName)
+    marker = getMigrationMarker(getAppDB(), markerName)
   } catch {
     throw phase3Error('phase3_prerequisite_invalid', `Phase 3 prerequisite ${checkName} is invalid`)
   }
@@ -60,7 +60,7 @@ export const getPhase3AttestationPrerequisites = (value?: unknown): Phase3Attest
 export const getCachePhasePrerequisite = (value?: unknown): CachePhasePrerequisiteV1 => {
   if (value !== undefined) throw phase3Error('cache_phase3_prerequisite_invalid', 'cache_phase3_prerequisite_invalid')
   try {
-    return parseCachePhasePrerequisite(readCrossMarker(getDB()))
+    return parseCachePhasePrerequisite(readCrossMarker(getAppDB()))
   } catch {
     throw phase3Error('cache_phase3_prerequisite_invalid', 'cache_phase3_prerequisite_invalid')
   }
@@ -76,7 +76,7 @@ const assertPrerequisite = (
   }
 }
 
-const readCrossMarker = (db: ReturnType<typeof getDB>): MigrationMarker | null => {
+const readCrossMarker = (db: ReturnType<typeof getAppDB>): MigrationMarker | null => {
   const row = db.prepare<[string]>(`
     SELECT name, source_sha256 AS sourceSha256, completed_at_ms AS completedAtMs,
       details_json AS detailsJson
@@ -125,7 +125,7 @@ export const completePhase3Attestation = (value: unknown): MigrationMarker => {
     completedAtMs: command.completedAtMs,
     detailsJson: phase3ManifestJson(manifest),
   }
-  const db = getDB()
+  const db = getAppDB()
   return db.transaction(() => {
     let existing: MigrationMarker | null
     try {

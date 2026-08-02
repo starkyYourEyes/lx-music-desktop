@@ -103,7 +103,7 @@ const createWorkerStore = async() => {
     targetSchemaVersion: 6,
   })
   assert.equal(result.status, 'ready')
-  return dbService.getDB()
+  return dbService.getAppDB()
 }
 
 const writeRawCrossMarker = (db, marker) => db.prepare(`

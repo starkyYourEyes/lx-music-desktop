@@ -180,7 +180,7 @@ const openStore = async root => {
     targetSchemaVersion: 6,
   })
   assert.equal(result.status, 'ready')
-  return dbService.getDB()
+  return dbService.getAppDB()
 }
 
 const group = suffix => `123e4567-e89b-42d3-a456-4266141740${suffix}`

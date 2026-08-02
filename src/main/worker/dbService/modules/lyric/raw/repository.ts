@@ -1,8 +1,9 @@
-import { createHash } from 'node:crypto'
-import { getAppDB, getDatabaseInitialization } from '../../../db'
 import { runCacheImmediate, runCacheRead, type CacheExecutionResult, type CacheReadResult, type CacheWriteResult } from '../../../cacheDb'
 import { scheduleCachePruneAfterWrite } from '../../cacheLifecycle/prune'
 import { selectRawCounts, selectRawProviderRows, selectRawRows } from './statements'
+import { canonicalRawLyricHash } from '../../../../../migration/cache/rawLyrics'
+
+export { canonicalRawLyricHash }
 
 const keys = ['lyric', 'tlyric', 'rlyric', 'lxlyric'] as const
 type LyricKey = typeof keys[number]
@@ -24,6 +25,23 @@ const validLyrics = (value: unknown): value is LX.Music.LyricInfo => {
 }
 const invalidInput = (): Error & { code: 'raw_lyric_input_invalid' } => Object.assign(new Error('raw_lyric_input_invalid'), { code: 'raw_lyric_input_invalid' as const })
 
+export type RawLyricFallbackState = 'schema6-fallback' | 'cutover-pending-cache-only' | 'schema7-cache-only'
+let fallbackState: RawLyricFallbackState = 'schema6-fallback'
+
+export const enterRawLyricCutoverPending = (): void => {
+  if (fallbackState == 'schema6-fallback') fallbackState = 'cutover-pending-cache-only'
+}
+
+export const restoreRawLyricSchema6Fallback = (): void => {
+  if (fallbackState == 'cutover-pending-cache-only') fallbackState = 'schema6-fallback'
+}
+
+export const enterRawLyricSchema7CacheOnly = (): void => {
+  fallbackState = 'schema7-cache-only'
+}
+
+export const getRawLyricFallbackState = (): RawLyricFallbackState => fallbackState
+
 const lyricInfo = (rows: ReadonlyArray<{ lyricType: LyricKey, text: string }>): LX.Music.LyricInfo => {
   const result: LX.Music.LyricInfo = { lyric: '' }
   for (const row of rows) {
@@ -33,44 +51,7 @@ const lyricInfo = (rows: ReadonlyArray<{ lyricType: LyricKey, text: string }>): 
   return result
 }
 
-const decodeLegacyText = (value: unknown): string | null => {
-  if (typeof value != 'string' || value.length % 4 != 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return null
-  const bytes = Buffer.from(value, 'base64')
-  if (bytes.toString('base64') != value) return null
-  const text = bytes.toString('utf8')
-  return Buffer.from(text, 'utf8').equals(bytes) ? text : null
-}
-
-const appRaw = (id: string): LX.Music.LyricInfo | null => {
-  const rows = getAppDB().prepare(`
-    SELECT type, text FROM lyric
-    WHERE id = ? AND source = 'raw' AND type IN ('lyric', 'tlyric', 'rlyric', 'lxlyric')
-  `).all(id) as Array<{ type: unknown, text: unknown }>
-  const valid = rows.flatMap(row => {
-    const text = decodeLegacyText(row.text)
-    return text == null || !validKey(row.type) ? [] : [{ lyricType: row.type, text }]
-  })
-  return valid.length ? lyricInfo(valid) : null
-}
-
 const bytes = (text: string): number => Buffer.byteLength(text, 'utf8')
-export const canonicalRawLyricHash = (tuples: readonly RawLyricTuple[]): string => {
-  const hash = createHash('sha256')
-  const sorted = [...tuples].sort((left, right) => {
-    for (const field of ['provider', 'sourceTrackId', 'lyricType'] as const) {
-      const compared = Buffer.compare(Buffer.from(left[field], 'utf8'), Buffer.from(right[field], 'utf8'))
-      if (compared) return compared
-    }
-    return 0
-  })
-  for (const tuple of sorted) for (const field of [tuple.provider, tuple.sourceTrackId, tuple.lyricType, tuple.text]) {
-    const value = Buffer.from(field, 'utf8')
-    const length = Buffer.allocUnsafe(4)
-    length.writeUInt32BE(value.length)
-    hash.update(length).update(value)
-  }
-  return hash.digest('hex')
-}
 
 const replaceOwners = (db: Parameters<typeof selectRawRows>[0], provider: string, groups: Map<string, RawLyricTuple[]>, nowMs: number): void => {
   db.prepare(`DELETE FROM raw_lyric_groups WHERE provider = ?`).run(provider)
@@ -109,35 +90,52 @@ export const attestRawProvider = (provider: string): Promise<CacheReadResult<{ r
   })
 }
 
-export const rawLyricGet = async(input: { provider: string, sourceTrackId: string, nowMs: number }): Promise<CacheReadResult<LX.Music.LyricInfo>> => {
+type RawLyricGetInput = { provider: string, sourceTrackId: string, nowMs: number }
+type RawLyricPutInput = { provider: string, sourceTrackId: string, lyrics: LX.Music.LyricInfo, nowMs: number }
+
+export const rawLyricGetSync = (
+  db: Parameters<typeof selectRawRows>[0],
+  input: RawLyricGetInput,
+): LX.Music.LyricInfo | null => {
   if (!plainRecord(input) || !exactKeys(input, ['provider', 'sourceTrackId', 'nowMs']) || !validOwner(input.provider, input.sourceTrackId) || !validNow(input.nowMs)) throw invalidInput()
-  const result = await runCacheRead(db => {
-    const exact = selectRawRows(db, input.provider, input.sourceTrackId)
-    const legacy = exact.length ? exact : input.provider == 'legacy' ? [] : selectRawRows(db, 'legacy', input.sourceTrackId)
-    if (!legacy.length) return null
-    const provider = exact.length ? input.provider : 'legacy'
-    db.prepare(`UPDATE raw_lyric_groups SET last_accessed_at_ms = CASE WHEN last_accessed_at_ms > ? THEN last_accessed_at_ms ELSE ? END WHERE provider = ? AND source_track_id = ?`).run(input.nowMs, input.nowMs, provider, input.sourceTrackId)
-    return lyricInfo(legacy)
-  })
-  if (result.status == 'hit' || getDatabaseInitialization().schemaVersion != 6) return result
-  const fallback = appRaw(input.sourceTrackId)
+  const exact = selectRawRows(db, input.provider, input.sourceTrackId)
+  const legacy = exact.length ? exact : input.provider == 'legacy' ? [] : selectRawRows(db, 'legacy', input.sourceTrackId)
+  if (!legacy.length) return null
+  const provider = exact.length ? input.provider : 'legacy'
+  db.prepare(`UPDATE raw_lyric_groups SET last_accessed_at_ms = CASE WHEN last_accessed_at_ms > ? THEN last_accessed_at_ms ELSE ? END WHERE provider = ? AND source_track_id = ?`).run(input.nowMs, input.nowMs, provider, input.sourceTrackId)
+  return lyricInfo(legacy)
+}
+
+export const rawLyricGet = async(input: RawLyricGetInput): Promise<CacheReadResult<LX.Music.LyricInfo>> => {
+  if (!plainRecord(input) || !exactKeys(input, ['provider', 'sourceTrackId', 'nowMs']) || !validOwner(input.provider, input.sourceTrackId) || !validNow(input.nowMs)) throw invalidInput()
+  const result = await runCacheRead(db => rawLyricGetSync(db, input))
+  if (result.status == 'hit' || fallbackState != 'schema6-fallback') {
+    return fallbackState == 'schema6-fallback' || result.status != 'unavailable' ? result : { status: 'miss' }
+  }
+  // Loaded only on the schema-6 transition path; the migration module is the sole owner of authoritative raw SQL.
+  const { readAuthoritativeRawLyric } = require('../../../../../migration/cache/rawLyrics') as typeof import('../../../../../migration/cache/rawLyrics')
+  const fallback = readAuthoritativeRawLyric(input.sourceTrackId)
   return fallback == null ? result.status == 'unavailable' ? { status: 'miss' } : result : { status: 'hit', value: fallback }
 }
 
-export const rawLyricPut = async(input: { provider: string, sourceTrackId: string, lyrics: LX.Music.LyricInfo, nowMs: number }): Promise<CacheWriteResult> => {
+export const rawLyricPutSync = (
+  db: Parameters<typeof selectRawRows>[0],
+  input: RawLyricPutInput,
+): void => {
   if (!plainRecord(input) || !exactKeys(input, ['provider', 'sourceTrackId', 'lyrics', 'nowMs']) || !validOwner(input.provider, input.sourceTrackId) || !validNow(input.nowMs) || !validLyrics(input.lyrics)) throw invalidInput()
   const tuples = keys.filter(key => input.lyrics[key] != null).map(lyricType => ({ provider: input.provider, sourceTrackId: input.sourceTrackId, lyricType, text: input.lyrics[lyricType]! }))
-  const result = await runCacheImmediate(db => {
-    const groups = new Map([[input.sourceTrackId, tuples]])
-    db.prepare(`DELETE FROM raw_lyric_groups WHERE provider = ? AND source_track_id = ?`).run(input.provider, input.sourceTrackId)
-    if (tuples.length) {
-      const group = db.prepare(`INSERT INTO raw_lyric_groups(provider, source_track_id, byte_size, created_at_ms, last_accessed_at_ms) VALUES (?, ?, ?, ?, ?)`)
-      group.run(input.provider, input.sourceTrackId, tuples.reduce((sum, row) => sum + bytes(row.text), 0), input.nowMs, input.nowMs)
-      const insert = db.prepare(`INSERT INTO raw_lyrics(provider, source_track_id, lyric_type, text, byte_size) VALUES (?, ?, ?, ?, ?)`)
-      for (const row of tuples) insert.run(row.provider, row.sourceTrackId, row.lyricType, row.text, bytes(row.text))
-    }
-    return groups
-  })
+  db.prepare(`DELETE FROM raw_lyric_groups WHERE provider = ? AND source_track_id = ?`).run(input.provider, input.sourceTrackId)
+  if (tuples.length) {
+    const group = db.prepare(`INSERT INTO raw_lyric_groups(provider, source_track_id, byte_size, created_at_ms, last_accessed_at_ms) VALUES (?, ?, ?, ?, ?)`)
+    group.run(input.provider, input.sourceTrackId, tuples.reduce((sum, row) => sum + bytes(row.text), 0), input.nowMs, input.nowMs)
+    const insert = db.prepare(`INSERT INTO raw_lyrics(provider, source_track_id, lyric_type, text, byte_size) VALUES (?, ?, ?, ?, ?)`)
+    for (const row of tuples) insert.run(row.provider, row.sourceTrackId, row.lyricType, row.text, bytes(row.text))
+  }
+}
+
+export const rawLyricPut = async(input: RawLyricPutInput): Promise<CacheWriteResult> => {
+  if (!plainRecord(input) || !exactKeys(input, ['provider', 'sourceTrackId', 'lyrics', 'nowMs']) || !validOwner(input.provider, input.sourceTrackId) || !validNow(input.nowMs) || !validLyrics(input.lyrics)) throw invalidInput()
+  const result = await runCacheImmediate(db => rawLyricPutSync(db, input))
   if (result.status == 'completed') scheduleCachePruneAfterWrite('rawLyrics')
   return result.status == 'completed' ? { status: 'stored' } : result
 }

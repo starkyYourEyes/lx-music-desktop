@@ -1,4 +1,4 @@
-import { getDB } from '../../db'
+import { getAppDB } from '../../db'
 import {
   createListQueryStatement,
   createListInsertStatement,
@@ -41,7 +41,7 @@ export const queryAllUserList = () => {
  * @param isClear 是否清空列表
  */
 export const insertUserLists = (lists: LX.DBService.UserListInfo[], isClear: boolean = false) => {
-  const db = getDB()
+  const db = getAppDB()
   const listClearStatement = createListClearStatement()
   const listInsertStatement = createListInsertStatement()
   db.transaction((lists: LX.DBService.UserListInfo[]) => {
@@ -64,7 +64,7 @@ export const insertUserLists = (lists: LX.DBService.UserListInfo[], isClear: boo
  * @param listIds 列表id
  */
 export const deleteUserLists = (listIds: string[]) => {
-  const db = getDB()
+  const db = getAppDB()
   const listDeleteStatement = createListDeleteStatement()
   const musicInfoDeleteByListIdStatement = createMusicInfoDeleteByListIdStatement()
   const musicInfoOrderDeleteByListIdStatement = createMusicInfoOrderDeleteByListIdStatement()
@@ -82,7 +82,7 @@ export const deleteUserLists = (listIds: string[]) => {
  * @param lists 列表
  */
 export const updateUserLists = (lists: LX.DBService.UserListInfo[]) => {
-  const db = getDB()
+  const db = getAppDB()
   const listUpdateStatement = createListUpdateStatement()
   db.transaction((lists: LX.DBService.UserListInfo[]) => {
     for (const list of lists) listUpdateStatement.run(list)
@@ -97,7 +97,7 @@ export const updateUserLists = (lists: LX.DBService.UserListInfo[]) => {
 export const insertMusicInfoList = (list: LX.DBService.MusicInfo[]) => {
   const musicInfoInsertStatement = createMusicInfoInsertStatement()
   const musicInfoOrderInsertStatement = createMusicInfoOrderInsertStatement()
-  const db = getDB()
+  const db = getAppDB()
   db.transaction((musics: LX.DBService.MusicInfo[]) => {
     for (const music of musics) {
       musicInfoInsertStatement.run(music)
@@ -121,7 +121,7 @@ export const insertMusicInfoListAndRefreshOrder = (list: LX.DBService.MusicInfo[
   const musicInfoOrderInsertStatement = createMusicInfoOrderInsertStatement()
   const musicInfoOrderDeleteByListIdStatement = createMusicInfoOrderDeleteByListIdStatement()
 
-  const db = getDB()
+  const db = getAppDB()
   db.transaction((list: LX.DBService.MusicInfo[], listId: string, listAll: LX.DBService.MusicInfo[]) => {
     musicInfoOrderDeleteByListIdStatement.run(listId)
     for (const music of list) {
@@ -148,7 +148,7 @@ export const insertMusicInfoListAndRefreshOrder = (list: LX.DBService.MusicInfo[
  */
 export const updateMusicInfos = (list: LX.DBService.MusicInfo[]) => {
   const musicInfoUpdateStatement = createMusicInfoUpdateStatement()
-  const db = getDB()
+  const db = getAppDB()
   db.transaction((musics: LX.DBService.MusicInfo[]) => {
     for (const music of musics) {
       musicInfoUpdateStatement.run(music)
@@ -179,7 +179,7 @@ export const moveMusicInfo = (fromId: string, ids: string[], musicInfos: LX.DBSe
   const musicInfoOrderDeleteStatement = createMusicInfoOrderDeleteStatement()
   // const musicInfoOrderDeleteByListIdStatement = createMusicInfoOrderDeleteByListIdStatement()
 
-  const db = getDB()
+  const db = getAppDB()
   db.transaction((fromId: string, ids: string[], musicInfos: LX.DBService.MusicInfo[]) => {
     // musicInfoOrderDeleteByListIdStatement.run(fromId)
     for (const id of ids) {
@@ -211,7 +211,7 @@ export const moveMusicInfoAndRefreshOrder = (fromId: string, ids: string[], toId
   const musicInfoOrderInsertStatement = createMusicInfoOrderInsertStatement()
   const musicInfoOrderDeleteByListIdStatement = createMusicInfoOrderDeleteByListIdStatement()
 
-  const db = getDB()
+  const db = getAppDB()
   db.transaction((fromId: string, ids: string[], musicInfos: LX.DBService.MusicInfo[], toListAll: LX.DBService.MusicInfo[]) => {
     for (const id of ids) {
       musicInfoDeleteStatement.run({ listId: fromId, id })
@@ -244,7 +244,7 @@ export const moveMusicInfoAndRefreshOrder = (fromId: string, ids: string[], toId
 export const removeMusicInfos = (listId: string, ids: string[]) => {
   const musicInfoDeleteStatement = createMusicInfoDeleteStatement()
   const musicInfoOrderDeleteStatement = createMusicInfoOrderDeleteStatement()
-  const db = getDB()
+  const db = getAppDB()
   db.transaction((listId: string, ids: string[]) => {
     for (const id of ids) {
       musicInfoDeleteStatement.run({ listId, id })
@@ -258,7 +258,7 @@ export const removeMusicInfos = (listId: string, ids: string[]) => {
  * @param listId 列表id
  */
 export const removeMusicInfoByListId = (ids: string[]) => {
-  const db = getDB()
+  const db = getAppDB()
   const musicInfoDeleteByListIdStatement = createMusicInfoDeleteByListIdStatement()
   const musicInfoOrderDeleteByListIdStatement = createMusicInfoOrderDeleteByListIdStatement()
   db.transaction((ids: string[]) => {
@@ -296,7 +296,7 @@ export const queryMusicInfoByMusicInfoId = (id: string) => {
  * @param musicInfoOrders 音乐顺序
  */
 export const updateMusicInfoOrder = (listId: string, musicInfoOrders: LX.DBService.MusicInfoOrder[]) => {
-  const db = getDB()
+  const db = getAppDB()
   const musicInfoOrderInsertStatement = createMusicInfoOrderInsertStatement()
   const musicInfoOrderDeleteByListIdStatement = createMusicInfoOrderDeleteByListIdStatement()
   db.transaction((listId: string, musicInfoOrders: LX.DBService.MusicInfoOrder[]) => {
@@ -311,7 +311,7 @@ export const updateMusicInfoOrder = (listId: string, musicInfoOrders: LX.DBServi
  * @param musicInfos 歌曲列表
  */
 export const overwriteMusicInfo = (listId: string, musicInfos: LX.DBService.MusicInfo[]) => {
-  const db = getDB()
+  const db = getAppDB()
   const musicInfoDeleteByListIdStatement = createMusicInfoDeleteByListIdStatement()
   const musicInfoOrderDeleteByListIdStatement = createMusicInfoOrderDeleteByListIdStatement()
   const musicInfoInsertStatement = createMusicInfoInsertStatement()
@@ -336,7 +336,7 @@ export const overwriteMusicInfo = (listId: string, musicInfos: LX.DBService.Musi
  * @param musicInfos 歌曲列表
  */
 export const overwriteListData = (lists: LX.DBService.UserListInfo[], musicInfos: LX.DBService.MusicInfo[]) => {
-  const db = getDB()
+  const db = getAppDB()
   const listClearStatement = createListClearStatement()
   const listInsertStatement = createListInsertStatement()
   const musicInfoClearStatement = createMusicInfoClearStatement()

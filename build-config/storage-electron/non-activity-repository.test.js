@@ -39,7 +39,7 @@ const createStore = async(prefix = 'lx-non-activity-') => {
     targetSchemaVersion: 6,
   })
   assert.equal(result.status, 'ready')
-  return { root, result, db: dbService.getDB() }
+  return { root, result, db: dbService.getAppDB() }
 }
 
 const getRepository = () => require('../../src/main/worker/dbService/modules/app_state/index.ts')

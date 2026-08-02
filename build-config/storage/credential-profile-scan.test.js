@@ -933,7 +933,10 @@ describe('credential startup gate', () => {
       sourceSha256: 'f'.repeat(64),
       completedAtMs: 1,
     })
-    deps.initializePhase4 = async() => { calls.push('phase4:initialize'); return { schemaVersion: 7 } }
+    deps.initializePhase4 = async() => {
+      calls.push('phase4:initialize')
+      return { schemaVersion: 7, typedOwnershipVerified: true }
+    }
     deps.acknowledgePortableProfileStartup = async actualToken => {
       assert.strictEqual(actualToken, token)
       calls.push('portable:acknowledge')

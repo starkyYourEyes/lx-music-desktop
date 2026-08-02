@@ -137,7 +137,7 @@ const createFixture = async(parsed, { vaultMode = 'encrypted' } = {}) => {
     snapshot,
     run,
     restart,
-    db: () => dbService.getDB(),
+    db: () => dbService.getAppDB(),
     vault: () => vault,
   }
 }

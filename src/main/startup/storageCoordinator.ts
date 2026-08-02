@@ -16,10 +16,9 @@ import type {
   Phase3AttestationPrerequisitesV1,
   Phase3CheckState,
 } from '../../common/storage/phase3'
-import type { CachePhasePrerequisiteV1 } from '../../common/storage/cachePhase'
+import type { CachePhase4Result, CachePhasePrerequisiteV1 } from '../../common/storage/cachePhase'
 import type { Phase3CredentialHealth, Phase3PlaybackSmokeEvidence } from './phase3Attestation'
 import type { PortableProfileStartupToken } from '../migration/portableProfile'
-import type { RawLyricMigrationResult } from '../migration/cache/rawLyrics'
 import type { CacheManager } from '../services/cacheManager'
 
 export type StorageRecoveryTarget =
@@ -106,7 +105,7 @@ export interface StorageCoordinatorDependencies {
     smoke: Phase3PlaybackSmokeEvidence
   }) => Promise<void> | void
   getCachePhasePrerequisite?: () => Promise<CachePhasePrerequisiteV1> | CachePhasePrerequisiteV1
-  initializePhase4?: (prerequisite: CachePhasePrerequisiteV1) => Promise<{ schemaVersion: 6 | 7 }> | { schemaVersion: 6 | 7 }
+  initializePhase4?: () => Promise<CachePhase4Result> | CachePhase4Result
   portableProfileToken?: PortableProfileStartupToken
   acknowledgePortableProfileStartup?: (
     token: PortableProfileStartupToken,
@@ -375,58 +374,28 @@ const fixedCredentialHealth = (check: CredentialStartupCheck): Phase3CredentialH
 
 interface ProductionCacheLifecycle {
   getCachePhasePrerequisite: () => Promise<CachePhasePrerequisiteV1> | CachePhasePrerequisiteV1
-  openCacheDatabase: () => Promise<{
-    status: 'ready' | 'created' | 'recreated' | 'unavailable'
-    schemaVersion: 1 | null
-    diagnostic: string | null
-  }>
-  migrateRawLyrics?: (input: { nowMs: number }) => Promise<RawLyricMigrationResult> | RawLyricMigrationResult
+  initializePhase4: () => Promise<CachePhase4Result> | CachePhase4Result
 }
-
-const cacheDiagnosticCodes = new Set([
-  'cache_target_invalid',
-  'cache_open_failed',
-  'cache_schema_invalid',
-  'cache_integrity_failed',
-  'cache_operation_failed',
-  'cache_close_failed',
-  'cache_delete_failed',
-  'cache_reopen_failed',
-  'cache_capacity_unavailable',
-])
 
 const getProductionCacheLifecycle = (): ProductionCacheLifecycle | null => {
   if (typeof globalThis.lx == 'undefined') return null
   const repository = globalThis.lx.worker?.dbService
   if (repository == null || typeof repository.getCachePhasePrerequisite != 'function' ||
-    typeof repository.openCacheDatabase != 'function') {
+    typeof repository.initializePhase4 != 'function') {
     throw errorWithCode('cache_phase4_result_invalid')
   }
   return repository
 }
 
-const isValidRawLyricMigrationResult = (value: unknown): boolean => {
-  if (value == null || typeof value != 'object' || Array.isArray(value) || Object.getPrototypeOf(value) != Object.prototype) return false
+const isValidPhase4Result = (value: unknown): value is CachePhase4Result => {
+  if (value == null || typeof value != 'object' || Array.isArray(value) ||
+    Object.getPrototypeOf(value) != Object.prototype) return false
   const result = value as Record<string, unknown>
-  if (result.status == 'unavailable') return Object.keys(result).length == 2 && typeof result.code == 'string' && cacheDiagnosticCodes.has(result.code)
-  if (result.status != 'complete' && result.status != 'already-complete') return false
-  const fields = ['sourceRows', 'sourceOwnerGroups', 'skippedInvalidRows', 'targetRows', 'targetOwnerGroups']
-  return Object.keys(result).length == 8 && fields.every(field => Number.isSafeInteger(result[field]) && (result[field] as number) >= 0) &&
-    typeof result.sourceSha256 == 'string' && typeof result.targetSha256 == 'string' &&
-    /^[a-f0-9]{64}$/.test(result.sourceSha256) && result.sourceSha256 == result.targetSha256 &&
-    result.sourceRows == result.targetRows && result.sourceOwnerGroups == result.targetOwnerGroups
-}
-
-const isValidCacheOpenResult = (value: Awaited<ReturnType<ProductionCacheLifecycle['openCacheDatabase']>>): boolean => {
-  if (value == null || typeof value != 'object' || Object.getPrototypeOf(value) != Object.prototype) return false
-  const keys = Reflect.ownKeys(value)
-  if (keys.length != 3 || !keys.includes('status') || !keys.includes('schemaVersion') || !keys.includes('diagnostic')) {
-    return false
-  }
-  return value.status == 'ready' || value.status == 'created' || value.status == 'recreated'
-    ? value.schemaVersion == 1 && value.diagnostic == null
-    : value.status == 'unavailable' && value.schemaVersion == null &&
-        typeof value.diagnostic == 'string' && cacheDiagnosticCodes.has(value.diagnostic)
+  const keys = Reflect.ownKeys(result)
+  return keys.length == 2 && keys.includes('schemaVersion') && keys.includes('typedOwnershipVerified') &&
+    (result.schemaVersion == 6 || result.schemaVersion == 7) &&
+    typeof result.typedOwnershipVerified == 'boolean' &&
+    !(result.schemaVersion == 6 && result.typedOwnershipVerified)
 }
 
 export const createStorageCoordinator = (
@@ -503,33 +472,21 @@ export const createStorageCoordinator = (
           : getProductionCacheLifecycle()
         const readCachePrerequisite = dependencies.getCachePhasePrerequisite ??
           (productionCache == null ? undefined : async() => productionCache.getCachePhasePrerequisite())
-        const initializePhase4 = dependencies.initializePhase4 ?? (productionCache == null
-          ? undefined
-          : async() => {
-            const cacheResult = await productionCache.openCacheDatabase()
-            if (!isValidCacheOpenResult(cacheResult) ||
-                (database.schemaVersion != 6 && database.schemaVersion != 7)) {
-              throw errorWithCode('cache_phase4_result_invalid')
-            }
-            if (cacheResult.status == 'unavailable') return { schemaVersion: database.schemaVersion }
-            if (typeof productionCache.migrateRawLyrics != 'function') throw errorWithCode('cache_phase4_result_invalid')
-            const migrationResult = await productionCache.migrateRawLyrics({ nowMs: dependencies.now?.() ?? Date.now() })
-            if (!isValidRawLyricMigrationResult(migrationResult)) throw errorWithCode('cache_phase4_result_invalid')
-            return { schemaVersion: database.schemaVersion }
-          })
+        const initializePhase4 = dependencies.initializePhase4 ?? productionCache?.initializePhase4
         if (initializePhase4 != null && readCachePrerequisite == null) {
           throw errorWithCode('cache_phase3_prerequisite_invalid')
         }
         const cachePrerequisite = await readCachePrerequisite?.()
         if (shutdownRequested) return startupCancelled()
-        const phase4 = cachePrerequisite == null ? undefined : await initializePhase4?.(cachePrerequisite)
+        const phase4 = cachePrerequisite == null ? undefined : await initializePhase4?.()
         if (shutdownRequested) return startupCancelled()
         let acknowledgementToArm: (() => Promise<void>) | null = null
         if (phase4 != null) {
-          if (phase4.schemaVersion != 6 && phase4.schemaVersion != 7) {
+          if (!isValidPhase4Result(phase4)) {
             throw errorWithCode('cache_phase4_result_invalid')
           }
-          if (dependencies.portableProfileToken != null) {
+          if (phase4.schemaVersion == 7 && phase4.typedOwnershipVerified &&
+            dependencies.portableProfileToken != null) {
             const token = dependencies.portableProfileToken
             const acknowledge = dependencies.acknowledgePortableProfileStartup
             if (acknowledge == null) {

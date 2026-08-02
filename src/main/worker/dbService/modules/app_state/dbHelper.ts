@@ -8,7 +8,7 @@ import {
   parsePlaylistMetadataCommand,
   parseSearchHistoryCommand,
 } from '../../../../../common/storage/stateValidation'
-import { getDB } from '../../db'
+import { getAppDB } from '../../db'
 import { getMigrationMarker, putMigrationMarker } from '../../migrate'
 import type { MigrationMarker } from '../../migrations/types'
 import type {
@@ -265,7 +265,7 @@ const validateImport = (input: unknown): {
 }
 
 const markerNeedsImport = (marker: NonActivityMarkerCommandV1): boolean => {
-  const existing = getMigrationMarker(getDB(), marker.name)
+  const existing = getMigrationMarker(getAppDB(), marker.name)
   if (existing == null) return true
   if (existing.sourceSha256 != marker.sourceSha256) {
     throw new Error(`Migration marker ${marker.name} source conflict`)
@@ -283,7 +283,7 @@ export const queryLocalState = (): LocalStateSnapshotV1 => readLocalState()
 
 export const updateLocalState = (input: unknown): LocalStateSnapshotV1 => {
   const update = parseLocalStateUpdate(input)
-  return getDB().transaction(() => {
+  return getAppDB().transaction(() => {
     createUpsertLocalStateStatement().run({
       key: update.key,
       version: 1,
@@ -295,7 +295,7 @@ export const updateLocalState = (input: unknown): LocalStateSnapshotV1 => {
 }
 
 export const deleteAllLocalState = (): void => {
-  getDB().transaction(() => {
+  getAppDB().transaction(() => {
     createClearLocalStateStatement().run()
     readLocalState()
   })()
@@ -309,7 +309,7 @@ export const queryPlaylistMetadata = (): LX.List.ListUpdateInfo => readPlaylistM
 
 export const mutatePlaylistMetadata = (input: unknown): LX.List.ListUpdateInfo => {
   const command = parsePlaylistMetadataCommand(input)
-  return getDB().transaction(() => {
+  return getAppDB().transaction(() => {
     switch (command.action) {
       case 'upsert': {
         const exists = createHasPlaylistMetadataStatement().get(command.playlistId) != null
@@ -333,7 +333,7 @@ export const mutatePlaylistMetadata = (input: unknown): LX.List.ListUpdateInfo =
       case 'retain': {
         const ids = Array.from(new Set(command.playlistIds))
         if (ids.length == 0) createClearPlaylistMetadataStatement().run()
-        else getDB().prepare(`DELETE FROM playlist_metadata WHERE playlist_id NOT IN (${ids.map(() => '?').join(', ')})`).run(...ids)
+        else getAppDB().prepare(`DELETE FROM playlist_metadata WHERE playlist_id NOT IN (${ids.map(() => '?').join(', ')})`).run(...ids)
         break
       }
     }
@@ -345,7 +345,7 @@ export const querySearchHistory = (): string[] => readSearchHistory()
 
 export const mutateSearchHistory = (input: unknown): string[] => {
   const command = parseSearchHistoryCommand(input)
-  return getDB().transaction(() => {
+  return getAppDB().transaction(() => {
     switch (command.action) {
       case 'record': {
         const existing = createGetSearchHistoryTermStatement().get(command.term)
@@ -375,7 +375,7 @@ export const mutateSearchHistory = (input: unknown): string[] => {
   })()
 }
 
-export const importLegacyState = (input: unknown): LegacyNonActivityImportResultV1 => getDB().transaction(() => {
+export const importLegacyState = (input: unknown): LegacyNonActivityImportResultV1 => getAppDB().transaction(() => {
   const normalized = validateImport(input)
   const importLocalState = markerNeedsImport(normalized.markers.localState)
   const importPlaylistMetadata = markerNeedsImport(normalized.markers.playlistMetadata)
@@ -405,9 +405,9 @@ export const importLegacyState = (input: unknown): LegacyNonActivityImportResult
     assertSame(normalized.searchHistory, readSearchHistory(), 'Search history')
   }
 
-  if (importLocalState) putMigrationMarker(getDB(), normalized.markers.localState)
-  if (importPlaylistMetadata) putMigrationMarker(getDB(), normalized.markers.playlistMetadata)
-  if (importSearchHistory) putMigrationMarker(getDB(), normalized.markers.searchHistory)
+  if (importLocalState) putMigrationMarker(getAppDB(), normalized.markers.localState)
+  if (importPlaylistMetadata) putMigrationMarker(getAppDB(), normalized.markers.playlistMetadata)
+  if (importSearchHistory) putMigrationMarker(getAppDB(), normalized.markers.searchHistory)
   return {
     localState: readLocalState(),
     playlistMetadata: readPlaylistMetadata(),
@@ -417,12 +417,12 @@ export const importLegacyState = (input: unknown): LegacyNonActivityImportResult
 
 export const queryNonActivityMarker = (name: unknown): MigrationMarker | null => {
   assertMarkerName(name)
-  return getMigrationMarker(getDB(), name)
+  return getMigrationMarker(getAppDB(), name)
 }
 
 export const completeNonActivityMarker = (input: unknown): void => {
   const marker = validateMarker(input)
-  getDB().transaction(() => {
-    putMigrationMarker(getDB(), marker)
+  getAppDB().transaction(() => {
+    putMigrationMarker(getAppDB(), marker)
   })()
 }

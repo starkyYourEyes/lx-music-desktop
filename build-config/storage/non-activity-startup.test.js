@@ -144,6 +144,13 @@ const installProductionRepository = (directory, overrides = {}) => {
         applyPlaylistMetadata: async() => {},
         getSearchHistory: async() => [],
         applySearchHistory: async() => {},
+        getCachePhasePrerequisite: async() => ({
+          version: 1,
+          markerName: 'legacy_data_v1.cross_artifact_complete',
+          sourceSha256: 'f'.repeat(64),
+          completedAtMs: 1,
+        }),
+        initializePhase4: async() => ({ schemaVersion: 6, typedOwnershipVerified: false }),
         ...overrides,
       },
     },
@@ -329,7 +336,7 @@ describe('non-activity startup gate', () => {
 
     const outcome = await createStorageCoordinator(dependencies).start()
 
-    assert.deepEqual(outcome, { status: 'ready', schemaVersion: 5 })
+    assert.deepEqual(outcome, { status: 'ready', schemaVersion: 6 })
     assert.equal(calls.includes('settings:init'), true)
     assert.equal(calls.includes('modules:register'), true)
     assert.equal(calls.includes('window:create'), true)
@@ -398,7 +405,7 @@ describe('non-activity startup gate', () => {
     const { createStorageCoordinator } = require(coordinatorPath)
 
     const outcome = await createStorageCoordinator(createDependencies(calls, { verifyPhase2Storage: undefined })).start()
-    assert.deepEqual(outcome, { status: 'ready', schemaVersion: 5 })
+    assert.deepEqual(outcome, { status: 'ready', schemaVersion: 6 })
 
     const { Store } = loadSourceModule(storePath)
     const { createDataHandlers } = loadSourceModule(dataHandlerPath)

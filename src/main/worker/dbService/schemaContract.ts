@@ -68,7 +68,7 @@ const nullableSafeInteger = (name: string, minimum = 0, maximum = MAX_SAFE_INTEG
   expression: `${name} IS NULL OR (typeof(${name}) = 'integer' AND ${name} BETWEEN ${minimum} AND ${maximum})`,
 })
 
-export const databaseSchemaContract: SchemaContract = {
+export const databaseSchema6Contract: SchemaContract = {
   tables: [
     {
       name: 'db_info',
@@ -609,5 +609,13 @@ export const databaseSchemaContract: SchemaContract = {
     },
   ],
 }
+
+export const databaseSchema7Contract: SchemaContract = {
+  tables: databaseSchema6Contract.tables.filter(table =>
+    table.name != 'music_info_other_source' && table.name != 'music_url'),
+}
+
+// Existing callers validate the transition schema explicitly through version 6.
+export const databaseSchemaContract = databaseSchema6Contract
 
 export default databaseSchemaContract

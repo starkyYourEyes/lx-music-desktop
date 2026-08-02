@@ -445,4 +445,23 @@ describe('scoped cache ownership callsites', () => {
     assert.doesNotMatch(active, /FROM\s+["']?(?:main\.)?["']?music_url["']?\s+WHERE\s+["']?id["']?\s*=\s*\?/i)
     assert.doesNotMatch(active, /music_info_other_source[\s\S]{0,160}WHERE\s+["']?source_id["']?\s*=\s*\?/i)
   })
+
+  it('keeps database ownership explicit and confines authoritative raw reads to migration', () => {
+    const trees = [
+      ...readTree('src/main/worker/dbService'),
+      ...readTree('build-config/storage-electron'),
+      ...readTree('build-config/storage'),
+    ]
+    const combined = trees.map(({ file, text }) => `/* ${file} */\n${text}`).join('\n')
+    assert.doesNotMatch(combined, new RegExp(`\\bget${'D'}B\\b`))
+
+    const authoritativeRawReaders = [
+      ...readTree('src/main'),
+      ...readTree('build-config'),
+    ].filter(({ file, text }) =>
+      file != path.join('src', 'main', 'migration', 'cache', 'rawLyrics.ts') &&
+      /\bFROM\s+(?:["'`]?(?:main\.)?["'`]?)?lyric\b[\s\S]{0,240}\bsource\s*=\s*["']raw["']/i.test(text),
+    ).map(({ file }) => file)
+    assert.deepEqual(authoritativeRawReaders, [])
+  })
 })

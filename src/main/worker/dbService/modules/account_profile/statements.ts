@@ -1,4 +1,4 @@
-import { getDB } from '../../db'
+import { getAppDB } from '../../db'
 import type { AccountProfileProvider, AccountProfileRow } from './index'
 
 interface AccountProfileDatabaseRow {
@@ -7,13 +7,13 @@ interface AccountProfileDatabaseRow {
   updated_at_ms: number
 }
 
-export const createGetAccountProfileStatement = () => getDB().prepare<[AccountProfileProvider], AccountProfileDatabaseRow>(`
+export const createGetAccountProfileStatement = () => getAppDB().prepare<[AccountProfileProvider], AccountProfileDatabaseRow>(`
   SELECT provider, profile_json, updated_at_ms
   FROM account_profiles
   WHERE provider = ?
 `)
 
-export const createUpsertAccountProfileStatement = () => getDB().prepare<[AccountProfileRow]>(`
+export const createUpsertAccountProfileStatement = () => getAppDB().prepare<[AccountProfileRow]>(`
   INSERT INTO account_profiles (provider, profile_json, updated_at_ms)
   VALUES (@provider, @profileJson, @updatedAtMs)
   ON CONFLICT(provider) DO UPDATE SET
@@ -21,7 +21,7 @@ export const createUpsertAccountProfileStatement = () => getDB().prepare<[Accoun
     updated_at_ms = excluded.updated_at_ms
 `)
 
-export const createRemoveAccountProfileStatement = () => getDB().prepare<[AccountProfileProvider]>(`
+export const createRemoveAccountProfileStatement = () => getAppDB().prepare<[AccountProfileProvider]>(`
   DELETE FROM account_profiles
   WHERE provider = ?
 `)

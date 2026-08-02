@@ -24,7 +24,7 @@ const actualMigrations = require('../../src/main/worker/dbService/migrations/ind
 const actualVerify = require('../../src/main/worker/dbService/verifyDB.ts')
 const tables = require('../../src/main/worker/dbService/tables.ts').default
 const { createAtomicJsonFile } = require('../../src/main/storage/atomicJsonFile.ts')
-const currentSchemaVersion = actualMigrations.migrations.at(-1).version
+const currentSchemaVersion = 6
 const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const MIGRATION_3_CHECKSUM = '9243aa510e8355d2c3d0f687c6736654adf584ec6007b1bcf46f374a9d694e41'
@@ -270,7 +270,10 @@ const createCurrentDatabase = databasePath => {
   try {
     db.pragma('foreign_keys = ON')
     db.pragma('journal_mode = WAL')
-    actualMigrate.runMigrations(db, actualMigrations.migrations, { now: () => 1000 })
+    actualMigrate.runMigrations(db, actualMigrations.migrations, {
+      targetSchemaVersion: currentSchemaVersion,
+      now: () => 1000,
+    })
     db.pragma('wal_checkpoint(TRUNCATE)')
   } finally {
     db.close()

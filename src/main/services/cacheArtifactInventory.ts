@@ -18,7 +18,8 @@ export type CacheArtifactClearResult =
   }
 
 export interface CacheArtifactInventory {
-  clearOwnedArtifacts: () => CacheArtifactClearResult
+  // eslint-disable-next-line @typescript-eslint/method-signature-style -- Preserve the exported method contract.
+  clearOwnedArtifacts(): CacheArtifactClearResult
 }
 
 interface CacheArtifactInventoryOptions {

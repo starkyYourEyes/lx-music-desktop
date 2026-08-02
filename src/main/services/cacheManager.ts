@@ -18,12 +18,15 @@ export interface CacheClearResult {
 }
 
 export interface CacheManager {
-  clearAll: () => Promise<CacheClearResult>
+  // eslint-disable-next-line @typescript-eslint/method-signature-style -- Preserve the exported method contract.
+  clearAll(): Promise<CacheClearResult>
 }
 
 interface CacheResetWorker {
-  beginCacheReset: () => Promise<LX.DBService.CacheResetLease>
-  finishCacheReset: (input: LX.DBService.CacheResetLease) => Promise<LX.DBService.CacheOpenResult>
+  // eslint-disable-next-line @typescript-eslint/method-signature-style -- Preserve the worker method contract.
+  beginCacheReset(): Promise<LX.DBService.CacheResetLease>
+  // eslint-disable-next-line @typescript-eslint/method-signature-style -- Preserve method parameter bivariance in the worker contract.
+  finishCacheReset(input: LX.DBService.CacheResetLease): Promise<LX.DBService.CacheOpenResult>
 }
 
 interface CacheManagerOptions {

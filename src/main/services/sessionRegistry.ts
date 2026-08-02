@@ -11,12 +11,15 @@ export type SessionClearResult =
 
 export interface SessionRegistration {
   ready: Promise<void>
-  unregister: () => void
+  // eslint-disable-next-line @typescript-eslint/method-signature-style -- Preserve the exported method contract.
+  unregister(): void
 }
 
 export interface SessionRegistry {
-  register: (input: { key: string, session: Electron.Session }) => SessionRegistration
-  clearRegisteredCaches: () => Promise<SessionClearResult[]>
+  // eslint-disable-next-line @typescript-eslint/method-signature-style -- Preserve method parameter bivariance in the exported contract.
+  register(input: { key: string, session: Electron.Session }): SessionRegistration
+  // eslint-disable-next-line @typescript-eslint/method-signature-style -- Preserve the exported method contract.
+  clearRegisteredCaches(): Promise<SessionClearResult[]>
 }
 
 interface SessionRecord {

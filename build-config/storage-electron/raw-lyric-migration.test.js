@@ -160,6 +160,18 @@ describe('raw lyric cache migration', () => {
     assert.deepEqual(await rawLyricGet({ provider: 'tx', sourceTrackId: 'bad-fallback', nowMs: 1000 }), { status: 'miss' })
   })
 
+  it('ignores unsupported authoritative lyric types during schema-6 fallback', async() => {
+    await createFixture()
+    const insert = dbService.getAppDB().prepare(`INSERT INTO lyric(id, type, text, source) VALUES (?, ?, ?, ?)`)
+    insert.run('typed-fallback', 'lyric', Buffer.from('supported').toString('base64'), 'raw')
+    insert.run('typed-fallback', 'arbitrary', Buffer.from('must not leak').toString('base64'), 'raw')
+
+    const { rawLyricGet } = require('../../src/main/worker/dbService/modules/lyric/raw/repository.ts')
+    assert.deepEqual(await rawLyricGet({ provider: 'tx', sourceTrackId: 'typed-fallback', nowMs: 1000 }), {
+      status: 'hit', value: { lyric: 'supported' },
+    })
+  })
+
   it('maps malformed existing markers to a fixed code before cache mutation', async() => {
     await createFixture()
     const db = dbService.getAppDB()
@@ -414,6 +426,34 @@ describe('raw lyric cache migration', () => {
     const { migrateRawLyrics } = require('../../src/main/migration/cache/rawLyrics.ts')
     assert.deepEqual(await migrateRawLyrics({ nowMs: 100 }), { status: 'unavailable', code: 'cache_open_failed' })
     assert.equal(db.prepare(`SELECT count(*) AS count FROM migration_markers WHERE name = ?`).get('legacy_cache_v1.raw_lyrics').count, 0)
+  })
+
+  it('rejects duplicate valid source tuples before cache mutation', async() => {
+    await createFixture()
+    const db = dbService.getAppDB()
+    const insert = db.prepare(`INSERT INTO lyric(id, type, text, source) VALUES (?, ?, ?, ?)`)
+    insert.run('duplicate', 'lyric', Buffer.from('first source').toString('base64'), 'raw')
+    insert.run('duplicate', 'lyric', Buffer.from('second source').toString('base64'), 'raw')
+    const { rawLyricPut } = require('../../src/main/worker/dbService/modules/lyric/raw/repository.ts')
+    await rawLyricPut({ provider: 'legacy', sourceTrackId: 'sentinel', lyrics: { lyric: 'preserve me' }, nowMs: 10 })
+
+    const { migrateRawLyrics } = require('../../src/main/migration/cache/rawLyrics.ts')
+    await assert.rejects(migrateRawLyrics({ nowMs: 100 }), error => error?.code == 'raw_lyric_attestation_failed')
+
+    assert.equal(await cacheDb.getCacheLifecycleState(), 'ready')
+    assert.equal(db.prepare(`SELECT count(*) AS count FROM migration_markers WHERE name = ?`).get('legacy_cache_v1.raw_lyrics').count, 0)
+    assert.deepEqual(await cacheDb.runCacheRead(cache => cache.prepare(`
+      SELECT r.provider, r.source_track_id AS sourceTrackId, r.lyric_type AS lyricType, r.text,
+        g.byte_size AS byteSize, g.created_at_ms AS createdAtMs, g.last_accessed_at_ms AS lastAccessedAtMs
+      FROM raw_lyrics r JOIN raw_lyric_groups g USING (provider, source_track_id)
+      WHERE r.provider = 'legacy' ORDER BY r.source_track_id, r.lyric_type
+    `).all()), {
+      status: 'hit',
+      value: [{
+        provider: 'legacy', sourceTrackId: 'sentinel', lyricType: 'lyric', text: 'preserve me',
+        byteSize: Buffer.byteLength('preserve me'), createdAtMs: 10, lastAccessedAtMs: 10,
+      }],
+    })
   })
 
   it('prefers exact providers, then legacy cache, then schema-6 authoritative fallback', async() => {

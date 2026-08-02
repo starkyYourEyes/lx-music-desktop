@@ -495,7 +495,9 @@ export const createStorageCoordinator = (
         const legacySourceState = legacyData.status == 'available' ? 'complete' : 'not-applicable'
         await runPhase3Gate(dependencies, legacySourceState, credentialHealth, activityEvidence)
         if (shutdownRequested) return startupCancelled()
-        const productionCache = getProductionCacheLifecycle()
+        const productionCache = dependencies.getCachePhasePrerequisite != null && dependencies.initializePhase4 != null
+          ? null
+          : getProductionCacheLifecycle()
         const readCachePrerequisite = dependencies.getCachePhasePrerequisite ??
           (productionCache == null ? undefined : async() => productionCache.getCachePhasePrerequisite())
         const initializePhase4 = dependencies.initializePhase4 ?? (productionCache == null

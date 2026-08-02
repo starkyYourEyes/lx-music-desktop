@@ -38,10 +38,15 @@ const decode = (value: unknown): string | null => {
 const source = (): { tuples: RawLyricTuple[], skippedInvalidRows: number } => {
   const rows = getAppDB().prepare(`SELECT id, type, text FROM lyric WHERE source = 'raw' AND type IN ('lyric', 'tlyric', 'rlyric', 'lxlyric')`).all() as Array<{ id: unknown, type: unknown, text: unknown }>
   const tuples: RawLyricTuple[] = []
+  const seen = new Map<string, Set<string>>()
   let skippedInvalidRows = 0
   for (const row of rows) {
     const text = decode(row.text)
     if (!validId(row.id) || typeof row.type != 'string' || !keys.has(row.type) || text == null) { skippedInvalidRows++; continue }
+    const types = seen.get(row.id) ?? new Set<string>()
+    if (types.has(row.type)) throw failure('raw_lyric_attestation_failed')
+    types.add(row.type)
+    seen.set(row.id, types)
     tuples.push({ provider: 'legacy', sourceTrackId: row.id, lyricType: row.type as RawLyricTuple['lyricType'], text })
   }
   return { tuples, skippedInvalidRows }

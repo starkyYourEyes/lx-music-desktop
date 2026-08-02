@@ -41,10 +41,13 @@ const decodeLegacyText = (value: unknown): string | null => {
 }
 
 const appRaw = (id: string): LX.Music.LyricInfo | null => {
-  const rows = getAppDB().prepare(`SELECT type, text FROM lyric WHERE id = ? AND source = 'raw'`).all(id) as Array<{ type: LyricKey, text: string }>
+  const rows = getAppDB().prepare(`
+    SELECT type, text FROM lyric
+    WHERE id = ? AND source = 'raw' AND type IN ('lyric', 'tlyric', 'rlyric', 'lxlyric')
+  `).all(id) as Array<{ type: unknown, text: unknown }>
   const valid = rows.flatMap(row => {
     const text = decodeLegacyText(row.text)
-    return text == null ? [] : [{ lyricType: row.type, text }]
+    return text == null || !validKey(row.type) ? [] : [{ lyricType: row.type, text }]
   })
   return valid.length ? lyricInfo(valid) : null
 }

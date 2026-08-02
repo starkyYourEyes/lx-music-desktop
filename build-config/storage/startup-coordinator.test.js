@@ -470,23 +470,22 @@ describe('storage startup coordinator', () => {
     }
   })
 
-  it('leaves a custom Phase 4 override independent of production cache composition', async() => {
-    const { calls, deps } = createDeps({
-      initDatabase: async() => ({ ...readyResult, schemaVersion: 6 }),
-      verifyPhase2Storage: async() => {},
-      initializePhase4: async prerequisite => {
-        calls.push(`custom-phase4:${prerequisite.markerName}`)
-        return { schemaVersion: 7 }
-      },
-    })
-    installProductionCache({
-      getCachePhasePrerequisite: async() => { throw new Error('production prerequisite must not run') },
-      openCacheDatabase: async() => { throw new Error('production cache open must not run') },
-      migrateRawLyrics: async() => { throw new Error('production migration must not run') },
-    })
+  it('leaves a custom Phase 4 override independent of absent or partial production composition', async() => {
+    for (const production of ['absent', 'partial']) {
+      if (production == 'absent') delete globalThis.lx
+      else installProductionCache({})
+      const { calls, deps } = createDeps({
+        initDatabase: async() => ({ ...readyResult, schemaVersion: 6 }),
+        verifyPhase2Storage: async() => {},
+        initializePhase4: async prerequisite => {
+          calls.push(`custom-phase4:${prerequisite.markerName}`)
+          return { schemaVersion: 7 }
+        },
+      })
 
-    assert.deepEqual(await createCoordinator(deps).start(), { status: 'ready', schemaVersion: 7 })
-    assert.equal(calls.includes('custom-phase4:legacy_data_v1.cross_artifact_complete'), true)
+      assert.deepEqual(await createCoordinator(deps).start(), { status: 'ready', schemaVersion: 7 }, production)
+      assert.equal(calls.includes('custom-phase4:legacy_data_v1.cross_artifact_complete'), true, production)
+    }
   })
 
   it('accepts a branch-dependent migration hook returning recovery or undefined', () => {

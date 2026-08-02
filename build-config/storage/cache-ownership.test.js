@@ -32,6 +32,51 @@ const legacyTables = new Set(['lyric', 'music_url', 'music_info_other_source'])
 const genericCacheDatabaseApiName = ['get', 'DB'].join('')
 const rawLyricOwnerName = ['r', 'aw'].join('')
 const editedLyricSqlOwner = 'src/main/worker/dbService/modules/lyric/edited/statements.ts'
+const exactTestFixtureOwners = new Map([
+  ['backup-root-derivation', new Set([
+    'build-config/storage-electron/account-profile.test.js',
+    'build-config/storage-electron/cache-cutover.test.js',
+    'build-config/storage-electron/cache-db.test.js',
+    'build-config/storage-electron/cache-lifecycle.test.js',
+    'build-config/storage-electron/cache-policy.test.js',
+    'build-config/storage-electron/database-recovery.test.js',
+    'build-config/storage-electron/migration-runner.test.js',
+    'build-config/storage-electron/non-activity-repository.test.js',
+    'build-config/storage-electron/non-activity-retry.test.js',
+    'build-config/storage-electron/playback-clear.test.js',
+    'build-config/storage-electron/playback-migration.test.js',
+    'build-config/storage-electron/playback-phase3.integration.test.js',
+    'build-config/storage-electron/playback-renderer-crash.integration.test.js',
+    'build-config/storage-electron/playback-retention.test.js',
+    'build-config/storage-electron/playback-storage.test.js',
+    'build-config/storage-electron/raw-lyric-migration.test.js',
+    'build-config/storage-electron/scoped-cache-repository.test.js',
+    'build-config/storage-electron/storage-foundation.integration.test.js',
+    'build-config/storage/cache-phase-prerequisite.test.js',
+    'build-config/storage/helpers/phase4-durable-fixture.js',
+    'build-config/storage/startup-coordinator.test.js',
+  ])],
+  ['migrated-producer-temp-root', new Set([
+    'build-config/main/webpack-worker-output.test.js',
+    'build-config/storage-electron/safe-storage-vault.test.js',
+    'build-config/storage/account-repository.test.js',
+    'build-config/storage/atomic-json-file.test.js',
+    'build-config/storage/cache-manager.test.js',
+    'build-config/storage/credential-migration.test.js',
+    'build-config/storage/credential-vault.test.js',
+    'build-config/storage/non-activity-source.test.js',
+    'build-config/storage/non-activity-startup.test.js',
+    'build-config/storage/portable-sync-filesystem.test.js',
+    'build-config/storage/sync-credential-cutover.test.js',
+    'build-config/storage/webdav-credential-cutover.test.js',
+  ])],
+  ['legacy-cache-dml', new Set([
+    'build-config/storage-electron/cache-cutover.test.js',
+    'build-config/storage-electron/database-recovery.test.js',
+    'build-config/storage-electron/raw-lyric-migration.test.js',
+    'build-config/storage/helpers/phase4-durable-fixture.js',
+  ])],
+])
 
 const normalizePath = value => value.replaceAll('\\', '/')
 const isContained = (basePath, candidate) => {
@@ -72,7 +117,6 @@ const ownershipRootSpecs = [
   { kind: 'test', path: 'build-config' },
   { kind: 'schema', path: 'src/main/worker/dbService/tables.ts' },
   { kind: 'schema', path: 'src/main/worker/dbService/migrations' },
-  { kind: 'schema', path: 'src/main/worker/dbService/modules/lyric/edited/statements.ts' },
   { kind: 'schema', path: 'src/main/migration/cache' },
 ]
 const ownershipInventory = readOwnershipInventory(root, ownershipRootSpecs)
@@ -84,22 +128,58 @@ const unwrapExpression = node => {
   return node
 }
 
+const lexicalBindingScope = (declaration, sourceFile) => {
+  if (typescript.isParameter(declaration)) {
+    for (let current = declaration.parent; current != null; current = current.parent) {
+      if (typescript.isFunctionLike(current)) return current
+    }
+  }
+  if (typescript.isVariableDeclaration(declaration) && typescript.isCatchClause(declaration.parent)) {
+    return declaration.parent.block
+  }
+  const functionScoped = typescript.isVariableDeclaration(declaration) &&
+    typescript.isVariableDeclarationList(declaration.parent) &&
+    (declaration.parent.flags & (typescript.NodeFlags.Const | typescript.NodeFlags.Let)) == 0
+  for (let current = declaration.parent; current != null; current = current.parent) {
+    if (typescript.isSourceFile(current)) return current
+    if (functionScoped) {
+      if (typescript.isFunctionLike(current)) return current
+      continue
+    }
+    if (typescript.isBlock(current) || typescript.isModuleBlock(current) || typescript.isCaseBlock(current) ||
+      typescript.isForStatement(current) || typescript.isForInStatement(current) ||
+      typescript.isForOfStatement(current)) return current
+  }
+  return sourceFile
+}
+
+const forEachBindingIdentifier = (name, visitor) => {
+  if (typescript.isIdentifier(name)) {
+    visitor(name)
+    return
+  }
+  for (const element of name.elements) {
+    if (typescript.isBindingElement(element)) forEachBindingIdentifier(element.name, visitor)
+  }
+}
+
 const collectStaticBindings = sourceFile => {
   const bindings = new Map()
-  const bindingScope = declaration => {
-    for (let node = declaration.parent; node != null; node = node.parent) {
-      if (typescript.isSourceFile(node) || typescript.isBlock(node) || typescript.isModuleBlock(node) ||
-        typescript.isCaseBlock(node) || typescript.isForStatement(node) || typescript.isForInStatement(node) ||
-        typescript.isForOfStatement(node)) return node
-    }
-    return sourceFile
+  const add = (name, declaration, initializer, scope = lexicalBindingScope(declaration, sourceFile)) => {
+    const candidates = bindings.get(name.text) ?? []
+    candidates.push({ declaration: name, initializer, scope })
+    bindings.set(name.text, candidates)
   }
   const visit = node => {
-    if (typescript.isVariableDeclaration(node) && node.initializer && typescript.isIdentifier(node.name) &&
-      typescript.isVariableDeclarationList(node.parent) && (node.parent.flags & typescript.NodeFlags.Const) != 0) {
-      const candidates = bindings.get(node.name.text) ?? []
-      candidates.push({ declaration: node, initializer: node.initializer, scope: bindingScope(node) })
-      bindings.set(node.name.text, candidates)
+    if (typescript.isVariableDeclaration(node) || typescript.isParameter(node)) {
+      const constantInitializer = typescript.isVariableDeclaration(node) && typescript.isIdentifier(node.name) &&
+        node.initializer && typescript.isVariableDeclarationList(node.parent) &&
+        (node.parent.flags & typescript.NodeFlags.Const) != 0
+        ? node.initializer
+        : null
+      forEachBindingIdentifier(node.name, name => add(name, node, constantInitializer))
+    } else if ((typescript.isFunctionDeclaration(node) || typescript.isClassDeclaration(node)) && node.name) {
+      add(node.name, node, null)
     }
     typescript.forEachChild(node, visit)
   }
@@ -140,7 +220,7 @@ const staticString = (input, bindings = new Map(), seen = new Set()) => {
   if (typescript.isNoSubstitutionTemplateLiteral(node)) return node.text
   if (typescript.isIdentifier(node)) {
     const binding = staticBindingForIdentifier(node, bindings)
-    if (binding == null || seen.has(binding.declaration)) return null
+    if (binding == null || binding.initializer == null || seen.has(binding.declaration)) return null
     return staticString(binding.initializer, bindings, new Set(seen).add(binding.declaration))
   }
   if (typescript.isBinaryExpression(node) && node.operatorToken.kind == typescript.SyntaxKind.PlusToken) {
@@ -165,7 +245,7 @@ const staticString = (input, bindings = new Map(), seen = new Set()) => {
     let owner = unwrapExpression(node.expression)
     if (typescript.isIdentifier(owner)) {
       const binding = staticBindingForIdentifier(owner, bindings)
-      if (binding == null || seen.has(binding.declaration)) return null
+      if (binding == null || binding.initializer == null || seen.has(binding.declaration)) return null
       owner = unwrapExpression(binding.initializer)
       seen = new Set(seen).add(binding.declaration)
     }
@@ -183,7 +263,7 @@ const staticMemberName = (input, bindings, seen = new Set()) => {
   const node = unwrapExpression(input)
   if (typescript.isIdentifier(node)) {
     const binding = staticBindingForIdentifier(node, bindings)
-    if (binding == null || seen.has(binding.declaration)) return null
+    if (binding == null || binding.initializer == null || seen.has(binding.declaration)) return null
     return staticMemberName(binding.initializer, bindings, new Set(seen).add(binding.declaration))
   }
   if (typescript.isPropertyAccessExpression(node)) return node.name.text
@@ -202,15 +282,41 @@ const moduleDescriptor = source => {
   return `module:${source}`
 }
 
-const descriptorsForExpression = (input, aliases, bindings = new Map()) => {
+const descriptorsForExpression = (input, aliasBindings, bindings = new Map(), seen = new Set()) => {
   const node = unwrapExpression(input)
-  if (typescript.isIdentifier(node)) return new Set(aliases.get(node.text) ?? [node.text])
+  if (typescript.isIdentifier(node)) {
+    const binding = staticBindingForIdentifier(node, aliasBindings)
+    if (binding == null) return new Set([node.text])
+    if (seen.has(binding)) return new Set()
+    const nextSeen = new Set(seen).add(binding)
+    let descriptors
+    if (binding.descriptors != null) {
+      descriptors = binding.descriptors
+    } else if (binding.initializer == null) {
+      descriptors = new Set([node.text])
+    } else {
+      descriptors = descriptorsForExpression(binding.initializer, aliasBindings, bindings, nextSeen)
+      if (descriptors.size == 0) descriptors = new Set([node.text])
+    }
+    for (const property of binding.properties) {
+      descriptors = new Set([...descriptors].map(base => `${base}.${property}`))
+    }
+    if (binding.fallback != null) {
+      descriptors = new Set([
+        ...descriptors,
+        ...descriptorsForExpression(binding.fallback, aliasBindings, bindings, nextSeen),
+      ])
+    }
+    return descriptors
+  }
   if (typescript.isPropertyAccessExpression(node) || typescript.isElementAccessExpression(node)) {
     const property = typescript.isPropertyAccessExpression(node)
       ? node.name.text
       : staticString(node.argumentExpression, bindings)
     if (property == null) return new Set()
-    return new Set([...descriptorsForExpression(node.expression, aliases, bindings)].map(base => `${base}.${property}`))
+    return new Set([
+      ...descriptorsForExpression(node.expression, aliasBindings, bindings, seen),
+    ].map(base => `${base}.${property}`))
   }
   if (typescript.isCallExpression(node) && typescript.isIdentifier(node.expression) &&
     node.expression.text == 'require' && node.arguments.length == 1) {
@@ -220,54 +326,103 @@ const descriptorsForExpression = (input, aliases, bindings = new Map()) => {
   return new Set()
 }
 
-const collectAliases = (sourceFile, bindings) => {
-  const aliases = new Map()
-  const setAlias = (name, descriptors) => {
-    if (descriptors.size == 0) return false
-    const current = aliases.get(name) ?? new Set()
-    const next = new Set([...current, ...descriptors])
-    if (next.size == current.size) return false
-    aliases.set(name, next)
-    return true
+const collectAliasBindings = (sourceFile, bindings) => {
+  const aliasBindings = new Map()
+  const addBinding = (name, binding) => {
+    const candidates = aliasBindings.get(name.text) ?? []
+    candidates.push({ declaration: name, ...binding })
+    aliasBindings.set(name.text, candidates)
   }
-  const bind = (binding, descriptors) => {
-    if (typescript.isIdentifier(binding)) return setAlias(binding.text, descriptors)
-    if (!typescript.isObjectBindingPattern(binding)) return false
-    let changed = false
-    for (const element of binding.elements) {
-      const property = element.propertyName == null
-        ? (typescript.isIdentifier(element.name) ? element.name.text : null)
-        : staticString(element.propertyName, bindings)
-      if (property == null) continue
-      const nested = new Set([...descriptors].map(base => `${base}.${property}`))
-      changed = bind(element.name, nested) || changed
+
+  const bind = (name, binding) => {
+    if (typescript.isIdentifier(name)) {
+      addBinding(name, binding)
+      return
     }
-    return changed
-  }
-  for (let pass = 0; pass < 4; pass++) {
-    let changed = false
-    const visit = node => {
-      if (typescript.isImportDeclaration(node) && typescript.isStringLiteral(node.moduleSpecifier) && node.importClause) {
-        const base = moduleDescriptor(node.moduleSpecifier.text)
-        if (node.importClause.name) changed = setAlias(node.importClause.name.text, new Set([base])) || changed
-        const bindings = node.importClause.namedBindings
-        if (bindings && typescript.isNamespaceImport(bindings)) {
-          changed = setAlias(bindings.name.text, new Set([base])) || changed
-        } else if (bindings && typescript.isNamedImports(bindings)) {
-          for (const element of bindings.elements) {
-            const imported = (element.propertyName ?? element.name).text
-            changed = setAlias(element.name.text, new Set([`${base}.${imported}`])) || changed
-          }
+    if (typescript.isObjectBindingPattern(name)) {
+      for (const element of name.elements) {
+        if (element.dotDotDotToken) {
+          bind(element.name, { ...binding, initializer: null, descriptors: null, properties: [] })
+          continue
         }
-      } else if (typescript.isVariableDeclaration(node) && node.initializer) {
-        changed = bind(node.name, descriptorsForExpression(node.initializer, aliases, bindings)) || changed
+        const property = element.propertyName == null
+          ? (typescript.isIdentifier(element.name) ? element.name.text : null)
+          : staticString(element.propertyName, bindings)
+        if (property == null) {
+          bind(element.name, { ...binding, initializer: null, descriptors: null, properties: [] })
+          continue
+        }
+        bind(element.name, {
+          ...binding,
+          properties: [...binding.properties, property],
+          fallback: binding.stable ? element.initializer ?? binding.fallback : null,
+        })
       }
-      typescript.forEachChild(node, visit)
+      return
     }
-    visit(sourceFile)
-    if (!changed) break
+    if (typescript.isArrayBindingPattern(name)) {
+      name.elements.forEach((element, index) => {
+        if (!typescript.isBindingElement(element)) return
+        bind(element.name, element.dotDotDotToken
+          ? { ...binding, initializer: null, descriptors: null, properties: [] }
+          : {
+              ...binding,
+              properties: [...binding.properties, String(index)],
+              fallback: binding.stable ? element.initializer ?? binding.fallback : null,
+            })
+      })
+    }
   }
-  return aliases
+
+  const visit = node => {
+    if (typescript.isImportDeclaration(node) && typescript.isStringLiteral(node.moduleSpecifier) && node.importClause) {
+      const base = moduleDescriptor(node.moduleSpecifier.text)
+      const binding = descriptors => ({
+        descriptors: new Set(descriptors),
+        fallback: null,
+        initializer: null,
+        properties: [],
+        scope: sourceFile,
+        stable: true,
+      })
+      if (node.importClause.name) addBinding(node.importClause.name, binding([base]))
+      const namedBindings = node.importClause.namedBindings
+      if (namedBindings && typescript.isNamespaceImport(namedBindings)) {
+        addBinding(namedBindings.name, binding([base]))
+      } else if (namedBindings && typescript.isNamedImports(namedBindings)) {
+        for (const element of namedBindings.elements) {
+          const imported = (element.propertyName ?? element.name).text
+          addBinding(element.name, binding([`${base}.${imported}`]))
+        }
+      }
+    } else if (typescript.isVariableDeclaration(node) || typescript.isParameter(node)) {
+      const stableInitializer = typescript.isVariableDeclaration(node) &&
+        typescript.isVariableDeclarationList(node.parent) &&
+        (node.parent.flags & typescript.NodeFlags.Const) != 0
+        ? node.initializer ?? null
+        : null
+      bind(node.name, {
+        descriptors: null,
+        fallback: null,
+        initializer: stableInitializer,
+        properties: [],
+        scope: lexicalBindingScope(node, sourceFile),
+        stable: stableInitializer != null,
+      })
+    } else if ((typescript.isFunctionDeclaration(node) || typescript.isClassDeclaration(node)) && node.name) {
+      addBinding(node.name, {
+        descriptors: null,
+        fallback: null,
+        initializer: null,
+        properties: [],
+        scope: lexicalBindingScope(node, sourceFile),
+        stable: false,
+      })
+    }
+    typescript.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  return aliasBindings
 }
 
 const extractVueScripts = (file, text) => {
@@ -293,9 +448,11 @@ const walkAst = (node, visitor) => {
 }
 
 const descriptorHasName = (descriptors, name) => [...descriptors].some(value => value.split('.').at(-1) == name)
-const isRendererBoundary = file => file.startsWith('src/renderer/') || file.startsWith('src/renderer-lyric/') ||
-  file.startsWith('src/main/modules/winMain/rendererEvent/') || file.startsWith('src/main/modules/userApi/') ||
-  file.startsWith('src/common/')
+const isRendererBoundary = record => record.kinds.includes('test') ||
+  record.file.startsWith('src/renderer/') || record.file.startsWith('src/renderer-lyric/') ||
+  record.file.startsWith('src/main/modules/winMain/rendererEvent/') ||
+  record.file.startsWith('src/main/modules/commonRenderers/') ||
+  record.file.startsWith('src/main/modules/userApi/') || record.file.startsWith('src/common/')
 
 const hasPathTarget = (node, bindings) => {
   let found = false
@@ -390,15 +547,80 @@ const commaSeparatedSqlItems = (tokens, openIndex) => {
   return null
 }
 
+const stripOuterSqlParentheses = input => {
+  let tokens = input
+  while (tokens[0] == '(' && tokens.at(-1) == ')') {
+    let depth = 0
+    let wrapsAll = true
+    for (let index = 0; index < tokens.length; index++) {
+      if (tokens[index] == '(') depth++
+      if (tokens[index] == ')') depth--
+      if (depth == 0 && index < tokens.length - 1) { wrapsAll = false; break }
+      if (depth < 0) return null
+    }
+    if (!wrapsAll || depth != 0) break
+    tokens = tokens.slice(1, -1)
+  }
+  return tokens
+}
+
+const editedPredicateProof = input => {
+  const tokens = stripOuterSqlParentheses(input)
+  if (tokens == null || tokens.length == 0) return { edited: false, valid: false }
+  const terms = []
+  let current = []
+  let depth = 0
+  for (const token of tokens) {
+    if (token == '(') depth++
+    if (token == ')') depth--
+    if (depth < 0) return { edited: false, valid: false }
+    if (depth == 0 && token.toUpperCase() == 'AND') {
+      if (current.length == 0) return { edited: false, valid: false }
+      terms.push(current)
+      current = []
+      continue
+    }
+    current.push(token)
+  }
+  if (depth != 0 || current.length == 0) return { edited: false, valid: false }
+  if (terms.length > 0) {
+    terms.push(current)
+    const proofs = terms.map(editedPredicateProof)
+    return {
+      edited: proofs.some(proof => proof.edited),
+      valid: proofs.every(proof => proof.valid),
+    }
+  }
+
+  const sourceIndexes = tokens.flatMap((token, index) => token.toLowerCase() == 'source' ? [index] : [])
+  if (sourceIndexes.length == 0) return { edited: false, valid: true }
+  if (sourceIndexes.length != 1) return { edited: false, valid: false }
+  const sourceIndex = sourceIndexes[0]
+  if (tokens[sourceIndex + 1] != '=' || tokens[sourceIndex + 2] != 'string:edited' ||
+    sourceIndex + 3 != tokens.length) return { edited: false, valid: false }
+  const qualifier = tokens.slice(0, sourceIndex)
+  const qualified = qualifier.length == 0 || (qualifier.length % 2 == 0 &&
+    qualifier.every((token, index) => index % 2 == 0 ? token != '.' : token == '.'))
+  return { edited: qualified, valid: qualified }
+}
+
 const hasExclusiveEditedWhere = tokens => {
   const whereIndex = tokens.findIndex(token => token.toUpperCase() == 'WHERE')
   if (whereIndex < 0) return false
-  const predicate = tokens.slice(whereIndex + 1)
+  const predicate = []
+  let depth = 0
+  const trailingClauses = new Set(['GROUP', 'ORDER', 'LIMIT', 'RETURNING'])
+  for (const token of tokens.slice(whereIndex + 1)) {
+    if (depth == 0 && (token == ';' || trailingClauses.has(token.toUpperCase()))) break
+    predicate.push(token)
+    if (token == '(') depth++
+    if (token == ')') depth--
+    if (depth < 0) return false
+  }
+  if (depth != 0 || predicate.length == 0) return false
   if (predicate.some(token => ['NOT', 'OR'].includes(token.toUpperCase()))) return false
-  const sourceIndexes = predicate.flatMap((token, index) => token.toLowerCase() == 'source' ? [index] : [])
-  return sourceIndexes.length > 0 && sourceIndexes.every(index =>
-    predicate[index + 1] == '=' && predicate[index + 2] == 'string:edited',
-  )
+  const proof = editedPredicateProof(predicate)
+  return proof.valid && proof.edited
 }
 
 const insertValueRows = (tokens, valuesIndex) => {
@@ -456,7 +678,7 @@ const analyzeOwnershipFiles = files => {
   const inspectSql = (sql, record, node) => {
     const analysis = legacySqlReferences(sql)
     const { references, ddl } = analysis
-    if (references.length == 0 || !record.kinds.includes('source')) return
+    if (references.length == 0 || !record.kinds.some(kind => kind == 'source' || kind == 'test')) return
     const migrationOwner = record.file.startsWith('src/main/migration/cache/') ||
       record.file.startsWith('src/main/worker/dbService/migrations/')
     const editedOwner = record.file == editedLyricSqlOwner && isEditedLyricSql(analysis)
@@ -479,9 +701,9 @@ const analyzeOwnershipFiles = files => {
       addFinding('parse-error', record, sourceFile)
       continue
     }
-    if (!record.kinds.includes('source')) continue
+    if (!record.kinds.some(kind => kind == 'source' || kind == 'test')) continue
     const bindings = collectStaticBindings(sourceFile)
-    const aliases = collectAliases(sourceFile, bindings)
+    const aliases = collectAliasBindings(sourceFile, bindings)
     walkAst(sourceFile, node => {
       if (typescript.isIdentifier(node) || typescript.isPropertyAccessExpression(node) ||
         typescript.isElementAccessExpression(node)) {
@@ -513,7 +735,7 @@ const analyzeOwnershipFiles = files => {
         )
         if (hasCacheRoot && hasUnsupportedOwner) addFinding('cache-artwork-audio-target', record, node)
       }
-      if (isRendererBoundary(record.file)) {
+      if (isRendererBoundary(record)) {
         const lowerCallees = calleeValues.map(value => value.toLowerCase())
         if (lowerCallees.some(value => value.includes('cachemanager') && value.endsWith('.clearall'))) {
           addFinding('renderer-cache-clear', record, node)
@@ -529,6 +751,8 @@ const analyzeOwnershipFiles = files => {
           'renderersend',
           'invoke',
           'send',
+          'handle',
+          'on',
           'mainhandle',
           'mainon',
         ].includes(value.split('.').at(-1)))
@@ -557,7 +781,9 @@ const analyzeOwnershipFiles = files => {
   return findings.sort((left, right) => left.file.localeCompare(right.file, 'en') || left.code.localeCompare(right.code, 'en'))
 }
 
-const ownershipFindings = analyzeOwnershipFiles(ownershipInventory)
+const ownershipAnalysis = analyzeOwnershipFiles(ownershipInventory)
+const isExactTestFixtureOwner = ({ code, file }) => exactTestFixtureOwners.get(code)?.has(file) ?? false
+const ownershipFindings = ownershipAnalysis.filter(finding => !isExactTestFixtureOwner(finding))
 
 describe('structured ownership analyzer regressions', () => {
   it('finds prohibited direct, aliased, and computed cache APIs', () => {
@@ -786,12 +1012,12 @@ describe('structured ownership analyzer regressions', () => {
       },
       {
         file: 'src/main/worker/dbService/modules/lyric/edited/statements.ts',
-        kinds: ['source', 'schema'],
+        kinds: ['source'],
         text: "db.prepare('DELETE FROM music_info_other_source')",
       },
       {
         file: 'src/main/worker/dbService/modules/lyric/edited/statements.ts',
-        kinds: ['source', 'schema'],
+        kinds: ['source'],
         text: "db.prepare(\"DELETE FROM lyric WHERE source = 'edited'\")",
       },
     ])
@@ -889,7 +1115,7 @@ describe('structured ownership analyzer regressions', () => {
     ]
     const actual = cases.map(text => analyzeOwnershipFiles([{
       file: 'src/main/worker/dbService/modules/lyric/edited/statements.ts',
-      kinds: ['source', 'schema'],
+      kinds: ['source'],
       text,
     }]).map(({ code }) => code))
     assert.deepEqual(actual, [
@@ -900,10 +1126,223 @@ describe('structured ownership analyzer regressions', () => {
 
     const legitimate = analyzeOwnershipFiles([{
       file: 'src/main/worker/dbService/modules/lyric/edited/statements.ts',
-      kinds: ['source', 'schema'],
+      kinds: ['source'],
       text: "db.prepare(\"DELETE FROM lyric WHERE source = 'edited'\")",
     }])
     assert.deepEqual(legitimate, [])
+  })
+
+  it('applies semantic ownership checks to executable test code', () => {
+    const cases = [
+      {
+        file: 'build-config/storage/executableIdentifier.test.js',
+        text: `const open = worker.${genericCacheDatabaseApiName}; open()`,
+        expected: ['generic-cache-db-api'],
+      },
+      {
+        file: 'build-config/storage/executablePath.test.js',
+        text: `
+          const path = require('node:path')
+          const os = require('node:os')
+          os.tmpdir()
+          path.join(profileRoot, 'backups')
+          path.join(cacheRoot, 'audio')
+        `,
+        expected: ['backup-root-derivation', 'cache-artwork-audio-target', 'migrated-producer-temp-root'],
+      },
+      {
+        file: 'build-config/storage/executableRenderer.test.js',
+        text: `
+          rendererInvoke('storage_cache_clear_all')
+          storageCacheRemove({ target: selectedPath })
+        `,
+        expected: ['renderer-cache-clear', 'renderer-deletion-target'],
+      },
+      {
+        file: 'build-config/storage/executableMainHandle.test.js',
+        text: 'handle(EVENT_NAMES.storage_cache_clear_all, resetCache)',
+        expected: ['renderer-cache-clear'],
+      },
+      {
+        file: 'build-config/storage/executableMainOn.test.js',
+        text: "on('storage_cache_delete', { target: selectedPath })",
+        expected: ['renderer-deletion-target'],
+      },
+      {
+        file: 'build-config/storage/executableSql.test.js',
+        text: "db.prepare('SELECT * FROM music_url')",
+        expected: ['legacy-cache-dml'],
+      },
+    ]
+    assert.deepEqual(cases.map(({ file, text, expected }) => ({
+      expected,
+      actual: analyzeOwnershipFiles([{ file, kinds: ['test'], text }]).map(({ code }) => code).sort(),
+    })), cases.map(({ expected }) => ({ expected, actual: expected })))
+  })
+
+  it('ignores comments, plain fixture strings, and intentionally parsed analyzer inputs in tests', () => {
+    const findings = analyzeOwnershipFiles([{
+      file: 'build-config/storage/inertOwnershipFixtures.test.js',
+      kinds: ['test'],
+      text: `
+        // rendererInvoke('storage_cache_clear_all')
+        const fixtureText = "worker.${genericCacheDatabaseApiName}(); path.join(profileRoot, 'backups')"
+        const analyzerInput = { text: "db.prepare('SELECT * FROM music_url')" }
+        analyzeOwnershipFiles([analyzerInput])
+      `,
+    }])
+    assert.deepEqual(findings, [])
+  })
+
+  it('resolves aliased and destructured calls through their nearest lexical binding', () => {
+    const cases = [
+      `
+        const manager = safeManager
+        const nested = () => { const manager = cacheManager; return manager }
+        manager.clearAll()
+      `,
+      `
+        const manager = cacheManager
+        const nested = () => { const manager = safeManager; return manager }
+        manager.clearAll()
+      `,
+      `
+        const { clearAll: clear } = safeManager
+        const nested = () => { const { clearAll: clear } = cacheManager; return clear }
+        clear()
+      `,
+      `
+        const { clearAll: clear } = cacheManager
+        const nested = () => { const { clearAll: clear } = safeManager; clear() }
+      `,
+    ]
+    const actual = cases.map((text, index) => analyzeOwnershipFiles([{
+      file: `src/renderer/utils/lexicalAliasFixture${index}.ts`,
+      kinds: ['source'],
+      text,
+    }]).map(({ code }) => code))
+    assert.deepEqual(actual, [[], ['renderer-cache-clear'], [], []])
+  })
+
+  it('keeps direct member semantics for local receivers without alias descriptors', () => {
+    const findings = analyzeOwnershipFiles([{
+      file: 'src/main/services/localDatabaseFixture.ts',
+      kinds: ['source'],
+      text: `
+        const database = new Database(':memory:')
+        database.prepare('SELECT * FROM music_url')
+      `,
+    }])
+    assert.deepEqual(findings.map(({ code }) => code), ['legacy-cache-dml'])
+  })
+
+  it('uses parameters and mutable declarations as static-binding shadow barriers', () => {
+    const findings = analyzeOwnershipFiles([{
+      file: 'src/renderer/utils/staticShadowFixture.ts',
+      kinds: ['source'],
+      text: `
+        const channel = 'storage_cache_clear_all'
+        const nested = channel => rendererInvoke(channel)
+        nested('clear_cache')
+        let segment = 'backups'
+        segment = 'logs'
+        path.join(profileRoot, segment)
+      `,
+    }])
+    assert.deepEqual(findings, [])
+  })
+
+  it('does not treat mutable initializers as stable alias descriptors', () => {
+    const cases = [
+      `
+        let manager = safeManager
+        manager = cacheManager
+        manager.clearAll()
+      `,
+      `
+        let manager = cacheManager
+        manager = safeManager
+        manager.clearAll()
+      `,
+      `
+        let { manager = cacheManager } = {}
+        manager = safeManager
+        manager.clearAll()
+      `,
+      `
+        const nested = ({ manager = cacheManager } = {}) => {
+          manager = safeManager
+          manager.clearAll()
+        }
+        nested()
+      `,
+    ]
+    const actual = cases.map((text, index) => analyzeOwnershipFiles([{
+      file: `src/renderer/utils/mutableAliasFixture${index}.ts`,
+      kinds: ['source'],
+      text,
+    }]).map(({ code }) => code))
+    assert.deepEqual(actual, [[], [], [], []])
+  })
+
+  it('retains destructuring default aliases for stable const bindings', () => {
+    const findings = analyzeOwnershipFiles([{
+      file: 'src/renderer/utils/constDefaultAliasFixture.ts',
+      kinds: ['source'],
+      text: `
+        const { manager = cacheManager } = {}
+        manager.clearAll()
+      `,
+    }])
+    assert.deepEqual(findings.map(({ code }) => code), ['renderer-cache-clear'])
+  })
+
+  it('includes commonRenderers files in the main IPC ownership boundary', () => {
+    const findings = analyzeOwnershipFiles([{
+      file: 'src/main/modules/commonRenderers/dislike/rendererEvent.ts',
+      kinds: ['source'],
+      text: 'mainHandle(EVENT_NAMES.storage_cache_clear_all, resetCache)',
+    }])
+    assert.deepEqual(findings.map(({ code }) => code), ['renderer-cache-clear'])
+  })
+
+  it('allows edited-only DML but not DDL in the actual edited repository owner', () => {
+    const file = 'src/main/worker/dbService/modules/lyric/edited/statements.ts'
+    const kinds = ownershipInventory.find(record => record.file == file)?.kinds
+    const findings = analyzeOwnershipFiles([
+      { file, kinds, text: "db.exec('CREATE TABLE music_url(id TEXT PRIMARY KEY)')" },
+      { file, kinds, text: "db.prepare(\"DELETE FROM lyric WHERE source = 'edited'\")" },
+    ])
+    assert.deepEqual({ kinds, findings: findings.map(({ code }) => code) }, {
+      kinds: ['source'],
+      findings: ['legacy-cache-dml'],
+    })
+  })
+
+  it('rejects edited-owner predicates that invert the edited equality result', () => {
+    const file = 'src/main/worker/dbService/modules/lyric/edited/statements.ts'
+    const statements = [
+      "db.prepare(\"DELETE FROM lyric WHERE source = 'edited' = 0\")",
+      "db.prepare(\"UPDATE lyric SET text = 'x' WHERE source = 'edited' IS FALSE\")",
+    ]
+    const actual = statements.map(text => analyzeOwnershipFiles([{
+      file,
+      kinds: ['source'],
+      text,
+    }]).map(({ code }) => code))
+    assert.deepEqual(actual, [['legacy-cache-dml'], ['legacy-cache-dml']])
+
+    const legitimate = [
+      "db.prepare(\"SELECT type, text, source FROM lyric WHERE id = ? AND source = 'edited'\")",
+      "db.prepare(\"UPDATE lyric SET text = @text WHERE id = @id AND type = @type AND source = 'edited'\")",
+      "db.prepare(\"DELETE FROM lyric WHERE id = ? AND source = 'edited'\")",
+      "db.prepare(\"INSERT INTO lyric(id, type, text, source) VALUES (@id, @type, @text, 'edited')\")",
+    ]
+    assert.deepEqual(legitimate.map(text => analyzeOwnershipFiles([{
+      file,
+      kinds: ['source'],
+      text,
+    }])), [[], [], [], []])
   })
 
   it('checks legacy SQL only for static literals passed to recognized database APIs', () => {
@@ -939,14 +1378,28 @@ describe('structured ownership analyzer regressions', () => {
         text: 'db.prepare(\'SELECT * FROM music_info_other_source\')',
       },
     ])
-    assert.deepEqual(findings.map(({ code, file }) => ({ code, file })), [{
-      code: 'legacy-cache-dml',
-      file: 'src/main/services/activeCacheQuery.ts',
-    }])
+    assert.deepEqual(findings.map(({ code, file }) => ({ code, file })), [
+      {
+        code: 'legacy-cache-dml',
+        file: 'build-config/storage-electron/legacyFixture.test.js',
+      },
+      {
+        code: 'legacy-cache-dml',
+        file: 'src/main/services/activeCacheQuery.ts',
+      },
+    ])
   })
 })
 
 describe('Phase 4 whole-source ownership gate', () => {
+  it('limits executable test path ownership to the exact fixture corpus', () => {
+    const declared = [...exactTestFixtureOwners].flatMap(([code, files]) =>
+      [...files].map(file => ({ code, file })),
+    ).sort((left, right) => left.file.localeCompare(right.file, 'en') || left.code.localeCompare(right.code, 'en'))
+    const actual = ownershipAnalysis.filter(isExactTestFixtureOwner).map(({ code, file }) => ({ code, file }))
+    assert.deepEqual(actual, declared)
+  })
+
   it('exposes no generic or unscoped cache database API across production and worker boundaries', () => {
     assert.deepEqual(new Set(ownershipInventory.flatMap(({ kinds }) => kinds)), new Set(['source', 'test', 'schema']))
     const prohibited = new Set(['parse-error', 'generic-cache-db-api', 'unscoped-cache-api'])

@@ -258,14 +258,35 @@ describe('serialized cache lifecycle', () => {
     ]
     for (const testCase of cases) {
       await t.test(testCase.code, async() => {
-        await createFixture('cache-callback')
-        const service = createService()
+        const { cachePath } = await createFixture('cache-callback')
+        const destructiveCalls = []
+        const guardedFs = {
+          ...fs,
+          renameSync(source, destination) {
+            destructiveCalls.push(['rename', path.resolve(source), path.resolve(destination)])
+            return fs.renameSync(source, destination)
+          },
+          unlinkSync(filename) {
+            destructiveCalls.push(['unlink', path.resolve(filename)])
+            return fs.unlinkSync(filename)
+          },
+          chmodSync(filename, mode) {
+            destructiveCalls.push(['chmod', path.resolve(filename)])
+            return fs.chmodSync(filename, mode)
+          },
+        }
+        const service = createService({ fileSystem: guardedFs })
         assert.equal((await service.openCacheDatabase()).status, 'created')
+        destructiveCalls.length = 0
+        const before = fs.lstatSync(cachePath, { bigint: true })
         const result = await service.runCacheRead(() => {
           throw Object.assign(new Error(`music-url-secret-${testCase.code}`), { code: testCase.code })
         })
 
         assert.deepEqual(result, { status: 'unavailable', code: testCase.expected })
+        assert.deepEqual(destructiveCalls, [])
+        const after = fs.lstatSync(cachePath, { bigint: true })
+        assert.deepEqual({ dev: after.dev, ino: after.ino }, { dev: before.dev, ino: before.ino })
         assert.equal(JSON.stringify(result).includes('music-url-secret'), false)
         assert.equal(await service.getCacheLifecycleState(), 'unavailable')
         assert.deepEqual(await service.runCacheWrite(() => assert.fail('disabled write ran')), {

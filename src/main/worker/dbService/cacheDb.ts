@@ -293,8 +293,11 @@ const readSidecarBytes = (
   position = 0,
 ): Buffer => {
   const value = Buffer.allocUnsafe(length)
-  if (fileSystem.readSync(descriptor, value, 0, length, position) != length) {
-    throw fixedError('cache_integrity_failed')
+  let offset = 0
+  while (offset < length) {
+    const bytesRead = fileSystem.readSync(descriptor, value, offset, length - offset, position + offset)
+    if (bytesRead <= 0) throw fixedError('cache_integrity_failed')
+    offset += bytesRead
   }
   return value
 }
@@ -326,6 +329,16 @@ interface WalHeader {
   checksum: readonly [number, number]
 }
 
+interface WalReplayPrefix {
+  lastCommittedFrameEnd: number | null
+  databasePages: number | null
+}
+
+const MAX_CACHE_PREFLIGHT_BYTES = 256 * 1024 * 1024
+const SQLITE_MAX_PAGE_NUMBER = 0xfffffffe
+const SQLITE_HEADER_BYTES = 100
+const SQLITE_HEADER_MAGIC = Buffer.from('SQLite format 3\0', 'ascii')
+
 const validateWalHeader = (header: Buffer): WalHeader => {
   const magic = header.readUInt32BE(0)
   if (magic != 0x377f0682 && magic != 0x377f0683) throw fixedError('cache_integrity_failed')
@@ -346,18 +359,19 @@ const validateWalHeader = (header: Buffer): WalHeader => {
   }
 }
 
-const validateWalFrames = (
-  descriptor: number,
+const scanWalFrames = (
   size: number,
   header: WalHeader,
-  fileSystem: typeof fs,
-): void => {
+  readFrame: (position: number, length: number) => Buffer,
+): WalReplayPrefix => {
   const frameSize = 24 + header.pageSize
   let checksum = header.checksum
   let hasCommittedPrefix = false
+  let lastCommittedFrameEnd: number | null = null
+  let databasePages: number | null = null
   // SQLite treats an incomplete or invalid frame after a committed prefix as the end of the WAL.
   for (let position = 32; position + frameSize <= size; position += frameSize) {
-    const frame = readSidecarBytes(descriptor, frameSize, fileSystem, position)
+    const frame = readFrame(position, frameSize)
     if (frame.readUInt32BE(0) == 0 || frame.readUInt32BE(8) != header.salt[0] ||
       frame.readUInt32BE(12) != header.salt[1]) {
       if (hasCommittedPrefix) break
@@ -370,9 +384,31 @@ const validateWalFrames = (
       throw fixedError('cache_integrity_failed')
     }
     checksum = nextChecksum
-    if (frame.readUInt32BE(4) != 0) hasCommittedPrefix = true
+    const pageNumber = frame.readUInt32BE(0)
+    const commitPages = frame.readUInt32BE(4)
+    if (pageNumber > SQLITE_MAX_PAGE_NUMBER) throw fixedError('cache_integrity_failed')
+    if (commitPages != 0) {
+      hasCommittedPrefix = true
+      lastCommittedFrameEnd = position + frameSize
+      databasePages = commitPages
+    }
   }
+  if (databasePages != null && databasePages > Math.floor(MAX_CACHE_PREFLIGHT_BYTES / header.pageSize)) {
+    throw fixedError('cache_capacity_unavailable')
+  }
+  return { lastCommittedFrameEnd, databasePages }
 }
+
+const validateWalFrames = (
+  descriptor: number,
+  size: number,
+  header: WalHeader,
+  fileSystem: typeof fs,
+): WalReplayPrefix => scanWalFrames(
+  size,
+  header,
+  (position, length) => readSidecarBytes(descriptor, length, fileSystem, position),
+)
 
 const validateShmHeader = (header: Buffer): void => {
   if (header.every(byte => byte == 0)) return
@@ -398,6 +434,9 @@ const validateSidecarHeader = (
   fileSystem: typeof fs,
 ): void => {
   if (snapshot.name == 'cache.db' || snapshot.size == 0) return
+  if (snapshot.name == 'cache.db-wal' && snapshot.size > MAX_CACHE_PREFLIGHT_BYTES) {
+    throw fixedError('cache_capacity_unavailable')
+  }
   const minimumSize = snapshot.name == 'cache.db-wal' ? 32 : 32768
   if (snapshot.size < minimumSize) throw fixedError('cache_integrity_failed')
   if (snapshot.name == 'cache.db-shm' && snapshot.size % 32768 != 0) {
@@ -429,6 +468,126 @@ const validateSidecarHeader = (
       try { fileSystem.closeSync(descriptor) } catch {}
     }
   }
+}
+
+const readBoundedArtifactFromDescriptor = (
+  descriptor: number,
+  snapshot: CacheArtifactSnapshot,
+  maximumBytes: number,
+  fileSystem: typeof fs,
+): Buffer => {
+  const opened = fileSystem.fstatSync(descriptor)
+  if (!isExclusiveSqliteFile(opened) || opened.size != snapshot.size ||
+    !sameSqliteFileIdentity(sqliteFileIdentity(opened), snapshot.identity)) {
+    throw fixedError('cache_target_invalid')
+  }
+  if (!Number.isSafeInteger(snapshot.size) || snapshot.size < 0 || snapshot.size > maximumBytes) {
+    throw fixedError('cache_capacity_unavailable')
+  }
+  const bytes = readSidecarBytes(descriptor, snapshot.size, fileSystem)
+  const verified = fileSystem.fstatSync(descriptor)
+  if (!isExclusiveSqliteFile(verified) || verified.size != snapshot.size ||
+    !sameSqliteFileIdentity(sqliteFileIdentity(verified), snapshot.identity)) {
+    throw fixedError('cache_target_invalid')
+  }
+  return bytes
+}
+
+const readBoundedArtifact = (
+  snapshot: CacheArtifactSnapshot,
+  maximumBytes: number,
+  fileSystem: typeof fs,
+): Buffer => {
+  let descriptor: number | null = null
+  try {
+    const noFollow = fileSystem.constants.O_NOFOLLOW ?? 0
+    descriptor = fileSystem.openSync(snapshot.path, fileSystem.constants.O_RDONLY | noFollow)
+    return readBoundedArtifactFromDescriptor(descriptor, snapshot, maximumBytes, fileSystem)
+  } catch (error) {
+    if (['ENOENT', 'ELOOP'].includes(sourceCode(error))) throw fixedError('cache_target_invalid')
+    throw error
+  } finally {
+    closeSqliteGuardDescriptor(fileSystem, descriptor)
+  }
+}
+
+const validateMainDatabaseImage = (bytes: Buffer): number => {
+  if (bytes.length < SQLITE_HEADER_BYTES || !bytes.subarray(0, SQLITE_HEADER_MAGIC.length).equals(SQLITE_HEADER_MAGIC)) {
+    throw fixedError('cache_integrity_failed')
+  }
+  const encodedPageSize = bytes.readUInt16BE(16)
+  const pageSize = encodedPageSize == 1 ? 65536 : encodedPageSize
+  if (!isSqlitePageSize(pageSize) || bytes.length < pageSize || bytes.length % pageSize != 0 ||
+    ![1, 2].includes(bytes[18]) || ![1, 2].includes(bytes[19])) {
+    throw fixedError('cache_integrity_failed')
+  }
+  return pageSize
+}
+
+const materializeExistingDatabase = (
+  snapshots: Map<CacheArtifactName, CacheArtifactSnapshot>,
+  prepared: Extract<ReturnType<typeof prepareSqliteTarget>, { ok: true }>,
+  fileSystem: typeof fs,
+): Buffer => {
+  const mainSnapshot = snapshots.get('cache.db')
+  if (mainSnapshot == null) throw fixedError('cache_target_invalid')
+  let image = readBoundedArtifactFromDescriptor(
+    prepared.guardDescriptor,
+    mainSnapshot,
+    MAX_CACHE_PREFLIGHT_BYTES,
+    fileSystem,
+  )
+  const pageSize = validateMainDatabaseImage(image)
+  const walSnapshot = snapshots.get('cache.db-wal')
+
+  if (walSnapshot != null && walSnapshot.size > 0) {
+    const remainingSourceBytes = MAX_CACHE_PREFLIGHT_BYTES - image.length
+    const wal = readBoundedArtifact(walSnapshot, remainingSourceBytes, fileSystem)
+    if (wal.length < 32) throw fixedError('cache_integrity_failed')
+    const walHeader = validateWalHeader(wal.subarray(0, 32))
+    if (walHeader.pageSize != pageSize) throw fixedError('cache_integrity_failed')
+    const replay = scanWalFrames(
+      wal.length,
+      walHeader,
+      (position, length) => wal.subarray(position, position + length),
+    )
+    if (replay.lastCommittedFrameEnd != null && replay.databasePages != null) {
+      const finalBytes = replay.databasePages * pageSize
+      if (!Number.isSafeInteger(finalBytes) || finalBytes < pageSize || finalBytes > MAX_CACHE_PREFLIGHT_BYTES) {
+        throw fixedError('cache_capacity_unavailable')
+      }
+      if (image.length != finalBytes) {
+        const resized = Buffer.alloc(finalBytes)
+        image.copy(resized, 0, 0, Math.min(image.length, resized.length))
+        image = resized
+      }
+      const frameSize = 24 + pageSize
+      for (let position = 32; position < replay.lastCommittedFrameEnd; position += frameSize) {
+        const pageNumber = wal.readUInt32BE(position)
+        if (pageNumber <= replay.databasePages) {
+          wal.copy(image, (pageNumber - 1) * pageSize, position + 24, position + frameSize)
+        }
+      }
+    }
+  }
+
+  if (validateMainDatabaseImage(image) != pageSize) throw fixedError('cache_integrity_failed')
+  image[18] = 1
+  image[19] = 1
+  return image
+}
+
+const rejectOrphanSidecars = (
+  root: CacheRootOwnership,
+  fileSystem: typeof fs,
+  pathModule: typeof path,
+): void => {
+  if (inspectArtifact(root, 'cache.db', fileSystem, pathModule) != null) return
+  const sidecars = (['cache.db-wal', 'cache.db-shm'] as const)
+    .map(name => inspectArtifact(root, name, fileSystem, pathModule))
+    .filter((snapshot): snapshot is CacheArtifactSnapshot => snapshot != null)
+  for (const snapshot of sidecars) validateSidecarHeader(snapshot, fileSystem)
+  if (sidecars.length > 0) throw fixedError('cache_integrity_failed')
 }
 
 const captureArtifacts = (
@@ -480,6 +639,7 @@ const validateArtifactOwnership = (
   expectedArtifacts: Map<CacheArtifactName, CacheArtifactSnapshot>,
   fileSystem: typeof fs,
   pathModule: typeof path,
+  requireStableSize = false,
 ): void => {
   const current = captureArtifacts(
     root,
@@ -492,7 +652,8 @@ const validateArtifactOwnership = (
   if (current.size != expectedArtifacts.size) throw fixedError('cache_target_invalid')
   for (const [name, expected] of expectedArtifacts) {
     const actual = current.get(name)
-    if (actual == null || !sameSqliteFileIdentity(actual.identity, expected.identity)) {
+    if (actual == null || !sameSqliteFileIdentity(actual.identity, expected.identity) ||
+      (requireStableSize && actual.size != expected.size)) {
       throw fixedError('cache_target_invalid')
     }
   }
@@ -554,88 +715,6 @@ const closeHandle = (db: Database.Database | null): { closed: boolean, error: un
   }
 }
 
-const restoreMovedArtifact = (
-  quarantinePath: string,
-  publishedPath: string,
-  movedIdentity: SqliteFileIdentity,
-  fileSystem: typeof fs,
-): boolean => {
-  try {
-    const moved = fileSystem.lstatSync(quarantinePath)
-    if (!sameSqliteFileIdentity(sqliteFileIdentity(moved), movedIdentity)) return false
-    try {
-      fileSystem.lstatSync(publishedPath)
-      return false
-    } catch (error) {
-      if (!isMissing(error)) return false
-    }
-    fileSystem.renameSync(quarantinePath, publishedPath)
-    const restored = fileSystem.lstatSync(publishedPath)
-    return sameSqliteFileIdentity(sqliteFileIdentity(restored), movedIdentity)
-  } catch {
-    return false
-  }
-}
-
-const isolateCacheArtifacts = (
-  root: CacheRootOwnership,
-  snapshots: Map<CacheArtifactName, CacheArtifactSnapshot>,
-  fileSystem: typeof fs,
-  pathModule: typeof path,
-  randomUUID: () => string,
-): void => {
-  for (const name of cacheArtifactNames) {
-    if (!validateCacheRoot(root, fileSystem)) throw fixedError('cache_target_invalid')
-    const expected = snapshots.get(name)
-    const current = inspectArtifact(root, name, fileSystem, pathModule)
-    if (current == null) continue
-    if (expected == null || !sameSqliteFileIdentity(current.identity, expected.identity)) {
-      throw fixedError('cache_target_invalid')
-    }
-    const quarantineName = `.${name}.isolate-${randomUUID()}`
-    const quarantinePath = resolveContainedPath(root.path, quarantineName, pathModule)
-    if (pathModule.dirname(quarantinePath) != root.path) throw fixedError('cache_target_invalid')
-    try {
-      fileSystem.lstatSync(quarantinePath)
-      throw fixedError('cache_target_invalid')
-    } catch (error) {
-      if (!isMissing(error)) throw error
-    }
-
-    try {
-      fileSystem.renameSync(current.path, quarantinePath)
-    } catch (error) {
-      if (sourceCode(error) == 'EEXIST') throw fixedError('cache_target_invalid')
-      throw fixedError('cache_delete_failed')
-    }
-    let movedIdentity: SqliteFileIdentity | null = null
-    try {
-      const moved = fileSystem.lstatSync(quarantinePath)
-      movedIdentity = sqliteFileIdentity(moved)
-      const movedIsExpected = !moved.isSymbolicLink() && isExclusiveSqliteFile(moved) &&
-        sameSqliteFileIdentity(sqliteFileIdentity(moved), expected.identity)
-      if (!movedIsExpected || !validateCacheRoot(root, fileSystem)) {
-        restoreMovedArtifact(quarantinePath, current.path, movedIdentity, fileSystem)
-        throw fixedError('cache_target_invalid')
-      }
-      const beforeUnlink = fileSystem.lstatSync(quarantinePath)
-      if (beforeUnlink.isSymbolicLink() || !isExclusiveSqliteFile(beforeUnlink) ||
-        !sameSqliteFileIdentity(sqliteFileIdentity(beforeUnlink), movedIdentity) ||
-        !validateCacheRoot(root, fileSystem)) {
-        restoreMovedArtifact(quarantinePath, current.path, movedIdentity, fileSystem)
-        throw fixedError('cache_target_invalid')
-      }
-      fileSystem.unlinkSync(quarantinePath)
-    } catch (error) {
-      if (movedIdentity != null) {
-        restoreMovedArtifact(quarantinePath, current.path, movedIdentity, fileSystem)
-      }
-      if (sourceCode(error) == 'cache_target_invalid') throw error
-      throw fixedError('cache_delete_failed')
-    }
-  }
-}
-
 export const createCacheDatabaseService = (
   options: CacheDatabaseServiceOptions = {},
 ): CacheDatabaseService => {
@@ -693,10 +772,39 @@ export const createCacheDatabaseService = (
     snapshots: Map<CacheArtifactName, CacheArtifactSnapshot> | null,
   ): CandidateResult => ({ ok: false, diagnostic, existed, snapshots })
 
+  const verifyExistingCandidateInMemory = (
+    snapshots: Map<CacheArtifactName, CacheArtifactSnapshot>,
+    prepared: Extract<ReturnType<typeof prepareSqliteTarget>, { ok: true }>,
+  ): void => {
+    let verificationDb: Database.Database | null = null
+    let verificationError: Error | null = null
+    try {
+      const image = materializeExistingDatabase(snapshots, prepared, fileSystem)
+      verificationDb = new Database(image, {
+        ...getNativeOptions(fileSystem, pathModule),
+        readonly: true,
+      })
+      const verification = verifyCacheSchema(verificationDb)
+      if (!verification.ok) throw fixedError(verification.diagnostic)
+    } catch (error) {
+      verificationError = fixedError(classifyCacheError(error, 'cache_integrity_failed'))
+    }
+
+    const closeAttempt = closeHandle(verificationDb)
+    if (!closeAttempt.closed) retainedHandle = verificationDb
+    if (closeAttempt.error != null || !closeAttempt.closed) throw fixedError('cache_close_failed')
+    if (verificationError != null) throw verificationError
+  }
+
   const openCandidate = (
     root: CacheRootOwnership,
     databasePath: string,
   ): CandidateResult => {
+    try {
+      rejectOrphanSidecars(root, fileSystem, pathModule)
+    } catch (error) {
+      return candidateFailure(classifyCacheError(error, 'cache_target_invalid'), false, null)
+    }
     const prepared = prepareSqliteTarget(root.path, databasePath, { fileSystem, pathModule })
     if (!prepared.ok) {
       const diagnostic = prepared.sourceCode == 'ENOSPC'
@@ -721,24 +829,46 @@ export const createCacheDatabaseService = (
         throw fixedError('cache_target_invalid')
       }
       snapshots = captureArtifacts(root, databasePath, target, fileSystem, pathModule, true)
+      if (prepared.existed) {
+        verifyExistingCandidateInMemory(snapshots, prepared)
+        validateArtifactOwnership(root, databasePath, target, snapshots, fileSystem, pathModule, true)
+        if (!validatePreparedSqliteTarget(databasePath, prepared, { fileSystem, pathModule }) ||
+          !validateCacheRoot(root, fileSystem)) {
+          throw fixedError('cache_target_invalid')
+        }
+      }
       db = new DatabaseImplementation(databasePath, {
         ...getNativeOptions(fileSystem, pathModule),
         fileMustExist: true,
       })
-      validateArtifactOwnership(root, databasePath, target, snapshots, fileSystem, pathModule)
+      validateArtifactOwnership(
+        root,
+        databasePath,
+        target,
+        snapshots,
+        fileSystem,
+        pathModule,
+        prepared.existed,
+      )
       if (!validatePreparedSqliteTarget(databasePath, prepared, { fileSystem, pathModule }) ||
         !validateCacheRoot(root, fileSystem)) {
         throw fixedError('cache_target_invalid')
       }
       closeSqliteGuardDescriptor(fileSystem, prepared.guardDescriptor)
+      if (prepared.existed) {
+        const verification = verifyCacheSchema(db)
+        if (!verification.ok) throw fixedError(verification.diagnostic)
+      }
       db.pragma('foreign_keys = ON')
       if (db.pragma('foreign_keys', { simple: true }) != 1) throw fixedError('cache_open_failed')
       if (String(db.pragma('journal_mode = WAL', { simple: true })).toLowerCase() != 'wal') {
         throw fixedError('cache_open_failed')
       }
       if (!prepared.existed) bootstrapCacheSchema(db, now())
-      const verification = verifyCacheSchema(db)
-      if (!verification.ok) throw fixedError(verification.diagnostic)
+      if (!prepared.existed) {
+        const verification = verifyCacheSchema(db)
+        if (!verification.ok) throw fixedError(verification.diagnostic)
+      }
       applyPrivateFileModes(root, fileSystem, pathModule)
       snapshots = captureArtifacts(root, databasePath, target, fileSystem, pathModule, true)
       return {
@@ -838,24 +968,9 @@ export const createCacheDatabaseService = (
 
     try {
       invalidateRepositories()
-      isolateCacheArtifacts(root, first.snapshots, fileSystem, pathModule, randomUUID)
-    } catch (error) {
-      const diagnostic = classifyCacheError(error, 'cache_delete_failed')
-      setUnavailable(diagnostic)
-      return { status: 'unavailable', schemaVersion: null, diagnostic }
-    }
-
-    const replacement = openCandidate(root, databasePath)
-    if (!replacement.ok) {
-      const diagnostic = [
-        'cache_target_invalid', 'cache_capacity_unavailable', 'cache_close_failed', 'cache_delete_failed',
-      ].includes(replacement.diagnostic)
-        ? replacement.diagnostic
-        : 'cache_reopen_failed'
-      setUnavailable(diagnostic)
-      return { status: 'unavailable', schemaVersion: null, diagnostic }
-    }
-    return installConnection(replacement.connection, 'recreated')
+    } catch {}
+    setUnavailable(first.diagnostic)
+    return { status: 'unavailable', schemaVersion: null, diagnostic: first.diagnostic }
   }
 
   const closeActiveConnection = (): CacheDiagnosticCode | null => {
@@ -874,7 +989,6 @@ export const createCacheDatabaseService = (
 
   const transitionAfterOperationFailure = (error: unknown): CacheDiagnosticCode => {
     let diagnostic = classifyCacheError(error, 'cache_operation_failed')
-    let snapshots: Map<CacheArtifactName, CacheArtifactSnapshot> | null = null
     const failedConnection = connection
     try {
       invalidateRepositories()
@@ -883,7 +997,7 @@ export const createCacheDatabaseService = (
     }
     if (failedConnection != null) {
       try {
-        snapshots = captureArtifacts(
+        captureArtifacts(
           failedConnection.root,
           failedConnection.databasePath,
           failedConnection.target,
@@ -897,14 +1011,6 @@ export const createCacheDatabaseService = (
       const closeAttempt = closeHandle(failedConnection.db)
       if (closeAttempt.closed) connection = null
       if (closeAttempt.error != null || !closeAttempt.closed) diagnostic = 'cache_close_failed'
-      if (closeAttempt.closed && snapshots != null &&
-        (diagnostic == 'cache_integrity_failed' || diagnostic == 'cache_schema_invalid')) {
-        try {
-          isolateCacheArtifacts(failedConnection.root, snapshots, fileSystem, pathModule, randomUUID)
-        } catch (isolationError) {
-          diagnostic = classifyCacheError(isolationError, 'cache_delete_failed')
-        }
-      }
     }
     setUnavailable(diagnostic)
     return diagnostic

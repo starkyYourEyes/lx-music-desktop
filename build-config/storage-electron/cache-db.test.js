@@ -31,6 +31,7 @@ const { CACHE_SCHEMA_SOURCE } = require('../../src/main/worker/dbService/cacheTa
 const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const cacheModulePath = '../../src/main/worker/dbService/cacheDb.ts'
+const MAX_CACHE_PREFLIGHT_BYTES = 256 * 1024 * 1024
 const fixtures = []
 const cacheServices = []
 
@@ -56,6 +57,62 @@ const fileNodeSnapshot = filename => ({
   ...nodeIdentity(filename),
   bytes: fs.readFileSync(filename),
 })
+
+const cacheArtifactSnapshots = cachePath => Object.fromEntries([
+  cachePath,
+  `${cachePath}-wal`,
+  `${cachePath}-shm`,
+].filter(filename => fs.existsSync(filename)).map(filename => [filename, fileNodeSnapshot(filename)]))
+
+const calculateWalChecksum = (value, length, byteOrder, initial = [0, 0]) => {
+  let [first, second] = initial
+  const readWord = byteOrder == 'BE'
+    ? offset => value.readUInt32BE(offset)
+    : offset => value.readUInt32LE(offset)
+  for (let offset = 0; offset < length; offset += 8) {
+    first = (first + readWord(offset) + second) >>> 0
+    second = (second + readWord(offset + 4) + first) >>> 0
+  }
+  return [first, second]
+}
+
+const rewriteWalChecksums = wal => {
+  const byteOrder = wal.readUInt32BE(0) == 0x377f0683 ? 'BE' : 'LE'
+  let checksum = calculateWalChecksum(wal, 24, byteOrder)
+  wal.writeUInt32BE(checksum[0], 24)
+  wal.writeUInt32BE(checksum[1], 28)
+  const pageSize = wal.readUInt32BE(8)
+  const frameSize = 24 + pageSize
+  for (let position = 32; position + frameSize <= wal.length; position += frameSize) {
+    const frame = wal.subarray(position, position + frameSize)
+    checksum = calculateWalChecksum(frame, 8, byteOrder, checksum)
+    checksum = calculateWalChecksum(frame.subarray(24), pageSize, byteOrder, checksum)
+    frame.writeUInt32BE(checksum[0], 16)
+    frame.writeUInt32BE(checksum[1], 20)
+  }
+}
+
+const lastCommittedWalFrame = wal => {
+  const frameSize = 24 + wal.readUInt32BE(8)
+  let committed = null
+  for (let position = 32; position + frameSize <= wal.length; position += frameSize) {
+    if (wal.readUInt32BE(position + 4) != 0) committed = position
+  }
+  assert.notEqual(committed, null)
+  return committed
+}
+
+const schemaSnapshot = cachePath => {
+  const db = new Database(cachePath, { readonly: true, fileMustExist: true })
+  try {
+    return db.prepare(`
+      SELECT type, name, tbl_name, sql FROM sqlite_master
+      ORDER BY type, name
+    `).all()
+  } finally {
+    db.close()
+  }
+}
 
 const appFingerprint = databasePath => Object.fromEntries([
   databasePath,
@@ -294,14 +351,16 @@ describe('guarded cache database', () => {
     assert.deepEqual(appFingerprint(appDbPath), before)
   })
 
-  it('recreates malformed bytes, wrong schemas, wrong checksums, and corrupt sidecars', async(t) => {
+  it('degrades without replacing malformed bytes, wrong schemas, or corrupt sidecars', async(t) => {
     const cases = [
       {
         name: 'malformed database bytes',
+        diagnostic: 'cache_integrity_failed',
         seed(cachePath) { fs.writeFileSync(cachePath, 'not a sqlite database') },
       },
       {
         name: 'syntactically valid wrong schema',
+        diagnostic: 'cache_schema_invalid',
         seed(cachePath) {
           const db = new Database(cachePath)
           db.exec('CREATE TABLE wrong_owner(id TEXT PRIMARY KEY); PRAGMA user_version = 1')
@@ -310,6 +369,7 @@ describe('guarded cache database', () => {
       },
       {
         name: 'corrupt WAL',
+        diagnostic: 'cache_integrity_failed',
         async seed(cachePath, service) {
           assert.equal((await service.openCacheDatabase()).status, 'created')
           await service.closeCacheDatabase()
@@ -318,6 +378,7 @@ describe('guarded cache database', () => {
       },
       {
         name: 'corrupt SHM',
+        diagnostic: 'cache_integrity_failed',
         async seed(cachePath, service) {
           assert.equal((await service.openCacheDatabase()).status, 'created')
           await service.closeCacheDatabase()
@@ -334,18 +395,18 @@ describe('guarded cache database', () => {
         const seedService = createCacheService()
         await testCase.seed(cachePath, seedService)
         await closeService(seedService)
+        const artifactsBefore = cacheArtifactSnapshots(cachePath)
         const before = appFingerprint(appDbPath)
         const service = createCacheService()
 
         assert.deepEqual(await service.openCacheDatabase(), {
-          status: 'recreated', schemaVersion: 1, diagnostic: null,
+          status: 'unavailable', schemaVersion: null, diagnostic: testCase.diagnostic,
         })
-        const inspection = new Database(cachePath, { readonly: true })
-        try {
-          assert.equal(inspection.pragma('quick_check', { simple: true }), 'ok')
-        } finally {
-          inspection.close()
-        }
+        assert.deepEqual(cacheArtifactSnapshots(cachePath), artifactsBefore)
+        assert.equal(await service.getCacheLifecycleState(), 'unavailable')
+        assert.deepEqual(await service.runCacheRead(() => assert.fail('cache handle was installed')), {
+          status: 'unavailable', code: testCase.diagnostic,
+        })
         assert.deepEqual(appFingerprint(appDbPath), before)
 
         await closeService(service)
@@ -354,26 +415,82 @@ describe('guarded cache database', () => {
     }
   })
 
-  it('recreates orphan corrupt WAL and SHM artifacts in the first open call', async(t) => {
+  it('rejects an oversized existing image without reading or opening it through SQLite', async() => {
+    const { cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-preflight-main-bound' })
+    const seed = createCacheService()
+    assert.equal((await seed.openCacheDatabase()).status, 'created')
+    await seed.closeCacheDatabase()
+    const cachePath = path.join(cacheRoot, 'cache.db')
+    for (const suffix of ['-wal', '-shm']) {
+      if (fs.existsSync(`${cachePath}${suffix}`)) fs.unlinkSync(`${cachePath}${suffix}`)
+    }
+    const descriptor = fs.openSync(cachePath, 'r+')
+    try {
+      fs.ftruncateSync(descriptor, MAX_CACHE_PREFLIGHT_BYTES + 4096)
+    } finally {
+      fs.closeSync(descriptor)
+    }
+    const prefix = Buffer.alloc(4096)
+    const prefixDescriptor = fs.openSync(cachePath, 'r')
+    try {
+      assert.equal(fs.readSync(prefixDescriptor, prefix, 0, prefix.length, 0), prefix.length)
+    } finally {
+      fs.closeSync(prefixDescriptor)
+    }
+    const before = {
+      identity: nodeIdentity(cachePath),
+      size: fs.statSync(cachePath).size,
+      prefix,
+      app: appFingerprint(appDbPath),
+    }
+    let constructions = 0
+    class CountingDatabase {
+      constructor(filename, options) {
+        constructions++
+        return new Database(filename, options)
+      }
+    }
+    const service = createCacheService({ DatabaseImplementation: CountingDatabase })
+
+    assert.deepEqual(await service.openCacheDatabase(), {
+      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_capacity_unavailable',
+    })
+    assert.equal(constructions, 0)
+    assert.deepEqual(nodeIdentity(cachePath), before.identity)
+    assert.equal(fs.statSync(cachePath).size, before.size)
+    const verifyDescriptor = fs.openSync(cachePath, 'r')
+    try {
+      const prefix = Buffer.alloc(4096)
+      assert.equal(fs.readSync(verifyDescriptor, prefix, 0, prefix.length, 0), prefix.length)
+      assert.deepEqual(prefix, before.prefix)
+    } finally {
+      fs.closeSync(verifyDescriptor)
+    }
+    assert.deepEqual(appFingerprint(appDbPath), before.app)
+  })
+
+  it('degrades without removing orphan corrupt WAL and SHM artifacts', async(t) => {
     for (const suffix of ['-wal', '-shm']) {
       await t.test(suffix.slice(1).toUpperCase(), async() => {
         const { cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-orphan-sidecar' })
         fs.mkdirSync(cacheRoot, { recursive: true })
         const cachePath = path.join(cacheRoot, 'cache.db')
-        fs.writeFileSync(`${cachePath}${suffix}`, Buffer.alloc(64, 0x5a))
+        const sidecarPath = `${cachePath}${suffix}`
+        fs.writeFileSync(sidecarPath, Buffer.alloc(64, 0x5a))
+        const sidecarBefore = fileNodeSnapshot(sidecarPath)
         assert.equal(fs.existsSync(cachePath), false)
         const before = appFingerprint(appDbPath)
         const service = createCacheService()
 
         assert.deepEqual(await service.openCacheDatabase(), {
-          status: 'recreated', schemaVersion: 1, diagnostic: null,
+          status: 'unavailable', schemaVersion: null, diagnostic: 'cache_integrity_failed',
         })
-        const inspection = new Database(cachePath, { readonly: true, fileMustExist: true })
-        try {
-          assert.equal(inspection.pragma('quick_check', { simple: true }), 'ok')
-        } finally {
-          inspection.close()
-        }
+        assert.equal(fs.existsSync(cachePath), false)
+        assert.deepEqual(fileNodeSnapshot(sidecarPath), sidecarBefore)
+        assert.equal(await service.getCacheLifecycleState(), 'unavailable')
+        assert.deepEqual(await service.runCacheRead(() => assert.fail('cache handle was installed')), {
+          status: 'unavailable', code: 'cache_integrity_failed',
+        })
         assert.deepEqual(appFingerprint(appDbPath), before)
 
         await closeService(service)
@@ -382,7 +499,7 @@ describe('guarded cache database', () => {
     }
   })
 
-  it('recreates structurally invalid sidecars with plausible first header words', async(t) => {
+  it('degrades without replacing structurally invalid sidecars with plausible headers', async(t) => {
     const cases = [
       {
         name: 'WAL',
@@ -410,13 +527,16 @@ describe('guarded cache database', () => {
         assert.equal((await seed.openCacheDatabase()).status, 'created')
         await seed.closeCacheDatabase()
         const cachePath = path.join(cacheRoot, 'cache.db')
-        fs.writeFileSync(`${cachePath}${testCase.suffix}`, testCase.bytes())
+        const sidecarPath = `${cachePath}${testCase.suffix}`
+        fs.writeFileSync(sidecarPath, testCase.bytes())
+        const sidecarBefore = fileNodeSnapshot(sidecarPath)
         const before = appFingerprint(appDbPath)
         const service = createCacheService()
 
         assert.deepEqual(await service.openCacheDatabase(), {
-          status: 'recreated', schemaVersion: 1, diagnostic: null,
+          status: 'unavailable', schemaVersion: null, diagnostic: 'cache_integrity_failed',
         })
+        assert.deepEqual(fileNodeSnapshot(sidecarPath), sidecarBefore)
         assert.deepEqual(appFingerprint(appDbPath), before)
 
         await closeService(service)
@@ -425,7 +545,7 @@ describe('guarded cache database', () => {
     }
   })
 
-  it('recreates an aligned WAL with a valid header and corrupt commit frame', async() => {
+  it('degrades without replacing an aligned WAL with a corrupt commit frame', async() => {
     const { cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-wal-frame-checksum' })
     const seed = createCacheService()
     assert.equal((await seed.openCacheDatabase()).status, 'created')
@@ -450,16 +570,277 @@ describe('guarded cache database', () => {
     wal.writeUInt32BE(0x87654321, 44)
     wal.fill(0x5a, 56)
     fs.writeFileSync(`${cachePath}-wal`, wal)
+    const walBefore = fileNodeSnapshot(`${cachePath}-wal`)
     const before = appFingerprint(appDbPath)
     const service = createCacheService()
 
     assert.deepEqual(await service.openCacheDatabase(), {
-      status: 'recreated', schemaVersion: 1, diagnostic: null,
+      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_integrity_failed',
     })
+    assert.deepEqual(fileNodeSnapshot(`${cachePath}-wal`), walBefore)
     assert.deepEqual(appFingerprint(appDbPath), before)
 
     await closeService(service)
     dbService.close()
+  })
+
+  it('reconstructs schema and data that exist only in a committed WAL', async() => {
+    const { cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-wal-only-state' })
+    const cachePath = path.join(cacheRoot, 'cache.db')
+    const seed = createCacheService()
+    assert.equal((await seed.openCacheDatabase()).status, 'created')
+    assert.deepEqual(await seed.runCacheWrite(db => {
+      db.prepare(`
+        INSERT INTO raw_lyric_groups(
+          provider, source_track_id, byte_size, created_at_ms, last_accessed_at_ms
+        ) VALUES ('tx', 'wal-only', 0, 1, 1)
+      `).run()
+    }), { status: 'stored' })
+    const databaseBytes = fs.readFileSync(cachePath)
+    const walBytes = fs.readFileSync(`${cachePath}-wal`)
+    const shmBytes = fs.readFileSync(`${cachePath}-shm`)
+    assert.ok(walBytes.length > 32)
+
+    const mainOnlyBytes = Buffer.from(databaseBytes)
+    mainOnlyBytes[18] = 1
+    mainOnlyBytes[19] = 1
+    const mainOnly = new Database(mainOnlyBytes, { readonly: true })
+    try {
+      const { verifyCacheSchema } = require('../../src/main/worker/dbService/cacheSchemaContract.ts')
+      assert.notDeepEqual(verifyCacheSchema(mainOnly), { ok: true })
+    } finally {
+      mainOnly.close()
+    }
+    await seed.closeCacheDatabase()
+
+    fs.writeFileSync(cachePath, databaseBytes)
+    fs.writeFileSync(`${cachePath}-wal`, walBytes)
+    fs.writeFileSync(`${cachePath}-shm`, shmBytes)
+    const before = appFingerprint(appDbPath)
+    const service = createCacheService()
+
+    assert.deepEqual(await service.openCacheDatabase(), {
+      status: 'ready', schemaVersion: 1, diagnostic: null,
+    })
+    assert.deepEqual(await service.runCacheRead(db => db.prepare(`
+      SELECT provider FROM raw_lyric_groups WHERE source_track_id = 'wal-only'
+    `).pluck().get()), { status: 'hit', value: 'tx' })
+    assert.deepEqual(appFingerprint(appDbPath), before)
+  })
+
+  it('rejects checksum-valid WAL frames that exceed reconstruction bounds', async(t) => {
+    const cases = [
+      {
+        name: 'commit database size',
+        diagnostic: 'cache_capacity_unavailable',
+        mutate(wal, frame, maximumPage) { wal.writeUInt32BE(maximumPage + 1, frame + 4) },
+      },
+      {
+        name: 'frame page number',
+        diagnostic: 'cache_integrity_failed',
+        mutate(wal, frame) { wal.writeUInt32BE(0xffffffff, frame) },
+      },
+    ]
+    for (const testCase of cases) {
+      await t.test(testCase.name, async() => {
+        const { cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-wal-replay-bound' })
+        const cachePath = path.join(cacheRoot, 'cache.db')
+        const seed = createCacheService()
+        assert.equal((await seed.openCacheDatabase()).status, 'created')
+        assert.deepEqual(await seed.runCacheWrite(db => {
+          db.prepare(`
+            INSERT INTO raw_lyric_groups(
+              provider, source_track_id, byte_size, created_at_ms, last_accessed_at_ms
+            ) VALUES ('tx', 'wal-bound', 0, 1, 1)
+          `).run()
+        }), { status: 'stored' })
+        const databaseBytes = fs.readFileSync(cachePath)
+        const walBytes = fs.readFileSync(`${cachePath}-wal`)
+        const shmBytes = fs.readFileSync(`${cachePath}-shm`)
+        await seed.closeCacheDatabase()
+
+        const wal = Buffer.from(walBytes)
+        const pageSize = wal.readUInt32BE(8)
+        const maximumPage = Math.floor(MAX_CACHE_PREFLIGHT_BYTES / pageSize)
+        testCase.mutate(wal, lastCommittedWalFrame(wal), maximumPage)
+        rewriteWalChecksums(wal)
+        fs.writeFileSync(cachePath, databaseBytes)
+        fs.writeFileSync(`${cachePath}-wal`, wal)
+        fs.writeFileSync(`${cachePath}-shm`, shmBytes)
+        const artifactsBefore = cacheArtifactSnapshots(cachePath)
+        const before = appFingerprint(appDbPath)
+        let constructions = 0
+        class CountingDatabase {
+          constructor(filename, options) {
+            constructions++
+            return new Database(filename, options)
+          }
+        }
+        const service = createCacheService({ DatabaseImplementation: CountingDatabase })
+
+        assert.deepEqual(await service.openCacheDatabase(), {
+          status: 'unavailable', schemaVersion: null, diagnostic: testCase.diagnostic,
+        })
+        assert.equal(constructions, 0)
+        assert.deepEqual(cacheArtifactSnapshots(cachePath), artifactsBefore)
+        assert.deepEqual(appFingerprint(appDbPath), before)
+      })
+    }
+  })
+
+  it('ignores a checksum-valid WAL that has no commit marker', async() => {
+    const { cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-wal-no-commit' })
+    const cachePath = path.join(cacheRoot, 'cache.db')
+    const seed = createCacheService()
+    assert.equal((await seed.openCacheDatabase()).status, 'created')
+    await seed.closeCacheDatabase()
+    const databaseBytes = fs.readFileSync(cachePath)
+
+    const writer = createCacheService()
+    assert.equal((await writer.openCacheDatabase()).status, 'ready')
+    assert.deepEqual(await writer.runCacheWrite(db => {
+      db.prepare(`
+        INSERT INTO raw_lyric_groups(
+          provider, source_track_id, byte_size, created_at_ms, last_accessed_at_ms
+        ) VALUES ('tx', 'not-committed', 0, 1, 1)
+      `).run()
+    }), { status: 'stored' })
+    const wal = fs.readFileSync(`${cachePath}-wal`)
+    const pageSize = wal.readUInt32BE(8)
+    const frameSize = 24 + pageSize
+    for (let position = 32; position + frameSize <= wal.length; position += frameSize) {
+      wal.writeUInt32BE(0, position + 4)
+    }
+    rewriteWalChecksums(wal)
+    await writer.closeCacheDatabase()
+
+    fs.writeFileSync(cachePath, databaseBytes)
+    fs.writeFileSync(`${cachePath}-wal`, wal)
+    fs.writeFileSync(`${cachePath}-shm`, Buffer.alloc(32768))
+    const before = appFingerprint(appDbPath)
+    const service = createCacheService()
+
+    assert.deepEqual(await service.openCacheDatabase(), {
+      status: 'ready', schemaVersion: 1, diagnostic: null,
+    })
+    assert.deepEqual(await service.runCacheRead(db => db.prepare(`
+      SELECT provider FROM raw_lyric_groups WHERE source_track_id = 'not-committed'
+    `).pluck().get()), { status: 'miss' })
+    assert.deepEqual(appFingerprint(appDbPath), before)
+  })
+
+  it('ignores a checksum-valid uncommitted frame after the last commit', async() => {
+    const { cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-wal-uncommitted-tail' })
+    const cachePath = path.join(cacheRoot, 'cache.db')
+    const seed = createCacheService()
+    assert.equal((await seed.openCacheDatabase()).status, 'created')
+    assert.deepEqual(await seed.runCacheWrite(db => {
+      db.prepare(`
+        INSERT INTO raw_lyric_groups(
+          provider, source_track_id, byte_size, created_at_ms, last_accessed_at_ms
+        ) VALUES ('tx', 'committed-prefix', 0, 1, 1)
+      `).run()
+    }), { status: 'stored' })
+    const databaseBytes = fs.readFileSync(cachePath)
+    const committedWal = fs.readFileSync(`${cachePath}-wal`)
+    const shmBytes = fs.readFileSync(`${cachePath}-shm`)
+    await seed.closeCacheDatabase()
+
+    const pageSize = committedWal.readUInt32BE(8)
+    const frame = Buffer.alloc(24 + pageSize)
+    frame.writeUInt32BE(1, 0)
+    frame.writeUInt32BE(committedWal.readUInt32BE(16), 8)
+    frame.writeUInt32BE(committedWal.readUInt32BE(20), 12)
+    const wal = Buffer.concat([committedWal, frame])
+    rewriteWalChecksums(wal)
+    fs.writeFileSync(cachePath, databaseBytes)
+    fs.writeFileSync(`${cachePath}-wal`, wal)
+    fs.writeFileSync(`${cachePath}-shm`, shmBytes)
+    const before = appFingerprint(appDbPath)
+    const service = createCacheService()
+
+    assert.deepEqual(await service.openCacheDatabase(), {
+      status: 'ready', schemaVersion: 1, diagnostic: null,
+    })
+    assert.deepEqual(await service.runCacheRead(db => db.prepare(`
+      SELECT provider FROM raw_lyric_groups WHERE source_track_id = 'committed-prefix'
+    `).pluck().get()), { status: 'hit', value: 'tx' })
+    assert.deepEqual(appFingerprint(appDbPath), before)
+  })
+
+  it('reconstructs a valid grow-then-shrink WAL to the last commit size', async() => {
+    const { cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-wal-grow-shrink' })
+    const cachePath = path.join(cacheRoot, 'cache.db')
+    fs.mkdirSync(cacheRoot, { recursive: true })
+    const writer = new Database(cachePath)
+    let databaseBytes
+    let walBytes
+    let shmBytes
+    try {
+      writer.pragma('page_size = 512')
+      writer.pragma('auto_vacuum = FULL')
+      writer.pragma('foreign_keys = ON')
+      writer.exec(CACHE_SCHEMA_SOURCE)
+      writer.prepare(`
+        INSERT INTO cache_schema_migrations(version, name, checksum, applied_at_ms)
+        VALUES (?, ?, ?, ?)
+      `).run(CACHE_SCHEMA_VERSION, CACHE_MIGRATION_NAME, CACHE_MIGRATION_CHECKSUM, 1)
+      writer.pragma(`user_version = ${CACHE_SCHEMA_VERSION}`)
+      assert.equal(String(writer.pragma('journal_mode = WAL', { simple: true })).toLowerCase(), 'wal')
+      writer.pragma('wal_autocheckpoint = 0')
+      const insertGroup = writer.prepare(`
+        INSERT INTO raw_lyric_groups(
+          provider, source_track_id, byte_size, created_at_ms, last_accessed_at_ms
+        ) VALUES ('tx', ?, ?, 1, 1)
+      `)
+      const insertLyric = writer.prepare(`
+        INSERT INTO raw_lyrics(provider, source_track_id, lyric_type, text, byte_size)
+        VALUES ('tx', ?, 'lyric', ?, ?)
+      `)
+      const text = 'x'.repeat(4096)
+      writer.transaction(() => {
+        for (let index = 0; index < 256; index++) {
+          const sourceTrackId = `grow-${index}`
+          insertGroup.run(sourceTrackId, text.length)
+          insertLyric.run(sourceTrackId, text, text.length)
+        }
+      })()
+      writer.exec('DELETE FROM raw_lyric_groups')
+      databaseBytes = fs.readFileSync(cachePath)
+      walBytes = fs.readFileSync(`${cachePath}-wal`)
+      shmBytes = fs.readFileSync(`${cachePath}-shm`)
+    } finally {
+      writer.close()
+    }
+
+    const pageSize = walBytes.readUInt32BE(8)
+    const frameSize = 24 + pageSize
+    let finalDatabasePages = 0
+    let maximumFramePage = 0
+    let commitCount = 0
+    for (let position = 32; position + frameSize <= walBytes.length; position += frameSize) {
+      maximumFramePage = Math.max(maximumFramePage, walBytes.readUInt32BE(position))
+      const commitPages = walBytes.readUInt32BE(position + 4)
+      if (commitPages != 0) {
+        finalDatabasePages = commitPages
+        commitCount++
+      }
+    }
+    assert.ok(commitCount >= 2)
+    assert.ok(maximumFramePage > finalDatabasePages)
+    fs.writeFileSync(cachePath, databaseBytes)
+    fs.writeFileSync(`${cachePath}-wal`, walBytes)
+    fs.writeFileSync(`${cachePath}-shm`, shmBytes)
+    const before = appFingerprint(appDbPath)
+    const service = createCacheService()
+
+    assert.deepEqual(await service.openCacheDatabase(), {
+      status: 'ready', schemaVersion: 1, diagnostic: null,
+    })
+    assert.deepEqual(await service.runCacheRead(db => db.prepare(`
+      SELECT count(*) FROM raw_lyric_groups
+    `).pluck().get()), { status: 'hit', value: 0 })
+    assert.deepEqual(appFingerprint(appDbPath), before)
   })
 
   it('keeps a valid committed WAL prefix when SQLite ignores an incomplete crash tail', async() => {
@@ -529,7 +910,7 @@ describe('guarded cache database', () => {
     assert.deepEqual(appFingerprint(appDbPath), before)
   })
 
-  it('recreates a valid cache whose migration checksum no longer matches', async() => {
+  it('degrades without replacing a cache whose migration checksum no longer matches', async() => {
     const { cacheRoot, appDbPath } = await createAppFixture()
     const first = createCacheService()
     assert.equal((await first.openCacheDatabase()).status, 'created')
@@ -538,19 +919,23 @@ describe('guarded cache database', () => {
     const tamper = new Database(cachePath)
     tamper.prepare('UPDATE cache_schema_migrations SET checksum = ? WHERE version = 1').run('f'.repeat(64))
     tamper.close()
+    const cacheBefore = nodeIdentity(cachePath)
+    const schemaBefore = schemaSnapshot(cachePath)
     const before = appFingerprint(appDbPath)
     const replacement = createCacheService()
 
     assert.deepEqual(await replacement.openCacheDatabase(), {
-      status: 'recreated', schemaVersion: 1, diagnostic: null,
+      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_schema_invalid',
     })
+    assert.deepEqual(nodeIdentity(cachePath), cacheBefore)
+    assert.deepEqual(schemaSnapshot(cachePath), schemaBefore)
     const check = new Database(cachePath, { readonly: true })
-    assert.notEqual(check.prepare('SELECT checksum FROM cache_schema_migrations').get().checksum, 'f'.repeat(64))
+    assert.equal(check.prepare('SELECT checksum FROM cache_schema_migrations').get().checksum, 'f'.repeat(64))
     check.close()
     assert.deepEqual(appFingerprint(appDbPath), before)
   })
 
-  it('recreates a cache whose persisted CHECK constraint was weakened', async() => {
+  it('degrades without replacing a cache whose persisted CHECK constraint was weakened', async() => {
     const { cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-weakened-check' })
     const first = createCacheService()
     assert.equal((await first.openCacheDatabase()).status, 'created')
@@ -572,26 +957,21 @@ describe('guarded cache database', () => {
       tamper.pragma('writable_schema = OFF')
       tamper.close()
     }
+    const cacheBefore = nodeIdentity(cachePath)
+    const schemaBefore = schemaSnapshot(cachePath)
     const before = appFingerprint(appDbPath)
     const replacement = createCacheService()
 
     assert.deepEqual(await replacement.openCacheDatabase(), {
-      status: 'recreated', schemaVersion: 1, diagnostic: null,
+      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_schema_invalid',
     })
-    const check = new Database(cachePath)
-    try {
-      assert.throws(() => check.prepare(`
-        INSERT INTO raw_lyric_groups(
-          provider, source_track_id, byte_size, created_at_ms, last_accessed_at_ms
-        ) VALUES ('tx', 'negative', -1, 1, 1)
-      `).run(), error => error?.code == 'SQLITE_CONSTRAINT_CHECK')
-    } finally {
-      check.close()
-    }
+    assert.deepEqual(nodeIdentity(cachePath), cacheBefore)
+    assert.deepEqual(schemaSnapshot(cachePath), schemaBefore)
+    assert.equal(schemaBefore.find(row => row.name == 'raw_lyric_groups').sql.includes('byte_size >= -1'), true)
     assert.deepEqual(appFingerprint(appDbPath), before)
   })
 
-  it('recreates a cache whose deterministic index collation was changed', async() => {
+  it('degrades without replacing a cache whose deterministic index collation was changed', async() => {
     const { cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-index-collation' })
     const first = createCacheService()
     assert.equal((await first.openCacheDatabase()).status, 'created')
@@ -607,17 +987,21 @@ describe('guarded cache database', () => {
       );
     `)
     tamper.close()
+    const cacheBefore = nodeIdentity(cachePath)
+    const schemaBefore = schemaSnapshot(cachePath)
     const before = appFingerprint(appDbPath)
     const replacement = createCacheService()
 
     assert.deepEqual(await replacement.openCacheDatabase(), {
-      status: 'recreated', schemaVersion: 1, diagnostic: null,
+      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_schema_invalid',
     })
+    assert.deepEqual(nodeIdentity(cachePath), cacheBefore)
+    assert.deepEqual(schemaSnapshot(cachePath), schemaBefore)
     const check = new Database(cachePath, { readonly: true })
     try {
       const provider = check.pragma('index_xinfo("raw_lyric_groups_lru")')
         .find(row => row.name == 'provider')
-      assert.equal(provider.coll, 'BINARY')
+      assert.equal(provider.coll, 'NOCASE')
       assert.equal(provider.desc, 0)
     } finally {
       check.close()
@@ -625,7 +1009,7 @@ describe('guarded cache database', () => {
     assert.deepEqual(appFingerprint(appDbPath), before)
   })
 
-  it('recreates caches with extra checks, defaults, hidden columns, views, or triggers', async(t) => {
+  it('degrades without replacing caches with extra checks, defaults, columns, views, or triggers', async(t) => {
     const cases = [
       {
         name: 'extra CHECK',
@@ -694,26 +1078,16 @@ describe('guarded cache database', () => {
         } finally {
           preflight.close()
         }
+        const cacheBefore = nodeIdentity(cachePath)
+        const schemaBefore = schemaSnapshot(cachePath)
         const before = appFingerprint(appDbPath)
         const replacement = createCacheService()
 
         assert.deepEqual(await replacement.openCacheDatabase(), {
-          status: 'recreated', schemaVersion: 1, diagnostic: null,
+          status: 'unavailable', schemaVersion: null, diagnostic: 'cache_schema_invalid',
         })
-        const check = new Database(cachePath, { readonly: true, fileMustExist: true })
-        try {
-          const columns = check.pragma('table_xinfo("raw_lyric_groups")')
-          assert.deepEqual(columns.map(row => row.name), expectedColumns.raw_lyric_groups)
-          assert.equal(columns.every(row => row.dflt_value == null && row.hidden == 0), true)
-          assert.equal(check.prepare(`
-            SELECT count(*) count FROM sqlite_master WHERE type IN ('view', 'trigger')
-          `).get().count, 0)
-          assert.equal(check.prepare(`
-            SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'raw_lyric_groups'
-          `).get().sql.includes("provider <> ''"), false)
-        } finally {
-          check.close()
-        }
+        assert.deepEqual(nodeIdentity(cachePath), cacheBefore)
+        assert.deepEqual(schemaSnapshot(cachePath), schemaBefore)
         assert.deepEqual(appFingerprint(appDbPath), before)
 
         await closeService(replacement)
@@ -772,17 +1146,21 @@ describe('guarded cache database', () => {
         } finally {
           preflight.close()
         }
+        const cacheBefore = nodeIdentity(cachePath)
+        const schemaBefore = schemaSnapshot(cachePath)
         const replacement = createCacheService()
 
         assert.deepEqual(await replacement.openCacheDatabase(), {
-          status: 'recreated', schemaVersion: 1, diagnostic: null,
+          status: 'unavailable', schemaVersion: null, diagnostic: 'cache_schema_invalid',
         })
+        assert.deepEqual(nodeIdentity(cachePath), cacheBefore)
+        assert.deepEqual(schemaSnapshot(cachePath), schemaBefore)
         const check = new Database(cachePath, { readonly: true, fileMustExist: true })
         try {
           const sql = check.prepare(`
             SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?
           `).get(testCase.table).sql
-          assert.equal(testCase.forbidden.test(sql), false)
+          assert.equal(testCase.forbidden.test(sql), true)
         } finally {
           check.close()
         }
@@ -961,6 +1339,59 @@ describe('guarded cache database', () => {
     assert.deepEqual(appFingerprint(appDbPath), before)
   })
 
+  it('revalidates artifact size after descriptor reading and before pathname open', async() => {
+    const { cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-preflight-size-race' })
+    const initial = createCacheService()
+    assert.equal((await initial.openCacheDatabase()).status, 'created')
+    await initial.closeCacheDatabase()
+    const cachePath = path.join(cacheRoot, 'cache.db')
+    for (const suffix of ['-wal', '-shm']) {
+      if (fs.existsSync(`${cachePath}${suffix}`)) fs.unlinkSync(`${cachePath}${suffix}`)
+    }
+    const identityBefore = nodeIdentity(cachePath)
+    const sizeBefore = fs.statSync(cachePath).size
+    const before = appFingerprint(appDbPath)
+    let readObserved = false
+    let injected = false
+    let constructions = 0
+    const changingFs = {
+      ...fs,
+      readSync(...args) {
+        const bytesRead = fs.readSync(...args)
+        readObserved = true
+        return bytesRead
+      },
+      fstatSync(...args) {
+        const stats = fs.fstatSync(...args)
+        if (readObserved && !injected) {
+          fs.appendFileSync(cachePath, Buffer.alloc(4096))
+          injected = true
+        }
+        return stats
+      },
+    }
+    class CountingDatabase {
+      constructor(filename, options) {
+        constructions++
+        return new Database(filename, options)
+      }
+    }
+    const service = createCacheService({
+      fileSystem: changingFs,
+      DatabaseImplementation: CountingDatabase,
+    })
+
+    assert.deepEqual(await service.openCacheDatabase(), {
+      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_target_invalid',
+    })
+    assert.equal(readObserved, true)
+    assert.equal(injected, true)
+    assert.equal(constructions, 0)
+    assert.deepEqual(nodeIdentity(cachePath), identityBefore)
+    assert.equal(fs.statSync(cachePath).size, sizeBefore + 4096)
+    assert.deepEqual(appFingerprint(appDbPath), before)
+  })
+
   it('rejects a sidecar replacement before SQLite can mutate its external hard-link target', async() => {
     const { fixture, cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-sidecar-swap' })
     const cachePath = path.join(cacheRoot, 'cache.db')
@@ -1001,8 +1432,8 @@ describe('guarded cache database', () => {
     assert.deepEqual(appFingerprint(appDbPath), before)
   })
 
-  it('restores the exact artifact moved by an isolation-boundary replacement', async() => {
-    const { fixture, cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-isolate-artifact-swap' })
+  it('does not start isolation when restoring a moved replacement would persistently fail', async() => {
+    const { fixture, cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-no-isolate-restore' })
     fs.mkdirSync(cacheRoot, { recursive: true })
     const cachePath = path.join(cacheRoot, 'cache.db')
     const parked = path.join(fixture.path, 'parked-owned-cache.db')
@@ -1011,97 +1442,187 @@ describe('guarded cache database', () => {
     const quarantinePath = path.join(cacheRoot, `.cache.db.isolate-${quarantineId}`)
     fs.writeFileSync(cachePath, 'owned-corrupt-cache-6C42')
     fs.writeFileSync(external, 'external-replacement-6C42')
+    const rootBefore = nodeIdentity(cacheRoot)
     const ownedBefore = fileNodeSnapshot(cachePath)
     const externalBefore = fileNodeSnapshot(external)
     const appBefore = appFingerprint(appDbPath)
-    const unlinkedQuarantines = []
-    let replacementBeforeMove
+    const destructiveCalls = []
     let injected = false
-    const swappingFs = {
+    let restoreAttempts = 0
+    const faultFs = {
       ...fs,
       renameSync(source, destination) {
+        destructiveCalls.push(['rename', path.resolve(source), path.resolve(destination)])
         if (!injected && path.resolve(source) == path.resolve(cachePath) &&
           path.resolve(destination) == path.resolve(quarantinePath)) {
           fs.renameSync(cachePath, parked)
           fs.linkSync(external, cachePath)
-          replacementBeforeMove = fileNodeSnapshot(cachePath)
           injected = true
+          return fs.renameSync(source, destination)
+        }
+        if (path.resolve(source) == path.resolve(quarantinePath) &&
+          path.resolve(destination) == path.resolve(cachePath)) {
+          restoreAttempts++
+          throw Object.assign(new Error('persistent-restore-denied'), { code: 'EACCES' })
         }
         return fs.renameSync(source, destination)
       },
       unlinkSync(filename) {
-        if (path.resolve(filename) == path.resolve(quarantinePath)) unlinkedQuarantines.push(filename)
+        destructiveCalls.push(['unlink', path.resolve(filename)])
         return fs.unlinkSync(filename)
       },
+      chmodSync(filename, mode) {
+        destructiveCalls.push(['chmod', path.resolve(filename)])
+        return fs.chmodSync(filename, mode)
+      },
     }
-    const service = createCacheService({
-      fileSystem: swappingFs,
-      randomUUID: () => quarantineId,
-    })
+    const service = createCacheService({ fileSystem: faultFs, randomUUID: () => quarantineId })
 
-    assert.deepEqual(await service.openCacheDatabase(), {
-      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_target_invalid',
+    const result = await service.openCacheDatabase()
+
+    assert.deepEqual(destructiveCalls, [])
+    assert.equal(injected, false)
+    assert.equal(restoreAttempts, 0)
+    assert.deepEqual(result, {
+      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_integrity_failed',
     })
-    assert.equal(injected, true)
-    assert.deepEqual(unlinkedQuarantines, [])
-    assert.equal(fs.existsSync(cachePath), true, 'moved replacement was not restored')
-    assert.deepEqual(fileNodeSnapshot(cachePath), replacementBeforeMove)
+    assert.deepEqual(nodeIdentity(cacheRoot), rootBefore)
+    assert.deepEqual(fileNodeSnapshot(cachePath), ownedBefore)
     assert.deepEqual(fileNodeSnapshot(external), externalBefore)
-    assert.deepEqual(fileNodeSnapshot(parked), ownedBefore)
+    assert.equal(fs.statSync(external).nlink, 1)
+    assert.equal(fs.existsSync(parked), false)
     assert.equal(fs.existsSync(quarantinePath), false)
+    assert.equal(await service.getCacheLifecycleState(), 'unavailable')
+    assert.deepEqual(await service.runCacheRead(() => assert.fail('cache handle was installed')), {
+      status: 'unavailable', code: 'cache_integrity_failed',
+    })
     assert.deepEqual(appFingerprint(appDbPath), appBefore)
   })
 
-  it('restores the exact artifact moved after a cache-root replacement', async() => {
-    const { fixture, cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-isolate-root-swap' })
+  it('does not move a replacement when a new node would occupy the published path', async() => {
+    const { fixture, cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-no-isolate-occupied' })
     fs.mkdirSync(cacheRoot, { recursive: true })
     const cachePath = path.join(cacheRoot, 'cache.db')
-    const parkedRoot = path.join(fixture.path, 'parked-owned-cache-root')
+    const parked = path.join(fixture.path, 'parked-owned-cache.db')
+    const replacement = path.join(fixture.path, 'external-replacement.db')
+    const occupant = path.join(fixture.path, 'new-published-occupant.db')
     const quarantineId = '22222222-2222-4222-8222-222222222222'
     const quarantinePath = path.join(cacheRoot, `.cache.db.isolate-${quarantineId}`)
-    fs.writeFileSync(cachePath, 'owned-corrupt-cache-root-9E17')
-    const ownedRootBefore = nodeIdentity(cacheRoot)
+    fs.writeFileSync(cachePath, 'owned-corrupt-cache-71A4')
+    fs.writeFileSync(replacement, 'external-replacement-71A4')
+    fs.writeFileSync(occupant, 'new-published-occupant-71A4')
+    const rootBefore = nodeIdentity(cacheRoot)
     const ownedBefore = fileNodeSnapshot(cachePath)
+    const replacementBefore = fileNodeSnapshot(replacement)
+    const occupantBefore = fileNodeSnapshot(occupant)
     const appBefore = appFingerprint(appDbPath)
-    const unlinkedQuarantines = []
-    let replacementRootBefore
-    let replacementBeforeMove
+    const destructiveCalls = []
     let injected = false
     const swappingFs = {
       ...fs,
       renameSync(source, destination) {
+        destructiveCalls.push(['rename', path.resolve(source), path.resolve(destination)])
+        if (!injected && path.resolve(source) == path.resolve(cachePath) &&
+          path.resolve(destination) == path.resolve(quarantinePath)) {
+          fs.renameSync(cachePath, parked)
+          fs.linkSync(replacement, cachePath)
+          fs.renameSync(source, destination)
+          fs.linkSync(occupant, cachePath)
+          injected = true
+          return
+        }
+        return fs.renameSync(source, destination)
+      },
+      unlinkSync(filename) {
+        destructiveCalls.push(['unlink', path.resolve(filename)])
+        return fs.unlinkSync(filename)
+      },
+      chmodSync(filename, mode) {
+        destructiveCalls.push(['chmod', path.resolve(filename)])
+        return fs.chmodSync(filename, mode)
+      },
+    }
+    const service = createCacheService({ fileSystem: swappingFs, randomUUID: () => quarantineId })
+
+    const result = await service.openCacheDatabase()
+
+    assert.deepEqual(destructiveCalls, [])
+    assert.equal(injected, false)
+    assert.deepEqual(result, {
+      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_integrity_failed',
+    })
+    assert.deepEqual(nodeIdentity(cacheRoot), rootBefore)
+    assert.deepEqual(fileNodeSnapshot(cachePath), ownedBefore)
+    assert.deepEqual(fileNodeSnapshot(replacement), replacementBefore)
+    assert.deepEqual(fileNodeSnapshot(occupant), occupantBefore)
+    assert.equal(fs.statSync(replacement).nlink, 1)
+    assert.equal(fs.statSync(occupant).nlink, 1)
+    assert.equal(fs.existsSync(parked), false)
+    assert.equal(fs.existsSync(quarantinePath), false)
+    assert.equal(await service.getCacheLifecycleState(), 'unavailable')
+    assert.deepEqual(await service.runCacheRead(() => assert.fail('cache handle was installed')), {
+      status: 'unavailable', code: 'cache_integrity_failed',
+    })
+    assert.deepEqual(appFingerprint(appDbPath), appBefore)
+  })
+
+  it('does not isolate through an equivalent cache-root identity replacement', async() => {
+    const { fixture, cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-no-isolate-root' })
+    fs.mkdirSync(cacheRoot, { recursive: true })
+    const cachePath = path.join(cacheRoot, 'cache.db')
+    const parkedRoot = path.join(fixture.path, 'parked-owned-cache-root')
+    const replacement = path.join(fixture.path, 'replacement-root-cache.db')
+    const quarantineId = '33333333-3333-4333-8333-333333333333'
+    const quarantinePath = path.join(cacheRoot, `.cache.db.isolate-${quarantineId}`)
+    fs.writeFileSync(cachePath, 'owned-corrupt-cache-root-9E17')
+    fs.writeFileSync(replacement, 'replacement-root-cache-9E17')
+    const rootBefore = nodeIdentity(cacheRoot)
+    const ownedBefore = fileNodeSnapshot(cachePath)
+    const replacementBefore = fileNodeSnapshot(replacement)
+    const appBefore = appFingerprint(appDbPath)
+    const destructiveCalls = []
+    let injected = false
+    const swappingFs = {
+      ...fs,
+      renameSync(source, destination) {
+        destructiveCalls.push(['rename', path.resolve(source), path.resolve(destination)])
         if (!injected && path.resolve(source) == path.resolve(cachePath) &&
           path.resolve(destination) == path.resolve(quarantinePath)) {
           fs.renameSync(cacheRoot, parkedRoot)
           fs.mkdirSync(cacheRoot)
-          fs.writeFileSync(cachePath, 'replacement-root-cache-9E17')
-          replacementRootBefore = nodeIdentity(cacheRoot)
-          replacementBeforeMove = fileNodeSnapshot(cachePath)
+          fs.linkSync(replacement, cachePath)
           injected = true
         }
         return fs.renameSync(source, destination)
       },
       unlinkSync(filename) {
-        if (path.resolve(filename) == path.resolve(quarantinePath)) unlinkedQuarantines.push(filename)
+        destructiveCalls.push(['unlink', path.resolve(filename)])
         return fs.unlinkSync(filename)
       },
+      chmodSync(filename, mode) {
+        destructiveCalls.push(['chmod', path.resolve(filename)])
+        return fs.chmodSync(filename, mode)
+      },
     }
-    const service = createCacheService({
-      fileSystem: swappingFs,
-      randomUUID: () => quarantineId,
-    })
+    const service = createCacheService({ fileSystem: swappingFs, randomUUID: () => quarantineId })
 
-    assert.deepEqual(await service.openCacheDatabase(), {
-      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_target_invalid',
+    const result = await service.openCacheDatabase()
+
+    assert.deepEqual(destructiveCalls, [])
+    assert.equal(injected, false)
+    assert.deepEqual(result, {
+      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_integrity_failed',
     })
-    assert.equal(injected, true)
-    assert.deepEqual(unlinkedQuarantines, [])
-    assert.deepEqual(nodeIdentity(cacheRoot), replacementRootBefore)
-    assert.equal(fs.existsSync(cachePath), true, 'root replacement artifact was not restored')
-    assert.deepEqual(fileNodeSnapshot(cachePath), replacementBeforeMove)
-    assert.deepEqual(nodeIdentity(parkedRoot), ownedRootBefore)
-    assert.deepEqual(fileNodeSnapshot(path.join(parkedRoot, 'cache.db')), ownedBefore)
+    assert.deepEqual(nodeIdentity(cacheRoot), rootBefore)
+    assert.deepEqual(fileNodeSnapshot(cachePath), ownedBefore)
+    assert.deepEqual(fileNodeSnapshot(replacement), replacementBefore)
+    assert.equal(fs.statSync(replacement).nlink, 1)
+    assert.equal(fs.existsSync(parkedRoot), false)
     assert.equal(fs.existsSync(quarantinePath), false)
+    assert.equal(await service.getCacheLifecycleState(), 'unavailable')
+    assert.deepEqual(await service.runCacheRead(() => assert.fail('cache handle was installed')), {
+      status: 'unavailable', code: 'cache_integrity_failed',
+    })
     assert.deepEqual(appFingerprint(appDbPath), appBefore)
   })
 
@@ -1138,19 +1659,27 @@ describe('guarded cache database', () => {
     }
   })
 
-  it('reports a fixed delete failure while isolating corrupt cache artifacts', async() => {
-    const { cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-delete-fault' })
+  it('does not invoke pathname deletion while degrading a corrupt cache', async() => {
+    const { cacheRoot, appDbPath } = await createAppFixture({ prefix: 'cache-no-delete' })
     fs.mkdirSync(cacheRoot, { recursive: true })
     const cachePath = path.join(cacheRoot, 'cache.db')
     fs.writeFileSync(cachePath, 'malformed-cache-secret-31D9')
+    const cacheBefore = fileNodeSnapshot(cachePath)
     const before = appFingerprint(appDbPath)
+    const destructiveCalls = []
     const faultFs = {
       ...fs,
       renameSync(source, destination) {
-        if (path.resolve(source) == path.resolve(cachePath)) {
-          throw Object.assign(new Error('private-delete-path-31D9'), { code: 'EACCES' })
-        }
+        destructiveCalls.push(['rename', path.resolve(source), path.resolve(destination)])
         return fs.renameSync(source, destination)
+      },
+      unlinkSync(filename) {
+        destructiveCalls.push(['unlink', path.resolve(filename)])
+        return fs.unlinkSync(filename)
+      },
+      chmodSync(filename, mode) {
+        destructiveCalls.push(['chmod', path.resolve(filename)])
+        return fs.chmodSync(filename, mode)
       },
     }
     const service = createCacheService({ fileSystem: faultFs })
@@ -1158,10 +1687,11 @@ describe('guarded cache database', () => {
     const result = await service.openCacheDatabase()
 
     assert.deepEqual(result, {
-      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_delete_failed',
+      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_integrity_failed',
     })
+    assert.deepEqual(destructiveCalls, [])
     assert.equal(JSON.stringify(result).includes('31D9'), false)
-    assert.equal(fs.readFileSync(cachePath, 'utf8'), 'malformed-cache-secret-31D9')
+    assert.deepEqual(fileNodeSnapshot(cachePath), cacheBefore)
     assert.deepEqual(appFingerprint(appDbPath), before)
   })
 })

@@ -311,7 +311,8 @@ export const getOnlineOtherSourceMusicUrl = async({ musicInfos, quality, onToggl
   // retryedSource.includes(musicInfo.source)
   // eslint-disable-next-line @typescript-eslint/promise-function-async
   return reqPromise.then(({ url, type, persistentCache = true }: LX.Playback.MusicUrlResult) => {
-    return { musicInfo, url, quality: type, isFromCache: false, persistentCache, cacheKey: persistentCache ? requestCacheKey : null }
+    const cacheKey = persistentCache && requestCacheKey != null ? { ...requestCacheKey, quality: type } : null
+    return { musicInfo, url, quality: type, isFromCache: false, persistentCache, cacheKey }
     // eslint-disable-next-line @typescript-eslint/promise-function-async
   }).catch((err: any) => {
     if (err.message == requestMsg.tooManyRequests) throw err
@@ -349,7 +350,8 @@ export const handleGetOnlineMusicUrl = async({ musicInfo, quality, onToggleSourc
     reqPromise = Promise.reject(err)
   }
   return reqPromise.then(({ url, type, persistentCache = true }: LX.Playback.MusicUrlResult) => {
-    return { musicInfo, url, quality: type, isFromCache: false, persistentCache, cacheKey: persistentCache ? cacheKey : null }
+    const responseCacheKey = persistentCache && cacheKey != null ? { ...cacheKey, quality: type } : null
+    return { musicInfo, url, quality: type, isFromCache: false, persistentCache, cacheKey: responseCacheKey }
   }).catch(async(err: any) => {
     console.log(err)
     if (!allowToggleSource || err.message == requestMsg.tooManyRequests) throw err

@@ -211,6 +211,36 @@ describe('scoped cache ownership callsites', () => {
     }
   })
 
+  it('writes a direct URL under the canonical quality returned by the provider', async() => {
+    const previousWindow = global.window
+    global.window = { lx: { apiInitPromise: [Promise.resolve(true)] }, i18n: { t: value => value } }
+    try {
+      const harness = createUrlRaceHarness({
+        musicSdk: {
+          wy: {
+            getMusicUrl: () => ({ promise: Promise.resolve({
+              type: '128k', url: 'https://media.invalid/direct-returned-quality',
+            }) }),
+          },
+        },
+      })
+      assert.equal(await harness.online.getMusicUrl({
+        musicInfo: music('wy-quality-track', 'wy'), quality: '320k', isRefresh: false,
+      }), 'https://media.invalid/direct-returned-quality')
+      assert.deepEqual(harness.saves, [{
+        key: {
+          provider: 'wy',
+          accountScope: 'profile-v1:user-id:1',
+          sourceTrackId: 'wy-quality-track',
+          quality: '128k',
+        },
+        url: 'https://media.invalid/direct-returned-quality',
+      }])
+    } finally {
+      global.window = previousWindow
+    }
+  })
+
   it('writes a fallback URL under the target account captured when that target request starts', async() => {
     const previousWindow = global.window
     const previousConsoleLog = console.log
@@ -247,6 +277,41 @@ describe('scoped cache ownership callsites', () => {
           quality: '320k',
         },
         url: 'https://media.invalid/qq-account-a',
+      }])
+    } finally {
+      global.window = previousWindow
+      console.log = previousConsoleLog
+    }
+  })
+
+  it('writes a fallback URL under the canonical quality returned by the provider', async() => {
+    const previousWindow = global.window
+    const previousConsoleLog = console.log
+    global.window = { lx: { apiInitPromise: [Promise.resolve(true)] }, i18n: { t: value => value } }
+    console.log = () => {}
+    try {
+      const harness = createUrlRaceHarness({
+        musicSdk: {
+          wy: { getMusicUrl: () => ({ promise: Promise.reject(new Error('primary failed')) }) },
+          tx: {
+            getMusicUrl: () => ({ promise: Promise.resolve({
+              type: '128k', url: 'https://media.invalid/fallback-returned-quality',
+            }) }),
+          },
+        },
+        findMusic: async() => [music('tx-quality-target', 'tx')],
+      })
+      assert.equal(await harness.online.getMusicUrl({
+        musicInfo: music('wy-quality-original', 'wy'), quality: '320k', isRefresh: false,
+      }), 'https://media.invalid/fallback-returned-quality')
+      assert.deepEqual(harness.saves, [{
+        key: {
+          provider: 'tx',
+          accountScope: 'profile-v1:uin:10001',
+          sourceTrackId: 'tx-quality-target',
+          quality: '128k',
+        },
+        url: 'https://media.invalid/fallback-returned-quality',
       }])
     } finally {
       global.window = previousWindow

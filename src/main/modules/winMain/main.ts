@@ -27,14 +27,6 @@ const winEvent = () => {
     browserWindow!.hide()
   })
 
-  const ownedWindow = browserWindow
-  browserWindow.on('closed', () => {
-    windowRegistrations.get(ownedWindow)?.unregister()
-    windowRegistrations.delete(ownedWindow)
-    // global.lx.mainWindowClosed = true
-    if (browserWindow == ownedWindow) browserWindow = null
-  })
-
   // browserWindow.on('restore', () => {
   //   browserWindow.webContents.send('restore')
   // })
@@ -127,6 +119,11 @@ export const createWindow = async(): Promise<void> => {
     window = new BrowserWindow(options)
     browserWindow = window
     windowRegistrations.set(window, registration)
+    window.once('closed', () => {
+      windowRegistrations.get(window!)?.unregister()
+      windowRegistrations.delete(window!)
+      if (browserWindow == window) browserWindow = null
+    })
 
     const winURL = process.env.NODE_ENV !== 'production' ? 'http://localhost:9080' : `file://${path.join(encodePath(__dirname), 'index.html')}`
     await window.loadURL(winURL + `?os=${getPlatform()}&dt=${global.envParams.cmdParams.dt}&dark=${shouldUseDarkColors}&theme=${encodeURIComponent(JSON.stringify(theme))}`)

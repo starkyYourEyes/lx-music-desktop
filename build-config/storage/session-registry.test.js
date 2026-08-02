@@ -363,6 +363,61 @@ test('User API no-window category failures keep fixed diagnostics and release ow
   assert.equal(registrations[0].unregisterCalls, 1)
 })
 
+test('User API disposal remains registered until its session cleanup finishes', async() => {
+  const { createSessionRegistry } = loadRegistry()
+  const registry = createSessionRegistry()
+  const { createRuntimeWindowHarness } = require('../test-utils/playback-fallback-harness')
+  const harness = createRuntimeWindowHarness()
+  harness.deps.sessionRegistry = registry
+  const runtime = await harness.create({ id: 'user_api/owned-cleanup' }, 1)
+  const cleanupGate = deferred()
+  let cacheCalls = 0
+  runtime.session.clearCache = async() => {
+    cacheCalls++
+    await cleanupGate.promise
+  }
+
+  const disposing = harness.dispose(runtime, { clearSession: true })
+  while (cacheCalls < 1) await new Promise(resolve => setImmediate(resolve))
+  const clearing = registry.clearRegisteredCaches()
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(await isSettled(clearing), false)
+  assert.equal(cacheCalls, 2)
+  cleanupGate.resolve()
+  await disposing
+  const results = await clearing
+  assert.deepEqual(results.map(result => result.category), ['cache', 'cache-storage', 'code-cache'])
+})
+
+test('User API cleanup after external close reacquires ownership for a concurrent registry clear', async() => {
+  const { createSessionRegistry } = loadRegistry()
+  const registry = createSessionRegistry()
+  const { createRuntimeWindowHarness } = require('../test-utils/playback-fallback-harness')
+  const harness = createRuntimeWindowHarness()
+  harness.deps.sessionRegistry = registry
+  const runtime = await harness.create({ id: 'user_api/closed-cleanup' }, 1)
+  runtime.window.destroy()
+  const cleanupGate = deferred()
+  let cacheCalls = 0
+  runtime.session.clearCache = async() => {
+    cacheCalls++
+    await cleanupGate.promise
+  }
+
+  const disposing = harness.dispose(runtime, { clearSession: true })
+  while (cacheCalls < 1) await new Promise(resolve => setImmediate(resolve))
+  const clearing = registry.clearRegisteredCaches()
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(await isSettled(clearing), false)
+  assert.equal(cacheCalls, 2)
+  cleanupGate.resolve()
+  await disposing
+  const results = await clearing
+  assert.deepEqual(results.map(result => result.category), ['cache', 'cache-storage', 'code-cache'])
+})
+
 test('main window construction waits for readiness and releases its matching token on close', async() => {
   const gate = deferred()
   const registrations = []
@@ -416,6 +471,74 @@ test('main window construction waits for readiness and releases its matching tok
   assert.deepEqual(registrations[0].input, { key: 'main:win-main', session: targetSession })
   windows[0].emit('closed')
   assert.equal(registrations[0].unregisterCalls, 1)
+})
+
+test('main load rollback failure retains ownership until a later successful close', async() => {
+  const registrations = []
+  const windows = []
+  let destroyFailures = 1
+  class FakeWindow {
+    constructor() {
+      this.destroyed = false
+      this.listeners = new Map()
+      this.webContents = { isDestroyed: () => false }
+      windows.push(this)
+    }
+    on(name, listener) {
+      let listeners = this.listeners.get(name)
+      if (!listeners) this.listeners.set(name, listeners = new Set())
+      listeners.add(listener)
+    }
+    once(name, listener) { this.on(name, listener) }
+    async loadURL() { throw new Error('private load failure') }
+    isDestroyed() { return this.destroyed }
+    destroy() {
+      if (destroyFailures > 0) {
+        destroyFailures--
+        throw new Error('private destroy failure')
+      }
+      this.destroyed = true
+      this.emit('closed')
+    }
+    close() { this.destroy() }
+    emit(name) {
+      for (const listener of [...(this.listeners.get(name) ?? [])]) listener()
+    }
+  }
+  global.envParams = { cmdParams: { dt: true } }
+  global.lx = {
+    sessionRegistry: {
+      register() {
+        const item = { unregisterCalls: 0 }
+        registrations.push(item)
+        return { ready: Promise.resolve(), unregister: () => { item.unregisterCalls++ } }
+      },
+    },
+    appSetting: { 'common.windowSizeId': 0, 'common.startInFullscreen': false },
+    theme: { shouldUseDarkColors: false, theme: { colors: { '--color-primary-light-1000': '#fff' } } },
+    event_app: { main_window_created() {} },
+  }
+  const main = loadTsModule(path.join(__dirname, '../../src/main/modules/winMain/main.ts'), {
+    electron: { BrowserWindow: FakeWindow, dialog: {}, session: { fromPartition: () => ({}) } },
+    'node:path': { join: (...parts) => parts.join('/') },
+    './utils': { createTaskBarButtons() {}, getWindowSizeInfo: () => ({ width: 800, height: 600 }) },
+    '@common/utils': { getPlatform: () => 'win32', isLinux: false, isWin: true },
+    '@main/utils': { getProxy: () => null, openDevTools() {} },
+    '@main/utils/sessionProxy': { configureSessionProxy: async() => {} },
+    '@common/mainIpc': { mainSend() {} },
+    './rendererEvent': { sendFocus() {}, sendTaskbarButtonClick() {} },
+    '@common/utils/electron': { encodePath: value => value },
+  })
+
+  await assert.rejects(main.createWindow(), error => error.message == 'main_window_creation_failed')
+  assert.equal(registrations[0].unregisterCalls, 0)
+  assert.equal(windows[0].destroyed, false)
+
+  main.closeWindow()
+
+  assert.equal(windows[0].destroyed, true)
+  assert.equal(registrations[0].unregisterCalls, 1)
+  assert.equal(main.isExistWindow(), false)
 })
 
 test('the main app event owner observes creation rejection using only the fixed code', async() => {

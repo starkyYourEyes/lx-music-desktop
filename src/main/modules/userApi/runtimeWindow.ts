@@ -101,6 +101,8 @@ export const getRuntimePartition = (apiId: string): string => (
   `${PROJECT_IDENTITY.userApiPartition}-${createHash('sha256').update(apiId).digest('hex').slice(0, 32)}`
 )
 
+const getRuntimeSessionKey = (partition: string) => `user-api:${partition.slice(-32)}`
+
 const clearSession = async(
   runtimeSession: Electron.Session,
   deps: UserApiRuntimeWindowDependencies,
@@ -149,7 +151,7 @@ export const createRuntimeWindow = async({
   }
   const runtimeSession = deps.fromPartition(partition)
   const registration = deps.sessionRegistry.register({
-    key: `user-api:${partition.slice(-32)}`,
+    key: getRuntimeSessionKey(partition),
     session: runtimeSession,
   })
   let runtime: UserApiRuntimeWindow | null = null
@@ -268,14 +270,23 @@ export const disposeRuntimeWindow = async(
     pendingRuntimes.set(runtime.identity.apiId, runtime)
     throw err
   }
-  disposedRuntimes.add(runtime)
   runtimeListeners.delete(runtime)
   if (pendingRuntimes.get(runtime.identity.apiId) == runtime) {
     pendingRuntimes.delete(runtime.identity.apiId)
   }
-  runtimeRegistrations.get(runtime)?.unregister()
-  runtimeRegistrations.delete(runtime)
+  let registration = runtimeRegistrations.get(runtime)
+  if (shouldClearSession && !registration) {
+    registration = deps.sessionRegistry.register({
+      key: getRuntimeSessionKey(runtime.partition),
+      session: runtime.session,
+    })
+    runtimeRegistrations.set(runtime, registration)
+    await registration.ready
+  }
   if (shouldClearSession) await clearSession(runtime.session, deps)
+  registration?.unregister()
+  runtimeRegistrations.delete(runtime)
+  disposedRuntimes.add(runtime)
 }
 
 export const clearRuntimeSession = async(
@@ -286,7 +297,7 @@ export const clearRuntimeSession = async(
   const partition = getRuntimePartition(apiId)
   const runtimeSession = deps.fromPartition(partition)
   const registration = deps.sessionRegistry.register({
-    key: `user-api:${partition.slice(-32)}`,
+    key: getRuntimeSessionKey(partition),
     session: runtimeSession,
   })
   try {

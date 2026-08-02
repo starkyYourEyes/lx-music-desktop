@@ -11,6 +11,7 @@ import {
   parseMusicUrlSourceInvalidation,
 } from '../../../../../common/storage/cacheValidation'
 import { runCacheImmediate, runCacheRead, runCacheWrite, type CacheReadResult, type CacheWriteResult } from '../../cacheDb'
+import { scheduleCachePruneAfterWrite } from '../cacheLifecycle/prune'
 
 const URL_TTL_MS = 15 * 60 * 1000
 
@@ -50,7 +51,7 @@ export const musicUrlGet = async(input: MusicUrlGetInputV1): Promise<CacheReadRe
 export const musicUrlPut = async(input: MusicUrlPutInputV1): Promise<CacheWriteResult> => {
   const parsed = parseMusicUrlPutInput(input)
   const expiresAtMs = expiryFor(parsed)
-  return runCacheWrite(db => {
+  const result = await runCacheWrite(db => {
     db.prepare(`
       INSERT INTO music_urls(
         provider, account_scope, source_track_id, quality, url,
@@ -66,6 +67,8 @@ export const musicUrlPut = async(input: MusicUrlPutInputV1): Promise<CacheWriteR
       expiresAtMs, parsed.nowMs, parsed.nowMs,
     )
   })
+  if (result.status == 'stored') scheduleCachePruneAfterWrite('musicUrls')
+  return result
 }
 
 export const musicUrlInvalidateAccount = async(input: MusicUrlAccountInvalidationV1): Promise<number> => {

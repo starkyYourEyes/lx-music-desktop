@@ -1,4 +1,6 @@
 import type { AccountRepository } from '@main/storage/accounts/accountRepository'
+import { neteaseAccountScope } from '@common/storage/cacheValidation'
+import type { MusicUrlAccountInvalidationV1 } from '@common/storage/cache'
 
 interface NeteaseAccountApi {
   login_qr_key: (params?: Record<string, unknown>) => Promise<any>
@@ -37,10 +39,12 @@ export const createNeteaseAccountService = ({
   accounts,
   api,
   now = Date.now,
+  invalidateMusicUrls = async() => 0,
 }: {
   accounts: AccountRepository
   api: NeteaseAccountApi
   now?: () => number
+  invalidateMusicUrls?: (input: MusicUrlAccountInvalidationV1) => Promise<number>
 }) => {
   let accountGeneration = 0
 
@@ -70,6 +74,7 @@ export const createNeteaseAccountService = ({
     sourceCookie: string,
     generation: number,
     canReplaceSourceAccount = false,
+    sourceProfile: LX.Netease.Profile | null = null,
   ): Promise<LX.Netease.AccountStatus> => {
     if (!cookie) return { isLoggedIn: false, profile: null }
 
@@ -86,6 +91,10 @@ export const createNeteaseAccountService = ({
     if (profile == null) {
       if (!isCurrentRefresh()) return getLoggedOutStatus()
       await accounts.clear('netease')
+      const accountScope = neteaseAccountScope(sourceProfile)
+      if (accountScope != null && isCurrentGeneration(generation) && !accounts.getCookie('netease')) {
+        await invalidateMusicUrls({ provider: 'wy', accountScope })
+      }
       return { isLoggedIn: false, profile: null }
     }
     const mergedCookie = normalizeCookie(result.body?.cookie || result.cookie) || cookie
@@ -111,7 +120,7 @@ export const createNeteaseAccountService = ({
       return { isLoggedIn: true, profile: account.profile }
     }
     const generation = accountGeneration
-    return refreshLoginStatus(account.cookie, account.cookie, generation).catch(() => ({
+    return refreshLoginStatus(account.cookie, account.cookie, generation, false, account.profile).catch(() => ({
       isLoggedIn: !!account.profile,
       profile: account.profile,
     }))
@@ -128,7 +137,7 @@ export const createNeteaseAccountService = ({
 
   const checkLoginQr = async(key: string): Promise<LX.Netease.LoginQrCheck> => {
     const generation = ++accountGeneration
-    const sourceCookie = accounts.getCookie('netease') ?? ''
+    const sourceAccount = getAccountData()
     const result = await api.login_qr_check({ key })
     const code = Number(result.body?.code ?? 0)
     const message = result.body?.message ?? ''
@@ -137,19 +146,24 @@ export const createNeteaseAccountService = ({
     }
     const status = await refreshLoginStatus(
       normalizeCookie(result.body?.cookie || result.cookie),
-      sourceCookie,
+      sourceAccount.cookie,
       generation,
       true,
+      sourceAccount.profile,
     )
     return { code, message, ...status }
   }
 
   const logout = async() => {
-    const cookie = accounts.getCookie('netease')
+    const account = getAccountData()
     const generation = ++accountGeneration
-    if (cookie) await api.logout({ cookie }).catch(() => null)
+    if (account.cookie) await api.logout({ cookie: account.cookie }).catch(() => null)
     if (!isCurrentGeneration(generation)) return
     await accounts.clear('netease')
+    const accountScope = neteaseAccountScope(account.profile)
+    if (accountScope != null && isCurrentGeneration(generation) && !accounts.getCookie('netease')) {
+      await invalidateMusicUrls({ provider: 'wy', accountScope })
+    }
   }
 
   return {

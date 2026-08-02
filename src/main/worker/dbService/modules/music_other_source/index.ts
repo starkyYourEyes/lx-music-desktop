@@ -1,6 +1,7 @@
 import type { OtherSourcesGetInputV1, OtherSourcesPutInputV1 } from '../../../../../common/storage/cache'
 import { parseOtherSourcesGetInput, parseOtherSourcesPutInput } from '../../../../../common/storage/cacheValidation'
 import { runCacheImmediate, runCacheRead, type CacheReadResult, type CacheWriteResult } from '../../cacheDb'
+import { scheduleCachePruneAfterWrite } from '../cacheLifecycle/prune'
 
 const OTHER_SOURCE_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const credentialKey = /(?:cookie|token|password|authorization|credential|secret)/i
@@ -190,6 +191,7 @@ export const otherSourcesPut = async(input: OtherSourcesPutInputV1): Promise<Cac
       candidate.provider, candidate.trackId, candidate.json, candidate.bytes,
     )
   })
+  if (result.status == 'completed') scheduleCachePruneAfterWrite('otherSources')
   return result.status == 'completed' ? { status: 'stored' } : result
 }
 

@@ -78,6 +78,7 @@ const createQQMusicService = ({
   loginResult = { state: 'success', message: 'ok', cookie: qqCookie('7') },
   credentialService = { getRefreshDueAt: () => null, refresh: async cookie => cookie },
   songService = { getGuessLikeSongs: async() => [] },
+  invalidateMusicUrls = async() => 0,
 } = {}) => {
   const { createQQMusicAccountService } = require('../../src/main/modules/qqMusic/index.ts')
   const service = createQQMusicAccountService({
@@ -97,15 +98,21 @@ const createQQMusicService = ({
     now: () => 20,
     schedule: () => undefined,
     onRefreshDiagnostic: () => {},
+    invalidateMusicUrls,
   })
   return { accounts, service }
 }
 
-const createNeteaseService = ({ accounts = createRepository(), api, now = () => 300_000 } = {}) => {
+const createNeteaseService = ({
+  accounts = createRepository(),
+  api,
+  now = () => 300_000,
+  invalidateMusicUrls = async() => 0,
+} = {}) => {
   const { createNeteaseAccountService } = require('../../src/main/modules/netease/account.ts')
   return {
     accounts,
-    service: createNeteaseAccountService({ accounts, api, now }),
+    service: createNeteaseAccountService({ accounts, api, now, invalidateMusicUrls }),
   }
 }
 
@@ -341,6 +348,59 @@ describe('account credential cutover', () => {
     assert.deepEqual(accounts.clears, ['qq_music'])
   })
 
+  it('invalidates only the captured QQ Music public scope after its matching logout clear succeeds', async() => {
+    const accounts = createRepository()
+    await saveAccount(accounts, 'qq_music', qqCookie('7'), { uin: '7', nickname: 'Q' })
+    const events = []
+    const originalClear = accounts.clear
+    accounts.clear = async(...args) => {
+      events.push('clear:start')
+      await originalClear.apply(accounts, args)
+      events.push('clear:done')
+    }
+    const { service } = createQQMusicService({
+      accounts,
+      invalidateMusicUrls: async input => { events.push({ invalidate: input }); return 1 },
+    })
+
+    await service.logout()
+
+    assert.deepEqual(events, [
+      'clear:start',
+      'clear:done',
+      { invalidate: { provider: 'tx', accountScope: 'profile-v1:uin:7' } },
+    ])
+  })
+
+  it('does not invalidate QQ Music URLs when a newer login generation starts during clear', async() => {
+    const accounts = createRepository()
+    await saveAccount(accounts, 'qq_music', qqCookie('7'), { uin: '7', nickname: 'Q' })
+    const clearStarted = deferred()
+    const clearGate = deferred()
+    const originalClear = accounts.clear
+    accounts.clear = async(...args) => {
+      clearStarted.resolve()
+      await clearGate.promise
+      return originalClear.apply(accounts, args)
+    }
+    const invalidations = []
+    const { service } = createQQMusicService({
+      accounts,
+      loginResult: { state: 'pending', message: 'pending' },
+      invalidateMusicUrls: async input => { invalidations.push(input); return 1 },
+    })
+
+    const loggingOut = service.logout()
+    await clearStarted.promise
+    const requestId = '00000000-0000-4000-8000-000000000007'
+    await service.createLoginQr(requestId, 1)
+    const checking = service.checkLoginQr(requestId)
+    clearGate.resolve()
+    await Promise.all([loggingOut, checking])
+
+    assert.deepEqual(invalidations, [])
+  })
+
   it('waits for NetEase refreshed-profile persistence before returning status', async() => {
     const accounts = createRepository()
     await saveAccount(accounts, 'netease', 'old-cookie', { userId: 1, nickname: 'Old', avatarUrl: '' }, 0)
@@ -422,6 +482,96 @@ describe('account credential cutover', () => {
     await refreshing
 
     assert.equal(accounts.getCookie('netease'), null)
+  })
+
+  it('invalidates only the captured NetEase public scope after its matching logout clear succeeds', async() => {
+    const accounts = createRepository()
+    await saveAccount(accounts, 'netease', 'old-cookie', { userId: 7, nickname: 'Old', avatarUrl: '' }, 0)
+    const events = []
+    const originalClear = accounts.clear
+    accounts.clear = async(...args) => {
+      events.push('clear:start')
+      await originalClear.apply(accounts, args)
+      events.push('clear:done')
+    }
+    const { service } = createNeteaseService({
+      accounts,
+      api: {
+        login_qr_key: async() => ({}),
+        login_qr_create: async() => ({}),
+        login_qr_check: async() => ({}),
+        login_status: async() => ({}),
+        logout: async() => ({}),
+      },
+      invalidateMusicUrls: async input => { events.push({ invalidate: input }); return 1 },
+    })
+
+    await service.logout()
+
+    assert.deepEqual(events, [
+      'clear:start',
+      'clear:done',
+      { invalidate: { provider: 'wy', accountScope: 'profile-v1:user-id:7' } },
+    ])
+  })
+
+  it('does not invalidate NetEase URLs when a newer QR generation starts during clear', async() => {
+    const accounts = createRepository()
+    await saveAccount(accounts, 'netease', 'old-cookie', { userId: 7, nickname: 'Old', avatarUrl: '' }, 0)
+    const clearStarted = deferred()
+    const clearGate = deferred()
+    const qrResponse = deferred()
+    const originalClear = accounts.clear
+    accounts.clear = async(...args) => {
+      clearStarted.resolve()
+      await clearGate.promise
+      return originalClear.apply(accounts, args)
+    }
+    const invalidations = []
+    const { service } = createNeteaseService({
+      accounts,
+      api: {
+        login_qr_key: async() => ({}),
+        login_qr_create: async() => ({}),
+        login_qr_check: async() => qrResponse.promise,
+        login_status: async() => ({}),
+        logout: async() => ({}),
+      },
+      invalidateMusicUrls: async input => { invalidations.push(input); return 1 },
+    })
+
+    const loggingOut = service.logout()
+    await clearStarted.promise
+    const checking = service.checkLoginQr('new-key')
+    clearGate.resolve()
+    qrResponse.resolve({ body: { code: 801, message: 'waiting' } })
+    await Promise.all([loggingOut, checking])
+
+    assert.deepEqual(invalidations, [])
+  })
+
+  it('invalidates the captured NetEase scope when an invalid QR profile clears the prior account', async() => {
+    const accounts = createRepository()
+    await saveAccount(accounts, 'netease', 'old-cookie', { userId: 7, nickname: 'Old', avatarUrl: '' }, 0)
+    const invalidations = []
+    const { service } = createNeteaseService({
+      accounts,
+      api: {
+        login_qr_key: async() => ({}),
+        login_qr_create: async() => ({}),
+        login_qr_check: async() => ({ body: { code: 803, message: 'accepted', cookie: 'new-cookie' } }),
+        login_status: async() => ({ body: { profile: null } }),
+        logout: async() => ({}),
+      },
+      invalidateMusicUrls: async input => { invalidations.push(input); return 1 },
+    })
+
+    assert.deepEqual(await service.checkLoginQr('new-key'), {
+      code: 803, message: 'accepted', isLoggedIn: false, profile: null,
+    })
+    assert.deepEqual(invalidations, [{
+      provider: 'wy', accountScope: 'profile-v1:user-id:7',
+    }])
   })
 
   it('ignores a NetEase refresh response that finishes after a newer QR login', async() => {

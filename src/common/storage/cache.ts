@@ -36,6 +36,51 @@ export interface MusicUrlSourceInvalidationV1 {
   provider: string
 }
 
+export interface CachePruneInputV1 {
+  nowMs: number
+  batchSize: number
+}
+
+export interface CachePruneReportV1 {
+  status: 'completed'
+  musicUrls: {
+    rowsBefore: number
+    rowsAfter: number
+    deletedRows: number
+    expiredKeys: string[]
+    evictedKeys: string[]
+  }
+  rawLyrics: {
+    rowsBefore: number
+    rowsAfter: number
+    ownerGroupsBefore: number
+    ownerGroupsAfter: number
+    bytesBefore: number
+    bytesAfter: number
+    deletedRows: number
+    deletedOwners: number
+    expiredOwners: string[]
+    evictedOwners: string[]
+  }
+  otherSources: {
+    rowsBefore: number
+    rowsAfter: number
+    ownerGroupsBefore: number
+    ownerGroupsAfter: number
+    bytesBefore: number
+    bytesAfter: number
+    deletedRows: number
+    deletedOwners: number
+    expiredOwners: string[]
+    evictedOwners: string[]
+  }
+}
+
+export type CachePruneResultV1 = CachePruneReportV1 | {
+  status: 'unavailable'
+  code: CacheDiagnosticCodeV1
+}
+
 export type CacheDiagnosticCodeV1 =
   | 'cache_phase3_prerequisite_invalid'
   | 'cache_target_invalid'

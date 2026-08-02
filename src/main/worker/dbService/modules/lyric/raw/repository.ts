@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { getAppDB, getDatabaseInitialization } from '../../../db'
 import { runCacheImmediate, runCacheRead, type CacheExecutionResult, type CacheReadResult, type CacheWriteResult } from '../../../cacheDb'
+import { scheduleCachePruneAfterWrite } from '../../cacheLifecycle/prune'
 import { selectRawCounts, selectRawProviderRows, selectRawRows } from './statements'
 
 const keys = ['lyric', 'tlyric', 'rlyric', 'lxlyric'] as const
@@ -86,7 +87,7 @@ export const replaceRawProvider = async(provider: string, tuples: readonly RawLy
   if (!validOwner(provider, provider) || !validNow(nowMs) || tuples.some(row => !validOwner(row.provider, row.sourceTrackId) || row.provider != provider || !validKey(row.lyricType) || typeof row.text != 'string')) throw new Error('raw_lyric_input_invalid')
   const groups = new Map<string, RawLyricTuple[]>()
   for (const tuple of tuples) groups.set(tuple.sourceTrackId, [...(groups.get(tuple.sourceTrackId) ?? []), tuple])
-  return runCacheImmediate(db => {
+  const result = await runCacheImmediate(db => {
     replaceOwners(db, provider, groups, nowMs)
     const counts = selectRawCounts(db, provider)
     const rows = [...groups.values()].flat()
@@ -95,6 +96,8 @@ export const replaceRawProvider = async(provider: string, tuples: readonly RawLy
     if (counts.rows != rows.length || counts.ownerGroups != groups.size || sha256 != canonicalRawLyricHash(rows)) throw new Error('raw_lyric_attestation_failed')
     return { rows: counts.rows, ownerGroups: counts.ownerGroups, sha256 }
   })
+  if (result.status == 'completed') scheduleCachePruneAfterWrite('rawLyrics')
+  return result
 }
 
 export const attestRawProvider = (provider: string): Promise<CacheReadResult<{ rows: number, ownerGroups: number, sha256: string }>> => {
@@ -135,6 +138,7 @@ export const rawLyricPut = async(input: { provider: string, sourceTrackId: strin
     }
     return groups
   })
+  if (result.status == 'completed') scheduleCachePruneAfterWrite('rawLyrics')
   return result.status == 'completed' ? { status: 'stored' } : result
 }
 

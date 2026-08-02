@@ -40,7 +40,11 @@ const getAccountService = () => {
   if (accountService) return accountService
   const accounts = global.lx.accountRepository
   if (accounts == null) throw new Error('Account repository has not been initialized')
-  accountService = createNeteaseAccountService({ accounts, api: neteaseApi })
+  accountService = createNeteaseAccountService({
+    accounts,
+    api: neteaseApi,
+    invalidateMusicUrls: input => global.lx.worker.dbService.musicUrlInvalidateAccount(input),
+  })
   return accountService
 }
 

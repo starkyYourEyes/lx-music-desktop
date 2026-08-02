@@ -1,4 +1,6 @@
 import type { AccountRepository } from '@main/storage/accounts/accountRepository'
+import { qqMusicAccountScope } from '@common/storage/cacheValidation'
+import type { MusicUrlAccountInvalidationV1 } from '@common/storage/cache'
 import {
   createQQMusicLoginService,
   isQQMusicLoginRequestId,
@@ -137,6 +139,7 @@ export const createQQMusicAccountService = ({
   schedule = setTimeout,
   cancelSchedule = clearTimeout,
   retryDelayMs = 60 * 60 * 1000,
+  invalidateMusicUrls = async() => 0,
 }: {
   accounts: AccountRepository
   loginService: LoginService
@@ -151,6 +154,7 @@ export const createQQMusicAccountService = ({
   schedule?: typeof setTimeout
   cancelSchedule?: typeof clearTimeout
   retryDelayMs?: number
+  invalidateMusicUrls?: (input: MusicUrlAccountInvalidationV1) => Promise<number>
 }) => {
   let loginGeneration = 0
   let refreshTimer: ReturnType<typeof setTimeout> | undefined
@@ -268,10 +272,17 @@ export const createQQMusicAccountService = ({
     await accounts.clear('qq_music')
   }
 
-  const clearMatchingAccount = async(account: QQMusicAccountData) => {
+  const invalidateClearedAccount = async(account: QQMusicAccountData, generation: number) => {
+    const accountScope = qqMusicAccountScope(account.profile)
+    if (accountScope == null || generation != loginGeneration || getAccountData(accounts).cookie) return
+    await invalidateMusicUrls({ provider: 'tx', accountScope })
+  }
+
+  const clearMatchingAccount = async(account: QQMusicAccountData, generation: number) => {
     const current = getAccountData(accounts)
     if (!isSameAccount(current, account)) return false
     await clearAccount()
+    await invalidateClearedAccount(account, generation)
     return true
   }
 
@@ -316,7 +327,7 @@ export const createQQMusicAccountService = ({
       const outcome = isQQMusicCredentialRefreshError(error)
         ? error.kind
         : 'transient'
-      if (outcome == 'invalid') await clearMatchingAccount(account)
+      if (outcome == 'invalid') await clearMatchingAccount(account, loginGeneration)
       emitRefreshDiagnostic({ trigger, outcome })
       return { status: outcome }
     }
@@ -421,9 +432,11 @@ export const createQQMusicAccountService = ({
   }
 
   const logout = async() => {
-    loginGeneration++
+    const account = getAccountData(accounts)
+    const generation = ++loginGeneration
     await loginService.disposeAll()
     await clearAccount()
+    await invalidateClearedAccount(account, generation)
   }
 
   const cancelLoginQr = async(requestId: string) => {
@@ -556,6 +569,7 @@ const getAccountService = () => {
     playlistDetailService,
     feedbackService,
     credentialService,
+    invalidateMusicUrls: input => global.lx.worker.dbService.musicUrlInvalidateAccount(input),
   })
   return accountService
 }

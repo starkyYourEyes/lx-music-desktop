@@ -44,6 +44,13 @@ const createHarness = (options = {}) => {
         Object.assign(global.lx.appSetting, update)
       },
     },
+    worker: {
+      dbService: {
+        musicUrlInvalidateSource() {
+          throw new Error('User API reconciliation must not invalidate persistent URL providers')
+        },
+      },
+    },
   }
 
   const runtimePool = {
@@ -94,6 +101,22 @@ const createHarness = (options = {}) => {
     restore() { global.lx = originalLx },
   }
 }
+
+test('User API replacement and removal are URL invalidation no-ops', async() => {
+  const replacement = createHarness()
+  try {
+    await replacement.module.replaceApisFromGitHub([])
+  } finally {
+    replacement.restore()
+  }
+
+  const removal = createHarness()
+  try {
+    await removal.module.removeApi(['b'])
+  } finally {
+    removal.restore()
+  }
+})
 
 test('post-commit deletion config failure exposes the retained committed state', async() => {
   const configFailure = new Error('config update failed after delete commit')

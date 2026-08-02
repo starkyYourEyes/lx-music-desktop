@@ -11,6 +11,7 @@ type PlainData = Record<string, unknown>
 
 const textBytes = (value: string): number => new TextEncoder().encode(value).byteLength
 const controlCharacters = /[\u0000-\u001f\u007f]/
+const musicUrlQualities = new Set(['128k', '320k', 'flac', 'flac24bit', '192k', 'ape', 'wav'])
 
 const fixedError = <C extends string>(code: C): Error & { code: C } => Object.assign(new Error(code), { code })
 const invalidMusicUrl = (): Error & { code: 'music_url_input_invalid' } => fixedError('music_url_input_invalid')
@@ -40,20 +41,28 @@ const validNow = (value: unknown): value is number =>
 
 const validProfileUin = (value: unknown): value is string => validText(value, 128)
 
-const validAccountScope = (value: unknown): value is string => {
+const validNeteaseAccountScope = (value: unknown): value is string => {
   if (typeof value != 'string') return false
   const userId = /^profile-v1:user-id:([1-9]\d*)$/.exec(value)?.[1]
-  if (userId != null) return Number.isSafeInteger(Number(userId))
+  return userId != null && Number.isSafeInteger(Number(userId))
+}
+
+const validQQMusicAccountScope = (value: unknown): value is string => {
+  if (typeof value != 'string') return false
   const uin = value.startsWith('profile-v1:uin:') ? value.slice('profile-v1:uin:'.length) : null
   return uin != null && validProfileUin(uin)
 }
 
+const validProviderAccountScope = (provider: unknown, accountScope: unknown): provider is 'wy' | 'tx' =>
+  provider == 'wy' ? validNeteaseAccountScope(accountScope) :
+    provider == 'tx' && validQQMusicAccountScope(accountScope)
+
 const parseMusicUrlKey = (value: PlainData): Omit<MusicUrlGetInputV1, 'nowMs'> | null => {
-  if (!validText(value.provider, 128) || !validAccountScope(value.accountScope) ||
-    !validText(value.sourceTrackId) || !validText(value.quality, 128)) return null
+  if (!validProviderAccountScope(value.provider, value.accountScope) ||
+    !validText(value.sourceTrackId) || typeof value.quality != 'string' || !musicUrlQualities.has(value.quality)) return null
   return {
     provider: value.provider,
-    accountScope: value.accountScope,
+    accountScope: value.accountScope as string,
     sourceTrackId: value.sourceTrackId,
     quality: value.quality,
   }
@@ -109,14 +118,14 @@ export const parseOtherSourcesPutInput = (value: unknown): OtherSourcesPutInputV
 
 export const parseMusicUrlAccountInvalidation = (value: unknown): MusicUrlAccountInvalidationV1 => {
   const data = readPlainData(value, ['provider', 'accountScope'])
-  if (data == null || !validText(data.provider, 128) || !validAccountScope(data.accountScope)) throw invalidMusicUrl()
-  return { provider: data.provider, accountScope: data.accountScope }
+  if (data == null || !validProviderAccountScope(data.provider, data.accountScope)) throw invalidMusicUrl()
+  return { provider: data.provider, accountScope: data.accountScope as string }
 }
 
 export const parseMusicUrlSourceInvalidation = (value: unknown): MusicUrlSourceInvalidationV1 => {
   const data = readPlainData(value, ['provider'])
-  if (data == null || !validText(data.provider, 128)) throw invalidMusicUrl()
-  return { provider: data.provider }
+  if (data == null || (data.provider != 'wy' && data.provider != 'tx')) throw invalidMusicUrl()
+  return { provider: data.provider as string }
 }
 
 export const neteaseAccountScope = (profile: unknown): string | null => {

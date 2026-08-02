@@ -13,7 +13,6 @@ import {
   getOnlineOtherSourcePicByLocal,
   getOnlineOtherSourcePicUrl,
   getOtherSource,
-  getMusicUrlCacheKey,
 } from './utils'
 
 
@@ -79,8 +78,7 @@ export const getMusicUrl = async({ musicInfo, isRefresh, allowToggleSource = tru
   }
 
   try {
-    return await getOnlineOtherSourceMusicUrlByLocal(musicInfo, isRefresh).then(({ url, quality, isFromCache, persistentCache }) => {
-      const cacheKey = getMusicUrlCacheKey(musicInfo, quality, persistentCache)
+    return await getOnlineOtherSourceMusicUrlByLocal(musicInfo, isRefresh).then(({ url, isFromCache, cacheKey }) => {
       if (!isFromCache && cacheKey != null) void saveMusicUrl(cacheKey, url).catch(() => {})
       return url
     })
@@ -90,9 +88,8 @@ export const getMusicUrl = async({ musicInfo, isRefresh, allowToggleSource = tru
 
   onToggleSource()
   return getOtherSourceByLocal(musicInfo, async(otherSource) => {
-    return getOnlineOtherSourceMusicUrl({ musicInfos: [...otherSource], onToggleSource, isRefresh }).then(({ url, quality: targetQuality, musicInfo: targetMusicInfo, isFromCache, persistentCache }) => {
+    return getOnlineOtherSourceMusicUrl({ musicInfos: [...otherSource], onToggleSource, isRefresh }).then(({ url, isFromCache, cacheKey }) => {
       // saveLyric(musicInfo, data.lyricInfo)
-      const cacheKey = getMusicUrlCacheKey(targetMusicInfo, targetQuality, persistentCache)
       if (!isFromCache && cacheKey != null) void saveMusicUrl(cacheKey, url).catch(() => {})
 
       // TODO: save url ?

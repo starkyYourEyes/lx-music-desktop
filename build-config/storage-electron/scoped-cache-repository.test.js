@@ -143,8 +143,8 @@ describe('scoped URL cache repository', () => {
     await createFixture()
     const modulePath = '../../src/main/worker/dbService/modules/music_url/index.ts'
     const put = repositoryFunction(modulePath, 'musicUrlPut')
-    await put({ ...urlKey('profile-v1:user-id:7', 123), url: 'https://media.invalid/default' })
-    await put({ ...urlKey('profile-v1:user-id:7', 123, { sourceTrackId: 'provider' }), url: 'https://media.invalid/provider', providerExpiresAtMs: 200 })
+    await put({ ...urlKey('profile-v1:user-id:7', 123, { provider: 'wy' }), url: 'https://media.invalid/default' })
+    await put({ ...urlKey('profile-v1:user-id:7', 123, { provider: 'wy', sourceTrackId: 'provider' }), url: 'https://media.invalid/provider', providerExpiresAtMs: 200 })
     assert.deepEqual(await cacheDb.runCacheRead(db => db.prepare(`
       SELECT source_track_id AS sourceTrackId, expires_at_ms AS expiresAtMs
       FROM music_urls ORDER BY source_track_id
@@ -190,6 +190,40 @@ describe('scoped URL cache repository', () => {
     await assert.rejects(get({ ...urlKey('profile-v1:uin:a', 1), extra: true }), error => error?.code == 'music_url_input_invalid')
     assert.deepEqual(await cacheDb.runCacheRead(db => db.prepare(`SELECT count(*) AS count FROM music_urls`).get()), {
       status: 'hit', value: { count: 0 },
+    })
+  })
+
+  it('accepts only canonical provider, profile scope, and quality combinations', async() => {
+    await createFixture()
+    const modulePath = '../../src/main/worker/dbService/modules/music_url/index.ts'
+    const put = repositoryFunction(modulePath, 'musicUrlPut')
+    const get = repositoryFunction(modulePath, 'musicUrlGet')
+    const qualities = ['128k', '320k', 'flac', 'flac24bit', '192k', 'ape', 'wav']
+    for (const [provider, accountScope] of [
+      ['wy', 'profile-v1:user-id:7'],
+      ['tx', 'profile-v1:uin:10001'],
+    ]) {
+      for (const quality of qualities) {
+        await put({
+          provider, accountScope, sourceTrackId: `${provider}-${quality}`, quality,
+          url: `https://media.invalid/${provider}/${quality}`, nowMs: 1,
+        })
+      }
+    }
+    for (const input of [
+      { provider: 'kw', accountScope: 'profile-v1:uin:10001', quality: '320k' },
+      { provider: 'wy', accountScope: 'profile-v1:uin:10001', quality: '320k' },
+      { provider: 'tx', accountScope: 'profile-v1:user-id:7', quality: '320k' },
+      { provider: 'tx', accountScope: 'profile-v1:uin:10001', quality: 'hires' },
+      { provider: 'TX', accountScope: 'profile-v1:uin:10001', quality: '320k' },
+    ]) {
+      await assert.rejects(put({
+        ...input, sourceTrackId: 'invalid', url: 'https://media.invalid/rejected', nowMs: 1,
+      }), error => error?.code == 'music_url_input_invalid')
+      await assert.rejects(get({ ...input, sourceTrackId: 'invalid', nowMs: 1 }), error => error?.code == 'music_url_input_invalid')
+    }
+    assert.deepEqual(await cacheDb.runCacheRead(db => db.prepare(`SELECT count(*) AS count FROM music_urls`).get()), {
+      status: 'hit', value: { count: 14 },
     })
   })
 

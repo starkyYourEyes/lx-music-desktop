@@ -2,6 +2,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const { describe, it } = require('node:test')
+const loadTsModule = require('../../scripts/test-utils/load-ts-module')
 
 const root = path.resolve(__dirname, '../..')
 const read = file => fs.readFileSync(path.join(root, file), 'utf8')
@@ -11,6 +12,73 @@ const readTree = directory => fs.readdirSync(path.join(root, directory), { withF
     if (entry.isDirectory()) return readTree(relative)
     return /\.(?:ts|js|vue|sql)$/.test(entry.name) ? [{ file: relative, text: read(relative) }] : []
   })
+
+const deferred = () => {
+  let resolve
+  let reject
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+const music = (id, source) => ({
+  id,
+  name: `name-${id}`,
+  singer: `singer-${id}`,
+  source,
+  interval: null,
+  meta: {
+    songId: id,
+    albumName: `album-${id}`,
+    qualitys: [],
+    _qualitys: { '320k': { size: null } },
+  },
+})
+
+const createUrlRaceHarness = ({
+  musicSdk,
+  findMusic = async() => [],
+  getOtherSourcesFromCache = async() => [],
+  getCachedMusicUrl = async() => '',
+}) => {
+  const saves = []
+  const neteaseProfile = { value: { userId: 1, nickname: '', avatarUrl: '' } }
+  const qqMusicProfile = { value: { uin: '10001', nickname: '' } }
+  const neteaseLoggedIn = { value: true }
+  const qqMusicLoggedIn = { value: true }
+  const cacheValidation = loadTsModule(path.join(root, 'src/common/storage/cacheValidation.ts'))
+  const ipc = {
+    getMusicUrl: getCachedMusicUrl,
+    saveMusicUrl: async(key, url) => { saves.push({ key: structuredClone(key), url }) },
+    getOtherSourcesFromCache,
+    putOtherSourcesInCache: async() => {},
+    getPlayerLyric: async() => ({ lyric: '' }),
+    saveLyric: async() => {},
+  }
+  const appSetting = { 'player.playQuality': '320k', 'player.isS2t': false }
+  const utils = loadTsModule(path.join(root, 'src/renderer/core/music/utils.ts'), {
+    '@renderer/store': { apiSource: { value: 'official' }, qualityList: { value: {} } },
+    '@renderer/store/netease': { profile: neteaseProfile, isLoggedIn: neteaseLoggedIn },
+    '@renderer/store/qqMusic': { profile: qqMusicProfile, isLoggedIn: qqMusicLoggedIn },
+    '@common/storage/cacheValidation': cacheValidation,
+    '@renderer/store/utils': { assertApiSupport: () => true },
+    '@renderer/utils/musicSdk': { ...musicSdk, findMusic },
+    '@renderer/utils/ipc': ipc,
+    '@renderer/store/setting': { appSetting },
+    '@renderer/utils': { langS2T: async value => value, toNewMusicInfo: value => value, toOldMusicInfo: value => value },
+    '@renderer/utils/message': { requestMsg: { tooManyRequests: 'too many requests' } },
+    '@renderer/utils/musicSdk/api-source': { apis: () => ({}) },
+  })
+  const online = loadTsModule(path.join(root, 'src/renderer/core/music/online.ts'), {
+    '@renderer/store/list/action': { updateListMusics: async() => {} },
+    '@renderer/store/setting': { appSetting },
+    '@renderer/utils/ipc': ipc,
+    './utils': utils,
+  })
+  return { neteaseProfile, online, qqMusicProfile, saves, utils }
+}
 
 describe('scoped cache ownership callsites', () => {
   it('defines strict scoped DTOs and exposes only scoped worker repository APIs', () => {
@@ -48,6 +116,48 @@ describe('scoped cache ownership callsites', () => {
     assert.match(main, /parseOtherSourcesPutInput/)
   })
 
+  it('rejects noncanonical URL ownership at main IPC before worker dispatch', async() => {
+    const handlers = new Map()
+    const dispatched = []
+    const previousLx = global.lx
+    global.lx = {
+      worker: {
+        dbService: {
+          musicUrlPut: async input => { dispatched.push(structuredClone(input)); return { status: 'stored' } },
+        },
+      },
+    }
+    try {
+      const names = new Proxy({}, { get: (_target, key) => String(key) })
+      const cacheValidation = loadTsModule(path.join(root, 'src/common/storage/cacheValidation.ts'))
+      const rendererEvent = loadTsModule(path.join(root, 'src/main/modules/winMain/rendererEvent/music.ts'), {
+        '@common/ipcNames': { WIN_MAIN_RENDERER_EVENT_NAME: names },
+        '@common/mainIpc': { mainHandle: (name, handler) => handlers.set(name, handler) },
+        '@common/storage/cacheValidation': cacheValidation,
+      })
+      rendererEvent.default()
+      const put = handlers.get('music_url_put')
+      for (const params of [
+        { provider: 'kw', accountScope: 'profile-v1:uin:10001', quality: '320k' },
+        { provider: 'wy', accountScope: 'profile-v1:uin:10001', quality: '320k' },
+        { provider: 'tx', accountScope: 'profile-v1:user-id:7', quality: '320k' },
+        { provider: 'tx', accountScope: 'profile-v1:uin:10001', quality: 'hires' },
+      ]) {
+        await assert.rejects(put({ params: {
+          ...params, sourceTrackId: 'track', url: 'https://media.invalid/rejected', nowMs: 1,
+        } }), error => error?.code == 'music_url_input_invalid')
+      }
+      assert.equal(dispatched.length, 0)
+      await put({ params: {
+        provider: 'tx', accountScope: 'profile-v1:uin:10001', sourceTrackId: 'track',
+        quality: 'wav', url: 'https://media.invalid/accepted', nowMs: 1,
+      } })
+      assert.equal(dispatched.length, 1)
+    } finally {
+      global.lx = previousLx
+    }
+  })
+
   it('persists URLs only for validated public profiles and never assigns an identity-less scope', () => {
     const ipc = read('src/renderer/utils/ipc.ts')
     const online = read('src/renderer/core/music/online.ts')
@@ -62,6 +172,166 @@ describe('scoped cache ownership callsites', () => {
     assert.match([online, local, utils].join('\n'), /persistentCache/)
     assert.doesNotMatch([ipc, online, local, utils].join('\n'), /accountScope\s*:\s*['"](?:guest|anonymous|public)['"]/i)
     assert.doesNotMatch([ipc, online, local, utils].join('\n'), /(?:cookie|token|authorization).*accountScope|accountScope.*(?:cookie|token|authorization)/i)
+  })
+
+  it('writes a direct URL only under the account scope captured when its provider request starts', async() => {
+    const previousWindow = global.window
+    const request = deferred()
+    const started = deferred()
+    global.window = { lx: { apiInitPromise: [Promise.resolve(true)] }, i18n: { t: value => value } }
+    try {
+      const harness = createUrlRaceHarness({
+        musicSdk: {
+          wy: {
+            getMusicUrl() {
+              started.resolve()
+              return { promise: request.promise }
+            },
+          },
+        },
+      })
+      const result = harness.online.getMusicUrl({
+        musicInfo: music('wy-track', 'wy'), quality: '320k', isRefresh: false,
+      })
+      await started.promise
+      harness.neteaseProfile.value = { userId: 2, nickname: '', avatarUrl: '' }
+      request.resolve({ type: '320k', url: 'https://media.invalid/account-a' })
+      assert.equal(await result, 'https://media.invalid/account-a')
+      assert.deepEqual(harness.saves, [{
+        key: {
+          provider: 'wy',
+          accountScope: 'profile-v1:user-id:1',
+          sourceTrackId: 'wy-track',
+          quality: '320k',
+        },
+        url: 'https://media.invalid/account-a',
+      }])
+    } finally {
+      global.window = previousWindow
+    }
+  })
+
+  it('writes a fallback URL under the target account captured when that target request starts', async() => {
+    const previousWindow = global.window
+    const previousConsoleLog = console.log
+    const request = deferred()
+    const started = deferred()
+    const target = music('tx-target', 'tx')
+    global.window = { lx: { apiInitPromise: [Promise.resolve(true)] }, i18n: { t: value => value } }
+    console.log = () => {}
+    try {
+      const harness = createUrlRaceHarness({
+        musicSdk: {
+          wy: { getMusicUrl: () => ({ promise: Promise.reject(new Error('primary failed')) }) },
+          tx: {
+            getMusicUrl() {
+              started.resolve()
+              return { promise: request.promise }
+            },
+          },
+        },
+        findMusic: async() => [target],
+      })
+      const result = harness.online.getMusicUrl({
+        musicInfo: music('wy-original', 'wy'), quality: '320k', isRefresh: false,
+      })
+      await started.promise
+      harness.qqMusicProfile.value = { uin: '20002', nickname: '' }
+      request.resolve({ type: '320k', url: 'https://media.invalid/qq-account-a' })
+      assert.equal(await result, 'https://media.invalid/qq-account-a')
+      assert.deepEqual(harness.saves, [{
+        key: {
+          provider: 'tx',
+          accountScope: 'profile-v1:uin:10001',
+          sourceTrackId: 'tx-target',
+          quality: '320k',
+        },
+        url: 'https://media.invalid/qq-account-a',
+      }])
+    } finally {
+      global.window = previousWindow
+      console.log = previousConsoleLog
+    }
+  })
+
+  it('captures fallback URL ownership after its cache read and immediately before the provider request', async() => {
+    const previousWindow = global.window
+    const cacheRead = deferred()
+    const cacheReadStarted = deferred()
+    const request = deferred()
+    const started = deferred()
+    global.window = { lx: { apiInitPromise: [Promise.resolve(true)] }, i18n: { t: value => value } }
+    try {
+      const harness = createUrlRaceHarness({
+        musicSdk: {
+          tx: {
+            getMusicUrl() {
+              started.resolve()
+              return { promise: request.promise }
+            },
+          },
+        },
+        getCachedMusicUrl: () => {
+          cacheReadStarted.resolve()
+          return cacheRead.promise
+        },
+      })
+      const result = harness.utils.getOnlineOtherSourceMusicUrl({
+        musicInfos: [music('tx-target', 'tx')], quality: '320k', onToggleSource() {}, isRefresh: false,
+      })
+      await cacheReadStarted.promise
+      harness.qqMusicProfile.value = { uin: '20002', nickname: '' }
+      cacheRead.resolve('')
+      await started.promise
+      request.resolve({ type: '320k', url: 'https://media.invalid/qq-account-b' })
+      assert.deepEqual((await result).cacheKey, {
+        provider: 'tx',
+        accountScope: 'profile-v1:uin:20002',
+        sourceTrackId: 'tx-target',
+        quality: '320k',
+      })
+    } finally {
+      global.window = previousWindow
+    }
+  })
+
+  for (const persistentState of ['expiry', 'explicit clear', 'unavailable']) {
+    it(`does not resurrect alternate sources from memory after persistent ${persistentState}`, async() => {
+      let searches = 0
+      const original = music('original', 'wy')
+      const harness = createUrlRaceHarness({
+        musicSdk: {},
+        findMusic: async() => [music(`candidate-${++searches}`, 'tx')],
+        getOtherSourcesFromCache: async() => [],
+      })
+      assert.deepEqual((await harness.utils.getOtherSource(original)).map(value => value.id), ['candidate-1'])
+      assert.deepEqual((await harness.utils.getOtherSource(original)).map(value => value.id), ['candidate-2'])
+      assert.equal(searches, 2)
+    })
+  }
+
+  it('deduplicates in-flight alternate-source discovery by canonical provider and track owner', async() => {
+    const search = deferred()
+    let searches = 0
+    const original = music('same-owner', 'local')
+    const harness = createUrlRaceHarness({
+      musicSdk: {},
+      findMusic() {
+        searches++
+        return search.promise
+      },
+      getOtherSourcesFromCache: async() => [],
+    })
+    const first = harness.utils.getOtherSource({ id: 'download-a', progress: 0, metadata: { musicInfo: original } })
+    const second = harness.utils.getOtherSource({ id: 'download-b', progress: 0, metadata: { musicInfo: original } })
+    await new Promise(resolve => setImmediate(resolve))
+    const observedSearches = searches
+    search.resolve([music('candidate', 'tx')])
+    assert.deepEqual(await Promise.all([first, second]), [
+      [music('candidate', 'tx')],
+      [music('candidate', 'tx')],
+    ])
+    assert.equal(observedSearches, 1)
   })
 
   it('captures User API URL provenance through preload/runtime and disables persistent URL caching', () => {

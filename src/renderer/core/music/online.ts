@@ -33,11 +33,8 @@ export const getMusicUrl = async({ musicInfo, quality, isRefresh, allowToggleSou
   const cachedUrl = cacheKey == null ? '' : await getStoreMusicUrl(cacheKey)
   if (cachedUrl && !isRefresh) return cachedUrl
 
-  return handleGetOnlineMusicUrl({ musicInfo, quality, onToggleSource, isRefresh, allowToggleSource }).then(({ url, quality: targetQuality, musicInfo: targetMusicInfo, isFromCache, persistentCache }) => {
-    if (!isFromCache) {
-      const targetCacheKey = getMusicUrlCacheKey(targetMusicInfo, targetQuality, persistentCache)
-      if (targetCacheKey != null) void saveMusicUrl(targetCacheKey, url).catch(() => {})
-    }
+  return handleGetOnlineMusicUrl({ musicInfo, quality, onToggleSource, isRefresh, allowToggleSource }).then(({ url, isFromCache, cacheKey }) => {
+    if (!isFromCache && cacheKey != null) void saveMusicUrl(cacheKey, url).catch(() => {})
     return url
   })
 }

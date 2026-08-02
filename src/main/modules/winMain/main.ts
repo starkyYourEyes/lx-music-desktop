@@ -7,8 +7,10 @@ import { configureSessionProxy } from '@main/utils/sessionProxy'
 import { mainSend } from '@common/mainIpc'
 import { sendFocus, sendTaskbarButtonClick } from './rendererEvent'
 import { encodePath } from '@common/utils/electron'
+import type { SessionRegistration } from '@main/services/sessionRegistry'
 
 let browserWindow: Electron.BrowserWindow | null = null
+const windowRegistrations = new WeakMap<Electron.BrowserWindow, SessionRegistration>()
 
 const winEvent = () => {
   if (!browserWindow) return
@@ -25,9 +27,12 @@ const winEvent = () => {
     browserWindow!.hide()
   })
 
+  const ownedWindow = browserWindow
   browserWindow.on('closed', () => {
+    windowRegistrations.get(ownedWindow)?.unregister()
+    windowRegistrations.delete(ownedWindow)
     // global.lx.mainWindowClosed = true
-    browserWindow = null
+    if (browserWindow == ownedWindow) browserWindow = null
   })
 
   // browserWindow.on('restore', () => {
@@ -73,18 +78,22 @@ const configureMainSessionProxy = (targetSession: Electron.Session) => {
   })
 }
 
-export const createWindow = () => {
+export const createWindow = async(): Promise<void> => {
   closeWindow()
   const windowSizeInfo = getWindowSizeInfo(global.lx.appSetting['common.windowSizeId'])
 
   const { shouldUseDarkColors, theme } = global.lx.theme
   const ses = session.fromPartition('persist:win-main')
-  configureMainSessionProxy(ses)
+  const registration = global.lx.sessionRegistry.register({ key: 'main:win-main', session: ses })
+  let window: Electron.BrowserWindow | null = null
+  try {
+    await registration.ready
+    configureMainSessionProxy(ses)
 
   /**
    * Initial window options
    */
-  const options: Electron.BrowserWindowConstructorOptions = {
+    const options: Electron.BrowserWindowConstructorOptions = {
     height: windowSizeInfo.height,
     useContentSize: true,
     width: windowSizeInfo.width,
@@ -109,24 +118,41 @@ export const createWindow = () => {
       webgl: false,
       spellcheck: false, // 禁用拼写检查器
     },
-  }
-  if (global.envParams.cmdParams.dt) options.backgroundColor = theme.colors['--color-primary-light-1000']
-  if (global.lx.appSetting['common.startInFullscreen']) {
-    options.fullscreen = true
-    if (isLinux) options.resizable = true
-  }
-  browserWindow = new BrowserWindow(options)
+    }
+    if (global.envParams.cmdParams.dt) options.backgroundColor = theme.colors['--color-primary-light-1000']
+    if (global.lx.appSetting['common.startInFullscreen']) {
+      options.fullscreen = true
+      if (isLinux) options.resizable = true
+    }
+    window = new BrowserWindow(options)
+    browserWindow = window
+    windowRegistrations.set(window, registration)
 
-  const winURL = process.env.NODE_ENV !== 'production' ? 'http://localhost:9080' : `file://${path.join(encodePath(__dirname), 'index.html')}`
-  void browserWindow.loadURL(winURL + `?os=${getPlatform()}&dt=${global.envParams.cmdParams.dt}&dark=${shouldUseDarkColors}&theme=${encodeURIComponent(JSON.stringify(theme))}`)
+    const winURL = process.env.NODE_ENV !== 'production' ? 'http://localhost:9080' : `file://${path.join(encodePath(__dirname), 'index.html')}`
+    await window.loadURL(winURL + `?os=${getPlatform()}&dt=${global.envParams.cmdParams.dt}&dark=${shouldUseDarkColors}&theme=${encodeURIComponent(JSON.stringify(theme))}`)
 
-  winEvent()
+    winEvent()
 
-  if (global.envParams.cmdParams.odt) handleOpenDevTools(browserWindow.webContents)
+    if (global.envParams.cmdParams.odt) handleOpenDevTools(window.webContents)
 
   // global.lx.mainWindowClosed = false
   // browserWindow.webContents.openDevTools()
-  global.lx.event_app.main_window_created(browserWindow)
+    global.lx.event_app.main_window_created(window)
+  } catch {
+    if (window) {
+      try {
+        if (!window.isDestroyed()) window.destroy()
+        windowRegistrations.delete(window)
+        registration.unregister()
+        if (browserWindow == window) browserWindow = null
+      } catch {
+        // Keep the registration while Electron still owns the failed window.
+      }
+    } else {
+      registration.unregister()
+    }
+    throw new Error('main_window_creation_failed')
+  }
 }
 
 export const isExistWindow = (): boolean => !!browserWindow

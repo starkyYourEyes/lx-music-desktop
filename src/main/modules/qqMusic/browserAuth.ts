@@ -421,41 +421,54 @@ export const createQQMusicBrowserAuthSession = async({
     void destroy().catch(() => {})
   }
 
-  const partition = `qq-music-login:${crypto.randomUUID()}`
+  const sessionId = crypto.randomUUID()
+  const partition = `qq-music-login:${sessionId}`
   const loginSession = session.fromPartition(partition, { cache: false })
-  loginSession.setPermissionRequestHandler((_webContents, _permission, resolve) => {
-    resolve(false)
+  const registration = global.lx.sessionRegistry.register({
+    key: `qq-music-auth:${sessionId}`,
+    session: loginSession,
   })
-  loginSession.setPermissionCheckHandler(() => false)
-
-  const win = new BrowserWindow({
-    width: 720,
-    height: 520,
-    show: false,
-    autoHideMenuBar: true,
-    webPreferences: {
-      session: loginSession,
-      backgroundThrottling: false,
-      contextIsolation: true,
-      nodeIntegration: false,
-      nodeIntegrationInWorker: false,
-      sandbox: true,
-      spellcheck: false,
-      autoplayPolicy: 'document-user-activation-required',
-      enableWebSQL: false,
-      webSecurity: true,
-    },
-  })
+  try {
+    await registration.ready
+  } catch {
+    registration.unregister()
+    throw new Error(CREATE_ERROR)
+  }
+  let win: Electron.BrowserWindow
+  try {
+    loginSession.setPermissionRequestHandler((_webContents, _permission, resolve) => {
+      resolve(false)
+    })
+    loginSession.setPermissionCheckHandler(() => false)
+    win = new BrowserWindow({
+      width: 720,
+      height: 520,
+      show: false,
+      autoHideMenuBar: true,
+      webPreferences: {
+        session: loginSession,
+        backgroundThrottling: false,
+        contextIsolation: true,
+        nodeIntegration: false,
+        nodeIntegrationInWorker: false,
+        sandbox: true,
+        spellcheck: false,
+        autoplayPolicy: 'document-user-activation-required',
+        enableWebSQL: false,
+        webSecurity: true,
+      },
+    })
+  } catch {
+    registration.unregister()
+    throw new Error(CREATE_ERROR)
+  }
   let destroyed = false
   let cleanupPromise: Promise<void> | null = null
   let callbackReached = false
   const authorizeUrl = createQQMusicAuthorizeUrl(crypto.randomUUID())
   let initialLoadPending = false
   let sawAllowedSupersedingNavigation = false
-  const unregisterNavigationGuard = registerWebContentsNavigationGuard(
-    win.webContents,
-    isQQMusicLoginNavigationAllowed,
-  )
+  let unregisterNavigationGuard = () => {}
 
   const inspectNavigation = (
     event: { preventDefault: () => void },
@@ -514,9 +527,9 @@ export const createQQMusicBrowserAuthSession = async({
   const settlePartitionCleanup = async(): Promise<void> => {
     let timer: ReturnType<typeof setTimeout> | undefined
     const cleanup = Promise.allSettled([
-      Promise.resolve().then(async() => loginSession.clearAuthCache()),
-      Promise.resolve().then(async() => loginSession.clearStorageData()),
       Promise.resolve().then(async() => loginSession.clearCache()),
+      Promise.resolve().then(async() => loginSession.clearStorageData({ storages: ['cachestorage'] })),
+      Promise.resolve().then(async() => loginSession.clearCodeCaches({})),
     ]).then(() => true)
     const timeout = new Promise<boolean>(resolve => {
       timer = setTimeout(() => {
@@ -539,17 +552,24 @@ export const createQQMusicBrowserAuthSession = async({
     if (cleanupPromise) return cleanupPromise
     destroyed = true
     creationController.abort()
-    signal.removeEventListener('abort', handleAbort)
-    unregisterNavigationGuard()
-    win.webContents.removeListener('did-fail-load', handleLoadFailure)
-    win.webContents.removeListener('will-navigate', handleNavigation)
-    win.webContents.removeListener('will-redirect', handleNavigation)
-    win.webContents.removeListener('will-frame-navigate', handleFrameNavigation)
-    win.webContents.removeListener('will-attach-webview', handleAttachWebview)
-    win.removeListener('closed', handleWindowClosed)
-    if (!win.isDestroyed()) win.destroy()
-    cleanupPromise = settlePartitionCleanup()
-    return cleanupPromise
+    const attempt = (async() => {
+      signal.removeEventListener('abort', handleAbort)
+      unregisterNavigationGuard()
+      win.webContents.removeListener('did-fail-load', handleLoadFailure)
+      win.webContents.removeListener('will-navigate', handleNavigation)
+      win.webContents.removeListener('will-redirect', handleNavigation)
+      win.webContents.removeListener('will-frame-navigate', handleFrameNavigation)
+      win.webContents.removeListener('will-attach-webview', handleAttachWebview)
+      win.removeListener('closed', handleWindowClosed)
+      if (!win.isDestroyed()) win.destroy()
+      await settlePartitionCleanup()
+      registration.unregister()
+    })()
+    cleanupPromise = attempt
+    void attempt.catch(() => {
+      if (cleanupPromise == attempt) cleanupPromise = null
+    })
+    return attempt
   }
 
   const handleAbort = () => {
@@ -557,18 +577,22 @@ export const createQQMusicBrowserAuthSession = async({
     void destroy().catch(() => {})
   }
 
-  win.webContents.on('will-navigate', handleNavigation)
-  win.webContents.on('will-redirect', handleNavigation)
-  win.webContents.on('will-frame-navigate', handleFrameNavigation)
-  win.webContents.on('did-fail-load', handleLoadFailure)
-  win.webContents.on('will-attach-webview', handleAttachWebview)
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  win.on('closed', handleWindowClosed)
-
-  if (signal.aborted) handleAbort()
-  else signal.addEventListener('abort', handleAbort, { once: true })
-
   try {
+    unregisterNavigationGuard = registerWebContentsNavigationGuard(
+      win.webContents,
+      isQQMusicLoginNavigationAllowed,
+    )
+    win.webContents.on('will-navigate', handleNavigation)
+    win.webContents.on('will-redirect', handleNavigation)
+    win.webContents.on('will-frame-navigate', handleFrameNavigation)
+    win.webContents.on('did-fail-load', handleLoadFailure)
+    win.webContents.on('will-attach-webview', handleAttachWebview)
+    win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    win.on('closed', handleWindowClosed)
+
+    if (signal.aborted) handleAbort()
+    else signal.addEventListener('abort', handleAbort, { once: true })
+
     await waitWithinCreation(
       configureSessionProxy(loginSession, proxy),
       creationController.signal,
@@ -668,7 +692,13 @@ export const createQQMusicBrowserAuthSession = async({
         reason: 'qr-capture-failed',
       })
     }
-    void destroy().catch(() => {})
+    try {
+      await destroy()
+    } catch {
+      try {
+        await destroy()
+      } catch {}
+    }
     throw new Error(CREATE_ERROR)
   }
 }

@@ -30,6 +30,7 @@ import {
   type Phase3PlaybackSmokeEvidence,
 } from './startup/phase3Attestation'
 import type { Phase3AttestationPrerequisitesV1 } from '../common/storage/phase3'
+import { createSessionRegistry } from './services/sessionRegistry'
 
 export const initGlobalData = () => {
   const envParams = parseEnvParams()
@@ -48,6 +49,7 @@ export const initGlobalData = () => {
     event_dislike: createDislikeEvent(),
     appSetting: defaultSetting,
     worker: createWorkers(),
+    sessionRegistry: createSessionRegistry(),
     storage: null,
     runTemp: null,
     themeAssets: null,

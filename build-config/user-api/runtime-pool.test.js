@@ -24,7 +24,7 @@ test('disposing one runtime clears only its own session', async() => {
 
   await harness.dispose(first, { clearSession: true })
 
-  assert.deepEqual(first.session.cleanupCalls, ['auth', 'storage', 'cache'])
+  assert.deepEqual(first.session.cleanupCalls, ['cache', 'storage:cachestorage', 'code'])
   assert.deepEqual(second.session.cleanupCalls, [])
   assert.equal(second.window.destroyed, false)
 })
@@ -51,7 +51,7 @@ test('a destroy failure leaves the runtime owned and retryable', async() => {
 
   await harness.dispose(runtime, { clearSession: true })
   assert.equal(runtime.window.destroyed, true)
-  assert.deepEqual(runtime.session.cleanupCalls, ['auth', 'storage', 'cache'])
+  assert.deepEqual(runtime.session.cleanupCalls, ['cache', 'storage:cachestorage', 'code'])
 })
 
 test('a failed destroy is retried before a same-source runtime is replaced', async() => {

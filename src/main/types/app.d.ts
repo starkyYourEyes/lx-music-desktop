@@ -11,6 +11,7 @@ import { type StoragePaths } from '@main/utils/storagePaths'
 import { type PortableProfileStartupToken } from '@main/migration/portableProfile'
 import { type RunTempHandle } from '@main/utils/tempLifecycle'
 import { type ThemeAssetManager } from '@main/services/themeAssetManager'
+import { type SessionRegistry } from '@main/services/sessionRegistry'
 
 interface Lx {
   inited: boolean
@@ -34,6 +35,7 @@ interface Lx {
   worker: {
     dbService: DBSeriveTypes
   }
+  sessionRegistry: SessionRegistry
   storage: StorageCoordinator | null
   runTemp: RunTempHandle | null
   themeAssets: ThemeAssetManager | null

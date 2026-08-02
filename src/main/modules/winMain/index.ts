@@ -34,7 +34,9 @@ export default () => {
   })
 
   global.lx.event_app.on('app_inited', () => {
-    createWindow()
+    void createWindow().catch(() => {
+      console.error('main_window_creation_failed')
+    })
   })
 
   const keys = (['status', 'collect'] as const) satisfies Array<keyof LX.Player.Status>

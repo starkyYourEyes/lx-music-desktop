@@ -8,6 +8,7 @@ import path from 'node:path'
 import USER_API_RENDERER_EVENT_NAME from './rendererEvent/name'
 import { getScript } from './utils'
 import { getProxy } from './main'
+import type { SessionRegistration, SessionRegistry } from '@main/services/sessionRegistry'
 
 export interface UserApiRuntimeWindow {
   identity: LX.UserApi.UserApiRuntimeIdentity
@@ -33,6 +34,7 @@ export interface UserApiRuntimeWindowDependencies {
   getProxy: () => { host: string, port: string }
   send: <T>(runtime: UserApiRuntimeWindow, name: string, payload: T) => boolean
   logError: (message: string, reason: unknown) => void
+  sessionRegistry: Pick<SessionRegistry, 'register'>
 }
 
 export interface CreateUserApiRuntimeWindowOptions {
@@ -58,6 +60,7 @@ const runtimeListeners = new WeakMap<UserApiRuntimeWindow, {
   closed: () => void
   renderProcessGone: (_event: Electron.Event, details: Electron.RenderProcessGoneDetails) => void
 }>()
+const runtimeRegistrations = new WeakMap<UserApiRuntimeWindow, SessionRegistration>()
 
 const readRuntimeHtml = async() => {
   if (runtimeHtml) return runtimeHtml
@@ -90,6 +93,7 @@ const getDependencies = (
     return true
   },
   logError: (message, reason) => log.error(message, reason),
+  sessionRegistry: dependencies?.sessionRegistry ?? global.lx.sessionRegistry,
   ...dependencies,
 })
 
@@ -102,14 +106,17 @@ const clearSession = async(
   deps: UserApiRuntimeWindowDependencies,
 ) => {
   const tasks = [
-    { name: 'auth cache', run: async() => runtimeSession.clearAuthCache() },
-    { name: 'storage data', run: async() => runtimeSession.clearStorageData() },
     { name: 'cache', run: async() => runtimeSession.clearCache() },
+    {
+      name: 'cache storage',
+      run: async() => runtimeSession.clearStorageData({ storages: ['cachestorage'] }),
+    },
+    { name: 'code cache', run: async() => runtimeSession.clearCodeCaches({}) },
   ]
   const results = await Promise.allSettled(tasks.map(async({ run }) => run()))
   for (const [index, result] of results.entries()) {
     if (result.status == 'rejected') {
-      deps.logError(`clear user API ${tasks[index].name} error:`, result.reason)
+      deps.logError('session_cache_clear_failed', tasks[index].name)
     }
   }
 }
@@ -141,77 +148,90 @@ export const createRuntimeWindow = async({
     await disposeRuntimeWindow(pendingRuntime, { clearSession: false }, deps)
   }
   const runtimeSession = deps.fromPartition(partition)
-  const html = await deps.readRuntimeHtml()
-  const window = deps.createWindow({
-    resizable: false,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    roundedCorners: false,
-    hasShadow: false,
-    show: false,
-    webPreferences: {
-      session: runtimeSession,
-      contextIsolation: true,
-      nodeIntegration: false,
-      nodeIntegrationInWorker: false,
-      sandbox: false,
-      spellcheck: false,
-      autoplayPolicy: 'document-user-activation-required',
-      enableWebSQL: false,
-      disableDialogs: true,
-      webgl: false,
-      images: false,
-      preload: getPreloadUrl(),
-    },
-  })
-  const runtime: UserApiRuntimeWindow = {
-    identity: { apiId: apiInfo.id, generation },
-    window,
-    webContentsId: window.webContents.id,
-    partition,
+  const registration = deps.sessionRegistry.register({
+    key: `user-api:${partition.slice(-32)}`,
     session: runtimeSession,
-  }
-  const handleClosed = () => {
-    hooks.onClosed(runtime.identity)
-  }
-  const handleRenderProcessGone = (_event: Electron.Event, details: Electron.RenderProcessGoneDetails) => {
-    hooks.onRenderProcessGone(runtime.identity, details)
-  }
-
-  const webContentsEvents: NodeJS.EventEmitter = window.webContents
-  for (const eventName of denyEvents) {
-    webContentsEvents.on(eventName, (event: Electron.Event) => {
-      event.preventDefault()
-    })
-  }
-  runtimeSession.setPermissionRequestHandler((_webContents, _permission, resolve) => {
-    resolve(false)
   })
-  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  window.on('closed', handleClosed)
-  window.webContents.on('render-process-gone', handleRenderProcessGone)
-  runtimeListeners.set(runtime, {
-    closed: handleClosed,
-    renderProcessGone: handleRenderProcessGone,
-  })
-
+  let runtime: UserApiRuntimeWindow | null = null
   try {
-    await window.loadURL('data:text/html;charset=UTF-8,' + encodeURIComponent(html))
-  } catch (err) {
-    detachRuntimeListeners(runtime)
-    try {
-      if (!window.isDestroyed()) window.destroy()
-    } catch (destroyErr) {
-      attachRuntimeListeners(runtime)
-      pendingRuntimes.set(runtime.identity.apiId, runtime)
-      deps.logError('destroy failed user API runtime after load failure:', destroyErr)
-      throw err
+    await registration.ready
+    const html = await deps.readRuntimeHtml()
+    const window = deps.createWindow({
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      roundedCorners: false,
+      hasShadow: false,
+      show: false,
+      webPreferences: {
+        session: runtimeSession,
+        contextIsolation: true,
+        nodeIntegration: false,
+        nodeIntegrationInWorker: false,
+        sandbox: false,
+        spellcheck: false,
+        autoplayPolicy: 'document-user-activation-required',
+        enableWebSQL: false,
+        disableDialogs: true,
+        webgl: false,
+        images: false,
+        preload: getPreloadUrl(),
+      },
+    })
+    runtime = {
+      identity: { apiId: apiInfo.id, generation },
+      window,
+      webContentsId: window.webContents.id,
+      partition,
+      session: runtimeSession,
     }
-    runtimeListeners.delete(runtime)
-    throw err
+    runtimeRegistrations.set(runtime, registration)
+    const handleClosed = () => {
+      runtimeRegistrations.get(runtime!)?.unregister()
+      runtimeRegistrations.delete(runtime!)
+      hooks.onClosed(runtime!.identity)
+    }
+    const handleRenderProcessGone = (_event: Electron.Event, details: Electron.RenderProcessGoneDetails) => {
+      hooks.onRenderProcessGone(runtime!.identity, details)
+    }
+
+    const webContentsEvents: NodeJS.EventEmitter = window.webContents
+    for (const eventName of denyEvents) {
+      webContentsEvents.on(eventName, (event: Electron.Event) => {
+        event.preventDefault()
+      })
+    }
+    runtimeSession.setPermissionRequestHandler((_webContents, _permission, resolve) => {
+      resolve(false)
+    })
+    window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    window.on('closed', handleClosed)
+    window.webContents.on('render-process-gone', handleRenderProcessGone)
+    runtimeListeners.set(runtime, {
+      closed: handleClosed,
+      renderProcessGone: handleRenderProcessGone,
+    })
+
+    await window.loadURL('data:text/html;charset=UTF-8,' + encodeURIComponent(html))
+    return runtime
+  } catch (error) {
+    if (runtime) {
+      detachRuntimeListeners(runtime)
+      try {
+        if (!runtime.window.isDestroyed()) runtime.window.destroy()
+      } catch (destroyErr) {
+        attachRuntimeListeners(runtime)
+        pendingRuntimes.set(runtime.identity.apiId, runtime)
+        deps.logError('destroy failed user API runtime after creation failure:', destroyErr)
+        throw error
+      }
+      runtimeListeners.delete(runtime)
+      runtimeRegistrations.delete(runtime)
+    }
+    registration.unregister()
+    throw error
   }
-  return runtime
 }
 
 export const initializeRuntimeWindow = async(
@@ -253,6 +273,8 @@ export const disposeRuntimeWindow = async(
   if (pendingRuntimes.get(runtime.identity.apiId) == runtime) {
     pendingRuntimes.delete(runtime.identity.apiId)
   }
+  runtimeRegistrations.get(runtime)?.unregister()
+  runtimeRegistrations.delete(runtime)
   if (shouldClearSession) await clearSession(runtime.session, deps)
 }
 
@@ -261,5 +283,16 @@ export const clearRuntimeSession = async(
   dependencies?: UserApiRuntimeWindowDependencies,
 ): Promise<void> => {
   const deps = getDependencies(dependencies)
-  await clearSession(deps.fromPartition(getRuntimePartition(apiId)), deps)
+  const partition = getRuntimePartition(apiId)
+  const runtimeSession = deps.fromPartition(partition)
+  const registration = deps.sessionRegistry.register({
+    key: `user-api:${partition.slice(-32)}`,
+    session: runtimeSession,
+  })
+  try {
+    await registration.ready
+    await clearSession(runtimeSession, deps)
+  } finally {
+    registration.unregister()
+  }
 }

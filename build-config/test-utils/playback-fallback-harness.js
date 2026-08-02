@@ -70,8 +70,11 @@ const createRuntimeWindowHarness = ({
     runtimeSession = {
       cleanupCalls: [],
       clearAuthCache() { this.cleanupCalls.push('auth') },
-      clearStorageData() { this.cleanupCalls.push('storage') },
+      clearStorageData(options) {
+        this.cleanupCalls.push(options ? `storage:${options.storages.join(',')}` : 'storage')
+      },
       clearCache() { this.cleanupCalls.push('cache') },
+      clearCodeCaches() { this.cleanupCalls.push('code') },
       setPermissionRequestHandler(handler) { this.permissionHandler = handler },
     }
     sessions.set(partition, runtimeSession)
@@ -170,6 +173,9 @@ const createRuntimeWindowHarness = ({
       return !runtime.window.isDestroyed()
     },
     logError() {},
+    sessionRegistry: {
+      register() { return { ready: Promise.resolve(), unregister() {} } },
+    },
   }
   if (!useDefaultReadRuntimeHtml) deps.readRuntimeHtml = async() => '<html></html>'
   const hooks = {

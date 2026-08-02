@@ -19,6 +19,7 @@ import type {
 import type { CachePhasePrerequisiteV1 } from '../../common/storage/cachePhase'
 import type { Phase3CredentialHealth, Phase3PlaybackSmokeEvidence } from './phase3Attestation'
 import type { PortableProfileStartupToken } from '../migration/portableProfile'
+import type { RawLyricMigrationResult } from '../migration/cache/rawLyrics'
 
 export type StorageRecoveryTarget =
   | {
@@ -376,7 +377,7 @@ interface ProductionCacheLifecycle {
     schemaVersion: 1 | null
     diagnostic: string | null
   }>
-  migrateRawLyrics?: (input: { nowMs: number }) => Promise<unknown> | unknown
+  migrateRawLyrics?: (input: { nowMs: number }) => Promise<RawLyricMigrationResult> | RawLyricMigrationResult
 }
 
 const cacheDiagnosticCodes = new Set([

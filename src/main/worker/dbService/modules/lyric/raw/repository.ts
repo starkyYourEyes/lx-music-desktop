@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { getAppDB, getDatabaseInitialization } from '../../../db'
 import { runCacheImmediate, runCacheRead, type CacheExecutionResult, type CacheReadResult, type CacheWriteResult } from '../../../cacheDb'
-import { selectRawCounts, selectRawRows } from './statements'
+import { selectRawCounts, selectRawProviderRows, selectRawRows } from './statements'
 
 const keys = ['lyric', 'tlyric', 'rlyric', 'lxlyric'] as const
 type LyricKey = typeof keys[number]
@@ -12,6 +12,16 @@ const validOwner = (provider: unknown, sourceTrackId: unknown): provider is stri
   typeof provider == 'string' && provider.length > 0 && provider.length <= 1024 &&
   typeof sourceTrackId == 'string' && sourceTrackId.length > 0 && sourceTrackId.length <= 1024
 const validNow = (value: unknown): value is number => typeof value == 'number' && Number.isSafeInteger(value) && value >= 0
+const plainRecord = (value: unknown): value is Record<string, unknown> => value != null && typeof value == 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) == Object.prototype
+const exactKeys = (value: Record<string, unknown>, expected: readonly string[]): boolean => {
+  const actual = Object.keys(value).sort()
+  return actual.length == expected.length && actual.every((key, index) => key == [...expected].sort()[index])
+}
+const validLyrics = (value: unknown): value is LX.Music.LyricInfo => {
+  if (!plainRecord(value) || typeof value.lyric != 'string' || Object.keys(value).some(key => !(keys as readonly string[]).includes(key))) return false
+  return keys.slice(1).every(key => value[key] == null || typeof value[key] == 'string')
+}
+const invalidInput = (): Error & { code: 'raw_lyric_input_invalid' } => Object.assign(new Error('raw_lyric_input_invalid'), { code: 'raw_lyric_input_invalid' as const })
 
 const lyricInfo = (rows: ReadonlyArray<{ lyricType: LyricKey, text: string }>): LX.Music.LyricInfo => {
   const result: LX.Music.LyricInfo = { lyric: '' }
@@ -84,8 +94,17 @@ export const replaceRawProvider = async(provider: string, tuples: readonly RawLy
   })
 }
 
+export const attestRawProvider = (provider: string): Promise<CacheReadResult<{ rows: number, ownerGroups: number, sha256: string }>> => {
+  if (!validOwner(provider, provider)) throw new Error('raw_lyric_input_invalid')
+  return runCacheRead(db => {
+    const counts = selectRawCounts(db, provider)
+    const tuples = selectRawProviderRows(db, provider).map(row => ({ provider, ...row }))
+    return { rows: counts.rows, ownerGroups: counts.ownerGroups, sha256: canonicalRawLyricHash(tuples) }
+  })
+}
+
 export const rawLyricGet = async(input: { provider: string, sourceTrackId: string, nowMs: number }): Promise<CacheReadResult<LX.Music.LyricInfo>> => {
-  if (!validOwner(input.provider, input.sourceTrackId) || !validNow(input.nowMs)) throw new Error('raw_lyric_input_invalid')
+  if (!plainRecord(input) || !exactKeys(input, ['provider', 'sourceTrackId', 'nowMs']) || !validOwner(input.provider, input.sourceTrackId) || !validNow(input.nowMs)) throw invalidInput()
   const result = await runCacheRead(db => {
     const exact = selectRawRows(db, input.provider, input.sourceTrackId)
     const legacy = exact.length ? exact : input.provider == 'legacy' ? [] : selectRawRows(db, 'legacy', input.sourceTrackId)
@@ -100,7 +119,7 @@ export const rawLyricGet = async(input: { provider: string, sourceTrackId: strin
 }
 
 export const rawLyricPut = async(input: { provider: string, sourceTrackId: string, lyrics: LX.Music.LyricInfo, nowMs: number }): Promise<CacheWriteResult> => {
-  if (!validOwner(input.provider, input.sourceTrackId) || !validNow(input.nowMs)) throw new Error('raw_lyric_input_invalid')
+  if (!plainRecord(input) || !exactKeys(input, ['provider', 'sourceTrackId', 'lyrics', 'nowMs']) || !validOwner(input.provider, input.sourceTrackId) || !validNow(input.nowMs) || !validLyrics(input.lyrics)) throw invalidInput()
   const tuples = keys.filter(key => input.lyrics[key] != null).map(lyricType => ({ provider: input.provider, sourceTrackId: input.sourceTrackId, lyricType, text: input.lyrics[lyricType]! }))
   const result = await runCacheImmediate(db => {
     const groups = new Map([[input.sourceTrackId, tuples]])

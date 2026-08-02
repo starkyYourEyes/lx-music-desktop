@@ -35,6 +35,8 @@ const { createTestStorageRoot } = require('./helpers/test-storage-root.js')
 const tempDirectories = []
 const appDbFixtures = []
 const supportsWorkerDatabase = typeof process.versions.electron == 'string'
+const hadOriginalLx = Object.prototype.hasOwnProperty.call(globalThis, 'lx')
+const originalLx = globalThis.lx
 
 const runElectronChild = () => {
   const result = childProcess.spawnSync(require('electron'), ['--test', __filename], {
@@ -93,6 +95,8 @@ afterEach(() => {
     fixture.cleanup()
   }
   for (const fixture of appDbFixtures.splice(0)) fixture.cleanup()
+  if (hadOriginalLx) globalThis.lx = originalLx
+  else delete globalThis.lx
 })
 
 const readyResult = {
@@ -231,6 +235,21 @@ const createDeps = (overrides = {}) => {
 
 const createCoordinator = deps => require(coordinatorPath).createStorageCoordinator(deps)
 
+const completeRawLyricMigration = {
+  status: 'complete',
+  sourceRows: 1,
+  sourceOwnerGroups: 1,
+  skippedInvalidRows: 0,
+  sourceSha256: '1'.repeat(64),
+  targetRows: 1,
+  targetOwnerGroups: 1,
+  targetSha256: '1'.repeat(64),
+}
+
+const installProductionCache = repository => {
+  globalThis.lx = { worker: { dbService: repository } }
+}
+
 const seedPortableProfile = rootPath => {
   const portableRoot = path.join(rootPath, 'portable')
   const sourceRoot = path.join(portableRoot, 'userData', 'LxDatas')
@@ -339,6 +358,135 @@ describe('storage startup coordinator', () => {
     assert.deepEqual(result, { status: 'ready', schemaVersion: 7 })
     assert.ok(calls.indexOf('phase3:attestation') < calls.indexOf('cache:prerequisite'))
     assert.ok(calls.indexOf('cache:prerequisite') < calls.indexOf('phase4:initialize:legacy_data_v1.cross_artifact_complete'))
+  })
+
+  it('runs the default Phase 4 path in prerequisite-open-migrate-settings order', async() => {
+    const { calls, deps } = createDeps({
+      initDatabase: async() => ({ ...readyResult, schemaVersion: 6 }),
+      verifyPhase2Storage: async() => {},
+      completePhase3Attestation: async() => { calls.push('phase3:attestation') },
+    })
+    delete deps.getCachePhasePrerequisite
+    installProductionCache({
+      getCachePhasePrerequisite: async() => {
+        calls.push('cache:prerequisite')
+        return { version: 1, markerName: 'legacy_data_v1.cross_artifact_complete', sourceSha256: 'f'.repeat(64), completedAtMs: 1 }
+      },
+      openCacheDatabase: async() => {
+        calls.push('cache:open')
+        return { status: 'created', schemaVersion: 1, diagnostic: null }
+      },
+      migrateRawLyrics: async input => {
+        calls.push(`raw-lyrics:migrate:${input.nowMs}`)
+        return completeRawLyricMigration
+      },
+    })
+
+    assert.deepEqual(await createCoordinator(deps).start(), { status: 'ready', schemaVersion: 6 })
+    assert.deepEqual(calls.filter(call => [
+      'phase3:attestation', 'cache:prerequisite', 'cache:open', 'raw-lyrics:migrate:1',
+      'settings:init', 'modules:register', 'app:inited',
+    ].includes(call)), [
+      'phase3:attestation', 'cache:prerequisite', 'cache:open', 'raw-lyrics:migrate:1',
+      'settings:init', 'modules:register', 'app:inited',
+    ])
+  })
+
+  it('skips raw lyric migration when cache open is unavailable and reaches ready', async() => {
+    const { calls, deps } = createDeps({
+      initDatabase: async() => ({ ...readyResult, schemaVersion: 6 }),
+      verifyPhase2Storage: async() => {},
+    })
+    delete deps.getCachePhasePrerequisite
+    installProductionCache({
+      getCachePhasePrerequisite: async() => {
+        calls.push('cache:prerequisite')
+        return { version: 1, markerName: 'legacy_data_v1.cross_artifact_complete', sourceSha256: 'f'.repeat(64), completedAtMs: 1 }
+      },
+      openCacheDatabase: async() => {
+        calls.push('cache:open:unavailable')
+        return { status: 'unavailable', schemaVersion: null, diagnostic: 'cache_integrity_failed' }
+      },
+      migrateRawLyrics: async() => {
+        calls.push('raw-lyrics:migrate')
+        return completeRawLyricMigration
+      },
+    })
+
+    assert.deepEqual(await createCoordinator(deps).start(), { status: 'ready', schemaVersion: 6 })
+    assert.deepEqual(calls.filter(call => call.startsWith('cache:') || call.startsWith('raw-lyrics:') || call == 'settings:init'), [
+      'cache:prerequisite', 'cache:open:unavailable', 'settings:init',
+    ])
+  })
+
+  it('continues startup when raw lyric migration makes cache unavailable', async() => {
+    const { calls, deps } = createDeps({
+      initDatabase: async() => ({ ...readyResult, schemaVersion: 6 }),
+      verifyPhase2Storage: async() => {},
+    })
+    delete deps.getCachePhasePrerequisite
+    installProductionCache({
+      getCachePhasePrerequisite: async() => {
+        calls.push('cache:prerequisite')
+        return { version: 1, markerName: 'legacy_data_v1.cross_artifact_complete', sourceSha256: 'f'.repeat(64), completedAtMs: 1 }
+      },
+      openCacheDatabase: async() => {
+        calls.push('cache:open')
+        return { status: 'ready', schemaVersion: 1, diagnostic: null }
+      },
+      migrateRawLyrics: async() => {
+        calls.push('raw-lyrics:unavailable')
+        return { status: 'unavailable', code: 'cache_capacity_unavailable' }
+      },
+    })
+
+    assert.deepEqual(await createCoordinator(deps).start(), { status: 'ready', schemaVersion: 6 })
+    assert.deepEqual(calls.filter(call => call.startsWith('cache:') || call.startsWith('raw-lyrics:') || call == 'settings:init'), [
+      'cache:prerequisite', 'cache:open', 'raw-lyrics:unavailable', 'settings:init',
+    ])
+  })
+
+  it('maps malformed and logically impossible raw lyric results to a fixed Phase 4 fatal code', async() => {
+    const cases = [
+      { name: 'malformed', result: { status: 'complete' } },
+      { name: 'row mismatch', result: { ...completeRawLyricMigration, targetRows: 2 } },
+      { name: 'hash mismatch', result: { ...completeRawLyricMigration, targetSha256: '2'.repeat(64) } },
+      { name: 'extra field', result: { ...completeRawLyricMigration, provider: 'legacy' } },
+    ]
+    for (const testCase of cases) {
+      const { calls, deps } = createDeps({
+        initDatabase: async() => ({ ...readyResult, schemaVersion: 6 }),
+        verifyPhase2Storage: async() => {},
+      })
+      delete deps.getCachePhasePrerequisite
+      installProductionCache({
+        getCachePhasePrerequisite: async() => ({ version: 1, markerName: 'legacy_data_v1.cross_artifact_complete', sourceSha256: 'f'.repeat(64), completedAtMs: 1 }),
+        openCacheDatabase: async() => ({ status: 'ready', schemaVersion: 1, diagnostic: null }),
+        migrateRawLyrics: async() => testCase.result,
+      })
+
+      assert.deepEqual(await createCoordinator(deps).start(), { status: 'fatal', reason: 'cache_phase4_result_invalid' }, testCase.name)
+      assert.equal(calls.includes('settings:init'), false, testCase.name)
+    }
+  })
+
+  it('leaves a custom Phase 4 override independent of production cache composition', async() => {
+    const { calls, deps } = createDeps({
+      initDatabase: async() => ({ ...readyResult, schemaVersion: 6 }),
+      verifyPhase2Storage: async() => {},
+      initializePhase4: async prerequisite => {
+        calls.push(`custom-phase4:${prerequisite.markerName}`)
+        return { schemaVersion: 7 }
+      },
+    })
+    installProductionCache({
+      getCachePhasePrerequisite: async() => { throw new Error('production prerequisite must not run') },
+      openCacheDatabase: async() => { throw new Error('production cache open must not run') },
+      migrateRawLyrics: async() => { throw new Error('production migration must not run') },
+    })
+
+    assert.deepEqual(await createCoordinator(deps).start(), { status: 'ready', schemaVersion: 7 })
+    assert.equal(calls.includes('custom-phase4:legacy_data_v1.cross_artifact_complete'), true)
   })
 
   it('accepts a branch-dependent migration hook returning recovery or undefined', () => {

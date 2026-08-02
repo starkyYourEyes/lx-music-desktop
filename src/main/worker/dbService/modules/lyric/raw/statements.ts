@@ -5,6 +5,11 @@ export const selectRawRows = (db: Database.Database, provider: string, sourceTra
   WHERE provider = ? AND source_track_id = ? ORDER BY lyric_type
 `).all(provider, sourceTrackId) as Array<{ lyricType: 'lyric' | 'tlyric' | 'rlyric' | 'lxlyric', text: string }>
 
+export const selectRawProviderRows = (db: Database.Database, provider: string) => db.prepare(`
+  SELECT source_track_id AS sourceTrackId, lyric_type AS lyricType, text FROM raw_lyrics
+  WHERE provider = ?
+`).all(provider) as Array<{ sourceTrackId: string, lyricType: 'lyric' | 'tlyric' | 'rlyric' | 'lxlyric', text: string }>
+
 export const selectRawCounts = (db: Database.Database, provider?: string) => {
   const where = provider == null ? '' : 'WHERE provider = ?'
   const rows = db.prepare(`SELECT count(*) AS rows FROM raw_lyrics ${where}`).get(...(provider == null ? [] : [provider])) as { rows: number }

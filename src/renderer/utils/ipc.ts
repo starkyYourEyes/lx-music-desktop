@@ -510,11 +510,15 @@ export const setWindowSize = (width: number, height: number) => {
 
 
 export const getPlayerLyric = async(musicInfo: LX.Music.MusicInfo) => {
-  return rendererInvoke<string, LX.Player.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_palyer_lyric, musicInfo.id)
+  return rendererInvoke<LX.Music.LyricInfoQuery, LX.Player.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_palyer_lyric, {
+    provider: musicInfo.source, sourceTrackId: musicInfo.id, nowMs: Date.now(),
+  })
 }
 
 export const getLyricRaw = async(musicInfo: LX.Music.MusicInfo): Promise<LX.Music.LyricInfo> => {
-  return rendererInvoke<string, LX.Music.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_lyric_raw, musicInfo.id)
+  return rendererInvoke<LX.Music.LyricInfoQuery, LX.Music.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_lyric_raw, {
+    provider: musicInfo.source, sourceTrackId: musicInfo.id, nowMs: Date.now(),
+  })
 }
 
 export const clearLyricRaw = async() => {
@@ -537,12 +541,14 @@ export const saveLyric = async(musicInfo: LX.Music.MusicInfo, lyricInfo: LX.Musi
     const tasks = [
       rendererInvoke<LX.Music.LyricInfoSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_lyric_raw, {
         id: musicInfo.id,
+        provider: musicInfo.source,
         lyrics: rawlrcInfo,
       }),
     ]
     if (info.lyric != rawlrcInfo.lyric) {
       tasks.push(rendererInvoke<LX.Music.LyricInfoSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_lyric_edited, {
         id: musicInfo.id,
+        provider: musicInfo.source,
         lyrics: info,
       }))
     }
@@ -551,6 +557,7 @@ export const saveLyric = async(musicInfo: LX.Music.MusicInfo, lyricInfo: LX.Musi
   } else {
     await rendererInvoke<LX.Music.LyricInfoSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_lyric_raw, {
       id: musicInfo.id,
+      provider: musicInfo.source,
       lyrics: lyricInfo,
     })
   }
@@ -558,6 +565,7 @@ export const saveLyric = async(musicInfo: LX.Music.MusicInfo, lyricInfo: LX.Musi
 export const saveLyricEdited = async(musicInfo: LX.Music.MusicInfo, lyricInfo: LX.Music.LyricInfo) => {
   await rendererInvoke<LX.Music.LyricInfoSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_lyric_edited, {
     id: musicInfo.id,
+    provider: musicInfo.source,
     lyrics: lyricInfo,
   })
 }

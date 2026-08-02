@@ -43,6 +43,9 @@ declare namespace LX {
       resetId: string
     }
 
+    type CacheReadResult<T> = { status: 'hit', value: T } | { status: 'miss' } | { status: 'unavailable', code: CacheDiagnosticCode }
+    type CacheWriteResult = { status: 'stored' } | { status: 'unavailable', code: CacheDiagnosticCode }
+
     interface MusicInfoOrder {
       listId: string
       musicInfoId: string

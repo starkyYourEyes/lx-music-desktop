@@ -160,7 +160,14 @@ declare namespace LX {
 
     interface LyricInfoSave {
       id: string
+      provider: string
       lyrics: LyricInfo
+    }
+
+    interface LyricInfoQuery {
+      provider: string
+      sourceTrackId: string
+      nowMs: number
     }
 
     interface MusicFileMeta {

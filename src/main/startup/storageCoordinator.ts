@@ -376,6 +376,7 @@ interface ProductionCacheLifecycle {
     schemaVersion: 1 | null
     diagnostic: string | null
   }>
+  migrateRawLyrics: (input: { nowMs: number }) => Promise<unknown> | unknown
 }
 
 const cacheDiagnosticCodes = new Set([
@@ -394,10 +395,22 @@ const getProductionCacheLifecycle = (): ProductionCacheLifecycle | null => {
   if (typeof globalThis.lx == 'undefined') return null
   const repository = globalThis.lx.worker?.dbService
   if (repository == null || typeof repository.getCachePhasePrerequisite != 'function' ||
-    typeof repository.openCacheDatabase != 'function') {
+    typeof repository.openCacheDatabase != 'function' || typeof repository.migrateRawLyrics != 'function') {
     throw errorWithCode('cache_phase4_result_invalid')
   }
   return repository
+}
+
+const isValidRawLyricMigrationResult = (value: unknown): boolean => {
+  if (value == null || typeof value != 'object' || Array.isArray(value) || Object.getPrototypeOf(value) != Object.prototype) return false
+  const result = value as Record<string, unknown>
+  if (result.status == 'unavailable') return Object.keys(result).length == 2 && typeof result.code == 'string' && cacheDiagnosticCodes.has(result.code)
+  if (result.status != 'complete' && result.status != 'already-complete') return false
+  const fields = ['sourceRows', 'sourceOwnerGroups', 'skippedInvalidRows', 'targetRows', 'targetOwnerGroups']
+  return Object.keys(result).length == 8 && fields.every(field => Number.isSafeInteger(result[field]) && (result[field] as number) >= 0) &&
+    typeof result.sourceSha256 == 'string' && typeof result.targetSha256 == 'string' &&
+    /^[a-f0-9]{64}$/.test(result.sourceSha256) && result.sourceSha256 == result.targetSha256 &&
+    result.sourceRows == result.targetRows && result.sourceOwnerGroups == result.targetOwnerGroups
 }
 
 const isValidCacheOpenResult = (value: Awaited<ReturnType<ProductionCacheLifecycle['openCacheDatabase']>>): boolean => {
@@ -492,6 +505,9 @@ export const createStorageCoordinator = (
                 (database.schemaVersion != 6 && database.schemaVersion != 7)) {
               throw errorWithCode('cache_phase4_result_invalid')
             }
+            if (cacheResult.status == 'unavailable') return { schemaVersion: database.schemaVersion }
+            const migrationResult = await productionCache.migrateRawLyrics({ nowMs: dependencies.now?.() ?? Date.now() })
+            if (!isValidRawLyricMigrationResult(migrationResult)) throw errorWithCode('cache_phase4_result_invalid')
             return { schemaVersion: database.schemaVersion }
           })
         if (initializePhase4 != null && readCachePrerequisite == null) {

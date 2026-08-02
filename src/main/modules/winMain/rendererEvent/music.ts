@@ -4,24 +4,26 @@ import { mainHandle } from '@common/mainIpc'
 
 export default () => {
   // =========================歌词=========================
-  mainHandle<string, LX.Player.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_palyer_lyric, async({ params: id }) => {
+  mainHandle<LX.Music.LyricInfoQuery, LX.Player.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_palyer_lyric, async({ params }) => {
     // return (getStore(LRC_EDITED, true, false).get(id) as LX.Music.LyricInfo | undefined) ??
     // getStore(LRC_RAW, true, false).get(id, {}) as LX.Music.LyricInfo
-    return global.lx.worker.dbService.getPlayerLyric(id)
+    return global.lx.worker.dbService.getPlayerLyric(params)
   })
 
   // 原始歌词
-  mainHandle<string, LX.Music.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_lyric_raw, async({ params: id }) => {
-    return global.lx.worker.dbService.getRawLyric(id)
+  mainHandle<LX.Music.LyricInfoQuery, LX.Music.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_lyric_raw, async({ params }) => {
+    const result = await global.lx.worker.dbService.getRawLyric(params)
+    return result.status == 'hit' ? result.value : { lyric: '' }
   })
-  mainHandle<LX.Music.LyricInfoSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_lyric_raw, async({ params: { id, lyrics } }) => {
-    await global.lx.worker.dbService.rawLyricAdd(id, lyrics)
+  mainHandle<LX.Music.LyricInfoSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_lyric_raw, async({ params: { id, provider, lyrics } }) => {
+    await global.lx.worker.dbService.rawLyricAdd({ provider, sourceTrackId: id, lyrics, nowMs: Date.now() })
   })
   mainHandle(WIN_MAIN_RENDERER_EVENT_NAME.clear_lyric_raw, async() => {
     await global.lx.worker.dbService.rawLyricClear()
   })
   mainHandle(WIN_MAIN_RENDERER_EVENT_NAME.get_lyric_raw_count, async() => {
-    return global.lx.worker.dbService.rawLyricCount()
+    const result = await global.lx.worker.dbService.rawLyricCount()
+    return result.status == 'hit' ? result.value.rows : 0
   })
 
   // 已编辑的歌词

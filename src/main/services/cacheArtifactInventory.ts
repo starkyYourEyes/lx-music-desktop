@@ -61,12 +61,41 @@ const nodeIdentity = (stats: fs.Stats | fs.BigIntStats): NodeIdentity => ({
   ino: String(stats.ino),
 })
 
+const sameNodeIdentity = (left: NodeIdentity, right: NodeIdentity): boolean =>
+  left.dev == right.dev && left.ino == right.ino
+
 export const createCacheArtifactInventory = ({
   cacheRoot,
   fileSystem = fs,
   pathModule = path,
 }: CacheArtifactInventoryOptions): CacheArtifactInventory => {
   const resolvedRoot = pathModule.resolve(cacheRoot)
+
+  const verifyMovedPayload = (
+    root: DirectDirectoryGuard,
+    expectedIdentity: NodeIdentity,
+    payloadPath: string,
+  ): void => {
+    const resolvedPayload = pathModule.resolve(payloadPath)
+    const relativePayload = pathModule.relative(resolvedRoot, resolvedPayload)
+    if (relativePayload == '' || relativePayload == '..' ||
+      relativePayload.startsWith(`..${pathModule.sep}`) || pathModule.isAbsolute(relativePayload)) {
+      throw new Error('cache_delete_failed')
+    }
+    const inspect = (): void => {
+      const stats = fileSystem.lstatSync(resolvedPayload, { bigint: true })
+      if (stats.isSymbolicLink() || !stats.isFile() || String(stats.nlink) != '1' ||
+        !sameNodeIdentity(nodeIdentity(stats), expectedIdentity)) {
+        throw new Error('cache_delete_failed')
+      }
+    }
+    revalidateDirectDirectory(root)
+    inspect()
+    const realPayload = pathModule.resolve(String(fileSystem.realpathSync(resolvedPayload)))
+    if (pathModule.relative(resolvedPayload, realPayload) != '') throw new Error('cache_delete_failed')
+    revalidateDirectDirectory(root)
+    inspect()
+  }
 
   const captureArtifact = (
     root: DirectDirectoryGuard,
@@ -128,6 +157,9 @@ export const createCacheArtifactInventory = ({
           const result = await isolateOwnedPath({
             source: artifact.source,
             prefix: `.${artifact.name}.isolate-`,
+            verifySource: async payloadPath => {
+              verifyMovedPayload(root, artifact.source.identity, payloadPath)
+            },
           })
           if (result.state != 'isolated') {
             return { status: 'failed', code: 'cache_delete_failed', failedArtifact: artifact.name }
@@ -162,7 +194,12 @@ export const createCacheArtifactInventory = ({
 
       let retained: CacheArtifactName | null = null
       for (const artifact of isolated) {
-        const result = await reclaimIsolatedPayload({ guard: artifact.guard })
+        const result = await reclaimIsolatedPayload({
+          guard: artifact.guard,
+          verifyPayload: async payloadPath => {
+            verifyMovedPayload(root, artifact.guard.expectedIdentity, payloadPath)
+          },
+        })
         if (result.state == 'retained') retained ??= artifact.name
       }
       if (retained != null) {

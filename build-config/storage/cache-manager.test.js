@@ -224,6 +224,7 @@ describe('protected main-only cache manager', () => {
     }
 
     assert.equal(result.status, 'degraded')
+    assert.equal(result.generation, 0)
     assert.deepEqual(harness.events, ['worker:begin-reset', 'worker:abort-reset'])
     assert.deepEqual(harness.broadcasts, [])
     assert.equal(fs.readFileSync(replacementPath, 'utf8'), 'replacement')
@@ -254,9 +255,80 @@ describe('protected main-only cache manager', () => {
     }
 
     assert.equal(result.status, 'degraded')
+    assert.equal(result.generation, 0)
     assert.deepEqual(harness.events, ['worker:begin-reset', 'worker:abort-reset'])
     assert.deepEqual(harness.broadcasts, [])
     assert.equal(fs.readFileSync(replacementPath, 'utf8'), 'replacement')
+  })
+
+  it('retains a payload linked after capture and aborts without sessions, reopen, or generation', async() => {
+    const harness = createManagerHarness()
+    const databasePath = path.join(harness.cacheRoot, 'cache.db')
+    const externalLink = path.join(harness.rootPath, 'linked-after-capture.db')
+    const nativeMkdir = fs.mkdirSync
+    let injected = false
+    fs.mkdirSync = (target, options) => {
+      const result = nativeMkdir(target, options)
+      if (!injected && /^\.cache\.db\.isolate-/.test(path.basename(target))) {
+        injected = true
+        fs.linkSync(databasePath, externalLink)
+      }
+      return result
+    }
+    let result
+    try {
+      result = await harness.manager.clearAll()
+    } finally {
+      fs.mkdirSync = nativeMkdir
+    }
+
+    assert.equal(result.status, 'degraded')
+    assert.equal(result.generation, 0)
+    assert.deepEqual(harness.events, ['worker:begin-reset', 'worker:abort-reset'])
+    assert.deepEqual(harness.broadcasts, [])
+    assert.equal(fs.readFileSync(externalLink, 'utf8'), 'cache.db')
+    const retained = fs.readdirSync(harness.cacheRoot).find(name => /^\.cache\.db\.isolate-/.test(name))
+    assert.equal(typeof retained, 'string')
+    assert.equal(fs.readFileSync(path.join(harness.cacheRoot, retained, 'payload'), 'utf8'), 'cache.db')
+  })
+
+  it('retains a payload linked after isolation verification and before reclamation', async() => {
+    const rootPath = temporaryRoot()
+    const externalLink = path.join(rootPath, 'linked-before-reclaim.db')
+    let isolatedPayload
+    let injected = false
+    const nativeRename = fs.renameSync
+    fs.renameSync = (source, destination) => {
+      const result = nativeRename(source, destination)
+      if (path.basename(source) == 'cache.db') isolatedPayload = destination
+      return result
+    }
+    const racingFs = new Proxy(fs, {
+      get(target, property, receiver) {
+        if (property != 'lstatSync') return Reflect.get(target, property, receiver)
+        return (targetPath, ...args) => {
+          if (!injected && isolatedPayload != null && path.basename(targetPath) == 'cache.db') {
+            injected = true
+            fs.linkSync(isolatedPayload, externalLink)
+          }
+          return target.lstatSync(targetPath, ...args)
+        }
+      },
+    })
+    const harness = createManagerHarness({ rootPath, fileSystem: racingFs })
+    let result
+    try {
+      result = await harness.manager.clearAll()
+    } finally {
+      fs.renameSync = nativeRename
+    }
+
+    assert.equal(result.status, 'degraded')
+    assert.equal(result.generation, 0)
+    assert.deepEqual(harness.events, ['worker:begin-reset', 'worker:abort-reset'])
+    assert.deepEqual(harness.broadcasts, [])
+    assert.equal(fs.readFileSync(externalLink, 'utf8'), 'cache.db')
+    assert.equal(fs.readFileSync(isolatedPayload, 'utf8'), 'cache.db')
   })
 
   it('does not delete or clear sessions when reset lease acquisition fails', async() => {

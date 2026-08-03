@@ -816,7 +816,7 @@ const performDatabaseAdvance = async(
   const cutover = require('../../migration/cache/cutover') as typeof CacheCutover
   const currentVersion = getSchemaVersion(db)
   if (currentVersion == 7) {
-    const { readWriteMarker, cutoverDetails, backupPreparedMarker } = cutover.verifySchema7SteadyState(db)
+    const { readWriteMarker, cutoverDetails } = cutover.verifySchema7SteadyState(db)
     if (cutoverDetails.version == 2) {
       if (!cutoverDetails.backupRequired) return publishSchema7(initialization, null, [])
       let guard: VerifiedOnlineBackupGuard | null = null
@@ -845,34 +845,22 @@ const performDatabaseAdvance = async(
       return publishSchema7(initialization, backupPath, [])
     }
 
-    const preparedBackup = backupPreparedMarker == null
-      ? null
-      : {
-          marker: backupPreparedMarker,
-          path: resolveContainedPath(initialization.backupsRoot, backupPreparedMarker.details.backupBasename, path),
-        }
-    if (preparedBackup != null) {
-      try {
-        const readWriteMarkerSha256 = cutover.markerRowSha256(readWriteMarker)
-        verifyLegacyOnlineBackup(
-          preparedBackup.path,
-          getNativeOptions(),
-          backupDb => {
-            cutover.verifyCutoverBackup(backupDb, readWriteMarkerSha256)
-            const sourceSha256 = cutover.backupPreparedSourceSha256(backupDb, {
-              details: preparedBackup.marker.details,
-              completedAtMs: preparedBackup.marker.completedAtMs,
-            })
-            if (sourceSha256 != preparedBackup.marker.sourceSha256) {
-              throw createDatabaseError('database_advance_backup_invalid')
-            }
-          },
-        )
-      } catch {
-        throw createDatabaseError('database_advance_backup_invalid')
-      }
+    const readWriteMarkerSha256 = cutover.markerRowSha256(readWriteMarker)
+    const legacyBackupPath = resolveContainedPath(
+      initialization.backupsRoot,
+      `lx.data.db.pre-migration-v6-to-v7.${readWriteMarkerSha256}.backup`,
+      path,
+    )
+    try {
+      verifyLegacyOnlineBackup(
+        legacyBackupPath,
+        getNativeOptions(),
+        backupDb => { cutover.verifyCutoverBackup(backupDb, readWriteMarkerSha256) },
+      )
+    } catch {
+      throw createDatabaseError('database_advance_backup_invalid')
     }
-    return publishSchema7(initialization, preparedBackup?.path ?? null, [])
+    return publishSchema7(initialization, legacyBackupPath, [])
   }
   if (currentVersion != 6) throw createDatabaseError('database_advance_schema_invalid')
 

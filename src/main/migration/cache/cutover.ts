@@ -788,7 +788,6 @@ export const verifySchema7SteadyState = (db: Database.Database): {
   readWriteMarker: StrictMarkerRow<typeof READ_WRITE_MARKER_NAME>
   cutoverMarker: StrictMarkerRow<typeof CUTOVER_MARKER_NAME>
   cutoverDetails: CutoverDetails
-  backupPreparedMarker: BackupPreparedMarkerV1 | null
 } => {
   verifyLedger(db, 7)
   verifyExactStructure(db, databaseSchema7Contract, explicitSchema7Indexes)
@@ -799,16 +798,8 @@ export const verifySchema7SteadyState = (db: Database.Database): {
   const rawMarker = verifyRawMarker(db, 'schema7-historical')
   const readWriteMarker = verifyReadWriteMarker(db, rawMarker)
   const cutover = readCutoverMarker(db, readWriteMarker)
-  const preparedRow = readBackupPreparedMarker(db)
-  let backupPreparedMarker: BackupPreparedMarkerV1 | null = null
-  if (cutover.details.version == 2 && preparedRow != null) {
+  if (cutover.details.version == 2 && readBackupPreparedMarker(db) != null) {
     throw failure('phase4_cutover_marker_invalid')
-  } else if (cutover.details.version == 1 && preparedRow != null) {
-    const details = parseBackupPreparedDetails(preparedRow.detailsJson)
-    if (details.readWriteMarkerSha256 != markerRowSha256(readWriteMarker)) {
-      throw failure('backup_prepared_source_changed')
-    }
-    backupPreparedMarker = Object.freeze({ ...preparedRow, details: Object.freeze({ ...details }) })
   }
   const ledger7 = db.prepare('SELECT applied_at_ms AS appliedAtMs FROM schema_migrations WHERE version = 7').get() as { appliedAtMs: unknown } | undefined
   if (ledger7 == null || ledger7.appliedAtMs != cutover.marker.completedAtMs) {
@@ -819,7 +810,6 @@ export const verifySchema7SteadyState = (db: Database.Database): {
     readWriteMarker,
     cutoverMarker: cutover.marker,
     cutoverDetails: cutover.details,
-    backupPreparedMarker,
   }
 }
 

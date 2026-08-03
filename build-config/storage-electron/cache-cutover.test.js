@@ -365,30 +365,13 @@ const advanceWithFinalGuardReplacement = async() => {
 const installHistoricalV1Cutover = () => {
   const db = dbService.getAppDB()
   const current = readCutoverDetails()
-  if (current.version == 1) return readPreparedMarker().details.backupBasename
   assert.equal(current.version, 2)
   assert.equal(current.backupRequired, true)
-  const preparedDetails = {
-    backupBasename: current.backupBasename,
-    readWriteMarkerSha256: current.readWriteMarkerSha256,
-    sourceSchemaVersion: 6,
-    version: 1,
-  }
-  const backupPath = path.join(preparedFixture.backupsRoot, current.backupBasename)
-  const backupDb = new Database(backupPath, { readonly: true, fileMustExist: true })
-  let sourceSha256
-  try {
-    sourceSha256 = require('../../src/main/migration/cache/cutover.ts').backupPreparedSourceSha256(backupDb, {
-      details: preparedDetails,
-      completedAtMs: current.completedAtMs,
-    })
-  } finally {
-    backupDb.close()
-  }
-  db.prepare(`
-    INSERT INTO migration_markers(name, source_sha256, completed_at_ms, details_json)
-    VALUES ('legacy_cache_v1.backup_prepared', ?, ?, ?)
-  `).run(sourceSha256, current.completedAtMs, canonical(preparedDetails))
+  const readWriteMarker = markerRow(db, 'legacy_cache_v1.read_write_verified')
+  const backupBasename = `lx.data.db.pre-migration-v6-to-v7.${markerHash(readWriteMarker)}.backup`
+  const backupPath = path.join(preparedFixture.backupsRoot, backupBasename)
+  fs.copyFileSync(path.join(preparedFixture.backupsRoot, current.backupBasename), backupPath)
+  fs.unlinkSync(path.join(preparedFixture.backupsRoot, current.backupBasename))
   const historical = {
     completedAtMs: current.completedAtMs,
     fromSchemaVersion: 6,
@@ -402,7 +385,8 @@ const installHistoricalV1Cutover = () => {
     UPDATE migration_markers SET source_sha256 = ?, details_json = ?
     WHERE name = 'legacy_cache_v1.cutover'
   `).run(framedHash('lx.storage.phase4.cutover-details.v1', historical), canonical(historical))
-  return current.backupBasename
+  assert.equal(markerRow(db, 'legacy_cache_v1.backup_prepared'), null)
+  return { backupBasename, backupPath }
 }
 
 const closeServices = async() => {
@@ -1147,7 +1131,7 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
   it('resolves only the exact v2 backup basename while ignoring unknown artifacts', async() => {
     await prepareExistingSchema6('cache-cutover-v2-exact-backup')
     const result = await advanceExistingSchema6()
-    const unknownBasename = 'lx.data.db.pre-migration-v6-to-v7.00000000000000000000000000000000.backup'
+    const unknownBasename = `lx.data.db.pre-migration-v6-to-v7.${'0'.repeat(64)}.backup`
     assert.notEqual(result.backupBasename, unknownBasename)
     const unknownPath = path.join(preparedFixture.backupsRoot, unknownBasename)
     const unknownBytes = Buffer.from('unknown-backup-artifact')
@@ -1174,8 +1158,8 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
   it('resolves historical v1 evidence read-only without repair, relink, deletion, rewrite, or scan', async() => {
     await prepareExistingSchema6('cache-cutover-v1-read-only')
     await advanceExistingSchema6()
-    const backupBasename = installHistoricalV1Cutover()
-    const unknownBasename = 'lx.data.db.pre-migration-v6-to-v7.00000000000000000000000000000000.backup'
+    const { backupBasename, backupPath } = installHistoricalV1Cutover()
+    const unknownBasename = `lx.data.db.pre-migration-v6-to-v7.${'0'.repeat(64)}.backup`
     assert.notEqual(backupBasename, unknownBasename)
     const unknownPath = path.join(preparedFixture.backupsRoot, unknownBasename)
     fs.writeFileSync(unknownPath, 'historical-unknown-artifact')
@@ -1187,7 +1171,8 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
       fs.lstatSync(path.join(paths.backupsRoot, name), { bigint: true }).nlink,
     ]))
     const cutoverBefore = markerRow(paths.db, 'legacy_cache_v1.cutover')
-    const preparedBefore = markerRow(paths.db, 'legacy_cache_v1.backup_prepared')
+    assert.equal(markerRow(paths.db, 'legacy_cache_v1.backup_prepared'), null)
+    const backupBytes = fs.readFileSync(backupPath)
 
     await closeServices()
     const relaunched = await dbService.init({
@@ -1198,6 +1183,14 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
       targetSchemaVersion: 6,
     })
     assert.equal(relaunched.schemaVersion, 7)
+    fs.writeFileSync(backupPath, 'invalid historical backup')
+    await assert.rejects(
+      dbService.advanceAppDatabase({ targetSchemaVersion: 7, backupsRoot: paths.backupsRoot }),
+      error => error?.code == 'database_advance_backup_invalid',
+    )
+    fs.writeFileSync(backupPath, backupBytes)
+    const advanced = await dbService.advanceAppDatabase({ targetSchemaVersion: 7, backupsRoot: paths.backupsRoot })
+    assert.equal(advanced.backupPath, backupPath)
     assert.deepEqual(await loadPhase4().initializePhase4(), { schemaVersion: 7, typedOwnershipVerified: true })
     assert.deepEqual(fs.readdirSync(paths.backupsRoot).sort(), rootBefore)
     for (const name of rootBefore) {
@@ -1206,7 +1199,7 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
       assert.equal(fs.lstatSync(artifactPath, { bigint: true }).nlink, linksBefore.get(name))
     }
     assert.deepEqual(markerRow(dbService.getAppDB(), 'legacy_cache_v1.cutover'), cutoverBefore)
-    assert.deepEqual(markerRow(dbService.getAppDB(), 'legacy_cache_v1.backup_prepared'), preparedBefore)
+    assert.equal(markerRow(dbService.getAppDB(), 'legacy_cache_v1.backup_prepared'), null)
   })
 
   it('rejects malformed cutover v2 true and false unions even with matching marker hashes', async() => {

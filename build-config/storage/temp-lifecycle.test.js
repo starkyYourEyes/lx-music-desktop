@@ -20,6 +20,17 @@ const loadLifecycle = (fsPromises = fsp) => loadTsModule(modulePath, {
 })
 
 const exists = async(targetPath) => await fsp.lstat(targetPath).then(() => true, () => false)
+const retainedRunIsolations = async(tempRoot) => (await fsp.readdir(tempRoot))
+  .filter(name => name.startsWith('.lx-run-retained-'))
+
+const writeRunMarker = async(runPath, runId) => {
+  const stat = await fsp.lstat(runPath, { bigint: true })
+  await fsp.writeFile(path.join(runPath, '.owner.v1.json'), JSON.stringify({
+    version: 1,
+    runId,
+    directoryIdentity: { dev: String(stat.dev), ino: String(stat.ino) },
+  }))
+}
 
 test('rejects adoption after the prepared temp ancestry is replaced around the same run node', async() => {
   const fixture = createTestStorageRoot('temp-reservation-ancestry')
@@ -78,6 +89,8 @@ test('run cleanup removes only the owned direct child and preserves neighboring 
     await handle.cleanup()
 
     assert.equal(await exists(runTempRoot), false)
+    assert.equal(await exists(path.join(artwork, 'cover.png')), false)
+    assert.deepEqual(await retainedRunIsolations(tempRoot), [])
     assert.equal(await fsp.readFile(path.join(neighboringRun, 'keep.txt'), 'utf8'), 'preserve')
   } finally {
     fixture.cleanup()
@@ -101,6 +114,37 @@ test('startup scavenging removes a marked stale run but refuses an unmarked dire
 
     assert.equal(await exists(staleRun), false)
     assert.equal(await fsp.readFile(path.join(foreignRun, 'keep.txt'), 'utf8'), 'preserve')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('startup scavenging ignores retained isolation and legacy quarantine names', async() => {
+  // Catches re-adoption of creation-bound isolation or legacy quarantine paths by pathname convention.
+  const fixture = createTestStorageRoot('temp-scavenge-retained')
+  try {
+    const tempRoot = path.join(fixture.path, 'temp')
+    const seededNames = [
+      '.lx-run-retained-seeded',
+      '.run-legacy.quarantine-00000000-0000-0000-0000-000000000000',
+      '.lx-profile-stage-seeded',
+      'arbitrary-directory',
+    ]
+    await fsp.mkdir(tempRoot, { recursive: true })
+    for (const name of seededNames) {
+      const seededPath = path.join(tempRoot, name)
+      await fsp.mkdir(seededPath)
+      await writeRunMarker(seededPath, name)
+      await fsp.writeFile(path.join(seededPath, 'keep.txt'), name)
+    }
+    const { scavengeRunTempRoots } = loadLifecycle()
+
+    await scavengeRunTempRoots(tempRoot)
+
+    assert.deepEqual((await fsp.readdir(tempRoot)).sort(), seededNames.sort())
+    for (const name of seededNames) {
+      assert.equal(await fsp.readFile(path.join(tempRoot, name, 'keep.txt'), 'utf8'), name)
+    }
   } finally {
     fixture.cleanup()
   }
@@ -167,65 +211,59 @@ test('cleanup refuses a replacement directory with copied owner bytes', async() 
   }
 })
 
-test('cleanup quarantines the owned run before recursive removal', async() => {
-  // Catches cleanup that recursively removes the published run path after another node appears there.
-  const fixture = createTestStorageRoot('temp-quarantine')
+test('retains the isolated run when recursive reclamation fails', async() => {
+  // Catches cleanup that loses the only owned payload reference after recursive removal fails.
+  const fixture = createTestStorageRoot('temp-retained-removal-failure')
   try {
     const tempRoot = path.join(fixture.path, 'temp')
     await fsp.mkdir(tempRoot, { recursive: true })
-    let runTempRoot
-    let replacementSentinel
-    let injectedReplacement = false
-    const injectedFs = {
-      ...fsp,
-      async rename(source, target) {
-        await fsp.rename(source, target)
-        if (!injectedReplacement && path.resolve(String(source)) == path.resolve(runTempRoot)) {
-          injectedReplacement = true
-          await fsp.mkdir(runTempRoot)
-          await fsp.writeFile(replacementSentinel, 'preserve replacement')
-        }
-      },
-    }
-    const { prepareRunTempLifecycle, createRunTempHandle } = loadLifecycle(injectedFs)
+    const { prepareRunTempLifecycle, createRunTempHandle } = loadLifecycle()
     const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
-    runTempRoot = reservation.runTempRoot
-    replacementSentinel = path.join(runTempRoot, 'replacement.txt')
     const handle = await createRunTempHandle({ reservation })
+    const child = await handle.createChild('local-artwork')
+    await fsp.writeFile(path.join(child, 'cover.png'), 'retain payload')
+    const originalRm = fs.rmSync
+    fs.rmSync = (targetPath, ...args) => {
+      if (path.basename(path.dirname(String(targetPath))).startsWith('.lx-run-retained-')) {
+        throw new Error('injected removal failure')
+      }
+      return originalRm(targetPath, ...args)
+    }
 
-    await handle.cleanup()
+    try {
+      await assert.rejects(handle.cleanup(), /run_temp_cleanup_failed/)
+    } finally {
+      fs.rmSync = originalRm
+    }
 
-    assert.equal(injectedReplacement, true)
-    assert.equal(await fsp.readFile(replacementSentinel, 'utf8'), 'preserve replacement')
-    const quarantineEntries = (await fsp.readdir(tempRoot)).filter(name => name.includes('quarantine'))
-    assert.deepEqual(quarantineEntries, [])
+    assert.equal((await retainedRunIsolations(tempRoot)).length, 1)
   } finally {
     fixture.cleanup()
   }
 })
 
-test('cleanup restores a replacement moved by the quarantine rename race', async() => {
-  // Catches quarantine that strands an unowned replacement after it wins the validation-to-rename race.
-  const fixture = createTestStorageRoot('temp-quarantine-replacement')
+test('preserves a replacement raced into the stable run pathname', async() => {
+  // Catches cleanup that restores the isolated payload over a stable-path replacement after a move race.
+  const fixture = createTestStorageRoot('temp-isolation-replacement')
   try {
     const tempRoot = path.join(fixture.path, 'temp')
-    const parkedOriginal = path.join(tempRoot, 'parked-original')
     await fsp.mkdir(tempRoot, { recursive: true })
     let runTempRoot
     let replacementSentinel
-    let swapped = false
+    let replaced = false
     const injectedFs = {
       ...fsp,
-      async rename(source, target) {
-        if (!swapped && path.resolve(String(source)) == path.resolve(runTempRoot)) {
-          swapped = true
-          const markerBytes = await fsp.readFile(path.join(runTempRoot, '.owner.v1.json'))
-          await fsp.rename(runTempRoot, parkedOriginal)
+      async readFile(targetPath, ...args) {
+        const bytes = await fsp.readFile(targetPath, ...args)
+        const markerParent = path.basename(path.dirname(String(targetPath)))
+        if (!replaced && path.basename(String(targetPath)) == '.owner.v1.json' &&
+          markerParent == 'payload' && path.basename(path.dirname(path.dirname(String(targetPath))))
+          .startsWith('.lx-run-retained-')) {
+          replaced = true
           await fsp.mkdir(runTempRoot)
-          await fsp.writeFile(path.join(runTempRoot, '.owner.v1.json'), markerBytes)
           await fsp.writeFile(replacementSentinel, 'preserve replacement')
         }
-        return fsp.rename(source, target)
+        return bytes
       },
     }
     const { prepareRunTempLifecycle, createRunTempHandle } = loadLifecycle(injectedFs)
@@ -234,11 +272,11 @@ test('cleanup restores a replacement moved by the quarantine rename race', async
     replacementSentinel = path.join(runTempRoot, 'replacement.txt')
     const handle = await createRunTempHandle({ reservation })
 
-    await assert.rejects(handle.cleanup(), /run_temp_(root|owner)_invalid/)
+    await assert.rejects(handle.cleanup(), /run_temp_owner_invalid/)
 
-    assert.equal(swapped, true)
+    assert.equal(replaced, true)
     assert.equal(await fsp.readFile(replacementSentinel, 'utf8'), 'preserve replacement')
-    assert.equal(await exists(parkedOriginal), true)
+    assert.equal((await retainedRunIsolations(tempRoot)).length, 1)
   } finally {
     fixture.cleanup()
   }

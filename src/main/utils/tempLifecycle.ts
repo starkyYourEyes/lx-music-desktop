@@ -7,6 +7,11 @@ import {
   validateDirectDirectory,
   type NodeIdentity,
 } from '../storage/directDirectory'
+import {
+  isolateOwnedPath,
+  reclaimIsolatedPayload,
+  type OwnedDirectNode,
+} from '../storage/exclusiveIsolation'
 
 const OWNER_MARKER = '.owner.v1.json'
 const runChildren = new Set(['theme-editor', 'local-artwork', 'backup-import'])
@@ -53,6 +58,9 @@ interface RunOwnership extends RootOwnership {
   runId: string
 }
 
+type RunMarkerOwnership = Pick<RunOwnership,
+'runTempIdentity' | 'markerIdentity' | 'markerRaw' | 'runId'>
+
 interface ChildOwnership {
   childPath: string
   childIdentity: PathIdentity
@@ -89,6 +97,7 @@ const pathKey = (value: string): string => process.platform == 'win32' ? value.t
 const invalidRoot = (): Error => new Error('run_temp_root_invalid')
 const invalidOwner = (): Error => new Error('run_temp_owner_invalid')
 const invalidChild = (): Error => new Error('run_temp_child_invalid')
+const cleanupFailed = (): Error => new Error('run_temp_cleanup_failed')
 
 const assertDirectChildPath = (rootPath: string, childPath: string, error: () => Error): void => {
   if (pathKey(path.dirname(path.resolve(childPath))) != pathKey(path.resolve(rootPath))) throw error()
@@ -135,11 +144,9 @@ const parseMarker = (raw: string): MarkerDocument => {
   return marker as MarkerDocument
 }
 
-const inspectRun = async(root: RootOwnership, runPath: string): Promise<RunOwnership> => {
-  await assertRoot(root)
-  assertDirectChildPath(root.tempRoot, runPath, invalidRoot)
+const inspectRunMarker = async(runPath: string): Promise<RunMarkerOwnership> => {
   const runBefore = await inspect(runPath)
-  if (runBefore.isSymbolicLink() || !runBefore.isDirectory()) throw invalidRoot()
+  if (runBefore.isSymbolicLink() || !runBefore.isDirectory()) throw invalidOwner()
   const marker = markerPath(runPath)
   assertDirectChildPath(runPath, marker, invalidOwner)
   const markerBefore = await inspect(marker)
@@ -153,60 +160,76 @@ const inspectRun = async(root: RootOwnership, runPath: string): Promise<RunOwner
     !sameIdentity(identityOf(markerAfter), markerIdentity)) throw invalidOwner()
   const document = parseMarker(markerRaw)
   if (!sameIdentity(document.directoryIdentity, runIdentity)) throw invalidOwner()
+  return { runTempIdentity: runIdentity, markerIdentity, markerRaw, runId: document.runId }
+}
+
+const inspectRun = async(root: RootOwnership, runPath: string): Promise<RunOwnership> => {
+  await assertRoot(root)
+  assertDirectChildPath(root.tempRoot, runPath, invalidRoot)
+  const marker = await inspectRunMarker(runPath)
   await assertRoot(root)
   return {
     ...root,
     runTempRoot: runPath,
-    runTempIdentity: runIdentity,
-    markerIdentity,
-    markerRaw,
-    runId: document.runId,
+    ...marker,
   }
 }
 
-const assertOwnedRunAt = async(ownership: RunOwnership, runPath: string): Promise<void> => {
-  const current = await inspectRun(ownership, runPath)
+const assertRunMarker = async(runPath: string, ownership: RunOwnership): Promise<void> => {
+  const current = await inspectRunMarker(runPath)
   if (!sameIdentity(current.runTempIdentity, ownership.runTempIdentity) ||
     !sameIdentity(current.markerIdentity, ownership.markerIdentity) ||
     current.markerRaw != ownership.markerRaw || current.runId != ownership.runId) throw invalidOwner()
 }
 
-const pathMissing = async(targetPath: string): Promise<boolean> => {
-  try {
-    await inspect(targetPath)
-    return false
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code == 'ENOENT') return true
-    throw error
-  }
+const assertOwnedRunAt = async(ownership: RunOwnership, runPath: string): Promise<void> => {
+  await assertRoot(ownership)
+  assertDirectChildPath(ownership.tempRoot, runPath, invalidOwner)
+  await assertRunMarker(runPath, ownership)
+  await assertRoot(ownership)
 }
 
 const removeOwnedRun = async(ownership: RunOwnership): Promise<void> => {
-  await assertOwnedRunAt(ownership, ownership.runTempRoot)
-  const quarantinePath = path.join(
-    ownership.tempRoot,
-    `.${path.basename(ownership.runTempRoot)}.quarantine-${crypto.randomUUID()}`,
-  )
-  assertDirectChildPath(ownership.tempRoot, quarantinePath, invalidRoot)
-  if (!await pathMissing(quarantinePath)) throw invalidRoot()
-  await fs.rename(ownership.runTempRoot, quarantinePath)
-  const movedIdentity = identityOf(await inspect(quarantinePath))
+  let rootGuard
   try {
-    await assertOwnedRunAt(ownership, quarantinePath)
-    await fs.rm(quarantinePath, { recursive: true, force: false, maxRetries: 1 })
-  } catch (error) {
     try {
-      await assertRoot(ownership)
-      const currentIdentity = identityOf(await inspect(quarantinePath))
-      if (!sameIdentity(currentIdentity, movedIdentity)) throw invalidOwner()
-      if (await pathMissing(ownership.runTempRoot)) await fs.rename(quarantinePath, ownership.runTempRoot)
-    } catch {}
-    throw error
+      await assertOwnedRunAt(ownership, ownership.runTempRoot)
+      rootGuard = validateDirectDirectory(ownership.tempRoot)
+      revalidateDirectDirectory(rootGuard)
+      if (!sameIdentity(rootGuard.identity, ownership.tempRootIdentity)) throw invalidOwner()
+    } catch {
+      throw invalidOwner()
+    }
+    const ownedRun: OwnedDirectNode = {
+      root: rootGuard,
+      path: ownership.runTempRoot,
+      basename: path.basename(ownership.runTempRoot),
+      identity: ownership.runTempIdentity,
+      kind: 'directory',
+    }
+    let isolation
+    try {
+      isolation = await isolateOwnedPath({
+        source: ownedRun,
+        prefix: '.lx-run-retained-',
+        verifySource: async(runPath) => { await assertRunMarker(runPath, ownership) },
+      })
+    } catch {
+      throw invalidOwner()
+    }
+    if (isolation.state != 'isolated') throw invalidOwner()
+    const reclaimed = await reclaimIsolatedPayload({
+      guard: isolation.guard,
+      verifyPayload: async(payloadPath) => { await assertRunMarker(payloadPath, ownership) },
+    })
+    if (reclaimed.state == 'retained') throw cleanupFailed()
+  } finally {
+    if (rootGuard != null) closeDirectDirectory(rootGuard)
   }
 }
 
 const isRunCandidate = (name: string): boolean =>
-  name.startsWith('run-') || /^\.run-.+\.quarantine-[a-f0-9-]+$/i.test(name)
+  /^run-[A-Za-z0-9_-]+$/.test(name)
 
 export const scavengeRunTempRoots = async(tempRoot: string): Promise<void> => {
   const root = await captureRoot(tempRoot)

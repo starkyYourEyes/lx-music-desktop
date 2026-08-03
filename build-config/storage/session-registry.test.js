@@ -4,6 +4,8 @@ const test = require('node:test')
 const loadTsModule = require('../../scripts/test-utils/load-ts-module')
 
 const registryPath = path.join(__dirname, '../../src/main/services/sessionRegistry.ts')
+const defaultSessionLifetimePath = path.join(__dirname, '../../src/main/services/defaultSessionLifetime.ts')
+const applicationPath = path.join(__dirname, '../../src/main/application.ts')
 
 const deferred = () => {
   let resolve
@@ -48,6 +50,237 @@ const createSession = ({ failures = {}, firstCacheGate } = {}) => {
 }
 
 const loadRegistry = () => loadTsModule(registryPath)
+const loadDefaultSessionLifetime = () => loadTsModule(defaultSessionLifetimePath)
+
+const createLifetimeFixture = () => {
+  const ready = deferred()
+  const registrations = []
+  const registry = {
+    register(input) {
+      const registration = { input, unregisterCalls: 0 }
+      registrations.push(registration)
+      return {
+        ready: ready.promise,
+        unregister() { registration.unregisterCalls++ },
+      }
+    },
+  }
+  const { createDefaultSessionLifetime } = loadDefaultSessionLifetime()
+  const defaultSession = createSession()
+  return {
+    defaultSession,
+    lifetime: createDefaultSessionLifetime(registry),
+    ready,
+    registrations,
+    async shutdown() {},
+  }
+}
+
+const createApplicationHarness = () => {
+  const appReady = deferred()
+  const admissionReady = deferred()
+  const registrations = []
+  const startCallbacks = []
+  let startCalls = 0
+  const defaultSession = createSession()
+  const coordinator = {
+    async start() {
+      startCalls++
+      return { status: 'started' }
+    },
+    async shutdown() {},
+  }
+  const appListeners = new Map()
+  const app = {
+    whenReady: () => appReady.promise,
+    on: (name, listener) => appListeners.set(name, listener),
+    exit() {},
+    quit() {},
+  }
+  const initGlobalData = () => {
+    global.portableProfileStartup = null
+    global.storagePaths = {
+      cacheRoot: 'memory:cache',
+      runtimeRoot: 'memory:runtime',
+      profileRoot: 'memory:profile',
+      backupsRoot: 'memory:backups',
+    }
+    global.lxOldDataPath = 'memory:legacy'
+    global.lx = {
+      worker: { dbService: {} },
+      sessionRegistry: {
+        register(input) {
+          const registration = { input, unregisterCalls: 0 }
+          registrations.push(registration)
+          return {
+            ready: admissionReady.promise,
+            unregister() { registration.unregisterCalls++ },
+          }
+        },
+      },
+      cacheManager: null,
+      storage: null,
+      runTemp: null,
+      themeAssets: null,
+      credentialVault: {},
+      accountRepository: {},
+      event_app: { app_inited() {} },
+    }
+  }
+
+  loadTsModule(applicationPath, {
+    electron: { app, session: { defaultSession } },
+    './utils/logInit': { initLog() {} },
+    '@common/error': {},
+    './app': {
+      initGlobalData,
+      initSingleInstanceHandle() {},
+      applyElectronEnvParams() {},
+      registerDeeplink: callback => startCallbacks.push(callback),
+      listenerAppEvent: callback => startCallbacks.push(callback),
+    },
+    '@common/utils': { isLinux: false },
+    '@main/app': {
+      completePhase3StartupAttestation() {},
+      initAppSetting() {},
+      runPlaybackActivityMigration() {},
+      runStorageMigrationHooks() {},
+    },
+    '@main/modules': () => {},
+    '@main/utils/store': { flushStores() {} },
+    '@main/startup/runState': { createRunState: () => ({}) },
+    '@main/startup/storageCoordinator': {
+      checkCredentialStartup() {},
+      createStorageCoordinator: () => coordinator,
+    },
+    '@main/startup/recovery': { showStorageRecovery() {} },
+    '@main/migration/legacyData/source': { readLegacyDataSource() {} },
+    '@main/migration/portableProfile': { acknowledgePortableProfileStartup() {} },
+    '@main/utils/tempLifecycle': { createRunTempHandle() {} },
+    '@main/services/themeAssetManager': { createThemeAssetManager() {} },
+    '@main/services/cacheManager': { createCacheManager: () => ({}) },
+    '@main/services/defaultSessionLifetime': loadDefaultSessionLifetime(),
+    '@common/storage/cache': { STORAGE_CACHE_GENERATION_EVENT: 'cache-generation' },
+    '@main/modules/winMain/main': { sendEvent() {} },
+  })
+
+  return {
+    admissionReady,
+    appReady,
+    defaultSession,
+    registrations,
+    startCallbacks,
+    get startCalls() { return startCalls },
+    beginShutdown() {
+      const event = {
+        prevented: false,
+        preventDefault() { this.prevented = true },
+      }
+      appListeners.get('before-quit')(event)
+      return event
+    },
+  }
+}
+
+test('admits the default session before application startup and never unregisters it', async() => {
+  const fixture = createLifetimeFixture()
+  const first = fixture.lifetime.admit(fixture.defaultSession)
+  const second = fixture.lifetime.admit(fixture.defaultSession)
+
+  assert.strictEqual(first, second)
+  assert.deepEqual(Object.keys(fixture.lifetime), ['admit'])
+  assert.equal(fixture.registrations.length, 1)
+  assert.deepEqual(fixture.registrations[0].input, {
+    key: 'electron:default',
+    session: fixture.defaultSession,
+  })
+  fixture.ready.resolve()
+  await first
+  await fixture.shutdown()
+  assert.equal(fixture.registrations[0].unregisterCalls, 0)
+})
+
+test('rejects a different default session after admission without replacing the lifetime owner', async() => {
+  const fixture = createLifetimeFixture()
+  const admitted = fixture.lifetime.admit(fixture.defaultSession)
+
+  await assert.rejects(
+    fixture.lifetime.admit(createSession()),
+    error => error.message == 'default_session_changed',
+  )
+  assert.equal(fixture.registrations.length, 1)
+  fixture.ready.resolve()
+  await admitted
+})
+
+test('a clear started during shutdown still includes the lifetime default session', async() => {
+  const { createSessionRegistry } = loadRegistry()
+  const { createDefaultSessionLifetime } = loadDefaultSessionLifetime()
+  const registry = createSessionRegistry()
+  const clearGate = deferred()
+  const defaultSession = createSession({ firstCacheGate: clearGate })
+  let unregisterCalls = 0
+  const lifetime = createDefaultSessionLifetime({
+    register(input) {
+      const registration = registry.register(input)
+      return {
+        ready: registration.ready,
+        unregister() {
+          unregisterCalls++
+          registration.unregister()
+        },
+      }
+    },
+  })
+  await lifetime.admit(defaultSession)
+
+  const clearing = registry.clearRegisteredCaches()
+  while (!defaultSession.calls.length) await new Promise(resolve => setImmediate(resolve))
+  const beginShutdown = () => {}
+  beginShutdown()
+  clearGate.resolve()
+  const results = await clearing
+
+  assert.deepEqual(results, [
+    { key: 'electron:default', category: 'cache', status: 'cleared' },
+    { key: 'electron:default', category: 'cache-storage', status: 'cleared' },
+    { key: 'electron:default', category: 'code-cache', status: 'cleared' },
+  ])
+  assert.equal(unregisterCalls, 0)
+})
+
+test('application startup callbacks wait for default-session admission after Electron readiness', async() => {
+  const fixture = createApplicationHarness()
+  assert.equal(fixture.startCallbacks.length, 2)
+  assert.strictEqual(fixture.startCallbacks[0], fixture.startCallbacks[1])
+
+  fixture.startCallbacks[0]()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(fixture.startCalls, 0)
+  assert.equal(fixture.registrations.length, 0)
+
+  fixture.appReady.resolve()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(fixture.startCalls, 0)
+  assert.equal(fixture.registrations.length, 1)
+  assert.deepEqual(fixture.registrations[0].input, {
+    key: 'electron:default',
+    session: fixture.defaultSession,
+  })
+
+  fixture.startCallbacks[1]()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(fixture.registrations.length, 1)
+  assert.equal(fixture.startCalls, 0)
+
+  fixture.admissionReady.resolve()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(fixture.startCalls, 3)
+  const shutdownEvent = fixture.beginShutdown()
+  assert.equal(shutdownEvent.prevented, true)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(fixture.registrations[0].unregisterCalls, 0)
+})
 
 test('registration rejects unbounded or non-stable keys', () => {
   const { createSessionRegistry } = loadRegistry()

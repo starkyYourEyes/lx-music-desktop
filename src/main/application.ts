@@ -1,4 +1,4 @@
-import { app } from 'electron'
+import { app, session } from 'electron'
 import { initLog } from './utils/logInit'
 import '@common/error'
 import {
@@ -22,6 +22,7 @@ import { createThemeAssetManager } from '@main/services/themeAssetManager'
 import { createCacheManager } from '@main/services/cacheManager'
 import { STORAGE_CACHE_GENERATION_EVENT } from '@common/storage/cache'
 import { sendEvent } from '@main/modules/winMain/main'
+import { createDefaultSessionLifetime, type DefaultSessionLifetime } from '@main/services/defaultSessionLifetime'
 
 let isFinishingStorageShutdown = false
 
@@ -99,8 +100,20 @@ const getStorageCoordinator = () => {
   return global.lx.storage
 }
 
+initSingleInstanceHandle()
+initLog()
+initGlobalData()
+applyElectronEnvParams()
+
+let defaultSessionLifetime: DefaultSessionLifetime | null = null
+const applicationReady = app.whenReady().then(async() => {
+  defaultSessionLifetime ??= createDefaultSessionLifetime(global.lx.sessionRegistry)
+  await defaultSessionLifetime.admit(session.defaultSession)
+})
+
 const init = () => {
-  void getStorageCoordinator().start().then(outcome => {
+  void applicationReady.then(async() => {
+    const outcome = await getStorageCoordinator().start()
     if (outcome.status == 'fatal' && !isFinishingStorageShutdown) {
       console.error('Storage startup failed', outcome.reason)
       app.exit(1)
@@ -108,10 +121,6 @@ const init = () => {
   })
 }
 
-initSingleInstanceHandle()
-initLog()
-initGlobalData()
-applyElectronEnvParams()
 app.on('before-quit', event => {
   const coordinator = global.lx.storage
   if (coordinator == null || isFinishingStorageShutdown) return
@@ -125,6 +134,6 @@ registerDeeplink(init)
 listenerAppEvent(init)
 
 // https://github.com/electron/electron/issues/16809
-void app.whenReady().then(() => {
+void applicationReady.then(() => {
   isLinux ? setTimeout(init, 300) : init()
 })

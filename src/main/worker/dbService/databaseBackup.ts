@@ -13,7 +13,6 @@ import {
 } from '../../storage/exclusiveArtifact'
 import {
   closeDirectDirectory,
-  createDirectChildDirectory,
   revalidateDirectDirectory,
   validateDirectDirectory,
   type DirectDirectoryGuard,
@@ -67,7 +66,6 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/
 const MAXIMUM_CHUNK_BYTES = 1024 * 1024
 const NO_FOLLOW = fs.constants.O_NOFOLLOW ?? 0
 const SQLITE_SIDECAR_SUFFIXES = ['-wal', '-shm', '-journal'] as const
-const LEGACY_STAGE_PATTERN = /^\.lx-backup-[0-9a-f]{32}\.stage$/
 
 const failure = (code: string): Error & { code: string } => Object.assign(new Error(code), { code })
 
@@ -108,15 +106,34 @@ const openBackupRoot = (backupsRoot: string): DirectDirectoryGuard => {
   const basename = path.basename(resolved)
   if (!directBasename(basename) || ownerPath == resolved) throw failure('backup_root_invalid')
   const owner = validateDirectDirectory(ownerPath)
+  let root: DirectDirectoryGuard | null = null
+  const closeOpenedRoot = (): void => {
+    if (root == null) return
+    const opened = root
+    root = null
+    closeDirectDirectory(opened)
+  }
+  let operationError: Error | null = null
   try {
     revalidateDirectDirectory(owner)
-    const root = createDirectChildDirectory(owner, basename, { mode: 0o700 })
+    fs.mkdirSync(resolved, { mode: 0o700 })
+    revalidateDirectDirectory(owner)
+    root = validateDirectDirectory(resolved)
     revalidateDirectDirectory(owner)
     revalidateDirectDirectory(root)
-    return root
-  } finally {
-    closeDirectDirectory(owner)
+  } catch (error) {
+    operationError = asError(error, 'backup_root_invalid')
   }
+  try {
+    closeDirectDirectory(owner)
+  } catch (error) {
+    operationError ??= asError(error, 'backup_root_close_failed')
+  }
+  if (operationError != null) {
+    try { closeOpenedRoot() } catch {}
+    throw operationError
+  }
+  return root!
 }
 
 const validateReservationInput = (input: {
@@ -181,7 +198,7 @@ const readSourceSchemaVersion = (db: Database.Database): number => {
   return version
 }
 
-const sqliteVerificationBytes = (bytes: Buffer): Buffer => {
+const standaloneSqliteBytes = (bytes: Buffer): Buffer => {
   if (bytes.length < 100 || bytes.subarray(0, 16).toString('binary') != 'SQLite format 3\0') {
     throw failure('backup_snapshot_invalid')
   }
@@ -190,18 +207,26 @@ const sqliteVerificationBytes = (bytes: Buffer): Buffer => {
   if (readVersion != writeVersion || (readVersion != 1 && readVersion != 2)) {
     throw failure('backup_snapshot_invalid')
   }
-  const verificationBytes = Buffer.from(bytes)
+  const artifactBytes = Buffer.from(bytes)
   if (readVersion == 2) {
-    // Deserialize into a read-only in-memory connection without creating WAL sidecars.
-    verificationBytes[18] = 1
-    verificationBytes[19] = 1
+    // The normalized copy becomes the artifact, so verification never derives different bytes.
+    artifactBytes[18] = 1
+    artifactBytes[19] = 1
   }
-  return verificationBytes
+  return artifactBytes
+}
+
+const assertStandaloneDescriptor = (descriptor: number): void => {
+  const header = Buffer.alloc(20)
+  if (fs.readSync(descriptor, header, 0, header.length, 0) != header.length ||
+    header.subarray(0, 16).toString('binary') != 'SQLite format 3\0' ||
+    header[18] != 1 || header[19] != 1) {
+    throw failure('backup_snapshot_invalid')
+  }
 }
 
 const verifySqlite = (
   filePath: string,
-  bytes: Buffer,
   expectedSourceSchemaVersion: number | null,
   nativeOptions: { nativeBinding?: string },
   verifier: OnlineBackupVerifier,
@@ -213,7 +238,7 @@ const verifySqlite = (
   let verificationDb: Database.Database | null = null
   let operationError: Error | null = null
   try {
-    verificationDb = new Database(sqliteVerificationBytes(bytes), {
+    verificationDb = new Database(path.toNamespacedPath(filePath), {
       ...nativeOptions,
       readonly: true,
       fileMustExist: true,
@@ -262,17 +287,6 @@ const hashDescriptor = (descriptor: number, expectedByteLength: number): string 
   return hash.digest('hex')
 }
 
-const readDescriptorBytes = (descriptor: number, expectedByteLength: number): Buffer => {
-  const bytes = Buffer.allocUnsafe(expectedByteLength)
-  let offset = 0
-  while (offset < expectedByteLength) {
-    const count = fs.readSync(descriptor, bytes, offset, expectedByteLength - offset, offset)
-    if (!Number.isSafeInteger(count) || count <= 0) throw failure('backup_evidence_invalid')
-    offset += count
-  }
-  return bytes
-}
-
 const revalidateCompletedArtifact = (guard: ImmutableArtifactGuard): void => {
   revalidateImmutableArtifact(guard)
   let descriptor: number | null = null
@@ -313,31 +327,6 @@ const validateRecordedIdentity = (filePath: string, metadata: RecordedGuardMetad
   }
 }
 
-const validateLegacyStageLink = (filePath: string, metadata: LegacyGuardMetadata): void => {
-  let matched = 0
-  for (const basename of fs.readdirSync(metadata.root.path)) {
-    if (!LEGACY_STAGE_PATTERN.test(basename)) continue
-    const stagePath = path.join(metadata.root.path, basename)
-    if (stagePath == filePath) continue
-    const pathStat = fs.lstatSync(stagePath, { bigint: true })
-    if (!sameIdentity(identityOf(pathStat), metadata.identity)) continue
-    let descriptor: number | null = null
-    try {
-      descriptor = fs.openSync(stagePath, fs.constants.O_RDONLY | NO_FOLLOW)
-      const descriptorStat = fs.fstatSync(descriptor, { bigint: true })
-      if (!pathStat.isFile() || pathStat.isSymbolicLink() || pathStat.nlink != 2n ||
-        !descriptorStat.isFile() || descriptorStat.nlink != 2n ||
-        !sameIdentity(identityOf(descriptorStat), metadata.identity)) {
-        throw failure('backup_evidence_changed')
-      }
-      matched++
-    } finally {
-      if (descriptor != null) fs.closeSync(descriptor)
-    }
-  }
-  if (matched != 1) throw failure('backup_evidence_changed')
-}
-
 const validateLegacyIdentity = (filePath: string, metadata: LegacyGuardMetadata): void => {
   try {
     revalidateDirectDirectory(metadata.root)
@@ -350,7 +339,6 @@ const validateLegacyIdentity = (filePath: string, metadata: LegacyGuardMetadata)
       (process.platform != 'win32' && (pathStat.mode & 0o077n) != 0n)) {
       throw failure('backup_evidence_changed')
     }
-    if (metadata.linkCount == 2n) validateLegacyStageLink(filePath, metadata)
     revalidateDirectDirectory(metadata.root)
   } catch (error) {
     if (error instanceof Error && error.message == 'backup_evidence_changed') throw error
@@ -436,14 +424,14 @@ export function completeOnlineBackup(
   try {
     const snapshot = db.serialize()
     if (!Buffer.isBuffer(snapshot)) throw failure('backup_snapshot_invalid')
+    const artifactBytes = standaloneSqliteBytes(snapshot)
     immutable = completeExclusiveArtifact(metadata.artifact, {
-      byteLength: snapshot.length,
-      read: (offset, maximumBytes) => snapshot.subarray(offset, offset + maximumBytes),
+      byteLength: artifactBytes.length,
+      read: (offset, maximumBytes) => artifactBytes.subarray(offset, offset + maximumBytes),
     }, {
-      verifyReadOnly: ({ path: filePath, readDescriptor, byteLength }) => {
+      verifyReadOnly: ({ path: filePath }) => {
         verifySqlite(
           filePath,
-          readDescriptorBytes(readDescriptor, byteLength),
           reservation.sourceSchemaVersion,
           nativeOptions,
           verifier,
@@ -514,10 +502,9 @@ export function verifyLegacyOnlineBackup(
     if (stat.size <= 0n || stat.size > BigInt(Number.MAX_SAFE_INTEGER)) {
       throw failure('backup_evidence_changed')
     }
-    const byteLength = Number(stat.size)
+    assertStandaloneDescriptor(descriptor)
     verifySqlite(
       resolved,
-      readDescriptorBytes(descriptor, byteLength),
       null,
       nativeOptions,
       verifier,
@@ -562,9 +549,9 @@ export function verifyRecordedOnlineBackup(input: {
       closed: false,
     }
     validateRecordedIdentity(filePath, metadata)
+    assertStandaloneDescriptor(descriptor)
     verifySqlite(
       filePath,
-      readDescriptorBytes(descriptor, input.expectedByteLength),
       input.expectedSourceSchemaVersion,
       input.nativeOptions,
       input.verifier,

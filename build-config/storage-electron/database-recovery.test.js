@@ -279,6 +279,23 @@ const clearDbServiceCache = () => {
   }
 }
 
+const loadBackupWithBoundaries = ({ fileSystem, directDirectoryModule, DatabaseImplementation } = {}) => {
+  const backupPath = require.resolve('../../src/main/worker/dbService/databaseBackup.ts')
+  delete require.cache[backupPath]
+  const originalLoad = Module._load
+  Module._load = function(request, parent, isMain) {
+    if (DatabaseImplementation && request == 'better-sqlite3') return DatabaseImplementation
+    if (fileSystem && request == 'node:fs') return fileSystem
+    if (directDirectoryModule && request == '../../storage/directDirectory') return directDirectoryModule
+    return originalLoad.call(this, request, parent, isMain)
+  }
+  try {
+    return require(backupPath)
+  } finally {
+    Module._load = originalLoad
+  }
+}
+
 const loadDbServiceWithBoundaries = ({
   backupModule,
   migrateModule,
@@ -362,7 +379,7 @@ describe('guarded online backup', () => {
     return backup.completeOnlineBackup(db, reservation, {}, verifier ?? (() => {}))
   }
 
-  it('writes one unique direct backup with no stage link or rename', () => {
+  it('writes one unique standalone backup whose exact path is read-only SQLite', () => {
     const root = tempDir('lx-recovery-unique-backup-')
     const backupsRoot = path.join(root, 'backups')
     const db = createV2Database(path.join(root, 'source.db'))
@@ -375,8 +392,11 @@ describe('guarded online backup', () => {
     assert.match(guard.basename, /^lx\.data\.db\.backup\.[a-f0-9]{32}\.backup$/)
     assert.deepEqual(backupArtifactNames(backupsRoot), [guard.basename])
     assert.equal(fs.lstatSync(guard.path, { bigint: true }).nlink, 1n)
-    assert.deepEqual(fs.readFileSync(guard.path), snapshot)
-    assert.equal(guard.sha256, crypto.createHash('sha256').update(snapshot).digest('hex'))
+    const artifactBytes = fs.readFileSync(guard.path)
+    assert.deepEqual([artifactBytes[18], artifactBytes[19]], [1, 1])
+    assert.deepEqual(artifactBytes.subarray(0, 18), snapshot.subarray(0, 18))
+    assert.deepEqual(artifactBytes.subarray(20), snapshot.subarray(20))
+    assert.equal(guard.sha256, crypto.createHash('sha256').update(artifactBytes).digest('hex'))
     const restored = openTracked(guard.path, { readonly: true, fileMustExist: true })
     assert.equal(restored.pragma('quick_check', { simple: true }), 'ok')
     guard.close()
@@ -402,7 +422,7 @@ describe('guarded online backup', () => {
 
       assert.throws(() => backup.completeOnlineBackup(source, reservation, {}, () => {}))
       assert.deepEqual(backupArtifactNames(backupsRoot), [reservation.basename])
-      assert.deepEqual(fs.readFileSync(reservation.path), bytes)
+      assert.equal(fs.readFileSync(reservation.path).length, 0)
     }
   })
 
@@ -499,6 +519,105 @@ describe('guarded online backup', () => {
     assert.throws(() => fs.fstatSync(reservation.root.descriptor), error => error?.code == 'EBADF')
   })
 
+  it('closes a newly opened backup root when post-creation revalidation fails', () => {
+    const root = tempDir('lx-recovery-root-revalidation-close-')
+    const backupsRoot = path.join(root, 'backups')
+    const direct = require('../../src/main/storage/directDirectory.js')
+    let ownerGuard
+    let rootGuard
+    const guardedDirect = {
+      ...direct,
+      createDirectChildDirectory(parent, basename, options) {
+        rootGuard = direct.createDirectChildDirectory(parent, basename, options)
+        return rootGuard
+      },
+      validateDirectDirectory(directoryPath, options) {
+        const guard = direct.validateDirectDirectory(directoryPath, options)
+        if (path.resolve(directoryPath) == path.resolve(backupsRoot)) rootGuard = guard
+        else if (path.resolve(directoryPath) == path.resolve(root)) ownerGuard = guard
+        return guard
+      },
+      revalidateDirectDirectory(guard) {
+        if (guard == rootGuard) throw new Error('injected root revalidation failure')
+        return direct.revalidateDirectDirectory(guard)
+      },
+    }
+    const backup = loadBackupWithBoundaries({ directDirectoryModule: guardedDirect })
+
+    assert.throws(() => backup.reserveOnlineBackup({
+      backupsRoot,
+      basenamePrefix: 'lx.data.db.backup',
+      sourceSchemaVersion: 2,
+    }), /injected root revalidation failure/)
+
+    const descriptorClosed = guard => {
+      try {
+        fs.fstatSync(guard.descriptor)
+        return false
+      } catch (error) {
+        return error?.code == 'EBADF'
+      }
+    }
+    const ownerClosed = descriptorClosed(ownerGuard)
+    const rootClosed = descriptorClosed(rootGuard)
+    if (!rootClosed) direct.closeDirectDirectory(rootGuard)
+    assert.equal(ownerClosed, true)
+    assert.equal(rootClosed, true)
+  })
+
+  it('rejects and retains a backup root created by a raced winner', () => {
+    const root = tempDir('lx-recovery-root-creation-race-')
+    const backupsRoot = path.join(root, 'backups')
+    const direct = require('../../src/main/storage/directDirectory.js')
+    let raceInjected = false
+    const injectWinner = () => {
+      if (raceInjected) return
+      raceInjected = true
+      fs.mkdirSync(backupsRoot, { mode: 0o700 })
+    }
+    const racingDirect = {
+      ...direct,
+      createDirectChildDirectory(parent, basename, options) {
+        injectWinner()
+        return direct.createDirectChildDirectory(parent, basename, options)
+      },
+    }
+    const racingFs = new Proxy(fs, {
+      get(target, property) {
+        if (property == 'mkdirSync') {
+          return (directoryPath, options) => {
+            if (path.resolve(directoryPath) == path.resolve(backupsRoot)) {
+              injectWinner()
+              throw Object.assign(new Error('raced backup root winner'), { code: 'EEXIST' })
+            }
+            return fs.mkdirSync(directoryPath, options)
+          }
+        }
+        return Reflect.get(target, property)
+      },
+    })
+    const backup = loadBackupWithBoundaries({
+      fileSystem: racingFs,
+      directDirectoryModule: racingDirect,
+    })
+    let reservation
+    let thrown
+    try {
+      reservation = backup.reserveOnlineBackup({
+        backupsRoot,
+        basenamePrefix: 'lx.data.db.backup',
+        sourceSchemaVersion: 2,
+      })
+    } catch (error) {
+      thrown = error
+    }
+    if (reservation != null) backup.closeOnlineBackupReservation(reservation)
+
+    assert.equal(thrown?.code, 'EEXIST')
+    assert.equal(fs.statSync(backupsRoot).isDirectory(), true)
+    assert.deepEqual(backupArtifactNames(backupsRoot), [])
+  })
+
   it('reopens recorded backup evidence read-only and rejects hash length or schema mismatch', () => {
     const root = tempDir('lx-recovery-recorded-backup-')
     const backupsRoot = path.join(root, 'backups')
@@ -539,14 +658,20 @@ describe('guarded online backup', () => {
     assert.equal(checked, true)
   })
 
-  it('verifies a legacy retained-stage hard-link pair only through the compatibility API', () => {
+  it('verifies only the exact legacy path without scanning retained siblings', () => {
     const root = tempDir('lx-recovery-legacy-linked-backup-')
     const stagePath = path.join(root, `.lx-backup-${'a'.repeat(32)}.stage`)
     const filePath = path.join(root, 'legacy.backup')
     const db = createV2Database(':memory:')
     fs.writeFileSync(stagePath, db.serialize(), { mode: 0o600 })
     fs.linkSync(stagePath, filePath)
-    const { verifyLegacyOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
+    const noScanFs = new Proxy(fs, {
+      get(target, property) {
+        if (property == 'readdirSync') return () => { throw new Error('legacy_directory_scan_forbidden') }
+        return Reflect.get(target, property)
+      },
+    })
+    const { verifyLegacyOnlineBackup } = loadBackupWithBoundaries({ fileSystem: noScanFs })
 
     verifyLegacyOnlineBackup(filePath, {}, candidate => {
       assert.equal(candidate.pragma('quick_check', { simple: true }), 'ok')
@@ -556,20 +681,33 @@ describe('guarded online backup', () => {
     assert.equal(fs.lstatSync(filePath, { bigint: true }).nlink, 2n)
   })
 
-  it('verifies legacy WAL snapshot bytes without rewriting their header', () => {
+  it('rejects non-standalone legacy WAL bytes before any SQLite open or sidecar', () => {
     const root = tempDir('lx-recovery-legacy-wal-backup-')
     const filePath = path.join(root, 'legacy.backup')
     const db = createV2Database(path.join(root, 'source.db'))
     const snapshot = db.serialize()
     assert.deepEqual([snapshot[18], snapshot[19]], [2, 2])
     fs.writeFileSync(filePath, snapshot, { mode: 0o600 })
-    const { verifyLegacyOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
-
-    verifyLegacyOnlineBackup(filePath, {}, candidate => {
-      assert.equal(candidate.pragma('quick_check', { simple: true }), 'ok')
+    const opens = []
+    class ExactPathDatabase {
+      constructor(filename, options) {
+        opens.push({ filename, options })
+        return new Database(filename, options)
+      }
+    }
+    const { verifyLegacyOnlineBackup } = loadBackupWithBoundaries({
+      DatabaseImplementation: ExactPathDatabase,
     })
 
+    assert.throws(
+      () => verifyLegacyOnlineBackup(filePath, {}, () => {}),
+      /backup_snapshot_invalid/,
+    )
+
+    assert.deepEqual(opens, [])
     assert.deepEqual(fs.readFileSync(filePath), snapshot)
+    assert.equal(fs.existsSync(`${filePath}-wal`), false)
+    assert.equal(fs.existsSync(`${filePath}-shm`), false)
   })
 })
 
@@ -908,7 +1046,7 @@ describe('database startup orchestration', () => {
           if (typeof options?.nativeBinding != 'string') throw new Error('startup_native_binding_missing')
           expectedNativeBinding = options.nativeBinding
         } else {
-          verificationOpens.push({ fromBytes: Buffer.isBuffer(filename), options })
+          verificationOpens.push({ filename, fromBytes: Buffer.isBuffer(filename), options })
           if (options.nativeBinding != expectedNativeBinding) {
             throw new Error('packaged_default_binding_lookup_failed')
           }
@@ -942,7 +1080,8 @@ describe('database startup orchestration', () => {
         fileMustExist: true,
       }
       assert.deepEqual(verificationOpens.map(entry => entry.options), [expectedOptions])
-      assert.equal(verificationOpens[0].fromBytes, true)
+      assert.equal(verificationOpens[0].fromBytes, false)
+      assert.equal(verificationOpens[0].filename, path.toNamespacedPath(result.backupPath))
     } finally {
       dbService.close()
       clearDbServiceCache()

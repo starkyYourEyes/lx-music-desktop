@@ -111,8 +111,13 @@ const migrateFixture = async(fixture, options = {}) => {
   }
   fs.renameSync = (sourcePath, destinationPath, ...args) => {
     const result = originalRename(sourcePath, destinationPath, ...args)
-    if (stagePath != null && path.resolve(sourcePath) == path.resolve(stagePath) &&
+    const sourceBasename = path.basename(sourcePath)
+    const sourceIsCurrentStage = (stagePath != null && path.resolve(sourcePath) == path.resolve(stagePath)) ||
+      (path.dirname(sourcePath) == fixture.rootPath &&
+        sourceBasename.startsWith(path.basename(fixture.stagePrefix)))
+    if (sourceIsCurrentStage &&
       path.basename(destinationPath) == 'payload') {
+      stagePath ??= sourcePath
       options.afterStageMovedToIsolation?.({ stagePath, isolatedPayloadPath: destinationPath })
     }
     return result
@@ -344,6 +349,72 @@ describe('guarded directory migration', () => {
     assert.equal(fs.readFileSync(path.join(isolatedStagePath, 'unexpected'), 'utf8'), 'unowned')
     assert.equal(fs.existsSync(fixture.destinationPath), false)
     assert.equal(result.status, 'failed')
+  })
+
+  // Catches cleanup recursively deleting unknown descendants when copying fails before a trusted manifest exists.
+  it('retains partial-copy descendants when no trusted payload manifest exists', async() => {
+    const fixture = createFixture()
+    let isolatedStagePath
+    let injected = false
+    const fsApi = {
+      ...fs,
+      open(targetPath, flags, ...args) {
+        const callback = args.pop()
+        if (!injected && flags == 'wx' && targetPath.includes(path.basename(fixture.stagePrefix))) {
+          injected = true
+          fs.writeFileSync(path.join(path.dirname(targetPath), 'foreign-partial'), 'partial-foreign-bytes')
+          return process.nextTick(callback, new Error('injected partial-copy failure'))
+        }
+        fs.open(targetPath, flags, ...args, callback)
+      },
+    }
+
+    const result = await migrateFixture(fixture, {
+      fsApi,
+      afterStageMovedToIsolation({ isolatedPayloadPath }) {
+        isolatedStagePath = isolatedPayloadPath
+      },
+    })
+
+    assert.equal(result.status, 'failed')
+    assert.equal(listIsolationNames(fixture.rootPath).length, 1)
+    assert.equal(fs.readFileSync(path.join(isolatedStagePath, 'payload', 'nested', 'foreign-partial'), 'utf8'),
+      'partial-foreign-bytes')
+    assert.equal(fs.existsSync(fixture.destinationPath), false)
+  })
+
+  // Catches cleanup trusting payload bytes first observed by a copied-manifest scan that later mismatches source.
+  it('retains payload changes first observed before copied-manifest comparison', async() => {
+    const fixture = createFixture()
+    let isolatedStagePath
+    let injected = false
+    const fsApi = {
+      ...fs,
+      readdir(targetPath, callback) {
+        if (!injected && path.basename(targetPath) == 'payload' &&
+          path.basename(path.dirname(targetPath)).startsWith(path.basename(fixture.stagePrefix))) {
+          injected = true
+          fs.writeFileSync(path.join(targetPath, 'nested', 'value'), 'first-scan-replacement')
+          fs.writeFileSync(path.join(targetPath, 'nested', 'foreign-first-scan'), 'first-scan-foreign-bytes')
+        }
+        fs.readdir(targetPath, callback)
+      },
+    }
+
+    const result = await migrateFixture(fixture, {
+      fsApi,
+      afterStageMovedToIsolation({ isolatedPayloadPath }) {
+        isolatedStagePath = isolatedPayloadPath
+      },
+    })
+
+    assert.equal(result.status, 'failed')
+    assert.equal(listIsolationNames(fixture.rootPath).length, 1)
+    assert.equal(fs.readFileSync(path.join(isolatedStagePath, 'payload', 'nested', 'value'), 'utf8'),
+      'first-scan-replacement')
+    assert.equal(fs.readFileSync(path.join(isolatedStagePath, 'payload', 'nested', 'foreign-first-scan'), 'utf8'),
+      'first-scan-foreign-bytes')
+    assert.equal(fs.existsSync(fixture.destinationPath), false)
   })
 
   // Catches a source scan callback resuming after compromise without reasserting before further validation or mutation.

@@ -442,13 +442,14 @@ const verifyCleanupStage = async({
     verifyOwnedStage(fsApi, ownership, currentStagePath, markerStageChildren)
   } else {
     const payloadPath = verifyOwnedPayload(fsApi, ownership, payloadOwnership, currentStagePath)
-    if (trustedPayloadManifest != null) {
-      const currentManifest = await createDirectoryManifestInternal(fsApi, payloadPath, lease)
-      lease.assertHeld()
-      verifyOwnedPayload(fsApi, ownership, payloadOwnership, currentStagePath)
-      if (!manifestsMatch(trustedPayloadManifest, currentManifest)) {
-        throw new Error('Migration payload changed before stage cleanup')
-      }
+    if (trustedPayloadManifest == null) {
+      throw new Error('Migration payload was not verified before stage cleanup')
+    }
+    const currentManifest = await createDirectoryManifestInternal(fsApi, payloadPath, lease)
+    lease.assertHeld()
+    verifyOwnedPayload(fsApi, ownership, payloadOwnership, currentStagePath)
+    if (!manifestsMatch(trustedPayloadManifest, currentManifest)) {
+      throw new Error('Migration payload changed before stage cleanup')
     }
   }
   lease.assertHeld()
@@ -567,7 +568,6 @@ const copyDirectoryWithManifestPromotion = async({
     const copiedManifest = await createDirectoryManifestInternal(fsApi, payloadPath, lease)
     lease.assertHeld()
     verifyOwnedStageAtRoot(fsApi, ownership, payloadOwnership)
-    trustedPayloadManifest = copiedManifest
     let finalSourceManifest
     try {
       lease.assertHeld()
@@ -576,10 +576,12 @@ const copyDirectoryWithManifestPromotion = async({
     } catch (error) {
       throw new DirectorySourceChangedError(`Migration source changed during copy: ${error.message}`)
     }
+    const copiedManifestMatchesSource = manifestsMatch(sourceManifest, copiedManifest)
+    if (copiedManifestMatchesSource) trustedPayloadManifest = copiedManifest
     if (!manifestsMatch(sourceManifest, finalSourceManifest)) {
       throw new DirectorySourceChangedError('Migration source changed during copy; close other app instances and retry')
     }
-    if (!manifestsMatch(sourceManifest, copiedManifest)) {
+    if (!copiedManifestMatchesSource) {
       throw new Error('Migration verification failed: recursive manifests do not match')
     }
     lease.assertHeld()
@@ -644,7 +646,8 @@ const copyDirectoryWithManifestPromotion = async({
       lease,
       logger,
     })
-    if (!cleanup.reclaimed) {
+    if (!cleanup.reclaimed &&
+      (result.status != 'failed' || cleanup.error?.code == 'migration_lease_compromised')) {
       result = { status: 'failed', stagePath: ownership.stagePath, error: cleanup.error }
     }
   }

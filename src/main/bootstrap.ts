@@ -66,7 +66,7 @@ export const bootstrap = async(
     legacyRoot = portablePaths.userDataPath
     applicationCacheRoot = portablePaths.appDataPath
   } else {
-    const migration = migrateLegacyUserData({ appDataPath: electronApp.getPath('appData'), logger: console })
+    const migration = await migrateLegacyUserData({ appDataPath: electronApp.getPath('appData'), logger: console })
     if (!migration.userDataPathReady) {
       console.error('User data is unavailable; startup has been aborted.', migration.error)
       electronApp.exit(1)

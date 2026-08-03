@@ -1,6 +1,4 @@
 const assert = require('node:assert/strict')
-const { spawn } = require('node:child_process')
-const { once } = require('node:events')
 const fs = require('node:fs')
 const path = require('node:path')
 const test = require('node:test')
@@ -27,6 +25,41 @@ const cleanupRoot = rootPath => {
 }
 const silentLogger = { info() {}, warn() {}, error() {} }
 
+const createAsyncCopyFs = ({ afterDestinationClose, writeError } = {}) => {
+  const destinationByDescriptor = new Map()
+  return {
+    ...fs,
+    open(filePath, flags, mode, callback) {
+      if (typeof mode == 'function') {
+        callback = mode
+        mode = undefined
+      }
+      const done = (error, descriptor) => {
+        if (error == null && flags == 'wx' && filePath.includes('.migration-tmp-')) {
+          destinationByDescriptor.set(descriptor, filePath)
+        }
+        callback(error, descriptor)
+      }
+      if (mode == null) fs.open(filePath, flags, done)
+      else fs.open(filePath, flags, mode, done)
+    },
+    write(descriptor, buffer, offset, length, position, callback) {
+      if (writeError != null && destinationByDescriptor.has(descriptor)) {
+        return process.nextTick(callback, writeError)
+      }
+      fs.write(descriptor, buffer, offset, length, position, callback)
+    },
+    close(descriptor, callback) {
+      const destinationPath = destinationByDescriptor.get(descriptor)
+      fs.close(descriptor, error => {
+        destinationByDescriptor.delete(descriptor)
+        if (error == null && destinationPath != null) afterDestinationClose?.(destinationPath)
+        callback(error)
+      })
+    },
+  }
+}
+
 const runMainStartup = async({ appDataPath, materializeApplicationData, mutateLegacyDuringCopy = false }) => {
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   let exitCode
@@ -51,18 +84,33 @@ const runMainStartup = async({ appDataPath, materializeApplicationData, mutateLe
       paths[name] = value
     },
   }
-  const storagePaths = loadTsModule(path.join(__dirname, '../src/main/utils/storagePaths.ts'))
+  const realStoragePaths = loadTsModule(path.join(__dirname, '../src/main/utils/storagePaths.ts'))
+  const storagePaths = {
+    ...realStoragePaths,
+    async initializeStoragePaths(input) {
+      const resolved = realStoragePaths.resolveStoragePaths(input)
+      return {
+        paths: { ...resolved, runTempRoot: path.join(resolved.tempRoot, 'run') },
+        runTempReservation: null,
+      }
+    },
+  }
   const { bootstrap } = loadTsModule(path.join(__dirname, '../src/main/bootstrap.ts'), {
     electron: { app: {} },
     './utils/storagePaths': storagePaths,
   })
 
-  const originalCpSync = fs.cpSync
+  const originalOpen = fs.open
   const originalConsole = { error: console.error, info: console.info, warn: console.warn }
   if (mutateLegacyDuringCopy) {
-    fs.cpSync = (source, destination, options) => {
-      originalCpSync(source, destination, options)
-      fs.writeFileSync(path.join(source, 'LxDatas', 'config.json'), 'changed')
+    const legacyConfigPath = path.join(appDataPath, 'lx-music-desktop', 'LxDatas', 'config.json')
+    let mutated = false
+    fs.open = (filePath, flags, ...args) => {
+      if (!mutated && filePath == legacyConfigPath && flags == 'r') {
+        mutated = true
+        fs.writeFileSync(legacyConfigPath, 'changed')
+      }
+      return originalOpen(filePath, flags, ...args)
     }
   }
   console.error = () => {}
@@ -77,7 +125,7 @@ const runMainStartup = async({ appDataPath, materializeApplicationData, mutateLe
       env: { LOCALAPPDATA: localAppData },
     })
   } finally {
-    fs.cpSync = originalCpSync
+    fs.open = originalOpen
     console.error = originalConsole.error
     console.info = originalConsole.info
     console.warn = originalConsole.warn
@@ -110,52 +158,21 @@ const createDirectoryLink = (t, targetPath, linkPath) => {
   }
 }
 
-const startLockHolder = lockPath => new Promise((resolve, reject) => {
-  const script = `
-    const fs = require('node:fs')
-    const lockPath = process.argv[1]
-    const fd = fs.openSync(lockPath, 'wx')
-    fs.writeSync(fd, JSON.stringify({
-      version: 1,
-      pid: process.pid,
-      nonce: 'fedcba9876543210fedcba9876543210',
-      createdAt: new Date().toISOString(),
-    }))
-    fs.fsyncSync(fd)
-    process.stdout.write('locked\\n')
-    setInterval(() => {}, 1000)
-  `
-  const child = spawn(process.execPath, ['-e', script, lockPath], { stdio: ['ignore', 'pipe', 'pipe'] })
-  let settled = false
-  let stderr = ''
-  child.stderr.setEncoding('utf8')
-  child.stderr.on('data', chunk => { stderr += chunk })
-  child.once('error', reject)
-  child.once('exit', code => {
-    if (!settled) reject(new Error(`lock holder exited with ${code}: ${stderr}`))
-  })
-  child.stdout.once('data', chunk => {
-    if (!chunk.toString().includes('locked')) return reject(new Error(`unexpected lock holder output: ${chunk}`))
-    settled = true
-    resolve(child)
-  })
-})
-
-test('copies legacy data atomically and leaves the source unchanged', t => {
+test('copies legacy data atomically and leaves the source unchanged', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(path.join(legacyPath, 'LxDatas'), { recursive: true })
   fs.writeFileSync(path.join(legacyPath, 'LxDatas', 'config.json'), 'legacy')
 
-  const result = migrateLegacyUserData({ appDataPath, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, logger: silentLogger })
   assert.equal(result.status, 'migrated')
   assert.equal(fs.readFileSync(path.join(result.userDataPath, 'LxDatas', 'config.json'), 'utf8'), 'legacy')
   assert.equal(fs.readFileSync(path.join(legacyPath, 'LxDatas', 'config.json'), 'utf8'), 'legacy')
   assert.equal(fs.existsSync(path.join(result.userDataPath, MIGRATION_MARKER_FILE)), true)
 })
 
-test('does not copy or overwrite when the new directory already exists', t => {
+test('does not copy or overwrite when the new directory already exists', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
@@ -165,13 +182,13 @@ test('does not copy or overwrite when the new directory already exists', t => {
   fs.writeFileSync(path.join(legacyPath, 'value'), 'old')
   fs.writeFileSync(path.join(currentPath, 'value'), 'new')
 
-  const result = migrateLegacyUserData({ appDataPath, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, logger: silentLogger })
   assert.equal(result.status, 'current-exists')
   assert.equal(fs.readFileSync(path.join(currentPath, 'value'), 'utf8'), 'new')
   assert.equal(fs.readFileSync(path.join(legacyPath, 'value'), 'utf8'), 'old')
 })
 
-test('uses a valid current directory without touching a stale lock', t => {
+test('uses a valid current directory without touching a stale lock', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
@@ -181,22 +198,22 @@ test('uses a valid current directory without touching a stale lock', t => {
   fs.writeFileSync(path.join(currentPath, 'value'), 'current')
   fs.writeFileSync(lockPath, lockContents)
 
-  const result = migrateLegacyUserData({ appDataPath, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, logger: silentLogger })
   assert.equal(result.status, 'current-exists')
   assert.equal(result.userDataPathReady, true)
   assert.equal(fs.readFileSync(path.join(currentPath, 'value'), 'utf8'), 'current')
   assert.equal(fs.readFileSync(lockPath, 'utf8'), lockContents)
 })
 
-test('creates an empty current directory when no legacy data exists', t => {
+test('creates an empty current directory when no legacy data exists', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
-  const result = migrateLegacyUserData({ appDataPath, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, logger: silentLogger })
   assert.equal(result.status, 'legacy-missing')
   assert.equal(fs.existsSync(result.userDataPath), true)
 })
 
-test('fresh install does not require hard-link support', t => {
+test('fresh install does not require hard-link support', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const fsApi = {
@@ -208,68 +225,28 @@ test('fresh install does not require hard-link support', t => {
     },
   }
 
-  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
   assert.equal(result.status, 'legacy-missing')
   assert.equal(result.userDataPathReady, true)
   assert.equal(fs.lstatSync(result.userDataPath).isDirectory(), true)
 })
 
-test('cleans only its temporary directory after a copy failure', t => {
+test('cleans only its temporary directory after a copy failure', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(legacyPath)
   fs.writeFileSync(path.join(legacyPath, 'value'), 'old')
-  const fsApi = { ...fs, cpSync() { throw new Error('copy failed') } }
+  const fsApi = createAsyncCopyFs({ writeError: new Error('copy failed') })
 
-  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
   assert.equal(result.status, 'failed')
   assert.equal(fs.readFileSync(path.join(legacyPath, 'value'), 'utf8'), 'old')
   assert.equal(fs.existsSync(result.tempPath), false)
   assert.equal(fs.existsSync(result.userDataPath), true)
 })
 
-test('preserves a replacement that appears at the owned temporary-directory path', t => {
-  const appDataPath = makeRoot()
-  t.after(() => cleanupRoot(appDataPath))
-  const legacyPath = path.join(appDataPath, 'lx-music-desktop')
-  fs.mkdirSync(legacyPath)
-  fs.writeFileSync(path.join(legacyPath, 'value'), 'old')
-  const warnings = []
-  let tempPath
-  let movedTempPath
-  const fsApi = {
-    ...fs,
-    mkdtempSync(prefix) {
-      tempPath = fs.mkdtempSync(prefix)
-      movedTempPath = `${tempPath}-moved`
-      return tempPath
-    },
-    cpSync(source, destination, options) {
-      fs.cpSync(source, destination, options)
-      fs.renameSync(tempPath, movedTempPath)
-      fs.mkdirSync(tempPath)
-      fs.writeFileSync(path.join(tempPath, 'replacement'), 'unowned')
-      throw new Error('copy interrupted after temporary-directory replacement')
-    },
-  }
-
-  const result = migrateLegacyUserData({
-    appDataPath,
-    fsApi,
-    logger: {
-      ...silentLogger,
-      warn: (...args) => warnings.push(args),
-    },
-  })
-
-  assert.equal(result.status, 'failed')
-  assert.equal(fs.readFileSync(path.join(tempPath, 'replacement'), 'utf8'), 'unowned')
-  assert.equal(fs.existsSync(movedTempPath), true)
-  assert.equal(warnings.some(args => args[0] == 'Could not verify owned user-data migration temporary directory'), true)
-})
-
-test('does not delete a pre-existing deterministic temporary-path occupant', t => {
+test('does not delete a pre-existing deterministic temporary-path occupant', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
@@ -280,13 +257,13 @@ test('does not delete a pre-existing deterministic temporary-path occupant', t =
   fs.writeFileSync(path.join(legacyPath, 'value'), 'legacy')
   fs.writeFileSync(path.join(collisionPath, 'sentinel'), 'unowned')
 
-  const result = migrateLegacyUserData({ appDataPath, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, logger: silentLogger })
   assert.equal(result.status, 'migrated')
   assert.equal(fs.readFileSync(path.join(collisionPath, 'sentinel'), 'utf8'), 'unowned')
   assert.notEqual(result.tempPath, collisionPath)
 })
 
-test('rejects a linked legacy root without writing through it', t => {
+test('rejects a linked legacy root without writing through it', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const externalPath = path.join(appDataPath, 'external')
@@ -295,7 +272,7 @@ test('rejects a linked legacy root without writing through it', t => {
   fs.writeFileSync(path.join(externalPath, 'value'), 'external')
   if (!createDirectoryLink(t, externalPath, legacyPath)) return
 
-  const result = migrateLegacyUserData({ appDataPath, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, logger: silentLogger })
   assert.equal(result.status, 'failed')
   assert.equal(result.userDataPathReady, true)
   assert.equal(fs.readFileSync(path.join(externalPath, 'value'), 'utf8'), 'external')
@@ -303,7 +280,7 @@ test('rejects a linked legacy root without writing through it', t => {
   assert.deepEqual(fs.readdirSync(result.userDataPath), [])
 })
 
-test('rejects linked entries inside the legacy tree', t => {
+test('rejects linked entries inside the legacy tree', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const externalPath = path.join(appDataPath, 'external')
@@ -313,76 +290,70 @@ test('rejects linked entries inside the legacy tree', t => {
   fs.writeFileSync(path.join(externalPath, 'value'), 'external')
   if (!createDirectoryLink(t, externalPath, path.join(legacyPath, 'linked'))) return
 
-  const result = migrateLegacyUserData({ appDataPath, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, logger: silentLogger })
   assert.equal(result.status, 'failed')
   assert.equal(fs.readFileSync(path.join(externalPath, 'value'), 'utf8'), 'external')
   assert.deepEqual(fs.readdirSync(result.userDataPath), [])
 })
 
-test('rejects an incomplete nested copy instead of promoting it', t => {
+test('rejects an incomplete nested copy instead of promoting it', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(path.join(legacyPath, 'nested'), { recursive: true })
   fs.writeFileSync(path.join(legacyPath, 'nested', 'kept'), 'kept')
   fs.writeFileSync(path.join(legacyPath, 'nested', 'omitted'), 'omitted')
-  const fsApi = {
-    ...fs,
-    cpSync(sourcePath, destinationPath, options) {
-      fs.cpSync(sourcePath, destinationPath, options)
-      fs.rmSync(path.join(destinationPath, 'nested', 'omitted'))
+  const fsApi = createAsyncCopyFs({
+    afterDestinationClose(destinationPath) {
+      if (path.basename(destinationPath) == 'omitted') fs.rmSync(destinationPath)
     },
-  }
+  })
 
-  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
   assert.equal(result.status, 'failed')
   assert.equal(fs.readFileSync(path.join(legacyPath, 'nested', 'omitted'), 'utf8'), 'omitted')
   assert.deepEqual(fs.readdirSync(result.userDataPath), [])
 })
 
-test('rejects a same-size torn copy using content hashes', t => {
+test('rejects a same-size torn copy using content hashes', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(path.join(legacyPath, 'LxDatas'), { recursive: true })
   fs.writeFileSync(path.join(legacyPath, 'LxDatas', 'lx_data.db-wal'), 'before')
-  const fsApi = {
-    ...fs,
-    cpSync(sourcePath, destinationPath, options) {
-      fs.cpSync(sourcePath, destinationPath, options)
-      fs.writeFileSync(path.join(destinationPath, 'LxDatas', 'lx_data.db-wal'), 'torn!!')
+  const fsApi = createAsyncCopyFs({
+    afterDestinationClose(destinationPath) {
+      if (path.basename(destinationPath) == 'lx_data.db-wal') fs.writeFileSync(destinationPath, 'torn!!')
     },
-  }
+  })
 
-  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
   assert.equal(result.status, 'failed')
   assert.equal(fs.readFileSync(path.join(legacyPath, 'LxDatas', 'lx_data.db-wal'), 'utf8'), 'before')
   assert.deepEqual(fs.readdirSync(result.userDataPath), [])
 })
 
-test('leaves no destination when live legacy data changes during migration', t => {
+test('leaves no destination when live legacy data changes during migration', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const walPath = path.join(legacyPath, 'LxDatas', 'lx_data.db-wal')
   fs.mkdirSync(path.dirname(walPath), { recursive: true })
   fs.writeFileSync(walPath, 'before')
-  const fsApi = {
-    ...fs,
-    cpSync(sourcePath, destinationPath, options) {
-      fs.cpSync(sourcePath, destinationPath, options)
-      fs.writeFileSync(walPath, 'during')
+  const fsApi = createAsyncCopyFs({
+    afterDestinationClose(destinationPath) {
+      if (path.basename(destinationPath) == 'lx_data.db-wal') fs.writeFileSync(walPath, 'during')
     },
-  }
+  })
 
-  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
   assert.equal(result.status, 'failed')
   assert.equal(result.userDataPathReady, false)
   assert.equal(fs.existsSync(result.userDataPath), false)
   assert.equal(fs.readFileSync(walPath, 'utf8'), 'during')
 })
 
-test('leaves no destination when a WAL disappears during the initial scan', t => {
+test('leaves no destination when a WAL disappears during the initial scan', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
@@ -392,22 +363,27 @@ test('leaves no destination when a WAL disappears during the initial scan', t =>
   let removed = false
   const fsApi = {
     ...fs,
-    openSync(filePath, flags, ...args) {
+    open(filePath, flags, mode, callback) {
+      if (typeof mode == 'function') {
+        callback = mode
+        mode = undefined
+      }
       if (!removed && filePath == walPath && flags == 'r') {
         removed = true
         fs.rmSync(walPath)
       }
-      return fs.openSync(filePath, flags, ...args)
+      if (mode == null) fs.open(filePath, flags, callback)
+      else fs.open(filePath, flags, mode, callback)
     },
   }
 
-  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
   assert.equal(result.status, 'failed')
   assert.equal(result.userDataPathReady, false)
   assert.equal(fs.existsSync(result.userDataPath), false)
 })
 
-test('does not promote data when writing the marker fails', t => {
+test('does not promote data when writing the marker fails', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
@@ -421,32 +397,40 @@ test('does not promote data when writing the marker fails', t => {
     },
   }
 
-  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
   assert.equal(result.status, 'failed')
   assert.deepEqual(fs.readdirSync(result.userDataPath), [])
   assert.equal(fs.readFileSync(path.join(legacyPath, 'value'), 'utf8'), 'legacy')
 })
 
-test('cleanup failure does not prevent the empty-directory fallback', t => {
+test('cleanup failure does not prevent the empty-directory fallback', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   fs.mkdirSync(legacyPath)
   fs.writeFileSync(path.join(legacyPath, 'value'), 'legacy')
-  const fsApi = {
-    ...fs,
-    cpSync() { throw new Error('copy failed') },
-    rmSync() { throw new Error('cleanup failed') },
+  const fsApi = createAsyncCopyFs({ writeError: new Error('copy failed') })
+  const originalRm = fs.rmSync
+  fs.rmSync = (targetPath, ...args) => {
+    if (path.basename(targetPath) == 'payload' &&
+      path.basename(path.dirname(targetPath)).startsWith('.guarded-directory-migration-isolation-')) {
+      throw new Error('cleanup failed')
+    }
+    return originalRm(targetPath, ...args)
   }
-
-  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
+  let result
+  try {
+    result = await migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
+  } finally {
+    fs.rmSync = originalRm
+  }
   assert.equal(result.status, 'failed')
   assert.equal(result.userDataPathReady, true)
   assert.equal(fs.existsSync(result.userDataPath), true)
   assert.equal(fs.readFileSync(path.join(legacyPath, 'value'), 'utf8'), 'legacy')
 })
 
-test('a cooperating process lock blocks migration without creating the destination', async t => {
+test('lease compromise blocks fresh user-data creation after copy failure', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
@@ -454,45 +438,50 @@ test('a cooperating process lock blocks migration without creating the destinati
   const lockPath = `${currentPath}.migration.lock`
   fs.mkdirSync(legacyPath)
   fs.writeFileSync(path.join(legacyPath, 'value'), 'legacy')
-  const lockHolder = await startLockHolder(lockPath)
-
-  try {
-    const result = migrateLegacyUserData({ appDataPath, logger: silentLogger })
-    assert.equal(result.status, 'failed')
-    assert.equal(result.userDataPathReady, false)
-    assert.equal(fs.existsSync(currentPath), false)
-    assert.equal(JSON.parse(fs.readFileSync(lockPath, 'utf8')).pid, lockHolder.pid)
-  } finally {
-    lockHolder.kill()
-    await once(lockHolder, 'exit')
+  let compromised = false
+  const fsApi = createAsyncCopyFs({ writeError: new Error('copy failed') })
+  const originalWrite = fsApi.write
+  fsApi.write = (...args) => {
+    if (!compromised) {
+      compromised = true
+      fs.writeFileSync(path.join(lockPath, 'compromise'), 'foreign')
+    }
+    originalWrite(...args)
   }
+
+  await assert.rejects(
+    migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger }),
+    error => error?.code == 'migration_lease_compromised',
+  )
+
+  assert.equal(fs.existsSync(currentPath), false)
+  assert.equal(fs.lstatSync(lockPath).isDirectory(), true)
+  assert.equal(fs.readFileSync(path.join(lockPath, 'compromise'), 'utf8'), 'foreign')
 })
 
-test('reclaims a dead owner lock and migrates', t => {
+test('rejects a pre-existing old regular-file lock without deleting it', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   const lockPath = `${currentPath}.migration.lock`
   const lockContents = makeLockMetadata(2147483647)
-  const candidatePath = `${lockPath}.${JSON.parse(lockContents).nonce}.candidate`
   fs.mkdirSync(legacyPath)
   fs.writeFileSync(path.join(legacyPath, 'value'), 'legacy')
-  fs.writeFileSync(candidatePath, lockContents)
-  fs.linkSync(candidatePath, lockPath)
+  fs.writeFileSync(lockPath, lockContents)
 
-  const result = migrateLegacyUserData({
+  const result = await migrateLegacyUserData({
     appDataPath,
     isProcessAlive: () => false,
     logger: silentLogger,
   })
-  assert.equal(result.status, 'migrated')
-  assert.equal(fs.readFileSync(path.join(currentPath, 'value'), 'utf8'), 'legacy')
-  assert.equal(fs.existsSync(lockPath), false)
-  assert.equal(fs.existsSync(candidatePath), false)
+  assert.equal(result.status, 'failed')
+  assert.equal(result.userDataPathReady, false)
+  assert.equal(fs.existsSync(currentPath), false)
+  assert.equal(fs.readFileSync(lockPath, 'utf8'), lockContents)
 })
 
-test('does not reclaim an invalid lock solely because it is old', t => {
+test('does not reclaim an invalid lock solely because it is old', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
@@ -502,14 +491,14 @@ test('does not reclaim an invalid lock solely because it is old', t => {
   fs.writeFileSync(lockPath, '')
   fs.utimesSync(lockPath, new Date(0), new Date(0))
 
-  const result = migrateLegacyUserData({ appDataPath, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, logger: silentLogger })
   assert.equal(result.status, 'failed')
   assert.equal(result.userDataPathReady, false)
   assert.equal(fs.existsSync(currentPath), false)
   assert.equal(fs.readFileSync(lockPath, 'utf8'), '')
 })
 
-test('does not reclaim an old lock while its validated owner is alive', t => {
+test('does not reclaim an old lock while its validated owner is alive', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
@@ -519,7 +508,7 @@ test('does not reclaim an old lock while its validated owner is alive', t => {
   fs.mkdirSync(legacyPath)
   fs.writeFileSync(lockPath, lockContents)
 
-  const result = migrateLegacyUserData({
+  const result = await migrateLegacyUserData({
     appDataPath,
     isProcessAlive: () => true,
     logger: silentLogger,
@@ -529,7 +518,7 @@ test('does not reclaim an old lock while its validated owner is alive', t => {
   assert.equal(fs.readFileSync(lockPath, 'utf8'), lockContents)
 })
 
-test('rejects a linked lock path without mutating its target', t => {
+test('rejects a linked lock path without mutating its target', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
@@ -540,14 +529,14 @@ test('rejects a linked lock path without mutating its target', t => {
   fs.writeFileSync(path.join(externalPath, 'sentinel'), 'external')
   if (!createDirectoryLink(t, externalPath, lockPath)) return
 
-  const result = migrateLegacyUserData({ appDataPath, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, logger: silentLogger })
   assert.equal(result.status, 'failed')
   assert.equal(result.userDataPathReady, false)
   assert.equal(fs.readFileSync(path.join(externalPath, 'sentinel'), 'utf8'), 'external')
   assert.equal(fs.lstatSync(lockPath).isSymbolicLink(), true)
 })
 
-test('rejects a non-regular lock path', t => {
+test('rejects a non-regular lock path', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
@@ -555,126 +544,42 @@ test('rejects a non-regular lock path', t => {
   fs.mkdirSync(legacyPath)
   fs.mkdirSync(lockPath)
 
-  const result = migrateLegacyUserData({ appDataPath, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, logger: silentLogger })
   assert.equal(result.status, 'failed')
   assert.equal(result.userDataPathReady, false)
   assert.equal(fs.lstatSync(lockPath).isDirectory(), true)
 })
 
-test('closes an exclusively created lock if reading its identity fails', t => {
+test('lease release failure overrides an otherwise successful migration', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
+  const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
+  const lockPath = `${currentPath}.migration.lock`
   fs.mkdirSync(legacyPath)
   fs.writeFileSync(path.join(legacyPath, 'value'), 'legacy')
-  let lockClosed = false
-  let failIdentity = true
-  const fsApi = {
-    ...fs,
-    fstatSync(fd) {
-      if (failIdentity) {
-        failIdentity = false
-        throw new Error('identity failed')
-      }
-      return fs.fstatSync(fd)
-    },
-    closeSync(fd) {
-      lockClosed = true
-      fs.closeSync(fd)
-    },
+  const originalRmdir = fs.rmdir
+  fs.rmdir = (targetPath, callback) => {
+    if (path.resolve(targetPath) == lockPath) {
+      return process.nextTick(callback, Object.assign(new Error('injected release failure'), { code: 'EACCES' }))
+    }
+    return originalRmdir(targetPath, callback)
+  }
+  try {
+    await assert.rejects(
+      migrateLegacyUserData({ appDataPath, logger: silentLogger }),
+      /injected release failure/,
+    )
+  } finally {
+    fs.rmdir = originalRmdir
   }
 
-  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
-  assert.equal(result.status, 'failed')
-  assert.equal(result.userDataPathReady, false)
-  assert.equal(lockClosed, true)
-  assert.equal(fs.existsSync(result.lockPath), false)
-
-  const restartedResult = migrateLegacyUserData({
-    appDataPath,
-    fsApi,
-    logger: silentLogger,
-  })
-  assert.equal(restartedResult.status, 'migrated')
-  assert.equal(fs.existsSync(restartedResult.lockPath), false)
+  assert.equal(fs.readFileSync(path.join(currentPath, 'value'), 'utf8'), 'legacy')
+  assert.equal(fs.lstatSync(lockPath).isDirectory(), true)
+  assert.deepEqual(fs.readdirSync(lockPath), [])
 })
 
-test('removes its candidate when writing lock metadata fails', t => {
-  const appDataPath = makeRoot()
-  t.after(() => cleanupRoot(appDataPath))
-  const legacyPath = path.join(appDataPath, 'lx-music-desktop')
-  fs.mkdirSync(legacyPath)
-  const fsApi = {
-    ...fs,
-    writeSync() { throw new Error('write failed') },
-  }
-
-  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
-  assert.equal(result.status, 'failed')
-  assert.equal(result.userDataPathReady, false)
-  assert.deepEqual(fs.readdirSync(appDataPath).filter(entry => entry.endsWith('.candidate')), [])
-  assert.equal(fs.existsSync(result.lockPath), false)
-})
-
-test('removes its candidate when syncing lock metadata fails', t => {
-  const appDataPath = makeRoot()
-  t.after(() => cleanupRoot(appDataPath))
-  const legacyPath = path.join(appDataPath, 'lx-music-desktop')
-  fs.mkdirSync(legacyPath)
-  const fsApi = {
-    ...fs,
-    fsyncSync() { throw new Error('sync failed') },
-  }
-
-  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
-  assert.equal(result.status, 'failed')
-  assert.equal(result.userDataPathReady, false)
-  assert.deepEqual(fs.readdirSync(appDataPath).filter(entry => entry.endsWith('.candidate')), [])
-  assert.equal(fs.existsSync(result.lockPath), false)
-})
-
-test('recovers a failed lock release after the owner process exits', t => {
-  const appDataPath = makeRoot()
-  t.after(() => cleanupRoot(appDataPath))
-  const legacyPath = path.join(appDataPath, 'lx-music-desktop')
-  const valuePath = path.join(legacyPath, 'value')
-  fs.mkdirSync(legacyPath)
-  fs.writeFileSync(valuePath, 'before')
-  let failRelease = true
-  const fsApi = {
-    ...fs,
-    cpSync(sourcePath, destinationPath, options) {
-      fs.cpSync(sourcePath, destinationPath, options)
-      fs.writeFileSync(valuePath, 'during')
-    },
-    unlinkSync(filePath) {
-      if (failRelease && filePath.endsWith('.migration.lock')) {
-        failRelease = false
-        throw new Error('release failed')
-      }
-      return fs.unlinkSync(filePath)
-    },
-  }
-
-  const firstResult = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
-  assert.equal(firstResult.status, 'failed')
-  assert.equal(firstResult.userDataPathReady, false)
-  assert.equal(fs.existsSync(firstResult.userDataPath), false)
-  assert.equal(fs.existsSync(firstResult.lockPath), true)
-
-  const restartedResult = migrateLegacyUserData({
-    appDataPath,
-    fsApi: { ...fsApi, cpSync: fs.cpSync },
-    isProcessAlive: () => false,
-    logger: silentLogger,
-  })
-  assert.equal(restartedResult.status, 'migrated')
-  assert.equal(restartedResult.userDataPathReady, true)
-  assert.equal(fs.readFileSync(path.join(restartedResult.userDataPath, 'value'), 'utf8'), 'during')
-  assert.equal(fs.existsSync(restartedResult.lockPath), false)
-})
-
-test('reports an error when the empty-directory fallback cannot be created', t => {
+test('reports an error when the empty-directory fallback cannot be created', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
@@ -686,13 +591,13 @@ test('reports an error when the empty-directory fallback cannot be created', t =
     },
   }
 
-  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
   assert.equal(result.status, 'failed')
   assert.equal(result.userDataPathReady, false)
   assert.equal(result.error instanceof Error, true)
 })
 
-test('rechecks a concurrently created destination immediately before promotion', t => {
+test('rechecks a concurrently created destination immediately before promotion', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
   const legacyPath = path.join(appDataPath, 'lx-music-desktop')
@@ -711,16 +616,16 @@ test('rechecks a concurrently created destination immediately before promotion',
     },
   }
 
-  const result = migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
+  const result = await migrateLegacyUserData({ appDataPath, fsApi, logger: silentLogger })
   assert.equal(result.status, 'current-exists')
   assert.equal(fs.readFileSync(path.join(currentPath, 'sentinel'), 'utf8'), 'concurrent')
   assert.equal(fs.existsSync(path.join(currentPath, 'value')), false)
 })
 
-test('refuses a user-data name that escapes appData', t => {
+test('refuses a user-data name that escapes appData', async t => {
   const appDataPath = makeRoot()
   t.after(() => cleanupRoot(appDataPath))
-  assert.throws(() => migrateLegacyUserData({
+  await assert.rejects(async() => migrateLegacyUserData({
     appDataPath,
     currentDirName: '..',
     logger: silentLogger,

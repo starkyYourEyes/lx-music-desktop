@@ -1108,7 +1108,15 @@ describe('database startup orchestration', () => {
       markerRowSha256: () => 'a'.repeat(64),
       verifyCutoverBackup: () => {},
       verifySchema6CutoverPrerequisites: () => ({ readWriteMarker: {} }),
-      verifySchema7SteadyState: () => ({ readWriteMarker: {} }),
+      verifySchema7SteadyState: database => {
+        const marker = cutover.readBackupPreparedMarker(database)
+        return {
+          readWriteMarker: {},
+          backupPreparedMarker: marker == null
+            ? null
+            : { ...marker, details: JSON.parse(marker.detailsJson) },
+        }
+      },
     })
     try {
       const initialized = await dbService.init(initOptions(paths))
@@ -1329,6 +1337,7 @@ describe('database startup orchestration', () => {
 
     assert.deepEqual(result, {
       status: 'ready', existed: true, schemaVersion: currentSchemaVersion, migratedVersions: [], backupPath: null,
+      preparedCutoverPending: false,
     })
     assert.deepEqual(calls, [{ runQuickCheck: false, runForeignKeyCheck: false }])
   })
@@ -2314,7 +2323,7 @@ describe('worker startup API', () => {
 
   it('returns ready startup metadata to direct object callers', async() => {
     const { init } = loadWorkerAdapterWithInit(async() => ({
-      status: 'ready', existed: true, schemaVersion: 3, migratedVersions: [], backupPath: null,
+      status: 'ready', existed: true, schemaVersion: 3, migratedVersions: [], backupPath: null, preparedCutoverPending: false,
     }))
 
     assert.deepEqual(await init({
@@ -2323,7 +2332,7 @@ describe('worker startup API', () => {
       backupsRoot: path.join('C:\\profiles\\alice', 'backups'),
       previousShutdownWasClean: true,
       targetSchemaVersion: 6,
-    }), { status: 'ready', existed: true, schemaVersion: 3, migratedVersions: [], backupPath: null })
+    }), { status: 'ready', existed: true, schemaVersion: 3, migratedVersions: [], backupPath: null, preparedCutoverPending: false })
   })
 
   it('reuses the same real object startup result without reinitialization', async() => {

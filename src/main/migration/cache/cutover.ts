@@ -27,6 +27,7 @@ import type * as OtherSourcesRepository from '../../worker/dbService/modules/mus
 type CacheExecutionResult<T> = CacheDb.CacheExecutionResult<T>
 
 export const READ_WRITE_MARKER_NAME = 'legacy_cache_v1.read_write_verified' as const
+export const BACKUP_PREPARED_MARKER_NAME = 'legacy_cache_v1.backup_prepared' as const
 export const CUTOVER_MARKER_NAME = 'legacy_cache_v1.cutover' as const
 export const CACHE_CLEANUP_MIGRATION_NAME = 'cache_cleanup' as const
 export const CACHE_CLEANUP_MIGRATION_SOURCE = 'lx.storage.schema-migration.v7.cache-cleanup.v1' as const
@@ -50,6 +51,19 @@ export interface StrictMarkerRow<Name extends string = string> {
   sourceSha256: string
   completedAtMs: number
   detailsJson: string
+}
+
+export interface BackupPreparedDetailsV1 {
+  backupBasename: string
+  readWriteMarkerSha256: string
+  sourceSchemaVersion: 6
+  version: 1
+}
+
+export interface BackupPreparedMarkerV1 extends StrictMarkerRow<
+  typeof BACKUP_PREPARED_MARKER_NAME
+> {
+  details: BackupPreparedDetailsV1
 }
 
 export interface Phase4CheckV1 {
@@ -91,6 +105,7 @@ const hasExactKeys = (value: Record<string, unknown>, expected: readonly string[
 }
 const isSafeTimestamp = (value: unknown): value is number =>
   typeof value == 'number' && Number.isSafeInteger(value) && value >= 0
+const BACKUP_BASENAME_PATTERN = /^lx\.data\.db\.pre-migration-v6-to-v7\.[a-f0-9]{32}\.backup$/
 
 export const framedSha256 = storageFramedSha256
 
@@ -119,6 +134,21 @@ const readMarkerRow = <Name extends string>(
     throw failure(`phase4_${name == READ_WRITE_MARKER_NAME ? 'read_write' : 'cutover'}_marker_invalid`)
   }
   return row as unknown as StrictMarkerRow<Name>
+}
+
+export const readBackupPreparedMarker = (
+  db: Database.Database,
+): StrictMarkerRow<typeof BACKUP_PREPARED_MARKER_NAME> | null => {
+  const row = db.prepare(`
+    SELECT name, source_sha256 AS sourceSha256, completed_at_ms AS completedAtMs,
+      details_json AS detailsJson
+    FROM migration_markers WHERE name = ?
+  `).get(BACKUP_PREPARED_MARKER_NAME) as Record<string, unknown> | undefined
+  if (row == null) return null
+  if (row.name != BACKUP_PREPARED_MARKER_NAME || typeof row.sourceSha256 != 'string' ||
+    !SHA256_PATTERN.test(row.sourceSha256) || !isSafeTimestamp(row.completedAtMs) ||
+    typeof row.detailsJson != 'string') throw failure('backup_prepared_source_changed')
+  return row as unknown as StrictMarkerRow<typeof BACKUP_PREPARED_MARKER_NAME>
 }
 
 const rawMarkerDetails = (row: RawLyricMarkerRow): RawLyricMarkerDetails =>
@@ -476,6 +506,147 @@ const verifyLedger = (db: Database.Database, schemaVersion: 6 | 7): void => {
   if (mirror.length != 1 || mirror[0].value != String(schemaVersion)) throw failure('phase4_schema_invalid')
 }
 
+const parseBackupPreparedDetails = (detailsJson: string): BackupPreparedDetailsV1 => {
+  let parsed: unknown
+  try { parsed = JSON.parse(detailsJson) } catch { throw failure('backup_prepared_source_changed') }
+  if (!isPlainRecord(parsed) || !hasExactKeys(parsed, [
+    'backupBasename', 'readWriteMarkerSha256', 'sourceSchemaVersion', 'version',
+  ]) || typeof parsed.backupBasename != 'string' || !BACKUP_BASENAME_PATTERN.test(parsed.backupBasename) ||
+    typeof parsed.readWriteMarkerSha256 != 'string' || !SHA256_PATTERN.test(parsed.readWriteMarkerSha256) ||
+    parsed.sourceSchemaVersion != 6 || parsed.version != 1 ||
+    canonicalJson(parsed as JsonValue) != detailsJson) throw failure('backup_prepared_source_changed')
+  return parsed as unknown as BackupPreparedDetailsV1
+}
+
+type CanonicalSqliteValue = ['null'] | ['integer', string] | ['real', number] | ['text', string] | ['blob', string]
+
+const canonicalSqliteValue = (value: unknown): CanonicalSqliteValue => {
+  if (value == null) return ['null']
+  if (typeof value == 'bigint') return ['integer', value.toString(10)]
+  if (typeof value == 'number') {
+    if (!Number.isFinite(value) || Object.is(value, -0)) throw failure('backup_prepared_source_changed')
+    return ['real', value]
+  }
+  if (typeof value == 'string') return ['text', value]
+  if (Buffer.isBuffer(value)) return ['blob', value.toString('base64')]
+  throw failure('backup_prepared_source_changed')
+}
+
+const compareUtf8 = (left: string, right: string): number => Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
+const quotedIdentifier = (value: string): string => `"${value.replaceAll('"', '""')}"`
+
+export function backupPreparedSourceSha256(
+  db: Database.Database,
+  input: {
+    details: BackupPreparedDetailsV1
+    completedAtMs: number
+  },
+): string {
+  if (input == null || !isPlainRecord(input) || !hasExactKeys(input, ['details', 'completedAtMs']) ||
+    !isSafeTimestamp(input.completedAtMs) || !isPlainRecord(input.details)) {
+    throw failure('backup_prepared_source_changed')
+  }
+  const detailsJson = canonicalJson(input.details as unknown as JsonValue)
+  const details = parseBackupPreparedDetails(detailsJson)
+  verifyLedger(db, 6)
+  verifyExactStructure(db, databaseSchema6Contract, explicitSchema6Indexes)
+
+  const actualTables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: unknown }>)
+    .map(row => row.name)
+  if (actualTables.some(name => typeof name != 'string')) throw failure('backup_prepared_source_changed')
+  const expectedTableNames = databaseSchema6Contract.tables.map(table => table.name)
+  const hasSqliteSequence = actualTables.includes('sqlite_sequence')
+  const allowedTableNames = new Set([...expectedTableNames, ...(hasSqliteSequence ? ['sqlite_sequence'] : [])])
+  if (actualTables.length != allowedTableNames.size || actualTables.some(name => !allowedTableNames.has(name as string))) {
+    throw failure('backup_prepared_source_changed')
+  }
+
+  const tables = [...expectedTableNames, ...(hasSqliteSequence ? ['sqlite_sequence'] : [])]
+    .sort(compareUtf8)
+    .map(tableName => {
+      const contract = databaseSchema6Contract.tables.find(table => table.name == tableName)
+      const columns = contract?.columns.map(column => column.name) ?? ['name', 'seq']
+      if (tableName == 'sqlite_sequence') {
+        const actualColumns = (db.prepare('PRAGMA table_info(sqlite_sequence)').all() as Array<{ name: unknown }>).map(row => row.name)
+        if (actualColumns.length != 2 || actualColumns[0] != 'name' || actualColumns[1] != 'seq') {
+          throw failure('backup_prepared_source_changed')
+        }
+      }
+      const statement = db.prepare(`SELECT ${columns.map(quotedIdentifier).join(', ')} FROM ${quotedIdentifier(tableName)}`)
+        .safeIntegers(true).raw(true)
+      const selected = statement.all() as unknown[][]
+      const filtered = tableName == 'migration_markers'
+        ? selected.filter(row => row[columns.indexOf('name')] != BACKUP_PREPARED_MARKER_NAME)
+        : selected
+      const rows = filtered.map(row => {
+        if (!Array.isArray(row) || row.length != columns.length) throw failure('backup_prepared_source_changed')
+        return row.map(canonicalSqliteValue)
+      }).sort((left, right) => compareUtf8(
+        canonicalJson(left as unknown as JsonValue),
+        canonicalJson(right as unknown as JsonValue),
+      ))
+      return { columns, name: tableName, rows }
+    })
+
+  return framedSha256('lx.storage.phase4.backup-prepared-source-state.v1', {
+    completedAtMs: input.completedAtMs,
+    details,
+    tables,
+    version: 1,
+  } as unknown as JsonValue)
+}
+
+export function verifyBackupPreparedMarker(
+  db: Database.Database,
+  verifiedReadWriteMarker: StrictMarkerRow<typeof READ_WRITE_MARKER_NAME>,
+): BackupPreparedMarkerV1 | null {
+  const row = readBackupPreparedMarker(db)
+  if (row == null) return null
+  try {
+    const details = parseBackupPreparedDetails(row.detailsJson)
+    if (details.readWriteMarkerSha256 != markerRowSha256(verifiedReadWriteMarker) ||
+      row.sourceSha256 != backupPreparedSourceSha256(db, { details, completedAtMs: row.completedAtMs })) {
+      throw failure('backup_prepared_source_changed')
+    }
+    return Object.freeze({ ...row, details: Object.freeze({ ...details }) })
+  } catch {
+    throw failure('backup_prepared_source_changed')
+  }
+}
+
+export function writeBackupPreparedMarker(
+  db: Database.Database,
+  input: {
+    details: BackupPreparedDetailsV1
+    completedAtMs: number
+  },
+): BackupPreparedMarkerV1 {
+  if (input == null || !isPlainRecord(input) || !hasExactKeys(input, ['details', 'completedAtMs']) ||
+    !isPlainRecord(input.details) || !db.inTransaction || readBackupPreparedMarker(db) != null) {
+    throw failure('backup_prepared_source_changed')
+  }
+  const readWriteMarker = verifySchema6CutoverPrerequisites(db).readWriteMarker
+  const detailsJson = canonicalJson(input.details as unknown as JsonValue)
+  const details = parseBackupPreparedDetails(detailsJson)
+  if (!isSafeTimestamp(input.completedAtMs) || details.readWriteMarkerSha256 != markerRowSha256(readWriteMarker)) {
+    throw failure('backup_prepared_source_changed')
+  }
+  const marker: StrictMarkerRow<typeof BACKUP_PREPARED_MARKER_NAME> = {
+    name: BACKUP_PREPARED_MARKER_NAME,
+    sourceSha256: backupPreparedSourceSha256(db, { details, completedAtMs: input.completedAtMs }),
+    completedAtMs: input.completedAtMs,
+    detailsJson,
+  }
+  db.prepare(`
+    INSERT INTO migration_markers(name, source_sha256, completed_at_ms, details_json)
+    VALUES (?, ?, ?, ?)
+  `).run(marker.name, marker.sourceSha256, marker.completedAtMs, marker.detailsJson)
+  const stored = verifyBackupPreparedMarker(db, readWriteMarker)
+  if (stored == null || stored.sourceSha256 != marker.sourceSha256 || stored.completedAtMs != marker.completedAtMs ||
+    stored.detailsJson != marker.detailsJson) throw failure('backup_prepared_source_changed')
+  return stored
+}
+
 const parseCutoverDetails = (detailsJson: string): CutoverDetailsV1 => {
   let parsed: unknown
   try { parsed = JSON.parse(detailsJson) } catch { throw failure('phase4_cutover_marker_invalid') }
@@ -546,6 +717,7 @@ export const verifySchema7SteadyState = (db: Database.Database): {
   rawMarker: RawLyricMarkerRow
   readWriteMarker: StrictMarkerRow<typeof READ_WRITE_MARKER_NAME>
   cutoverMarker: StrictMarkerRow<typeof CUTOVER_MARKER_NAME>
+  backupPreparedMarker: BackupPreparedMarkerV1 | null
 } => {
   verifyLedger(db, 7)
   verifyExactStructure(db, databaseSchema7Contract, explicitSchema7Indexes)
@@ -555,12 +727,21 @@ export const verifySchema7SteadyState = (db: Database.Database): {
   assertNoRemovedObjectReferences(db)
   const rawMarker = verifyRawMarker(db, 'schema7-historical')
   const readWriteMarker = verifyReadWriteMarker(db, rawMarker)
+  const preparedRow = readBackupPreparedMarker(db)
+  let backupPreparedMarker: BackupPreparedMarkerV1 | null = null
+  if (preparedRow != null) {
+    const details = parseBackupPreparedDetails(preparedRow.detailsJson)
+    if (details.readWriteMarkerSha256 != markerRowSha256(readWriteMarker)) {
+      throw failure('backup_prepared_source_changed')
+    }
+    backupPreparedMarker = Object.freeze({ ...preparedRow, details: Object.freeze({ ...details }) })
+  }
   const cutover = readCutoverMarker(db, readWriteMarker)
   const ledger7 = db.prepare('SELECT applied_at_ms AS appliedAtMs FROM schema_migrations WHERE version = 7').get() as { appliedAtMs: unknown } | undefined
   if (ledger7 == null || ledger7.appliedAtMs != cutover.marker.completedAtMs) {
     throw failure('phase4_cutover_marker_invalid')
   }
-  return { rawMarker, readWriteMarker, cutoverMarker: cutover.marker }
+  return { rawMarker, readWriteMarker, cutoverMarker: cutover.marker, backupPreparedMarker }
 }
 
 const editedRows = (db: Database.Database): string[][] => {

@@ -436,6 +436,30 @@ export const createStorageCoordinator = (
           return outcome
         }
 
+        let readCachePrerequisite = dependencies.getCachePhasePrerequisite
+        let initializePhase4 = dependencies.initializePhase4
+        let phase4: CachePhase4Result | undefined
+        if (database.preparedCutoverPending) {
+          const productionCache = readCachePrerequisite != null && initializePhase4 != null
+            ? null
+            : getProductionCacheLifecycle()
+          readCachePrerequisite ??= productionCache == null
+            ? undefined
+            : async() => productionCache.getCachePhasePrerequisite()
+          initializePhase4 ??= productionCache?.initializePhase4
+          if (readCachePrerequisite == null || initializePhase4 == null) {
+            throw errorWithCode('cache_phase3_prerequisite_invalid')
+          }
+          await readCachePrerequisite()
+          if (shutdownRequested) return startupCancelled()
+          const resumed = await initializePhase4()
+          if (!isValidPhase4Result(resumed) || resumed.schemaVersion != 7 || !resumed.typedOwnershipVerified) {
+            throw errorWithCode('cache_phase4_result_invalid')
+          }
+          phase4 = resumed
+          if (shutdownRequested) return startupCancelled()
+        }
+
         const migrationOutcome = await dependencies.runMigrationHooks(database, legacyData)
         if (shutdownRequested) return startupCancelled()
         if (migrationOutcome?.status == 'recovery') {
@@ -467,19 +491,24 @@ export const createStorageCoordinator = (
         const legacySourceState = legacyData.status == 'available' ? 'complete' : 'not-applicable'
         await runPhase3Gate(dependencies, legacySourceState, credentialHealth, activityEvidence)
         if (shutdownRequested) return startupCancelled()
-        const productionCache = dependencies.getCachePhasePrerequisite != null && dependencies.initializePhase4 != null
-          ? null
-          : getProductionCacheLifecycle()
-        const readCachePrerequisite = dependencies.getCachePhasePrerequisite ??
-          (productionCache == null ? undefined : async() => productionCache.getCachePhasePrerequisite())
-        const initializePhase4 = dependencies.initializePhase4 ?? productionCache?.initializePhase4
+        if (phase4 == null) {
+          const productionCache = readCachePrerequisite != null && initializePhase4 != null
+            ? null
+            : getProductionCacheLifecycle()
+          readCachePrerequisite ??= productionCache == null
+            ? undefined
+            : async() => productionCache.getCachePhasePrerequisite()
+          initializePhase4 ??= productionCache?.initializePhase4
+        }
         if (initializePhase4 != null && readCachePrerequisite == null) {
           throw errorWithCode('cache_phase3_prerequisite_invalid')
         }
-        const cachePrerequisite = await readCachePrerequisite?.()
-        if (shutdownRequested) return startupCancelled()
-        const phase4 = cachePrerequisite == null ? undefined : await initializePhase4?.()
-        if (shutdownRequested) return startupCancelled()
+        if (phase4 == null) {
+          const cachePrerequisite = await readCachePrerequisite?.()
+          if (shutdownRequested) return startupCancelled()
+          phase4 = cachePrerequisite == null ? undefined : await initializePhase4?.()
+          if (shutdownRequested) return startupCancelled()
+        }
         let acknowledgementToArm: (() => Promise<void>) | null = null
         if (phase4 != null) {
           if (!isValidPhase4Result(phase4)) {

@@ -305,7 +305,9 @@ describe('rollback-safe typed playback smoke', () => {
 })
 
 describe('Phase 3 startup ordering and sanitized inputs', () => {
-  const readyDb = { status: 'ready', existed: true, schemaVersion: 6, migratedVersions: [], backupPath: null }
+  const readyDb = {
+    status: 'ready', existed: true, schemaVersion: 6, migratedVersions: [], backupPath: null, preparedCutoverPending: false,
+  }
   const credentialCheck = { vaultReadable: true, profileRepositoryReadable: true, activePlaintextSources: [] }
 
   const dependencies = calls => ({

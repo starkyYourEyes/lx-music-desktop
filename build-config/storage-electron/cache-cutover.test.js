@@ -22,6 +22,20 @@ require.extensions['.ts'] = (module, filename) => {
 const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 const dbService = require('../../src/main/worker/dbService/db.ts')
 const cacheDb = require('../../src/main/worker/dbService/cacheDb.ts')
+const databaseBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
+
+/**
+ * Test-only aggregate assembled from the verified backup guard and persisted marker evidence.
+ * @typedef {{
+ *   backupBasename: string,
+ *   backupByteLength: number,
+ *   backupSha256: string,
+ *   completedAtMs: number,
+ *   path: string,
+ *   rawLyricsDeletedRows: number,
+ *   readWriteMarkerSha256: string,
+ * }} CacheCutoverFixtureResult
+ */
 
 const fixtures = []
 const modulePaths = [
@@ -140,6 +154,16 @@ const createSchema6Fixture = async(prefix = 'cache-cutover') => {
   assert.equal(result.status, 'ready')
   assert.equal(result.schemaVersion, 6)
   putPhase3Marker(dbService.getAppDB())
+  dbService.close()
+  const relaunched = await dbService.init({
+    dataPath: profileRoot,
+    cacheRoot,
+    backupsRoot,
+    previousShutdownWasClean: true,
+    targetSchemaVersion: 6,
+  })
+  assert.equal(relaunched.status, 'ready')
+  assert.equal(relaunched.schemaVersion, 6)
   return {
     fixture,
     profileRoot,
@@ -162,12 +186,148 @@ const loadPhase4 = () => require('../../src/main/worker/dbService/modules/phase4
 const loadRawMigration = () => require('../../src/main/migration/cache/rawLyrics.ts')
 const loadRawRepository = () => require('../../src/main/worker/dbService/modules/lyric/raw/repository.ts')
 
+let preparedFixture = null
+
+const listPreparedCandidates = () => fs.readdirSync(preparedFixture.backupsRoot)
+  .filter(name => /^lx\.data\.db\.pre-migration-v6-to-v7\.[a-f0-9]{32}\.backup$/.test(name))
+
+const readPreparedMarker = () => {
+  const row = markerRow(dbService.getAppDB(), 'legacy_cache_v1.backup_prepared')
+  assert.notEqual(row, null)
+  return { ...row, details: JSON.parse(row.detailsJson) }
+}
+
+const readPreparedArtifact = () => {
+  const marker = readPreparedMarker()
+  const artifactPath = path.join(preparedFixture.backupsRoot, marker.details.backupBasename)
+  return {
+    basename: marker.details.backupBasename,
+    byteLength: fs.statSync(artifactPath).size,
+    bytes: fs.readFileSync(artifactPath),
+    path: artifactPath,
+  }
+}
+
+const readPrefix = (filePath, byteLength) => fs.readFileSync(filePath).subarray(0, byteLength)
+
+const prepareExistingSchema6 = async(prefix = 'cache-cutover-prepared') => {
+  const paths = await createSchema6Fixture(prefix)
+  const db = dbService.getAppDB()
+  seedLyrics(db)
+  assert.equal((await cacheDb.openCacheDatabase()).status, 'created')
+  assert.equal((await loadRawMigration().migrateRawLyrics({ nowMs: 10 })).status, 'complete')
+  const cutover = require('../../src/main/migration/cache/cutover.ts')
+  assert.equal((await cutover.attestSchema6TypedOwnership(db, 20)).status, 'completed')
+  loadRawRepository().enterRawLyricCutoverPending()
+  preparedFixture = { ...paths, db }
+  return preparedFixture
+}
+
+const fixtureAggregate = advanced => {
+  const marker = readPreparedMarker()
+  const cutover = markerRow(dbService.getAppDB(), 'legacy_cache_v1.cutover')
+  const artifact = readPreparedArtifact()
+  const expectedSha256 = crypto.createHash('sha256').update(artifact.bytes).digest('hex')
+  const guard = databaseBackup.verifyRecordedOnlineBackup({
+    backupsRoot: preparedFixture.backupsRoot,
+    basename: marker.details.backupBasename,
+    expectedSha256,
+    expectedByteLength: artifact.byteLength,
+    expectedSourceSchemaVersion: 6,
+    nativeOptions: {},
+    verifier: backupDb => require('../../src/main/migration/cache/cutover.ts')
+      .verifyCutoverBackup(backupDb, marker.details.readWriteMarkerSha256),
+  })
+  try {
+    assert.equal(guard.path, advanced.backupPath)
+    return {
+      backupBasename: guard.basename,
+      backupByteLength: guard.byteLength,
+      backupSha256: guard.sha256,
+      completedAtMs: marker.completedAtMs,
+      path: guard.path,
+      rawLyricsDeletedRows: JSON.parse(cutover.detailsJson).rawLyricsDeletedRows,
+      readWriteMarkerSha256: marker.details.readWriteMarkerSha256,
+    }
+  } finally {
+    guard.close()
+  }
+}
+
+/** @returns {Promise<CacheCutoverFixtureResult>} */
+const advanceExistingSchema6 = async() => {
+  const advanced = await dbService.advanceAppDatabase({
+    targetSchemaVersion: 7,
+    backupsRoot: preparedFixture.backupsRoot,
+  })
+  return fixtureAggregate(advanced)
+}
+
+/** @returns {Promise<CacheCutoverFixtureResult>} */
+const advanceFixture = async({ events = [] } = {}) => {
+  await prepareExistingSchema6('cache-cutover-prepared-order')
+  const originalWriteSync = fs.writeSync
+  let observedBackupWrite = false
+  fs.writeSync = function(descriptor, buffer, ...args) {
+    if (!observedBackupWrite && Buffer.isBuffer(buffer) && readPreparedMarker() != null) {
+      observedBackupWrite = true
+      events.push('prepared-marker.commit', 'backup.write')
+    }
+    return originalWriteSync.call(this, descriptor, buffer, ...args)
+  }
+  try {
+    return await advanceExistingSchema6()
+  } finally {
+    fs.writeSync = originalWriteSync
+  }
+}
+
+/** @returns {Promise<CacheCutoverFixtureResult>} */
+const retryAdvance = async() => await advanceExistingSchema6()
+
+const failFirstAdvanceAfterBytes = async(bytesWritten, code) => {
+  await prepareExistingSchema6(`cache-cutover-prefix-${bytesWritten}`)
+  const originalWriteSync = fs.writeSync
+  let failed = false
+  fs.writeSync = function(descriptor, buffer, offset, length, position) {
+    if (!failed && Buffer.isBuffer(buffer) && markerRow(preparedFixture.db, 'legacy_cache_v1.backup_prepared') != null) {
+      failed = true
+      if (bytesWritten > 0) originalWriteSync.call(this, descriptor, buffer, offset, Math.min(length, bytesWritten), position)
+      throw Object.assign(new Error(code), { code })
+    }
+    return originalWriteSync.apply(this, arguments)
+  }
+  try {
+    await assert.rejects(advanceExistingSchema6(), error => error?.code == code || error?.message == 'artifact_verification_failed')
+  } finally {
+    fs.writeSync = originalWriteSync
+  }
+}
+
+const createPreparedPrefix = async() => await failFirstAdvanceAfterBytes(4096, 'ENOSPC')
+const mutatePreparedPrefixByte = () => {
+  const artifact = readPreparedArtifact()
+  const bytes = Buffer.from(artifact.bytes)
+  bytes[Math.min(128, bytes.length - 1)] ^= 0xff
+  fs.writeFileSync(artifact.path, bytes)
+}
+
+const crashAfterPreparedMarkerCommit = async({ bytesWritten }) =>
+  await failFirstAdvanceAfterBytes(bytesWritten, 'injected_after_prepared_marker')
+
+const mutateAuthoritativeRowOutOfBand = () => {
+  preparedFixture.db.prepare("UPDATE lyric SET text = ? WHERE id = 'edited-track'").run('out-of-band-change')
+}
+
+const restartAndRetryAdvance = async() => await retryAdvance()
+
 const closeServices = async() => {
   try { await cacheDb.closeCacheDatabase() } catch {}
   try { dbService.close() } catch {}
 }
 
 afterEach(async() => {
+  preparedFixture = null
   await closeServices()
   for (const fixture of fixtures.splice(0).reverse()) fixture.cleanup()
   for (const modulePath of modulePaths) {
@@ -347,17 +507,20 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
     assert.notEqual(cutoverMarker.sourceSha256, cutoverDetails.readWriteMarkerSha256)
     assert.equal(db.prepare('SELECT applied_at_ms AS appliedAtMs FROM schema_migrations WHERE version = 7').get().appliedAtMs, cutoverMarker.completedAtMs)
 
-    const backupName = `lx.data.db.pre-migration-v6-to-v7.${markerHash(readWriteMarker)}.backup`
+    const preparedMarker = markerRow(db, 'legacy_cache_v1.backup_prepared')
+    const preparedDetails = JSON.parse(preparedMarker.detailsJson)
+    assert.deepEqual(Object.keys(preparedDetails), [
+      'backupBasename', 'readWriteMarkerSha256', 'sourceSchemaVersion', 'version',
+    ])
+    assert.equal(preparedDetails.readWriteMarkerSha256, markerHash(readWriteMarker))
+    assert.equal(preparedDetails.sourceSchemaVersion, 6)
+    assert.equal(preparedDetails.version, 1)
+    const backupName = preparedDetails.backupBasename
+    assert.match(backupName, /^lx\.data\.db\.pre-migration-v6-to-v7\.[a-f0-9]{32}\.backup$/)
     const backupArtifacts = fs.readdirSync(paths.backupsRoot)
-    const stageName = backupArtifacts.find(name => /^\.lx-backup-[0-9a-f]{32}\.stage$/.test(name))
-    assert.equal(typeof stageName, 'string')
-    assert.deepEqual(backupArtifacts.sort(), [stageName, backupName].sort())
-    const stageStat = fs.lstatSync(path.join(paths.backupsRoot, stageName), { bigint: true })
+    assert.deepEqual(backupArtifacts, [backupName])
     const finalStat = fs.lstatSync(path.join(paths.backupsRoot, backupName), { bigint: true })
-    assert.equal(stageStat.nlink, 2n)
-    assert.equal(finalStat.nlink, 2n)
-    assert.equal(stageStat.dev, finalStat.dev)
-    assert.equal(stageStat.ino, finalStat.ino)
+    assert.equal(finalStat.nlink, 1n)
 
     const smokeResidue = await cacheDb.runCacheRead(cache => ({
       raw: cache.prepare("SELECT count(*) AS count FROM raw_lyric_groups WHERE provider = '__lx_phase4_smoke_v1__'").get().count,
@@ -499,75 +662,104 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
     })
   })
 
-  it('preserves schema 6 and a raced winner when backup publication loses the hard-link race', async() => {
-    const paths = await createSchema6Fixture('cache-cutover-backup-link-race')
-    const db = dbService.getAppDB()
-    seedLyrics(db)
-    const rawRepository = loadRawRepository()
-    const rawMigration = loadRawMigration()
-    const winnerBytes = Buffer.from('raced cutover backup winner must remain byte-identical')
-    const originalLinkSync = fs.linkSync
-    let sourceBytesBefore
-    let ledgerBefore
-    let markersBefore
-    let rawInventoryBefore
-    let rawRowCountBefore
-    let fallbackBefore
-    let winnerPath
-    let winnerIdentity
+  it('commits backup-prepared before the first backup byte and binds one unique basename', async() => {
+    const events = []
+    await advanceFixture({ events })
+    assert.deepEqual(events.slice(0, 2), ['prepared-marker.commit', 'backup.write'])
+    const marker = readPreparedMarker()
+    assert.match(marker.details.backupBasename, /^lx\.data\.db\.pre-migration-v6-to-v7\.[a-f0-9]{32}\.backup$/)
+  })
 
-    fs.linkSync = (sourcePath, destinationPath) => {
-      if (path.resolve(path.dirname(destinationPath)) == path.resolve(paths.backupsRoot)) {
-        sourceBytesBefore = fs.readFileSync(paths.databasePath)
-        ledgerBefore = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()
-        markersBefore = db.prepare(`
-          SELECT name, source_sha256 AS sourceSha256, completed_at_ms AS completedAtMs,
-            details_json AS detailsJson
-          FROM migration_markers ORDER BY name
-        `).all()
-        rawInventoryBefore = rawMigration.readAuthoritativeRawInventory(db)
-        rawRowCountBefore = rawMigration.countAuthoritativeRawRows(db)
-        fallbackBefore = rawRepository.getRawLyricFallbackState()
-        winnerPath = path.resolve(destinationPath)
-        fs.writeFileSync(winnerPath, winnerBytes, { flag: 'wx', mode: 0o600 })
-        winnerIdentity = fs.lstatSync(winnerPath, { bigint: true })
-      }
-      return originalLinkSync(sourcePath, destinationPath)
+  it('resumes an ENOSPC prefix only after exact prefix verification', async() => {
+    await failFirstAdvanceAfterBytes(4096, 'ENOSPC')
+    const first = readPreparedArtifact()
+    const second = await retryAdvance()
+    assert.equal(second.backupBasename, first.basename)
+    assert.equal(readPrefix(second.path, 4096).equals(first.bytes), true)
+    assert.equal(listPreparedCandidates().length, 1)
+  })
+
+  it('retains and blocks a mismatched marker-bound prefix without allocating another attempt', async() => {
+    await createPreparedPrefix()
+    mutatePreparedPrefixByte()
+    await assert.rejects(retryAdvance(), /backup_prepared_conflict/)
+    assert.equal(listPreparedCandidates().length, 1)
+  })
+
+  it('rejects changed authoritative state before resuming even with a zero-length prefix', async() => {
+    await crashAfterPreparedMarkerCommit({ bytesWritten: 0 })
+    mutateAuthoritativeRowOutOfBand()
+    await assert.rejects(restartAndRetryAdvance(), /backup_prepared_source_changed/)
+    assert.equal(readPreparedArtifact().byteLength, 0)
+    assert.equal(listPreparedCandidates().length, 1)
+  })
+
+  it('rejects a source mutation beyond an existing short prefix before serialization or append', async() => {
+    await createPreparedPrefix()
+    const first = readPreparedArtifact()
+    mutateAuthoritativeRowOutOfBand()
+    await assert.rejects(retryAdvance(), /backup_prepared_source_changed/)
+    assert.equal(readPreparedArtifact().bytes.equals(first.bytes), true)
+    assert.equal(listPreparedCandidates().length, 1)
+  })
+
+  it('retains an unreferenced zero-byte artifact when the prepared-marker commit fails', async() => {
+    await prepareExistingSchema6('cache-cutover-prepared-commit-failure')
+    const db = preparedFixture.db
+    const originalPrepare = db.prepare
+    db.prepare = function(sql) {
+      const statement = originalPrepare.call(this, sql)
+      if (!String(sql).includes('INSERT INTO migration_markers')) return statement
+      return new Proxy(statement, {
+        get(target, property, receiver) {
+          if (property != 'run') return Reflect.get(target, property, receiver)
+          return (...args) => {
+            if (args[0] == 'legacy_cache_v1.backup_prepared') {
+              throw Object.assign(new Error('prepared-marker-commit-failed'), { code: 'prepared-marker-commit-failed' })
+            }
+            return target.run(...args)
+          }
+        },
+      })
     }
-
     try {
-      await assert.rejects(
-        loadPhase4().initializePhase4(),
-        error => error?.code == 'database_advance_backup_invalid',
-      )
+      await assert.rejects(advanceExistingSchema6(), /prepared-marker-commit-failed/)
     } finally {
-      fs.linkSync = originalLinkSync
+      db.prepare = originalPrepare
+    }
+    assert.equal(markerRow(db, 'legacy_cache_v1.backup_prepared'), null)
+    const artifacts = fs.readdirSync(preparedFixture.backupsRoot)
+    assert.equal(artifacts.length, 1)
+    assert.equal(fs.statSync(path.join(preparedFixture.backupsRoot, artifacts[0])).size, 0)
+  })
+
+  it('reuses one prepared attempt across write verification and cutover failures', async() => {
+    await failFirstAdvanceAfterBytes(4096, 'ENOSPC')
+    const basename = readPreparedMarker().details.backupBasename
+    const cutover = require('../../src/main/migration/cache/cutover.ts')
+    const originalVerifier = cutover.verifyCutoverBackup
+    cutover.verifyCutoverBackup = () => { throw new Error('injected-backup-verification') }
+    try {
+      await assert.rejects(retryAdvance(), /injected-backup-verification|backup_verification_failed/)
+    } finally {
+      cutover.verifyCutoverBackup = originalVerifier
     }
 
-    assert.equal(typeof winnerPath, 'string')
-    assert.equal(dbService.getDatabaseInitialization().schemaVersion, 6)
-    assert.equal(db.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value, '6')
-    assert.deepEqual(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all(), ledgerBefore)
-    assert.deepEqual(db.prepare(`
-      SELECT name, source_sha256 AS sourceSha256, completed_at_ms AS completedAtMs,
-        details_json AS detailsJson
-      FROM migration_markers ORDER BY name
-    `).all(), markersBefore)
-    assert.deepEqual(rawMigration.readAuthoritativeRawInventory(db), rawInventoryBefore)
-    assert.equal(rawMigration.countAuthoritativeRawRows(db), rawRowCountBefore)
-    assert.equal(rawRepository.getRawLyricFallbackState(), fallbackBefore)
-    assert.equal(fallbackBefore, 'schema6-fallback')
-    assert.deepEqual(fs.readFileSync(paths.databasePath), sourceBytesBefore)
-    assert.equal(markerRow(db, 'legacy_cache_v1.cutover'), null)
-    assert.equal(fs.readFileSync(winnerPath).equals(winnerBytes), true)
-    const winnerAfter = fs.lstatSync(winnerPath, { bigint: true })
-    assert.equal(winnerAfter.dev, winnerIdentity.dev)
-    assert.equal(winnerAfter.ino, winnerIdentity.ino)
-    const backupArtifacts = fs.readdirSync(paths.backupsRoot)
-    const stageName = backupArtifacts.find(name => /^\.lx-backup-[0-9a-f]{32}\.stage$/.test(name))
-    assert.equal(typeof stageName, 'string')
-    assert.deepEqual(backupArtifacts.sort(), [stageName, path.basename(winnerPath)].sort())
-    assert.equal(fs.lstatSync(path.join(paths.backupsRoot, stageName), { bigint: true }).nlink, 1n)
+    const migration7 = require('../../src/main/worker/dbService/migrations/0007_cache_cleanup.ts').migration7
+    const originalUp = migration7.up
+    migration7.up = function(database, context) {
+      originalUp.call(this, database, context)
+      throw new Error('injected-cutover-failure')
+    }
+    try {
+      await assert.rejects(retryAdvance(), /injected-cutover-failure/)
+    } finally {
+      migration7.up = originalUp
+    }
+
+    const completed = await retryAdvance()
+    assert.equal(completed.backupBasename, basename)
+    assert.deepEqual(listPreparedCandidates(), [basename])
   })
 
   it('reuses immutable attestation after a pre-migration failure and rolls migration 7 back before one retry', async() => {
@@ -601,7 +793,7 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
 
     assert.deepEqual(await phase4.initializePhase4(), { schemaVersion: 7, typedOwnershipVerified: true })
     assert.equal(attempts, 1)
-    assert.equal(fs.readdirSync(paths.backupsRoot).length, 2)
+    assert.equal(fs.readdirSync(paths.backupsRoot).length, 1)
     assert.deepEqual(markerRow(db, 'legacy_cache_v1.read_write_verified'), readWriteBefore)
   })
 
@@ -674,7 +866,8 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
     const advanced = await first
     assert.equal(advanced.schemaVersion, 7)
     assert.equal(dbService.getAppDB(), db)
-    assert.equal(fs.readdirSync(paths.backupsRoot).length, 2)
+    assert.equal(fs.readdirSync(paths.backupsRoot).length, 1)
+    assert.match(readPreparedMarker().details.backupBasename, /^lx\.data\.db\.pre-migration-v6-to-v7\.[a-f0-9]{32}\.backup$/)
   })
 
   it('relaunches exact schema 7 without replaying migration or backup and reruns live typed smoke', async() => {

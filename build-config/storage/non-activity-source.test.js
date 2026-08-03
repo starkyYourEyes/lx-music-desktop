@@ -215,7 +215,7 @@ describe('legacy non-activity source', () => {
     const storageCoordinator = createStorageCoordinator({
       runState: { begin: async() => true, markClean: async() => {} },
       preflightLegacyData: () => readLegacyDataSource({ profileRoot, legacyRoot }),
-      initDatabase: async() => { initDatabaseCalls++; return { status: 'ready', schemaVersion: 5, existed: false, migratedVersions: [], backupPath: null } },
+      initDatabase: async() => { initDatabaseCalls++; return { status: 'ready', schemaVersion: 5, existed: false, migratedVersions: [], backupPath: null, preparedCutoverPending: false } },
       closeDatabase: async() => {},
       runMigrationHooks: async() => { runMigrationCalls++ },
       checkCredentials: async() => ({ vaultReadable: true, profileRepositoryReadable: true, activePlaintextSources: [] }),

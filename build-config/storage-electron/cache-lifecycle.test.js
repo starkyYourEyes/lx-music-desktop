@@ -138,7 +138,7 @@ const createProductionCoordinator = (overrides = {}) => {
   return createStorageCoordinator({
     runState: { begin: async() => true, markClean: async() => {} },
     initDatabase: async() => ({
-      status: 'ready', existed: true, schemaVersion: 6, migratedVersions: [], backupPath: null,
+      status: 'ready', existed: true, schemaVersion: 6, migratedVersions: [], backupPath: null, preparedCutoverPending: false,
     }),
     closeDatabase: async() => {},
     runMigrationHooks: async() => undefined,
@@ -701,7 +701,7 @@ describe('serialized cache lifecycle', () => {
     const coordinator = createStorageCoordinator({
       runState: { begin: async() => true, markClean: async() => {} },
       initDatabase: async() => ({
-        status: 'ready', existed: true, schemaVersion: 6, migratedVersions: [], backupPath: null,
+        status: 'ready', existed: true, schemaVersion: 6, migratedVersions: [], backupPath: null, preparedCutoverPending: false,
       }),
       closeDatabase: async() => {},
       runMigrationHooks: async() => undefined,
@@ -750,7 +750,7 @@ describe('serialized cache lifecycle', () => {
     const coordinator = createStorageCoordinator({
       runState: { begin: async() => true, markClean: async() => {} },
       initDatabase: async() => ({
-        status: 'ready', existed: true, schemaVersion: 6, migratedVersions: [], backupPath: null,
+        status: 'ready', existed: true, schemaVersion: 6, migratedVersions: [], backupPath: null, preparedCutoverPending: false,
       }),
       closeDatabase: async() => {},
       runMigrationHooks: async() => undefined,

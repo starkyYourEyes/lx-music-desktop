@@ -2,7 +2,9 @@ import Database from 'better-sqlite3'
 import fs from 'node:fs'
 import path from 'node:path'
 import {
+  closeOnlineBackupReservation,
   completeOnlineBackup,
+  reopenPreparedOnlineBackup,
   reserveOnlineBackup,
   verifyLegacyOnlineBackup,
   type OnlineBackupVerifier,
@@ -32,14 +34,17 @@ export type DatabaseRecoveryReason =
   | 'quick_check_failed'
   | 'foreign_key_check_failed'
 
+export interface DatabaseReadyStartupResult {
+  status: 'ready'
+  existed: boolean
+  schemaVersion: number
+  migratedVersions: number[]
+  backupPath: string | null
+  preparedCutoverPending: boolean
+}
+
 export type DatabaseStartupResult =
-  | {
-    status: 'ready'
-    existed: boolean
-    schemaVersion: number
-    migratedVersions: number[]
-    backupPath: string | null
-  }
+  | DatabaseReadyStartupResult
   | {
     status: 'recovery'
     reason: DatabaseRecoveryReason
@@ -474,7 +479,14 @@ const initializeDatabase = async(
       schemaVersion: 7,
       existedBeforeOpen: existed,
     })
-    return { status: 'ready', existed, schemaVersion: 7, migratedVersions: [], backupPath: null }
+    return {
+      status: 'ready',
+      existed,
+      schemaVersion: 7,
+      migratedVersions: [],
+      backupPath: null,
+      preparedCutoverPending: false,
+    }
   }
 
   let pending
@@ -597,6 +609,16 @@ const initializeDatabase = async(
     )
   }
 
+  let preparedCutoverPending = false
+  // A prepared marker is itself startup state: verify it before application code can observe schema 6.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the cache cutover loading boundary.
+  const cutover = require('../../migration/cache/cutover') as typeof CacheCutover
+  if (cutover.readBackupPreparedMarker(localWriteDb) != null) {
+    const prerequisites = cutover.verifySchema6CutoverPrerequisites(localWriteDb)
+    cutover.verifyBackupPreparedMarker(localWriteDb, prerequisites.readWriteMarker)
+    preparedCutoverPending = true
+  }
+
   writeDb = localWriteDb
   initializingDb = null
   recoveryDb = null
@@ -608,7 +630,7 @@ const initializeDatabase = async(
     schemaVersion: schemaVersion as 6,
     existedBeforeOpen: existed,
   })
-  return { status: 'ready', existed, schemaVersion, migratedVersions, backupPath }
+  return { status: 'ready', existed, schemaVersion, migratedVersions, backupPath, preparedCutoverPending }
 }
 
 export const init = async(options: DatabaseInitOptions): Promise<DatabaseStartupResult> => {
@@ -684,45 +706,51 @@ export const getDatabaseInitialization = (): Readonly<{
   })
 }
 
-const backupPathFor = (backupsRoot: string, readWriteMarkerSha256: string): string => resolveContainedPath(
-  backupsRoot,
-  `lx.data.db.pre-migration-v6-to-v7.${readWriteMarkerSha256}.backup`,
-  path,
-)
-
 const cutoverBackupVerifier = (readWriteMarkerSha256: string): OnlineBackupVerifier => backupDb => {
   // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the cache cutover loading boundary.
   const cutover = require('../../migration/cache/cutover') as typeof CacheCutover
   cutover.verifyCutoverBackup(backupDb, readWriteMarkerSha256)
 }
 
-const verifyCutoverBackupFile = (
-  backupsRoot: string,
-  backupPath: string,
-  readWriteMarkerSha256: string,
-  nativeOptions: { nativeBinding?: string },
-): void => {
-  try {
-    if (path.resolve(path.dirname(backupPath)) != path.resolve(backupsRoot)) {
-      throw createDatabaseError('database_advance_backup_invalid')
-    }
-    verifyLegacyOnlineBackup(backupPath, nativeOptions, cutoverBackupVerifier(readWriteMarkerSha256))
-  } catch {
-    throw createDatabaseError('database_advance_backup_invalid')
-  }
-}
-
-const ensureCutoverBackup = (
+const prepareCutoverBackup = (
   db: Database.Database,
   backupsRoot: string,
-  readWriteMarkerSha256: string,
+  readWriteMarker: CacheCutover.StrictMarkerRow<typeof CacheCutover.READ_WRITE_MARKER_NAME>,
 ): VerifiedOnlineBackupGuard => {
   const nativeOptions = getNativeOptions()
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the cache cutover loading boundary.
+  const cutover = require('../../migration/cache/cutover') as typeof CacheCutover
+  const readWriteMarkerSha256 = cutover.markerRowSha256(readWriteMarker)
+  const existing = cutover.verifyBackupPreparedMarker(db, readWriteMarker)
+  if (existing != null) {
+    return reopenPreparedOnlineBackup(db, {
+      backupsRoot,
+      marker: existing,
+      nativeOptions,
+      verifier: cutoverBackupVerifier(readWriteMarkerSha256),
+    })
+  }
+
   const reservation = reserveOnlineBackup({
     backupsRoot,
-    basenamePrefix: `lx.data.db.pre-migration-v6-to-v7.${readWriteMarkerSha256}`,
+    basenamePrefix: 'lx.data.db.pre-migration-v6-to-v7',
     sourceSchemaVersion: 6,
   })
+  const completedAtMs = Date.now()
+  try {
+    db.transaction(() => cutover.writeBackupPreparedMarker(db, {
+      details: {
+        backupBasename: reservation.basename,
+        readWriteMarkerSha256,
+        sourceSchemaVersion: 6,
+        version: 1,
+      },
+      completedAtMs,
+    }))()
+  } catch (error) {
+    try { closeOnlineBackupReservation(reservation) } catch {}
+    throw error
+  }
   return completeOnlineBackup(db, reservation, nativeOptions, cutoverBackupVerifier(readWriteMarkerSha256))
 }
 
@@ -766,6 +794,7 @@ const publishSchema7 = (
     schemaVersion: 7,
     migratedVersions,
     backupPath,
+    preparedCutoverPending: false,
   })
   enterRawLyricSchema7CacheOnly()
   health = { status: 'ready', readOnly: false, schemaVersion: 7 }
@@ -783,15 +812,20 @@ const performDatabaseAdvance = async(
   const cutover = require('../../migration/cache/cutover') as typeof CacheCutover
   const currentVersion = getSchemaVersion(db)
   if (currentVersion == 7) {
-    const { readWriteMarker } = cutover.verifySchema7SteadyState(db)
-    const publishedBackup = cachedStartupResult?.status == 'ready' ? cachedStartupResult.backupPath : null
-    const candidate = publishedBackup ?? backupPathFor(
-      initialization.backupsRoot,
-      cutover.markerRowSha256(readWriteMarker),
-    )
-    const backupPath = pathExists(candidate) ? candidate : null
+    const { readWriteMarker, backupPreparedMarker } = cutover.verifySchema7SteadyState(db)
+    const backupPath = backupPreparedMarker == null
+      ? null
+      : resolveContainedPath(initialization.backupsRoot, backupPreparedMarker.details.backupBasename, path)
     if (backupPath != null) {
-      verifyCutoverBackupFile(initialization.backupsRoot, backupPath, cutover.markerRowSha256(readWriteMarker), getNativeOptions())
+      try {
+        verifyLegacyOnlineBackup(
+          backupPath,
+          getNativeOptions(),
+          cutoverBackupVerifier(cutover.markerRowSha256(readWriteMarker)),
+        )
+      } catch {
+        throw createDatabaseError('database_advance_backup_invalid')
+      }
     }
     return publishSchema7(initialization, backupPath, [])
   }
@@ -800,7 +834,7 @@ const performDatabaseAdvance = async(
   const prerequisites = cutover.verifySchema6CutoverPrerequisites(db)
   const readWriteMarkerSha256 = cutover.markerRowSha256(prerequisites.readWriteMarker)
   const backupGuard = initialization.existedBeforeOpen
-    ? ensureCutoverBackup(db, initialization.backupsRoot, readWriteMarkerSha256)
+    ? prepareCutoverBackup(db, initialization.backupsRoot, prerequisites.readWriteMarker)
     : null
   const backupPath = backupGuard?.path ?? null
   if (generation != lifecycleGeneration || writeDb != db || health.status != 'ready') {
@@ -813,6 +847,7 @@ const performDatabaseAdvance = async(
     try { backupGuard?.close() } catch {}
     throw createDatabaseError('database_advance_schema_invalid')
   }
+  if (backupGuard != null) cutover.verifyBackupPreparedMarker(db, refreshed.readWriteMarker)
 
   enterRawLyricCutoverPending()
   try {

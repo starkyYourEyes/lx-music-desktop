@@ -106,6 +106,7 @@ const readyResult = {
   schemaVersion: 3,
   migratedVersions: [],
   backupPath: null,
+  preparedCutoverPending: false,
 }
 
 const recoveryResult = {
@@ -326,6 +327,49 @@ describe('portable bootstrap sequencing', () => {
 })
 
 describe('storage startup coordinator', () => {
+  it('resumes a prepared cutover before migration playback credential or phase-3 mutation hooks', async() => {
+    const { calls, deps } = createDeps({
+      initDatabase: async() => {
+        calls.push('db:init')
+        return { ...readyResult, schemaVersion: 6, preparedCutoverPending: true }
+      },
+      getCachePhasePrerequisite: async() => {
+        calls.push('cache:prerequisite')
+        return {
+          version: 1,
+          markerName: 'legacy_data_v1.cross_artifact_complete',
+          sourceSha256: 'f'.repeat(64),
+          completedAtMs: 1,
+        }
+      },
+      initializePhase4: async() => {
+        calls.push('cache:initialize')
+        return { schemaVersion: 7, typedOwnershipVerified: true }
+      },
+      runMigrationHooks: async() => { calls.push('migration-hooks') },
+      runPlaybackActivityMigration: async() => {
+        calls.push('playback-migration')
+        return { sourceState: 'not-applicable' }
+      },
+      checkCredentials: async() => {
+        calls.push('credentials:check')
+        return { vaultReadable: true, profileRepositoryReadable: true, activePlaintextSources: [] }
+      },
+      interruptStalePlaybackSessions: async() => {
+        calls.push('phase3:interrupt')
+        return 0
+      },
+    })
+
+    assert.deepEqual(await createCoordinator(deps).start(), { status: 'ready', schemaVersion: 7 })
+    for (const mutation of ['migration-hooks', 'playback-migration', 'credentials:check', 'phase3:interrupt']) {
+      assert.ok(calls.indexOf('cache:prerequisite') < calls.indexOf(mutation), mutation)
+      assert.ok(calls.indexOf('cache:initialize') < calls.indexOf(mutation), mutation)
+    }
+    assert.equal(calls.filter(call => call == 'cache:prerequisite').length, 1)
+    assert.equal(calls.filter(call => call == 'cache:initialize').length, 1)
+  })
+
   it('rejects invalid raw worker markers before Phase 4 can mutate the app database', async() => {
     if (!supportsWorkerDatabase) return runElectronChild()
     const valid = cacheMarker(cacheChecks())

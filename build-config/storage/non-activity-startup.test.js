@@ -165,7 +165,7 @@ const createDependencies = (calls, overrides = {}) => ({
   preflightLegacyData: async() => ({ status: 'absent' }),
   initDatabase: async() => {
     calls.push('database:init')
-    return { status: 'ready', existed: true, schemaVersion: 5, migratedVersions: [], backupPath: null }
+    return { status: 'ready', existed: true, schemaVersion: 5, migratedVersions: [], backupPath: null, preparedCutoverPending: false }
   },
   closeDatabase: async() => {},
   runMigrationHooks: async() => { calls.push('migration:run') },

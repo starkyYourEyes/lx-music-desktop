@@ -225,7 +225,7 @@ const createCoordinatorDependencies = (checkCredentials, runMigrationHooks = asy
     },
     initDatabase: async() => {
       calls.push('database:init')
-      return { status: 'ready', existed: true, schemaVersion: 4, migratedVersions: [], backupPath: null }
+      return { status: 'ready', existed: true, schemaVersion: 4, migratedVersions: [], backupPath: null, preparedCutoverPending: false }
     },
     closeDatabase: async() => { calls.push('database:close') },
     runMigrationHooks: async result => {
@@ -804,7 +804,7 @@ describe('credential startup gate', () => {
     }), runMigrationHooks)
     deps.initDatabase = async() => {
       calls.push('database:init')
-      return { status: 'ready', existed: false, schemaVersion: 4, migratedVersions: [], backupPath: null }
+      return { status: 'ready', existed: false, schemaVersion: 4, migratedVersions: [], backupPath: null, preparedCutoverPending: false }
     }
 
     assert.deepEqual(await createStorageCoordinator(deps).start(), {

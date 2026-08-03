@@ -683,7 +683,9 @@ describe('legacy playback activity migration', () => {
     const coordinator = createStorageCoordinator({
       runState: { begin: async() => true, markClean: async() => {} },
       preflightLegacyData: async() => ({ status: 'absent' }),
-      initDatabase: async() => ({ status: 'ready', schemaVersion: 6, existed: true, databasePath: 'test' }),
+      initDatabase: async() => ({
+        status: 'ready', schemaVersion: 6, existed: true, databasePath: 'test', preparedCutoverPending: false,
+      }),
       closeDatabase: () => {},
       runMigrationHooks: async() => { calls.push('phase2-migrations') },
       runPlaybackActivityMigration: async() => { calls.push('activity-migration') },

@@ -18,6 +18,7 @@ import {
   type DirectDirectoryGuard,
   type NodeIdentity,
 } from '../../storage/directDirectory'
+import type { BackupPreparedMarkerV1 } from '../../migration/cache/cutover'
 
 export type OnlineBackupVerifier = (db: Database.Database) => void
 
@@ -63,6 +64,7 @@ interface LegacyGuardMetadata {
 const onlineReservations = new WeakMap<OnlineBackupReservation, OnlineReservationMetadata>()
 const recordedGuards = new WeakMap<VerifiedOnlineBackupGuard, RecordedGuardMetadata>()
 const SHA256_PATTERN = /^[0-9a-f]{64}$/
+const PREPARED_BACKUP_BASENAME_PATTERN = /^lx\.data\.db\.pre-migration-v6-to-v7\.[a-f0-9]{32}\.backup$/
 const MAXIMUM_CHUNK_BYTES = 1024 * 1024
 const NO_FOLLOW = fs.constants.O_NOFOLLOW ?? 0
 const SQLITE_SIDECAR_SUFFIXES = ['-wal', '-shm', '-journal'] as const
@@ -546,6 +548,148 @@ export function completeOnlineBackup(
       closeOnlineBackupReservation(reservation)
     } catch {}
     throw error
+  }
+}
+
+export function reopenPreparedOnlineBackup(
+  db: Database.Database,
+  input: {
+    backupsRoot: string
+    marker: BackupPreparedMarkerV1
+    nativeOptions: { nativeBinding?: string }
+    verifier: OnlineBackupVerifier
+  },
+): VerifiedOnlineBackupGuard {
+  if (input == null || typeof input != 'object' || typeof input.backupsRoot != 'string' ||
+    input.marker == null || typeof input.marker != 'object' || input.marker.details == null ||
+    typeof input.marker.details.backupBasename != 'string' ||
+    !PREPARED_BACKUP_BASENAME_PATTERN.test(input.marker.details.backupBasename) ||
+    input.marker.details.sourceSchemaVersion != 6 || typeof input.verifier != 'function') {
+    throw failure('backup_prepared_conflict')
+  }
+
+  const root = validateDirectDirectory(path.resolve(input.backupsRoot))
+  const basename = input.marker.details.backupBasename
+  const filePath = path.join(root.path, basename)
+  let readDescriptor: number | null = null
+  let writeDescriptor: number | null = null
+  let finalDescriptor: number | null = null
+  let keepRoot = false
+  try {
+    revalidateDirectDirectory(root)
+    readDescriptor = fs.openSync(filePath, fs.constants.O_RDONLY | NO_FOLLOW)
+    const initialStat = fs.fstatSync(readDescriptor, { bigint: true })
+    const initialIdentity = identityOf(initialStat)
+    revalidateDirectDirectory(root)
+    const pathStat = fs.lstatSync(filePath, { bigint: true })
+    if (!initialStat.isFile() || !pathStat.isFile() || pathStat.isSymbolicLink() ||
+      initialStat.nlink != 1n || pathStat.nlink != 1n || !sameIdentity(initialIdentity, identityOf(pathStat)) ||
+      initialStat.size < 0n || initialStat.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw failure('backup_prepared_conflict')
+    }
+
+    const snapshot = db.serialize()
+    if (!Buffer.isBuffer(snapshot)) throw failure('backup_snapshot_invalid')
+    const artifactBytes = standaloneSqliteBytes(snapshot)
+    const existingLength = Number(initialStat.size)
+    if (existingLength > artifactBytes.length) throw failure('backup_prepared_conflict')
+    const chunk = Buffer.allocUnsafe(Math.min(MAXIMUM_CHUNK_BYTES, Math.max(existingLength, 1)))
+    let compared = 0
+    while (compared < existingLength) {
+      const count = fs.readSync(
+        readDescriptor,
+        chunk,
+        0,
+        Math.min(chunk.length, existingLength - compared),
+        compared,
+      )
+      if (!Number.isSafeInteger(count) || count <= 0 ||
+        !chunk.subarray(0, count).equals(artifactBytes.subarray(compared, compared + count))) {
+        throw failure('backup_prepared_conflict')
+      }
+      compared += count
+    }
+    if (fs.readSync(readDescriptor, chunk, 0, 1, existingLength) != 0) throw failure('backup_prepared_conflict')
+    fs.closeSync(readDescriptor)
+    readDescriptor = null
+
+    if (existingLength < artifactBytes.length) {
+      revalidateDirectDirectory(root)
+      writeDescriptor = fs.openSync(filePath, fs.constants.O_WRONLY | NO_FOLLOW)
+      const writeStat = fs.fstatSync(writeDescriptor, { bigint: true })
+      revalidateDirectDirectory(root)
+      const currentPathStat = fs.lstatSync(filePath, { bigint: true })
+      if (!writeStat.isFile() || !currentPathStat.isFile() || currentPathStat.isSymbolicLink() ||
+        writeStat.nlink != 1n || currentPathStat.nlink != 1n || writeStat.size != BigInt(existingLength) ||
+        !sameIdentity(identityOf(writeStat), initialIdentity) || !sameIdentity(identityOf(currentPathStat), initialIdentity)) {
+        throw failure('backup_prepared_conflict')
+      }
+      let writtenAt = existingLength
+      while (writtenAt < artifactBytes.length) {
+        const count = fs.writeSync(
+          writeDescriptor,
+          artifactBytes,
+          writtenAt,
+          Math.min(MAXIMUM_CHUNK_BYTES, artifactBytes.length - writtenAt),
+          writtenAt,
+        )
+        if (!Number.isSafeInteger(count) || count <= 0) throw failure('backup_prepared_conflict')
+        writtenAt += count
+      }
+      fs.fsyncSync(writeDescriptor)
+      fs.closeSync(writeDescriptor)
+      writeDescriptor = null
+    }
+
+    revalidateDirectDirectory(root)
+    finalDescriptor = fs.openSync(filePath, fs.constants.O_RDONLY | NO_FOLLOW)
+    const finalStat = fs.fstatSync(finalDescriptor, { bigint: true })
+    const expectedByteLength = artifactBytes.length
+    const expectedSha256 = crypto.createHash('sha256').update(artifactBytes).digest('hex')
+    const metadata: RecordedGuardMetadata = {
+      root,
+      descriptor: finalDescriptor,
+      identity: initialIdentity,
+      expectedSha256,
+      expectedByteLength,
+      closed: false,
+    }
+    validateRecordedIdentity(filePath, metadata)
+    if (finalStat.size != BigInt(expectedByteLength)) throw failure('backup_prepared_conflict')
+    assertStandaloneDescriptor(finalDescriptor)
+    verifySqlite(
+      filePath,
+      6,
+      input.nativeOptions,
+      input.verifier,
+      () => { validateRecordedIdentity(filePath, metadata) },
+    )
+    const guard: VerifiedOnlineBackupGuard = Object.freeze({
+      path: filePath,
+      basename,
+      sha256: expectedSha256,
+      byteLength: expectedByteLength,
+      sourceSchemaVersion: 6,
+      revalidate: () => { validateRecordedIdentity(filePath, metadata) },
+      close: () => { closeRecordedGuard(guard) },
+    })
+    recordedGuards.set(guard, metadata)
+    finalDescriptor = null
+    keepRoot = true
+    return guard
+  } finally {
+    if (readDescriptor != null) {
+      try { fs.closeSync(readDescriptor) } catch {}
+    }
+    if (writeDescriptor != null) {
+      try { fs.closeSync(writeDescriptor) } catch {}
+    }
+    if (finalDescriptor != null) {
+      try { fs.closeSync(finalDescriptor) } catch {}
+    }
+    if (!keepRoot) {
+      try { closeDirectDirectory(root) } catch {}
+    }
   }
 }
 

@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import {
   closeDirectDirectory,
+  revalidateDirectDirectory,
   validateDirectDirectory,
   type DirectDirectoryGuard,
   type NodeIdentity,
@@ -631,11 +632,45 @@ export const createThemeAssetManager = (input: {
     })
   }
 
+  const revalidateLegacyTarget = async(input: {
+    root: DirectDirectoryGuard
+    targetRoot: DirectDirectoryGuard
+    targetPath: string
+    identity: FileIdentity
+    descriptor?: Awaited<ReturnType<typeof fs.open>>
+  }): Promise<void> => {
+    try {
+      revalidateDirectDirectory(input.root)
+      revalidateDirectDirectory(input.targetRoot)
+      if (!samePathIdentity(input.root.identity, input.targetRoot.identity)) {
+        throw new Error('theme_asset_migration_conflict')
+      }
+      assertDirectFilePath(input.targetRoot.path, input.targetPath, 'theme_asset_migration_conflict')
+      if (input.descriptor != null) {
+        await verifyDescriptorPath(
+          input.descriptor,
+          input.identity,
+          input.targetPath,
+          'theme_asset_migration_conflict',
+        )
+      } else {
+        const target = await inspect(input.targetPath)
+        if (target.isSymbolicLink() || !target.isFile() || target.nlink != 1n ||
+          !sameFile(identityOf(target), input.identity)) throw new Error('theme_asset_migration_conflict')
+      }
+      revalidateDirectDirectory(input.targetRoot)
+      revalidateDirectDirectory(input.root)
+    } catch {
+      throw new Error('theme_asset_migration_conflict')
+    }
+  }
+
   const installLegacy = async(fileName: string, bytes: Buffer): Promise<void> => {
     await ensureAssetRoot()
     const targetPath = path.join(assetRoot, fileName)
     assertDirectFilePath(assetRoot, targetPath, 'theme_asset_migration_conflict')
     const root = openRootGuard(assetRoot, assetRootIdentity!, 'theme_asset_migration_conflict')
+    let targetRoot: DirectDirectoryGuard | null = null
     let descriptor: Awaited<ReturnType<typeof fs.open>> | null = null
     let createdIdentity: NodeIdentity | null = null
     try {
@@ -643,27 +678,49 @@ export const createThemeAssetManager = (input: {
         descriptor = await fs.open(targetPath, 'wx', 0o600)
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code != 'EEXIST') throw error
+        targetRoot = validateDirectDirectory(assetRoot)
         const existing = await inspect(targetPath)
         if (existing.isSymbolicLink() || !existing.isFile() || existing.nlink != 1n) {
           throw new Error('theme_asset_migration_conflict')
         }
+        const existingIdentity = identityOf(existing)
+        await revalidateLegacyTarget({ root, targetRoot, targetPath, identity: existingIdentity })
         await readOwnedPayload(
           targetPath,
-          identityOf(existing),
+          existingIdentity,
           sha256(bytes),
           'theme_asset_migration_conflict',
         )
+        await revalidateLegacyTarget({ root, targetRoot, targetPath, identity: existingIdentity })
+        await revalidateLegacyTarget({ root, targetRoot, targetPath, identity: existingIdentity })
         return
       }
       const opened = await descriptor.stat({ bigint: true })
       if (!opened.isFile() || opened.nlink != 1n) throw new Error('theme_asset_migration_conflict')
-      createdIdentity = identityOf(opened)
+      const openedIdentity = identityOf(opened)
+      createdIdentity = openedIdentity
+      targetRoot = validateDirectDirectory(assetRoot)
+      await revalidateLegacyTarget({
+        root,
+        targetRoot,
+        targetPath,
+        identity: openedIdentity,
+        descriptor,
+      })
       await descriptor.writeFile(bytes)
       await descriptor.sync()
       const written = await descriptor.stat({ bigint: true })
-      if (!written.isFile() || written.nlink != 1n || !sameNode(identityOf(written), createdIdentity)) {
+      const writtenIdentity = identityOf(written)
+      if (!written.isFile() || written.nlink != 1n || !sameNode(writtenIdentity, createdIdentity)) {
         throw new Error('theme_asset_migration_conflict')
       }
+      await revalidateLegacyTarget({
+        root,
+        targetRoot,
+        targetPath,
+        identity: writtenIdentity,
+        descriptor,
+      })
       await descriptor.close()
       descriptor = null
       await readOwnedPayload(
@@ -672,13 +729,28 @@ export const createThemeAssetManager = (input: {
         sha256(bytes),
         'theme_asset_migration_conflict',
       )
+      await revalidateLegacyTarget({ root, targetRoot, targetPath, identity: writtenIdentity })
+      await revalidateLegacyTarget({ root, targetRoot, targetPath, identity: writtenIdentity })
     } catch (error) {
       try { await descriptor?.close() } catch {}
       descriptor = null
       if (createdIdentity != null) {
+        if (targetRoot == null) {
+          try {
+            const candidate = validateDirectDirectory(assetRoot)
+            const current = await inspect(targetPath)
+            if (current.isSymbolicLink() || !current.isFile() || current.nlink != 1n ||
+              !sameNode(identityOf(current), createdIdentity)) {
+              closeDirectDirectory(candidate)
+            } else {
+              targetRoot = candidate
+            }
+          } catch {}
+        }
         try {
+          if (targetRoot == null) throw new Error('theme_asset_migration_conflict')
           await isolateAndReclaim({
-            root,
+            root: targetRoot,
             filePath: targetPath,
             identity: createdIdentity,
             prefix: `.${fileName}.isolate-`,
@@ -694,6 +766,9 @@ export const createThemeAssetManager = (input: {
       throw fixedThemeError(error, 'theme_asset_migration_conflict')
     } finally {
       try { await descriptor?.close() } catch {}
+      if (targetRoot != null) {
+        try { closeDirectDirectory(targetRoot) } catch {}
+      }
       closeDirectDirectory(root)
     }
   }

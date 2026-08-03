@@ -848,6 +848,58 @@ test('discard preserves a replacement raced into stage isolation', async() => {
   }
 })
 
+test('rejects a legacy asset-root swap and isolates the exact created destination', async() => {
+  // Catches legacy wx/readback that succeeds entirely inside a replacement asset root.
+  const fixture = createTestStorageRoot('theme-legacy-asset-root-swap')
+  const originalRenameSync = fs.renameSync
+  let destination
+  let assetRoot
+  let parkedRoot
+  let replacementSentinel
+  let swapped = false
+  let isolatedPath
+  try {
+    const injectedFs = {
+      ...fsp,
+      async open(targetPath, flags, mode) {
+        if (!swapped && destination != null && path.resolve(String(targetPath)) == path.resolve(destination) &&
+          String(flags) == 'wx') {
+          swapped = true
+          await fsp.rename(assetRoot, parkedRoot)
+          await fsp.mkdir(assetRoot)
+          await fsp.writeFile(replacementSentinel, 'replacement root')
+        }
+        return fsp.open(targetPath, flags, mode)
+      },
+    }
+    fs.renameSync = function(source, target) {
+      if (destination != null && path.resolve(String(source)) == path.resolve(destination)) isolatedPath = String(target)
+      return originalRenameSync.call(this, source, target)
+    }
+    const { manager, profileRoot } = await createManager(fixture, injectedFs)
+    const legacy = path.join(profileRoot, 'theme_images', 'old.png')
+    assetRoot = path.join(profileRoot, 'assets', 'theme-images')
+    parkedRoot = path.join(profileRoot, 'assets', 'parked-theme-images')
+    replacementSentinel = path.join(assetRoot, 'replacement-sentinel.txt')
+    destination = path.join(assetRoot, 'old.png')
+    await fsp.mkdir(path.dirname(legacy), { recursive: true })
+    await fsp.writeFile(legacy, pngBytes)
+
+    await assert.rejects(manager.prepareThemeAssetStorage(), /theme_asset_migration_conflict/)
+
+    assert.equal(swapped, true)
+    assert.match(isolatedPath, /\.old\.png\.isolate-[a-f0-9]{32}[\\/]payload$/i)
+    assert.deepEqual(await fsp.readdir(parkedRoot), [])
+    assert.deepEqual(await fsp.readdir(assetRoot), ['replacement-sentinel.txt'])
+    assert.equal(await fsp.readFile(replacementSentinel, 'utf8'), 'replacement root')
+    assert.equal(await exists(destination), false)
+    assert.equal(await exists(path.dirname(isolatedPath)), false)
+  } finally {
+    fs.renameSync = originalRenameSync
+    fixture.cleanup()
+  }
+})
+
 test('fails closed when an existing legacy destination has different bytes', async() => {
   // Catches migration that treats any EEXIST destination as a successful copy without hash/read-back equality.
   const fixture = createTestStorageRoot('theme-legacy-conflict')

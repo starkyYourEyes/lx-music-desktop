@@ -158,6 +158,66 @@ describe('portable profile migration journal', () => {
     assert.deepEqual(fs.readdirSync(isolationPath), [])
   })
 
+  it('recovers an exact empty retirement isolation after payload removal interrupts final journalling', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    await prepareAcknowledgedFixture(fixture, migration)
+
+    const interrupted = await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-2',
+      afterRetirementPayloadRemoval() {
+        throw new Error('interrupt_after_retirement_payload_removal')
+      },
+    })
+
+    assert.equal(interrupted.state, 'failed')
+    const isolatedJournal = readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    assert.equal(isolatedJournal.state, 'retirement-isolated')
+    const isolationPath = retirementIsolationPath(fixture, isolatedJournal)
+    const isolationBeforeResume = fs.lstatSync(isolationPath, { bigint: true })
+    assert.deepEqual(fs.readdirSync(isolationPath), [])
+    assert.deepEqual(
+      { dev: String(isolationBeforeResume.dev), ino: String(isolationBeforeResume.ino) },
+      isolatedJournal.retirement.isolationIdentity,
+    )
+
+    const resumed = await migration.retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' })
+
+    assert.equal(resumed.state, 'retired')
+    assert.equal(readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE).state, 'retired')
+    const isolationAfterResume = fs.lstatSync(isolationPath, { bigint: true })
+    assert.deepEqual(fs.readdirSync(isolationPath), [])
+    assert.deepEqual(
+      { dev: String(isolationAfterResume.dev), ino: String(isolationAfterResume.ino) },
+      isolatedJournal.retirement.isolationIdentity,
+    )
+  })
+
+  it('revalidates destination evidence after payload removal before journalling retired', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    await prepareAcknowledgedFixture(fixture, migration)
+    let movedProfileRoot
+
+    const result = await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-2',
+      afterRetirementPayloadRemoval() {
+        movedProfileRoot = replaceDirectoryWithSameContent(fixture.profileRoot)
+      },
+    })
+
+    assert.equal(result.state, 'failed')
+    const journal = readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    assert.equal(journal.state, 'retirement-isolated')
+    assert.deepEqual(fs.readdirSync(retirementIsolationPath(fixture, journal)), [])
+    assert.equal(fs.readFileSync(path.join(fixture.profileRoot, 'lx.data.db'), 'utf8'), 'database-v1')
+    assert.equal(fs.readFileSync(path.join(movedProfileRoot, 'lx.data.db'), 'utf8'), 'database-v1')
+  })
+
   it('preserves a source replacement introduced at the retirement rename boundary', async() => {
     const fixture = createFixture()
     seedSource(fixture)
@@ -180,6 +240,78 @@ describe('portable profile migration journal', () => {
     assert.equal(result.state, 'failed')
     assert.equal(fs.readFileSync(path.join(fixture.sourceRoot, 'replacement'), 'utf8'), 'must-survive')
     assert.equal(fs.readFileSync(path.join(movedRoot, 'lx.data.db'), 'utf8'), 'database-v1')
+  })
+
+  it('retains the isolated payload when a source replacement appears after isolation journalling', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    await prepareAcknowledgedFixture(fixture, migration)
+    let isolationPath
+
+    const result = await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-2',
+      afterJournalWrite(journal) {
+        if (journal.state != 'retirement-isolated') return
+        isolationPath = retirementIsolationPath(fixture, journal)
+        fs.mkdirSync(fixture.sourceRoot)
+        fs.writeFileSync(path.join(fixture.sourceRoot, 'replacement'), 'must-survive')
+      },
+    })
+
+    assert.equal(result.state, 'failed')
+    assert.equal(readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE).state, 'retired-retained')
+    assert.equal(fs.readFileSync(path.join(fixture.sourceRoot, 'replacement'), 'utf8'), 'must-survive')
+    assert.equal(fs.readFileSync(path.join(isolationPath, 'payload', 'lx.data.db'), 'utf8'), 'database-v1')
+  })
+
+  it('does not remove a foreign payload after the retirement isolation changes at the removal boundary', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    await prepareAcknowledgedFixture(fixture, migration)
+    let isolationPath
+    let isolationReads = 0
+    let moveIsolationOnPayloadStat = false
+    let movedIsolation
+    const fsApi = {
+      ...fs,
+      readdirSync(target, options) {
+        const entries = fs.readdirSync(target, options)
+        if (target == isolationPath && ++isolationReads == 2) {
+          moveIsolationOnPayloadStat = true
+        }
+        return entries
+      },
+      lstatSync(target, options) {
+        const stat = fs.lstatSync(target, options)
+        if (moveIsolationOnPayloadStat && target == path.join(isolationPath, 'payload')) {
+          moveIsolationOnPayloadStat = false
+          movedIsolation = `${isolationPath}-original`
+          fs.renameSync(isolationPath, movedIsolation)
+          fs.mkdirSync(path.join(isolationPath, 'payload'), { recursive: true })
+          fs.writeFileSync(path.join(isolationPath, 'payload', 'foreign'), 'must-survive')
+        }
+        return stat
+      },
+    }
+
+    const result = await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-2',
+      fsApi,
+      afterJournalWrite(journal) {
+        if (journal.state == 'retirement-isolated') {
+          isolationPath = retirementIsolationPath(fixture, journal)
+        }
+      },
+    })
+
+    assert.equal(result.state, 'failed')
+    assert.equal(readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE).state, 'retired-retained')
+    assert.equal(fs.readFileSync(path.join(movedIsolation, 'payload', 'lx.data.db'), 'utf8'), 'database-v1')
+    assert.equal(fs.readFileSync(path.join(isolationPath, 'payload', 'foreign'), 'utf8'), 'must-survive')
   })
 
   it('resumes only the exact journal-bound empty retirement isolation', async() => {
@@ -234,6 +366,76 @@ describe('portable profile migration journal', () => {
     assert.equal(exists(fixture.sourceRoot), true)
     assert.equal(exists(isolationPath), true)
     assert.equal(exists(movedIsolation), true)
+  })
+
+  it('fails closed when an empty retirement isolation identity changes during recovery inspection', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    await prepareAcknowledgedFixture(fixture, migration)
+    await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-2',
+      afterRetirementPayloadRemoval() {
+        throw new Error('interrupt_after_retirement_payload_removal')
+      },
+    })
+    const isolatedJournal = readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    const isolationPath = retirementIsolationPath(fixture, isolatedJournal)
+    const movedIsolation = `${isolationPath}-original`
+    let replaced = false
+    const fsApi = {
+      ...fs,
+      readdirSync(target, options) {
+        if (!replaced && target == isolationPath) {
+          replaced = true
+          fs.renameSync(isolationPath, movedIsolation)
+          fs.mkdirSync(isolationPath)
+          return []
+        }
+        return fs.readdirSync(target, options)
+      },
+    }
+
+    const result = await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-3',
+      fsApi,
+    })
+
+    assert.equal(result.state, 'failed')
+    assert.equal(readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE).state, 'retirement-isolated')
+    assert.equal(exists(isolationPath), true)
+    assert.equal(exists(movedIsolation), true)
+  })
+
+  it('revalidates userData identity before finalizing an empty retirement isolation', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    await prepareAcknowledgedFixture(fixture, migration)
+    await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-2',
+      afterRetirementPayloadRemoval() {
+        throw new Error('interrupt_after_retirement_payload_removal')
+      },
+    })
+    const isolatedJournal = readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    const userDataPath = path.dirname(fixture.sourceRoot)
+    const movedUserData = `${userDataPath}-original`
+    const isolationPath = retirementIsolationPath(fixture, isolatedJournal)
+    const movedIsolation = path.join(movedUserData, isolatedJournal.retirement.isolationBasename)
+    fs.renameSync(userDataPath, movedUserData)
+    fs.mkdirSync(userDataPath)
+    fs.renameSync(movedIsolation, isolationPath)
+
+    const result = await migration.retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' })
+
+    assert.equal(result.state, 'failed')
+    assert.equal(readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE).state, 'retirement-isolated')
+    assert.equal(exists(isolationPath), true)
+    assert.equal(exists(movedUserData), true)
   })
 
   it('retains unexpected entries in the journal-bound private isolation', async() => {
@@ -320,6 +522,52 @@ describe('portable profile migration journal', () => {
     assert.match(result.error.message, /destination manifest/i)
     assert.equal(fs.readFileSync(journalPath, 'utf8'), versionOneRaw)
     assert.equal(exists(fixture.sourceRoot), true)
+  })
+
+  it('keeps an identity-bound version-1 typed journal read-only when its source is absent', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    const prepared = await migration.preparePortableProfile(fixture)
+    await migration.acknowledgePortableProfileStartup(prepared.token)
+    const journalPath = path.join(fixture.portableRoot, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    const versionOne = readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    versionOne.version = 1
+    delete versionOne.retirement
+    const versionOneRaw = JSON.stringify(versionOne, null, 2)
+    fs.writeFileSync(journalPath, versionOneRaw)
+    fs.rmSync(fixture.sourceRoot, { recursive: true, force: false })
+
+    const result = await migration.preparePortableProfile({ ...fixture, runId: 'startup-2' })
+
+    assert.equal(result.state, 'already-acknowledged')
+    assert.equal(fs.readFileSync(journalPath, 'utf8'), versionOneRaw)
+    const unchanged = readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    assert.equal(unchanged.version, 1)
+    assert.equal(unchanged.retirement, undefined)
+  })
+
+  it('rejects a version-1 typed journal with an absent source and replaced userData identity', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    const prepared = await migration.preparePortableProfile(fixture)
+    await migration.acknowledgePortableProfileStartup(prepared.token)
+    const journalPath = path.join(fixture.portableRoot, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    const versionOne = readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    versionOne.version = 1
+    delete versionOne.retirement
+    const versionOneRaw = JSON.stringify(versionOne, null, 2)
+    fs.writeFileSync(journalPath, versionOneRaw)
+    fs.rmSync(fixture.sourceRoot, { recursive: true, force: false })
+    const movedUserData = replaceDirectoryWithSameContent(path.dirname(fixture.sourceRoot))
+
+    const result = await migration.preparePortableProfile({ ...fixture, runId: 'startup-2' })
+
+    assert.equal(result.state, 'failed')
+    assert.match(result.error.message, /userData identity/i)
+    assert.equal(fs.readFileSync(journalPath, 'utf8'), versionOneRaw)
+    assert.equal(exists(movedUserData), true)
   })
 
   it('promotes only LxDatas and retains it through the acknowledged startup', async() => {

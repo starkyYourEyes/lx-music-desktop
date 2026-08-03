@@ -71,6 +71,7 @@ export interface PortableProfileOptions {
 export interface PortableProfileRetirementOptions extends PortableProfileOptions {
   beforeSourceRetirement?: () => void | Promise<void>
   beforeSourceRename?: () => void | Promise<void>
+  afterRetirementPayloadRemoval?: () => void | Promise<void>
   afterJournalWrite?: (journal: PortableJournalV2) => void | Promise<void>
 }
 

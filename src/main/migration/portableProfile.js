@@ -12,7 +12,6 @@ const {
 const { acquireMigrationLease, releaseMigrationLease } = require('./migrationLease')
 const {
   isolateOwnedPath,
-  reclaimIsolatedPayload,
   reopenExclusiveIsolation,
   reserveExclusiveIsolation,
 } = require('../storage/exclusiveIsolation')
@@ -74,7 +73,7 @@ const getPaths = (portableRootPath, fsApi = fs) => {
   }
 }
 
-const assertSourceAncestry = (fsApi, paths) => {
+const assertUserDataAncestry = (fsApi, paths) => {
   const portableIdentity = fsApi.lstatSync(paths.portableRoot, { bigint: true })
   if (portableIdentity.isSymbolicLink() || !portableIdentity.isDirectory() ||
     !isSameNode(paths.portableIdentity, portableIdentity)) {
@@ -84,6 +83,11 @@ const assertSourceAncestry = (fsApi, paths) => {
   if (userDataIdentity.isSymbolicLink() || !userDataIdentity.isDirectory()) {
     throw new Error('Portable userData must be a non-link directory')
   }
+  return userDataIdentity
+}
+
+const assertSourceAncestry = (fsApi, paths) => {
+  const userDataIdentity = assertUserDataAncestry(fsApi, paths)
   const sourceIdentity = fsApi.lstatSync(paths.sourcePath, { bigint: true })
   if (sourceIdentity.isSymbolicLink() || !sourceIdentity.isDirectory()) {
     throw new Error('Portable LxDatas source must be a non-link directory')
@@ -311,6 +315,16 @@ const removeOwnedReceipt = (fsApi, paths, snapshot, lease) => {
 
 const hashDirectory = async(fsApi, directoryPath) => hashManifest(await createDirectoryManifest(fsApi, directoryPath))
 
+const sourceIsAbsent = (fsApi, sourcePath) => {
+  try {
+    fsApi.lstatSync(sourcePath)
+    return false
+  } catch (error) {
+    if (error?.code == 'ENOENT') return true
+    throw error
+  }
+}
+
 const assertRecordedTrees = async(fsApi, paths, journal, {
   sourceRequired = true,
   destinationHashRequired = true,
@@ -333,9 +347,18 @@ const assertRecordedTrees = async(fsApi, paths, journal, {
     !recordedIdentityMatches(journal.destinationIdentity, destinationAfter)) {
     throw new Error('Portable profile destination identity changed while it was verified')
   }
-  if (!fsApi.existsSync(paths.sourcePath)) {
+  if (sourceIsAbsent(fsApi, paths.sourcePath)) {
     if (sourceRequired) throw new Error('Portable profile source is missing before retirement')
-    return { destinationIdentity: destinationAfter, destinationManifestHash }
+    if (!sourceIdentityRequired) return { destinationIdentity: destinationAfter, destinationManifestHash }
+    const userDataIdentity = assertUserDataAncestry(fsApi, paths)
+    if (!recordedIdentityMatches(journal.userDataIdentity, userDataIdentity)) {
+      throw new Error('Portable profile userData identity does not match the migration record')
+    }
+    const userDataAfter = assertUserDataAncestry(fsApi, paths)
+    if (!isSameNode(userDataIdentity, userDataAfter)) {
+      throw new Error('Portable profile userData ownership changed while it was verified')
+    }
+    return { destinationIdentity: destinationAfter, destinationManifestHash, userDataIdentity: userDataAfter }
   }
   const sourceIdentities = assertSourceAncestry(fsApi, paths)
   if (sourceIdentityRequired && !recordedIdentityMatches(journal.userDataIdentity, sourceIdentities.userDataIdentity)) {
@@ -557,9 +580,10 @@ const preparePortableProfile = async({
             ? createResult('already-acknowledged')
             : createResult('failed', { error: new Error('Portable profile retirement must be resolved before preparation') })
         }
+        let verifiedTrees
         try {
           const journalIsBound = hasSourceIdentityBinding(journalSnapshot.journal)
-          await assertRecordedTrees(fsApi, paths, journalSnapshot.journal, {
+          verifiedTrees = await assertRecordedTrees(fsApi, paths, journalSnapshot.journal, {
             sourceRequired: journalSnapshot.journal.state == 'promoted',
             destinationHashRequired: journalSnapshot.journal.version == 1 ||
               journalSnapshot.journal.state == 'typed-only-acknowledged',
@@ -569,7 +593,8 @@ const preparePortableProfile = async({
           return createResult('failed', { error })
         }
         let verifiedJournal = journalSnapshot.journal
-        if (verifiedJournal.version == 1 && hasSourceIdentityBinding(verifiedJournal)) {
+        if (verifiedJournal.version == 1 && hasSourceIdentityBinding(verifiedJournal) &&
+          verifiedTrees.sourceIdentity != null) {
           verifiedJournal = upgradeIdentityBoundJournalV1(verifiedJournal)
         }
         if (verifiedJournal.state == 'typed-only-acknowledged') {
@@ -710,7 +735,7 @@ const acknowledgePortableProfileStartup = async(rawToken, {
   return result
 }
 
-const assertRetirementPayload = async(fsApi, paths, journal, payloadPath) => {
+const assertRetirementContext = async(fsApi, paths, journal) => {
   const portableIdentity = fsApi.lstatSync(paths.portableRoot, { bigint: true })
   if (portableIdentity.isSymbolicLink() || !portableIdentity.isDirectory() ||
     !isSameNode(paths.portableIdentity, portableIdentity)) {
@@ -727,6 +752,18 @@ const assertRetirementPayload = async(fsApi, paths, journal, payloadPath) => {
     await hashDirectory(fsApi, paths.destinationPath) != journal.destinationManifestHash) {
     throw new Error('Portable profile destination does not match the retirement journal')
   }
+  const portableAfter = fsApi.lstatSync(paths.portableRoot, { bigint: true })
+  const destinationAfter = fsApi.lstatSync(paths.destinationPath, { bigint: true })
+  const userDataAfter = fsApi.lstatSync(paths.userDataPath, { bigint: true })
+  if (!isSameNode(portableIdentity, portableAfter) || !isSameNode(destinationIdentity, destinationAfter) ||
+    !isSameNode(userDataIdentity, userDataAfter)) {
+    throw new Error('Portable profile retirement context changed while verified')
+  }
+  return { portableIdentity: portableAfter, destinationIdentity: destinationAfter, userDataIdentity: userDataAfter }
+}
+
+const assertRetirementPayload = async(fsApi, paths, journal, payloadPath) => {
+  const context = await assertRetirementContext(fsApi, paths, journal)
   const payloadIdentity = fsApi.lstatSync(payloadPath, { bigint: true })
   if (payloadIdentity.isSymbolicLink() || !payloadIdentity.isDirectory() ||
     !recordedIdentityMatches(journal.retirement.sourceIdentity, payloadIdentity) ||
@@ -736,29 +773,71 @@ const assertRetirementPayload = async(fsApi, paths, journal, payloadPath) => {
   const payloadAfter = fsApi.lstatSync(payloadPath, { bigint: true })
   const destinationAfter = fsApi.lstatSync(paths.destinationPath, { bigint: true })
   const userDataAfter = fsApi.lstatSync(paths.userDataPath, { bigint: true })
-  if (!isSameNode(payloadIdentity, payloadAfter) || !isSameNode(destinationIdentity, destinationAfter) ||
-    !isSameNode(userDataIdentity, userDataAfter)) {
+  const portableAfter = fsApi.lstatSync(paths.portableRoot, { bigint: true })
+  if (!isSameNode(payloadIdentity, payloadAfter) ||
+    !isSameNode(context.portableIdentity, portableAfter) ||
+    !isSameNode(context.destinationIdentity, destinationAfter) ||
+    !isSameNode(context.userDataIdentity, userDataAfter)) {
     throw new Error('Portable profile retirement ownership changed while verified')
   }
 }
 
-const sourceIsAbsent = (fsApi, sourcePath) => {
-  try {
-    fsApi.lstatSync(sourcePath)
-    return false
-  } catch (error) {
-    if (error?.code == 'ENOENT') return true
-    throw error
+const reopenRetirementIsolation = async(root, retirement) => await reopenExclusiveIsolation({
+  root,
+  isolationBasename: retirement.isolationBasename,
+  isolationIdentity: retirement.isolationIdentity,
+})
+
+const assertEmptyRetirementIsolation = async(fsApi, root, retirement) => {
+  let reservation = await reopenRetirementIsolation(root, retirement)
+  if (fsApi.readdirSync(reservation.isolationPath).length != 0) {
+    throw new Error('Portable profile retirement isolation is not empty')
+  }
+  reservation = await reopenRetirementIsolation(root, retirement)
+  if (fsApi.readdirSync(reservation.isolationPath).length != 0) {
+    throw new Error('Portable profile retirement isolation changed while it was verified')
+  }
+  return await reopenRetirementIsolation(root, retirement)
+}
+
+const assertRetirementSourceAbsent = (fsApi, paths) => {
+  if (!sourceIsAbsent(fsApi, paths.sourcePath)) {
+    throw new Error('Portable profile source was replaced during retirement')
   }
 }
 
-const isolatedGuardFromJournal = (paths, reservation, retirement) => Object.freeze({
-  ...reservation,
-  sourcePath: paths.sourcePath,
-  expectedIdentity: Object.freeze({ ...retirement.sourceIdentity }),
-  payloadIdentity: Object.freeze({ ...retirement.sourceIdentity }),
-  kind: 'directory',
-})
+const assertExactRetirementPayloadEntry = (fsApi, reservation, retirement) => {
+  const entries = fsApi.readdirSync(reservation.isolationPath)
+  const payloadIdentity = fsApi.lstatSync(reservation.payloadPath, { bigint: true })
+  if (entries.length != 1 || entries[0] != 'payload' ||
+    payloadIdentity.isSymbolicLink() || !payloadIdentity.isDirectory() ||
+    !recordedIdentityMatches(retirement.sourceIdentity, payloadIdentity)) {
+    throw new Error('Portable profile retirement payload changed before removal')
+  }
+}
+
+const reclaimRetirementPayload = async({ fsApi, paths, journal, root, lease }) => {
+  try {
+    let reservation = await reopenRetirementIsolation(root, journal.retirement)
+    assertExactRetirementPayloadEntry(fsApi, reservation, journal.retirement)
+    await assertRetirementPayload(fsApi, paths, journal, reservation.payloadPath)
+
+    reservation = await reopenRetirementIsolation(root, journal.retirement)
+    assertExactRetirementPayloadEntry(fsApi, reservation, journal.retirement)
+    reservation = await reopenRetirementIsolation(root, journal.retirement)
+
+    assertRetirementSourceAbsent(fsApi, paths)
+    lease.assertHeld()
+    fsApi.rmSync(reservation.payloadPath, { recursive: true, force: false })
+    await assertEmptyRetirementIsolation(fsApi, root, journal.retirement)
+    return { state: 'reclaimed' }
+  } catch (error) {
+    return {
+      state: 'retained',
+      error: error instanceof Error ? error : new Error('Portable profile retirement payload could not be reclaimed'),
+    }
+  }
+}
 
 const retireAcknowledgedPortableSource = async({
   portableRoot,
@@ -767,6 +846,7 @@ const retireAcknowledgedPortableSource = async({
   logger = console,
   beforeSourceRetirement,
   beforeSourceRename,
+  afterRetirementPayloadRemoval,
   afterJournalWrite,
 }) => {
   assertRunId(runId, 'Portable startup run ID')
@@ -833,6 +913,9 @@ const retireAcknowledgedPortableSource = async({
           await writeJournal(fsApi, paths, journal, lease, afterJournalWrite)
           return createResult('failed', { error: new Error('Portable profile retirement payload was retained after interruption') })
         } else if (['retirement-isolated', 'retired-retained'].includes(journal.state) && !hasSource && isEmpty) {
+          await assertRetirementContext(fsApi, paths, journal)
+          await assertEmptyRetirementIsolation(fsApi, userDataGuard, journal.retirement)
+          assertRetirementSourceAbsent(fsApi, paths)
           journal = withRetirementState(journal, 'retired')
           await writeJournal(fsApi, paths, journal, lease, afterJournalWrite)
           return createResult('retired')
@@ -893,12 +976,12 @@ const retireAcknowledgedPortableSource = async({
       journal = withRetirementState(journal, 'retirement-isolated')
       await writeJournal(fsApi, paths, journal, lease, afterJournalWrite)
       lease.assertHeld()
-      const reclaimed = await reclaimIsolatedPayload({
-        guard: isolatedGuardFromJournal(paths, isolation.guard, journal.retirement),
-        async verifyPayload(payloadPath) {
-          lease.assertHeld()
-          await assertRetirementPayload(fsApi, paths, journal, payloadPath)
-        },
+      const reclaimed = await reclaimRetirementPayload({
+        fsApi,
+        paths,
+        journal,
+        root: userDataGuard,
+        lease,
       })
       if (reclaimed.state == 'retained') {
         lease.assertHeld()
@@ -906,6 +989,10 @@ const retireAcknowledgedPortableSource = async({
         await writeJournal(fsApi, paths, journal, lease, afterJournalWrite)
         return createResult('failed', { error: reclaimed.error })
       }
+      await afterRetirementPayloadRemoval?.()
+      await assertRetirementContext(fsApi, paths, journal)
+      await assertEmptyRetirementIsolation(fsApi, userDataGuard, journal.retirement)
+      assertRetirementSourceAbsent(fsApi, paths)
       lease.assertHeld()
       journal = withRetirementState(journal, 'retired')
       await writeJournal(fsApi, paths, journal, lease, afterJournalWrite)

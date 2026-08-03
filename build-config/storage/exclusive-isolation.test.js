@@ -127,6 +127,86 @@ describe('exclusive isolation', () => {
     assert.equal(fs.readFileSync(isolation.payloadPath, 'utf8'), 'owned')
   })
 
+  it('does not overwrite a foreign payload created before the move boundary', async() => {
+    const fixture = createFixture()
+    const source = captureOwnedFile(fixture.root, 'cache.db')
+    const isolation = await reserveExclusiveIsolation({ root: fixture.root, prefix: '.lx-isolation-' })
+    const originalLstat = fs.lstatSync
+    let sourceReads = 0
+    let injected = false
+    fs.lstatSync = (target, ...args) => {
+      if (target == source.path) sourceReads++
+      if (!injected && target == source.path && sourceReads == 3) {
+        injected = true
+        fs.writeFileSync(isolation.payloadPath, 'foreign', { flag: 'wx' })
+      }
+      return originalLstat(target, ...args)
+    }
+    try {
+      await assert.rejects(isolateOwnedPath({ source, reservation: isolation }), /isolation_changed/)
+    } finally {
+      fs.lstatSync = originalLstat
+    }
+
+    assert.equal(fs.readFileSync(source.path, 'utf8'), 'owned')
+    assert.equal(fs.readFileSync(isolation.payloadPath, 'utf8'), 'foreign')
+  })
+
+  it('reports absent when the source disappears during its final revalidation', async() => {
+    const fixture = createFixture()
+    const source = captureOwnedFile(fixture.root, 'cache.db')
+    const isolation = await reserveExclusiveIsolation({ root: fixture.root, prefix: '.lx-isolation-' })
+    const originalLstat = fs.lstatSync
+    let sourceReads = 0
+    fs.lstatSync = (target, ...args) => {
+      if (target == source.path && ++sourceReads == 3) fs.unlinkSync(source.path)
+      return originalLstat(target, ...args)
+    }
+    try {
+      const result = await isolateOwnedPath({ source, reservation: isolation })
+      assert.deepEqual(result, { state: 'absent' })
+    } finally {
+      fs.lstatSync = originalLstat
+    }
+
+    assert.equal(fs.existsSync(source.path), false)
+    assert.equal(fs.existsSync(isolation.payloadPath), false)
+  })
+
+  it('reports conflict when a stable-path replacement appears after its first absence check', async() => {
+    const fixture = createFixture()
+    const source = captureOwnedFile(fixture.root, 'cache.db')
+    const isolation = await reserveExclusiveIsolation({ root: fixture.root, prefix: '.lx-isolation-' })
+    const originalLstat = fs.lstatSync
+    let sourceReads = 0
+    let sawStableAbsence = false
+    let injected = false
+    fs.lstatSync = (target, ...args) => {
+      if (target == source.path && ++sourceReads == 4) {
+        try {
+          originalLstat(target, ...args)
+        } catch (error) {
+          if (error?.code == 'ENOENT') sawStableAbsence = true
+          else throw error
+        }
+      }
+      if (sawStableAbsence && !injected && target == isolation.payloadPath) {
+        injected = true
+        fs.writeFileSync(source.path, 'replacement', { flag: 'wx' })
+      }
+      return originalLstat(target, ...args)
+    }
+    try {
+      const result = await isolateOwnedPath({ source, reservation: isolation })
+      assert.equal(result.state, 'conflict')
+    } finally {
+      fs.lstatSync = originalLstat
+    }
+
+    assert.equal(fs.readFileSync(source.path, 'utf8'), 'replacement')
+    assert.equal(fs.readFileSync(isolation.payloadPath, 'utf8'), 'owned')
+  })
+
   it('retains the moved payload when its marker verification fails', async() => {
     const fixture = createFixture()
     const source = captureOwnedFile(fixture.root, 'cache.db')
@@ -158,6 +238,32 @@ describe('exclusive isolation', () => {
     assert.equal(fs.existsSync(isolated.guard.isolationPath), true)
   })
 
+  it('retains a payload replaced after the exact directory check', async() => {
+    const isolated = await isolateFixtureDirectory()
+    const originalReaddir = fs.readdirSync
+    let payloadReads = 0
+    fs.readdirSync = (target, ...args) => {
+      const entries = originalReaddir(target, ...args)
+      if (target == isolated.guard.isolationPath && entries.length == 1 && entries[0] == 'payload') {
+        payloadReads++
+        if (payloadReads == 2) {
+          fs.renameSync(isolated.guard.payloadPath, path.join(isolated.guard.isolationPath, 'owned-payload'))
+          fs.writeFileSync(isolated.guard.payloadPath, 'replacement', { flag: 'wx' })
+        }
+      }
+      return entries
+    }
+    try {
+      const result = await reclaimIsolatedPayload({ guard: isolated.guard, verifyPayload })
+      assert.equal(result.state, 'retained')
+    } finally {
+      fs.readdirSync = originalReaddir
+    }
+
+    assert.equal(fs.readFileSync(isolated.guard.payloadPath, 'utf8'), 'replacement')
+    assert.equal(fs.existsSync(path.join(isolated.guard.isolationPath, 'owned-payload')), true)
+  })
+
   it('reclaims an exactly verified payload and its owned empty private directory', async() => {
     const isolated = await isolateFixtureDirectory()
 
@@ -166,6 +272,43 @@ describe('exclusive isolation', () => {
     assert.deepEqual(result, { state: 'reclaimed' })
     assert.equal(fs.existsSync(isolated.guard.payloadPath), false)
     assert.equal(fs.existsSync(isolated.guard.isolationPath), false)
+  })
+
+  it('retains an isolation directory replaced after its empty check', async() => {
+    const isolated = await isolateFixtureDirectory()
+    const originalReaddir = fs.readdirSync
+    const displacedPath = `${isolated.guard.isolationPath}-displaced`
+    let injected = false
+    fs.readdirSync = (target, ...args) => {
+      const entries = originalReaddir(target, ...args)
+      if (!injected && target == isolated.guard.isolationPath && entries.length == 0) {
+        injected = true
+        fs.renameSync(isolated.guard.isolationPath, displacedPath)
+        fs.mkdirSync(isolated.guard.isolationPath)
+      }
+      return entries
+    }
+    try {
+      const result = await reclaimIsolatedPayload({ guard: isolated.guard, verifyPayload })
+      assert.equal(result.state, 'retained')
+    } finally {
+      fs.readdirSync = originalReaddir
+    }
+
+    assert.equal(fs.existsSync(isolated.guard.isolationPath), true)
+    assert.equal(fs.existsSync(displacedPath), true)
+  })
+
+  it('rejects incomplete reservation identities as invalid', async() => {
+    const fixture = createFixture()
+    await assert.rejects(
+      reopenExclusiveIsolation({
+        root: fixture.root,
+        isolationBasename: 'missing',
+        isolationIdentity: { dev: '1' },
+      }),
+      error => error?.code == 'isolation_invalid',
+    )
   })
 
   it('retains the private directory when identity marker or removal verification fails', async() => {

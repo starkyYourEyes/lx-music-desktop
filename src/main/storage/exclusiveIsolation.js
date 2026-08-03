@@ -7,6 +7,9 @@ const payloadBasename = 'payload'
 const isolationError = code => Object.assign(new Error(code), { code })
 const identityOf = stat => ({ dev: String(stat.dev), ino: String(stat.ino) })
 const sameIdentity = (left, right) => left.dev == right.dev && left.ino == right.ino
+const isIdentity = identity => identity != null && typeof identity == 'object' &&
+  typeof identity.dev == 'string' && identity.dev.length > 0 &&
+  typeof identity.ino == 'string' && identity.ino.length > 0
 const isMissing = error => error != null && typeof error == 'object' && error.code == 'ENOENT'
 const isCollision = error => error != null && typeof error == 'object' && error.code == 'EEXIST'
 const isDirectBasename = basename => typeof basename == 'string' && basename.length > 0 &&
@@ -40,7 +43,7 @@ const validateReservation = reservation => {
     !isDirectBasename(reservation.isolationBasename) ||
     !samePath(reservation.isolationPath, path.join(reservation.root?.path ?? '', reservation.isolationBasename)) ||
     !samePath(reservation.payloadPath, path.join(reservation.isolationPath, payloadBasename)) ||
-    !sameIdentity(reservation.isolationIdentity ?? {}, reservation.isolationIdentity ?? {})) {
+    !isIdentity(reservation.isolationIdentity)) {
     throw isolationError('isolation_invalid')
   }
   try {
@@ -60,7 +63,7 @@ const validateSource = source => {
   if (source == null || typeof source != 'object' ||
     !isDirectBasename(source.basename) || (source.kind != 'file' && source.kind != 'directory') ||
     !samePath(source.path, path.join(source.root?.path ?? '', source.basename)) ||
-    !sameIdentity(source.identity ?? {}, source.identity ?? {})) {
+    !isIdentity(source.identity)) {
     throw isolationError('isolation_invalid')
   }
   revalidateDirectDirectory(source.root)
@@ -80,7 +83,7 @@ const assertPayloadAbsent = reservation => {
 }
 
 const reservationFor = ({ root, isolationBasename, isolationIdentity }) => {
-  if (!isDirectBasename(isolationBasename) || isolationIdentity == null || typeof isolationIdentity != 'object') {
+  if (!isDirectBasename(isolationBasename) || !isIdentity(isolationIdentity)) {
     throw isolationError('isolation_invalid')
   }
   const isolationPath = path.join(root?.path ?? '', isolationBasename)
@@ -147,8 +150,10 @@ const isolateOwnedPath = async input => {
   const sourceBeforeMove = validateSource(source)
   if (sourceBeforeMove == null) return { state: 'absent' }
   validateReservation(reservation)
+  const sourceAtMove = validateSource(source)
+  if (sourceAtMove == null) return { state: 'absent' }
+  validateReservation(reservation)
   assertPayloadAbsent(reservation)
-  validateSource(source)
   fs.renameSync(source.path, reservation.payloadPath)
 
   const moved = inspectOwnedNode({
@@ -171,11 +176,19 @@ const isolateOwnedPath = async input => {
     if (!isMissing(error)) throw isolationError('isolation_changed')
   }
   validateReservation(reservation)
-  const payloadIdentity = identityOf(inspectOwnedNode({
+  const finalPayload = inspectOwnedNode({
     path: reservation.payloadPath,
     identity: source.identity,
     kind: source.kind,
-  }))
+  })
+  if (finalPayload == null) throw isolationError('isolation_changed')
+  try {
+    fs.lstatSync(source.path, { bigint: true })
+    return { state: 'conflict', reservation, error: isolationError('isolation_conflict') }
+  } catch (error) {
+    if (!isMissing(error)) throw isolationError('isolation_changed')
+  }
+  const payloadIdentity = identityOf(finalPayload)
   return {
     state: 'isolated',
     guard: Object.freeze({
@@ -208,6 +221,9 @@ const reclaimIsolatedPayload = async input => {
       fs.readdirSync(guard.isolationPath).length != 1 || fs.readdirSync(guard.isolationPath)[0] != payloadBasename) {
       throw isolationError('isolation_changed')
     }
+    if (inspectOwnedNode({ path: guard.payloadPath, identity: guard.payloadIdentity, kind: guard.kind }) == null) {
+      throw isolationError('isolation_changed')
+    }
 
     fs.rmSync(guard.payloadPath, { recursive: guard.kind == 'directory', force: false })
     try {
@@ -219,6 +235,7 @@ const reclaimIsolatedPayload = async input => {
     }
     validateReservation(guard)
     if (fs.readdirSync(guard.isolationPath).length != 0) throw isolationError('isolation_changed')
+    validateReservation(guard)
     fs.rmdirSync(guard.isolationPath)
     try {
       fs.lstatSync(guard.isolationPath, { bigint: true })

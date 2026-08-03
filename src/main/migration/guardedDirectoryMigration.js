@@ -13,6 +13,7 @@ const {
 
 const HASH_BUFFER_SIZE = 64 * 1024
 const STAGE_MARKER_FILE = '.guarded-directory-migration-owner.json'
+const STAGE_PAYLOAD_BASENAME = 'payload'
 const STAGE_ISOLATION_PREFIX = '.guarded-directory-migration-isolation-'
 
 class DirectorySourceChangedError extends Error {}
@@ -186,9 +187,30 @@ const ensureDirectory = (fsApi, directoryPath, logger = console) => {
   return getUsableDirectory(fsApi, directoryPath)
 }
 
+const verifyStageDirectory = (fsApi, rootGuard, stagePath, identity, expectedChildren) => {
+  revalidateDirectDirectory(rootGuard)
+  assertDirectChild(rootGuard.path, stagePath)
+  const before = fsApi.lstatSync(stagePath, { bigint: true })
+  const childrenBefore = fsApi.readdirSync(stagePath).sort()
+  const after = fsApi.lstatSync(stagePath, { bigint: true })
+  const childrenAfter = fsApi.readdirSync(stagePath).sort()
+  if (before.isSymbolicLink() || !before.isDirectory() || !sameIdentity(identityOf(before), identity) ||
+    !sameIdentity(identityOf(before), identityOf(after)) ||
+    childrenBefore.length != expectedChildren.length ||
+    childrenBefore.some((name, index) => name != expectedChildren[index]) ||
+    childrenBefore.length != childrenAfter.length ||
+    childrenBefore.some((name, index) => name != childrenAfter[index])) {
+    throw new Error('Migration stage contents changed')
+  }
+  revalidateDirectDirectory(rootGuard)
+}
+
 const createOwnedStage = async({ fsApi, rootGuard, stagePrefix, runId, lease }) => {
   lease.assertHeld()
+  revalidateDirectDirectory(rootGuard)
+  lease.assertHeld()
   const stagePath = fsApi.mkdtempSync(stagePrefix)
+  revalidateDirectDirectory(rootGuard)
   assertDirectChild(rootGuard.path, stagePath)
   if (!path.basename(stagePath).startsWith(path.basename(stagePrefix))) {
     throw new Error(`Unexpected migration stage path: ${stagePath}`)
@@ -198,6 +220,7 @@ const createOwnedStage = async({ fsApi, rootGuard, stagePrefix, runId, lease }) 
     throw new Error(`Migration stage must be a non-link directory: ${stagePath}`)
   }
   const identity = Object.freeze(identityOf(stageStat))
+  verifyStageDirectory(fsApi, rootGuard, stagePath, identity, [])
   const marker = {
     version: 1,
     nonce: crypto.randomBytes(16).toString('hex'),
@@ -207,14 +230,17 @@ const createOwnedStage = async({ fsApi, rootGuard, stagePrefix, runId, lease }) 
   const markerRaw = JSON.stringify(marker)
   const markerPath = path.join(stagePath, STAGE_MARKER_FILE)
   lease.assertHeld()
+  verifyStageDirectory(fsApi, rootGuard, stagePath, identity, [])
+  lease.assertHeld()
   await awaitWithLease(writeFileAsync(fsApi, markerPath, markerRaw, { flag: 'wx' }), lease)
+  revalidateDirectDirectory(rootGuard)
   const markerStat = fsApi.lstatSync(markerPath, { bigint: true })
   const stageAfter = fsApi.lstatSync(stagePath, { bigint: true })
   if (markerStat.isSymbolicLink() || !markerStat.isFile() || stageAfter.isSymbolicLink() ||
     !stageAfter.isDirectory() || !sameIdentity(identity, identityOf(stageAfter))) {
     throw new Error('Migration stage ownership changed during creation')
   }
-  return Object.freeze({
+  const ownership = Object.freeze({
     rootGuard,
     stagePath,
     stageBasename: path.basename(stagePath),
@@ -222,12 +248,16 @@ const createOwnedStage = async({ fsApi, rootGuard, stagePrefix, runId, lease }) 
     markerIdentity: Object.freeze(identityOf(markerStat)),
     markerRaw,
   })
+  verifyOwnedStageAtRoot(fsApi, ownership)
+  lease.assertHeld()
+  return ownership
 }
 
-const verifyOwnedStage = (fsApi, ownership, currentPath) => {
+const verifyOwnedStage = (fsApi, ownership, currentPath, expectedChildren) => {
   const directoryBefore = fsApi.lstatSync(currentPath, { bigint: true })
   const markerPath = path.join(currentPath, STAGE_MARKER_FILE)
   const markerBefore = fsApi.lstatSync(markerPath, { bigint: true })
+  const childrenBefore = fsApi.readdirSync(currentPath).sort()
   if (directoryBefore.isSymbolicLink() || !directoryBefore.isDirectory() ||
     !sameIdentity(identityOf(directoryBefore), ownership.identity) ||
     markerBefore.isSymbolicLink() || !markerBefore.isFile() ||
@@ -237,47 +267,74 @@ const verifyOwnedStage = (fsApi, ownership, currentPath) => {
   const markerRaw = fsApi.readFileSync(markerPath, 'utf8')
   const markerAfter = fsApi.lstatSync(markerPath, { bigint: true })
   const directoryAfter = fsApi.lstatSync(currentPath, { bigint: true })
+  const childrenAfter = fsApi.readdirSync(currentPath).sort()
   if (markerRaw != ownership.markerRaw ||
     !sameIdentity(identityOf(markerBefore), identityOf(markerAfter)) ||
-    !sameIdentity(identityOf(directoryBefore), identityOf(directoryAfter))) {
+    !sameIdentity(identityOf(directoryBefore), identityOf(directoryAfter)) ||
+    (expectedChildren != null && (childrenBefore.length != expectedChildren.length ||
+      childrenBefore.some((name, index) => name != expectedChildren[index]))) ||
+    childrenBefore.length != childrenAfter.length ||
+    childrenBefore.some((name, index) => name != childrenAfter[index])) {
     throw new Error('Migration stage ownership changed')
   }
 }
 
-const verifyOwnedPayload = (fsApi, ownership, payloadOwnership) => {
-  verifyOwnedStage(fsApi, ownership, ownership.stagePath)
-  const before = fsApi.lstatSync(payloadOwnership.path, { bigint: true })
+const payloadStageChildren = [STAGE_MARKER_FILE, STAGE_PAYLOAD_BASENAME].sort()
+const markerStageChildren = [STAGE_MARKER_FILE]
+
+const verifyOwnedPayload = (fsApi, ownership, payloadOwnership, currentStagePath = ownership.stagePath) => {
+  verifyOwnedStage(fsApi, ownership, currentStagePath, payloadStageChildren)
+  const payloadPath = path.join(currentStagePath, STAGE_PAYLOAD_BASENAME)
+  const before = fsApi.lstatSync(payloadPath, { bigint: true })
   if (before.isSymbolicLink() || !before.isDirectory() ||
     !sameIdentity(identityOf(before), payloadOwnership.identity)) {
     throw new Error('Migration payload ownership changed')
   }
-  const after = fsApi.lstatSync(payloadOwnership.path, { bigint: true })
-  verifyOwnedStage(fsApi, ownership, ownership.stagePath)
+  const after = fsApi.lstatSync(payloadPath, { bigint: true })
+  verifyOwnedStage(fsApi, ownership, currentStagePath, payloadStageChildren)
   if (!sameIdentity(identityOf(before), identityOf(after))) {
     throw new Error('Migration payload ownership changed')
   }
+  return payloadPath
+}
+
+const verifyOwnedStageAtRoot = (fsApi, ownership, payloadOwnership) => {
+  revalidateDirectDirectory(ownership.rootGuard)
+  assertDirectChild(ownership.rootGuard.path, ownership.stagePath)
+  if (payloadOwnership == null) {
+    verifyOwnedStage(fsApi, ownership, ownership.stagePath, markerStageChildren)
+  } else {
+    verifyOwnedPayload(fsApi, ownership, payloadOwnership)
+  }
+  revalidateDirectDirectory(ownership.rootGuard)
 }
 
 const createOwnedPayload = ({ fsApi, ownership, lease }) => {
   lease.assertHeld()
-  verifyOwnedStage(fsApi, ownership, ownership.stagePath)
-  const payloadPath = path.join(ownership.stagePath, 'payload')
+  verifyOwnedStageAtRoot(fsApi, ownership)
+  const payloadPath = path.join(ownership.stagePath, STAGE_PAYLOAD_BASENAME)
   lease.assertHeld()
   fsApi.mkdirSync(payloadPath)
+  revalidateDirectDirectory(ownership.rootGuard)
   const payloadStat = fsApi.lstatSync(payloadPath, { bigint: true })
   if (payloadStat.isSymbolicLink() || !payloadStat.isDirectory()) {
     throw new Error('Migration payload must be a non-link directory')
   }
   const payloadOwnership = Object.freeze({
-    path: payloadPath,
     identity: Object.freeze(identityOf(payloadStat)),
   })
-  verifyOwnedPayload(fsApi, ownership, payloadOwnership)
+  verifyOwnedStageAtRoot(fsApi, ownership, payloadOwnership)
   lease.assertHeld()
-  return payloadOwnership
+  return Object.freeze({ ...payloadOwnership, path: payloadPath })
 }
 
-const copyFileBounded = async({ fsApi, sourcePath, destinationPath, lease }) => {
+const copyFileBounded = async({
+  fsApi,
+  sourcePath,
+  destinationPath,
+  lease,
+  beforeDestinationMutation,
+}) => {
   lease.assertHeld()
   const sourceBefore = await awaitWithLease(lstatAsync(fsApi, sourcePath), lease)
   if (sourceBefore.isSymbolicLink() || !sourceBefore.isFile()) {
@@ -297,6 +354,8 @@ const copyFileBounded = async({ fsApi, sourcePath, destinationPath, lease }) => 
     const mode = typeof sourceBefore.mode == 'bigint'
       ? Number(sourceBefore.mode & 0o777n)
       : sourceBefore.mode & 0o777
+    beforeDestinationMutation()
+    lease.assertHeld()
     destinationDescriptor = await openAsync(fsApi, destinationPath, 'wx', mode)
     lease.assertHeld()
     const buffer = Buffer.allocUnsafe(HASH_BUFFER_SIZE)
@@ -306,6 +365,8 @@ const copyFileBounded = async({ fsApi, sourcePath, destinationPath, lease }) => 
       if (bytesRead == 0) break
       let offset = 0
       while (offset < bytesRead) {
+        lease.assertHeld()
+        beforeDestinationMutation()
         lease.assertHeld()
         const [bytesWritten] = await awaitWithLease(
           writeAsync(fsApi, destinationDescriptor, buffer, offset, bytesRead - offset),
@@ -336,7 +397,14 @@ const copyFileBounded = async({ fsApi, sourcePath, destinationPath, lease }) => 
   if (closeError != null) throw closeError
 }
 
-const copyManifestEntries = async({ fsApi, sourcePath, payloadPath, manifest, lease }) => {
+const copyManifestEntries = async({
+  fsApi,
+  sourcePath,
+  payloadPath,
+  manifest,
+  lease,
+  beforeDestinationMutation,
+}) => {
   for (const entry of manifest) {
     if (entry.path == '.') {
       if (entry.type != 'directory') throw new Error('Migration manifest root must be a directory')
@@ -345,6 +413,8 @@ const copyManifestEntries = async({ fsApi, sourcePath, payloadPath, manifest, le
     const destinationEntry = entry.path == '.' ? payloadPath : path.join(payloadPath, entry.path)
     if (entry.type == 'directory') {
       lease.assertHeld()
+      beforeDestinationMutation()
+      lease.assertHeld()
       await awaitWithLease(mkdirAsync(fsApi, destinationEntry, { recursive: false }), lease)
     } else {
       await copyFileBounded({
@@ -352,13 +422,46 @@ const copyManifestEntries = async({ fsApi, sourcePath, payloadPath, manifest, le
         sourcePath: path.join(sourcePath, entry.path),
         destinationPath: destinationEntry,
         lease,
+        beforeDestinationMutation,
       })
     }
     lease.assertHeld()
   }
 }
 
-const isolateAndReclaimStage = async({ fsApi, ownership, lease, logger }) => {
+const verifyCleanupStage = async({
+  fsApi,
+  ownership,
+  currentStagePath,
+  payloadOwnership,
+  trustedPayloadManifest,
+  lease,
+}) => {
+  lease.assertHeld()
+  if (payloadOwnership == null) {
+    verifyOwnedStage(fsApi, ownership, currentStagePath, markerStageChildren)
+  } else {
+    const payloadPath = verifyOwnedPayload(fsApi, ownership, payloadOwnership, currentStagePath)
+    if (trustedPayloadManifest != null) {
+      const currentManifest = await createDirectoryManifestInternal(fsApi, payloadPath, lease)
+      lease.assertHeld()
+      verifyOwnedPayload(fsApi, ownership, payloadOwnership, currentStagePath)
+      if (!manifestsMatch(trustedPayloadManifest, currentManifest)) {
+        throw new Error('Migration payload changed before stage cleanup')
+      }
+    }
+  }
+  lease.assertHeld()
+}
+
+const isolateAndReclaimStage = async({
+  fsApi,
+  ownership,
+  payloadOwnership,
+  trustedPayloadManifest,
+  lease,
+  logger,
+}) => {
   try {
     lease.assertHeld()
     const isolation = await isolateOwnedPath({
@@ -372,9 +475,14 @@ const isolateAndReclaimStage = async({ fsApi, ownership, lease, logger }) => {
       prefix: STAGE_ISOLATION_PREFIX,
       onReserved: async() => { lease.assertHeld() },
       verifySource: async isolatedStagePath => {
-        lease.assertHeld()
-        verifyOwnedStage(fsApi, ownership, isolatedStagePath)
-        lease.assertHeld()
+        await verifyCleanupStage({
+          fsApi,
+          ownership,
+          currentStagePath: isolatedStagePath,
+          payloadOwnership,
+          trustedPayloadManifest,
+          lease,
+        })
       },
     })
     lease.assertHeld()
@@ -386,9 +494,14 @@ const isolateAndReclaimStage = async({ fsApi, ownership, lease, logger }) => {
     const reclamation = await reclaimIsolatedPayload({
       guard: isolation.guard,
       verifyPayload: async isolatedStagePath => {
-        lease.assertHeld()
-        verifyOwnedStage(fsApi, ownership, isolatedStagePath)
-        lease.assertHeld()
+        await verifyCleanupStage({
+          fsApi,
+          ownership,
+          currentStagePath: isolatedStagePath,
+          payloadOwnership,
+          trustedPayloadManifest,
+          lease,
+        })
       },
     })
     lease.assertHeld()
@@ -417,6 +530,9 @@ const copyDirectoryWithManifestPromotion = async({
   if (lease == null || typeof lease.assertHeld != 'function') throw new Error('Migration lease is required')
   let rootGuard
   let ownership
+  let payloadOwnership
+  let trustedPayloadManifest
+  let payloadPromoted = false
   let result
   try {
     lease.assertHeld()
@@ -431,16 +547,27 @@ const copyDirectoryWithManifestPromotion = async({
       if (error instanceof UnsupportedDirectoryEntryError || error instanceof DirectorySourceChangedError) throw error
       throw new DirectorySourceChangedError(`Migration source changed during initial scan: ${error.message}`)
     }
+    revalidateDirectDirectory(rootGuard)
+    lease.assertHeld()
     ownership = await createOwnedStage({ fsApi, rootGuard, stagePrefix, runId, lease })
     lease.assertHeld()
-    const payloadOwnership = createOwnedPayload({ fsApi, ownership, lease })
+    payloadOwnership = createOwnedPayload({ fsApi, ownership, lease })
     const payloadPath = payloadOwnership.path
-    await copyManifestEntries({ fsApi, sourcePath, payloadPath, manifest: sourceManifest, lease })
+    const beforePayloadMutation = () => verifyOwnedStageAtRoot(fsApi, ownership, payloadOwnership)
+    await copyManifestEntries({
+      fsApi,
+      sourcePath,
+      payloadPath,
+      manifest: sourceManifest,
+      lease,
+      beforeDestinationMutation: beforePayloadMutation,
+    })
     lease.assertHeld()
-    verifyOwnedPayload(fsApi, ownership, payloadOwnership)
+    verifyOwnedStageAtRoot(fsApi, ownership, payloadOwnership)
     const copiedManifest = await createDirectoryManifestInternal(fsApi, payloadPath, lease)
     lease.assertHeld()
-    verifyOwnedPayload(fsApi, ownership, payloadOwnership)
+    verifyOwnedStageAtRoot(fsApi, ownership, payloadOwnership)
+    trustedPayloadManifest = copiedManifest
     let finalSourceManifest
     try {
       lease.assertHeld()
@@ -456,15 +583,18 @@ const copyDirectoryWithManifestPromotion = async({
       throw new Error('Migration verification failed: recursive manifests do not match')
     }
     lease.assertHeld()
+    beforePayloadMutation()
+    lease.assertHeld()
     await writePayloadMarker?.({ payloadPath, sourceManifest, copiedManifest })
     lease.assertHeld()
-    verifyOwnedPayload(fsApi, ownership, payloadOwnership)
+    verifyOwnedStageAtRoot(fsApi, ownership, payloadOwnership)
     const markedPayloadManifest = await createDirectoryManifestInternal(fsApi, payloadPath, lease)
     lease.assertHeld()
-    verifyOwnedPayload(fsApi, ownership, payloadOwnership)
+    verifyOwnedStageAtRoot(fsApi, ownership, payloadOwnership)
     if (!manifestContains(markedPayloadManifest, copiedManifest)) {
       throw new Error('Migration payload changed while writing its marker')
     }
+    trustedPayloadManifest = markedPayloadManifest
     const sourceManifestHash = hashManifest(sourceManifest)
     const destinationManifestHash = hashManifest(copiedManifest)
     lease.assertHeld()
@@ -476,20 +606,22 @@ const copyDirectoryWithManifestPromotion = async({
       destinationManifestHash,
     })
     lease.assertHeld()
-    verifyOwnedPayload(fsApi, ownership, payloadOwnership)
+    verifyOwnedStageAtRoot(fsApi, ownership, payloadOwnership)
     const promotionManifest = await createDirectoryManifestInternal(fsApi, payloadPath, lease)
     lease.assertHeld()
-    verifyOwnedPayload(fsApi, ownership, payloadOwnership)
+    verifyOwnedStageAtRoot(fsApi, ownership, payloadOwnership)
     if (!manifestsMatch(markedPayloadManifest, promotionManifest)) {
       throw new Error('Migration payload changed before promotion')
     }
+    trustedPayloadManifest = promotionManifest
     if (fsApi.existsSync(destinationPath)) {
       result = { status: 'destination-exists', stagePath: ownership.stagePath }
     } else {
       lease.assertHeld()
-      verifyOwnedPayload(fsApi, ownership, payloadOwnership)
+      beforePayloadMutation()
       lease.assertHeld()
       fsApi.renameSync(payloadPath, destinationPath)
+      payloadPromoted = true
       result = {
         status: 'promoted',
         stagePath: ownership.stagePath,
@@ -504,7 +636,14 @@ const copyDirectoryWithManifestPromotion = async({
   }
 
   if (ownership != null) {
-    const cleanup = await isolateAndReclaimStage({ fsApi, ownership, lease, logger })
+    const cleanup = await isolateAndReclaimStage({
+      fsApi,
+      ownership,
+      payloadOwnership: payloadPromoted ? undefined : payloadOwnership,
+      trustedPayloadManifest: payloadPromoted ? undefined : trustedPayloadManifest,
+      lease,
+      logger,
+    })
     if (!cleanup.reclaimed) {
       result = { status: 'failed', stagePath: ownership.stagePath, error: cleanup.error }
     }

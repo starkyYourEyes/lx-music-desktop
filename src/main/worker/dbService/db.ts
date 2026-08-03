@@ -7,13 +7,15 @@ import {
   reopenPreparedOnlineBackup,
   reserveOnlineBackup,
   verifyLegacyOnlineBackup,
+  verifyRecordedOnlineBackup,
   type OnlineBackupVerifier,
   type VerifiedOnlineBackupGuard,
 } from './databaseBackup'
 import { bootstrapDatabaseSchema, getPendingMigrations, getSchemaVersion, runMigrations } from './migrate'
 import { migrations } from './migrations'
-import type { MigrationRunResult } from './migrations/types'
+import type { CacheCleanupMigrationContext, MigrationContext, MigrationRunResult } from './migrations/types'
 import { verifyDatabase } from './verifyDB'
+import { SCHEMA7_REMOVED_OBJECTS } from './tables'
 import type * as CacheCutover from '../../migration/cache/cutover'
 import type * as CacheCleanupMigration from './migrations/0007_cache_cleanup'
 import type * as RawLyricRepository from './modules/lyric/raw/repository'
@@ -756,27 +758,29 @@ const prepareCutoverBackup = (
 
 const runCacheCutoverMigration = (
   db: Database.Database,
-  beforeCommit?: () => void,
+  cacheCleanup: CacheCleanupMigrationContext,
 ): MigrationRunResult => db.transaction(() => {
   const fromVersion = getSchemaVersion(db)
   if (fromVersion != 6) throw createDatabaseError('database_advance_schema_invalid')
+  if (!Number.isSafeInteger(cacheCleanup.cutover.completedAtMs) || cacheCleanup.cutover.completedAtMs < 0) {
+    throw new Error('phase4_cutover_marker_invalid')
+  }
   // eslint-disable-next-line @typescript-eslint/no-var-requires -- Load migration 7 only during the schema-6-to-7 transition.
   const { migration7 } = require('./migrations/0007_cache_cleanup') as typeof CacheCleanupMigration
-  const appliedAtMs = Date.now()
-  if (!Number.isSafeInteger(appliedAtMs) || appliedAtMs < 0) {
-    throw new Error('Migration 7 produced an invalid applied timestamp')
-  }
-  const context = Object.freeze({ appliedAtMs })
+  const context: MigrationContext = Object.freeze({
+    appliedAtMs: cacheCleanup.cutover.completedAtMs,
+    cacheCleanup,
+  })
   migration7.up(db, context)
   db.prepare(`
     INSERT INTO schema_migrations (version, name, checksum, applied_at_ms)
     VALUES (?, ?, ?, ?)
-  `).run(migration7.version, migration7.name, migration7.checksum, appliedAtMs)
+  `).run(migration7.version, migration7.name, migration7.checksum, context.appliedAtMs)
   if (db.prepare("UPDATE db_info SET field_value = ? WHERE field_name = 'version'").run('7').changes != 1) {
     throw new Error('Migration 7 could not update the legacy version mirror')
   }
   migration7.verify?.(db, context)
-  beforeCommit?.()
+  cacheCleanup.assertBackupGuard()
   return { fromVersion: 6, toVersion: 7, applied: [7] }
 })()
 
@@ -812,7 +816,35 @@ const performDatabaseAdvance = async(
   const cutover = require('../../migration/cache/cutover') as typeof CacheCutover
   const currentVersion = getSchemaVersion(db)
   if (currentVersion == 7) {
-    const { readWriteMarker, backupPreparedMarker } = cutover.verifySchema7SteadyState(db)
+    const { readWriteMarker, cutoverDetails, backupPreparedMarker } = cutover.verifySchema7SteadyState(db)
+    if (cutoverDetails.version == 2) {
+      if (!cutoverDetails.backupRequired) return publishSchema7(initialization, null, [])
+      let guard: VerifiedOnlineBackupGuard | null = null
+      let backupPath: string | null = null
+      let verificationFailed = false
+      try {
+        guard = verifyRecordedOnlineBackup({
+          backupsRoot: initialization.backupsRoot,
+          basename: cutoverDetails.backupBasename,
+          expectedSha256: cutoverDetails.backupSha256,
+          expectedByteLength: cutoverDetails.backupByteLength,
+          expectedSourceSchemaVersion: cutoverDetails.backupSourceSchemaVersion,
+          nativeOptions: getNativeOptions(),
+          verifier: cutoverBackupVerifier(cutoverDetails.readWriteMarkerSha256),
+        })
+        guard.revalidate()
+        backupPath = guard.path
+      } catch {
+        verificationFailed = true
+      } finally {
+        try { guard?.close() } catch { verificationFailed = true }
+      }
+      if (verificationFailed || backupPath == null) {
+        throw createDatabaseError('database_advance_backup_invalid')
+      }
+      return publishSchema7(initialization, backupPath, [])
+    }
+
     const preparedBackup = backupPreparedMarker == null
       ? null
       : {
@@ -860,13 +892,52 @@ const performDatabaseAdvance = async(
     try { backupGuard?.close() } catch {}
     throw createDatabaseError('database_advance_schema_invalid')
   }
-  if (backupGuard != null) cutover.verifyBackupPreparedMarker(db, refreshed.readWriteMarker)
+  const preparedMarker = backupGuard == null
+    ? null
+    : cutover.verifyBackupPreparedMarker(db, refreshed.readWriteMarker)
+  if (backupGuard != null && (preparedMarker == null || backupGuard.sourceSchemaVersion != 6)) {
+    try { backupGuard.close() } catch {}
+    throw createDatabaseError('database_advance_backup_invalid')
+  }
+  const completedAtMs = preparedMarker?.completedAtMs ?? Date.now()
+  const removedObjects = [...SCHEMA7_REMOVED_OBJECTS] as [...typeof SCHEMA7_REMOVED_OBJECTS]
+  Object.freeze(removedObjects)
+  const cutoverDetails: CacheCutover.CutoverDetailsV2 = backupGuard == null
+    ? {
+        backupRequired: false,
+        completedAtMs,
+        fromSchemaVersion: 6,
+        rawLyricsDeletedRows: refreshed.rawLyricsDeletedRows,
+        readWriteMarkerSha256,
+        removedObjects,
+        toSchemaVersion: 7,
+        version: 2,
+      }
+    : {
+        backupBasename: backupGuard.basename,
+        backupByteLength: backupGuard.byteLength,
+        backupRequired: true,
+        backupSha256: backupGuard.sha256,
+        backupSourceSchemaVersion: 6,
+        completedAtMs,
+        fromSchemaVersion: 6,
+        rawLyricsDeletedRows: refreshed.rawLyricsDeletedRows,
+        readWriteMarkerSha256,
+        removedObjects,
+        toSchemaVersion: 7,
+        version: 2,
+      }
+  Object.freeze(cutoverDetails)
+  const cacheCleanup: CacheCleanupMigrationContext = Object.freeze({
+    cutover: cutoverDetails,
+    assertBackupGuard() {
+      backupGuard?.revalidate()
+    },
+  })
 
   enterRawLyricCutoverPending()
   try {
-    const migration = runCacheCutoverMigration(db, backupGuard == null
-      ? undefined
-      : () => { backupGuard.revalidate() })
+    const migration = runCacheCutoverMigration(db, cacheCleanup)
     if (migration.fromVersion != 6 || migration.toVersion != 7 ||
       migration.applied.length != 1 || migration.applied[0] != 7) {
       throw createDatabaseError('database_advance_migration_invalid')

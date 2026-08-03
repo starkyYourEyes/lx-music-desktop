@@ -23,6 +23,7 @@ import type * as CacheDb from '../../worker/dbService/cacheDb'
 import type * as RawLyricRepository from '../../worker/dbService/modules/lyric/raw/repository'
 import type * as MusicUrlRepository from '../../worker/dbService/modules/music_url'
 import type * as OtherSourcesRepository from '../../worker/dbService/modules/music_other_source'
+import type { CacheCleanupMigrationContext } from '../../worker/dbService/migrations/types'
 
 type CacheExecutionResult<T> = CacheDb.CacheExecutionResult<T>
 
@@ -89,6 +90,31 @@ export interface CutoverDetailsV1 {
   toSchemaVersion: 7
   version: 1
 }
+
+interface CutoverDetailsV2Base {
+  backupRequired: boolean
+  completedAtMs: number
+  fromSchemaVersion: 6
+  rawLyricsDeletedRows: number
+  readWriteMarkerSha256: string
+  removedObjects: [...typeof SCHEMA7_REMOVED_OBJECTS]
+  toSchemaVersion: 7
+  version: 2
+}
+
+export type CutoverDetailsV2 =
+  | (CutoverDetailsV2Base & {
+    backupRequired: false
+  })
+  | (CutoverDetailsV2Base & {
+    backupRequired: true
+    backupBasename: string
+    backupByteLength: number
+    backupSha256: string
+    backupSourceSchemaVersion: 6
+  })
+
+export type CutoverDetails = CutoverDetailsV1 | CutoverDetailsV2
 
 interface TypedSmokeEvidence {
   raw: JsonValue
@@ -658,33 +684,65 @@ export function writeBackupPreparedMarker(
   return stored
 }
 
-const parseCutoverDetails = (detailsJson: string): CutoverDetailsV1 => {
-  let parsed: unknown
-  try { parsed = JSON.parse(detailsJson) } catch { throw failure('phase4_cutover_marker_invalid') }
-  if (!isPlainRecord(parsed) || !hasExactKeys(parsed, [
+const validCutoverBase = (parsed: Record<string, unknown>, version: 1 | 2): boolean =>
+  isSafeTimestamp(parsed.completedAtMs) && parsed.fromSchemaVersion == 6 && parsed.toSchemaVersion == 7 &&
+  parsed.version == version && isSafeTimestamp(parsed.rawLyricsDeletedRows) &&
+  typeof parsed.readWriteMarkerSha256 == 'string' && SHA256_PATTERN.test(parsed.readWriteMarkerSha256) &&
+  Array.isArray(parsed.removedObjects) && parsed.removedObjects.length == SCHEMA7_REMOVED_OBJECTS.length &&
+  parsed.removedObjects.every((name, index) => name == SCHEMA7_REMOVED_OBJECTS[index])
+
+const parseCutoverDetailsV1 = (parsed: Record<string, unknown>, detailsJson: string): CutoverDetailsV1 => {
+  if (!hasExactKeys(parsed, [
     'completedAtMs', 'fromSchemaVersion', 'rawLyricsDeletedRows', 'readWriteMarkerSha256',
     'removedObjects', 'toSchemaVersion', 'version',
-  ]) || !isSafeTimestamp(parsed.completedAtMs) || parsed.fromSchemaVersion != 6 || parsed.toSchemaVersion != 7 ||
-    parsed.version != 1 || !isSafeTimestamp(parsed.rawLyricsDeletedRows) ||
-    typeof parsed.readWriteMarkerSha256 != 'string' || !SHA256_PATTERN.test(parsed.readWriteMarkerSha256) ||
-    !Array.isArray(parsed.removedObjects) || parsed.removedObjects.length != SCHEMA7_REMOVED_OBJECTS.length ||
-    parsed.removedObjects.some((name, index) => name != SCHEMA7_REMOVED_OBJECTS[index]) ||
-    canonicalJson(parsed as JsonValue) != detailsJson) {
+  ]) || !validCutoverBase(parsed, 1) || canonicalJson(parsed as JsonValue) != detailsJson) {
     throw failure('phase4_cutover_marker_invalid')
   }
   return parsed as unknown as CutoverDetailsV1
 }
 
+const parseCutoverDetailsV2 = (parsed: Record<string, unknown>, detailsJson: string): CutoverDetailsV2 => {
+  const falseKeys = [
+    'backupRequired', 'completedAtMs', 'fromSchemaVersion', 'rawLyricsDeletedRows',
+    'readWriteMarkerSha256', 'removedObjects', 'toSchemaVersion', 'version',
+  ] as const
+  const trueKeys = [
+    'backupBasename', 'backupByteLength', 'backupRequired', 'backupSha256', 'backupSourceSchemaVersion',
+    ...falseKeys.slice(1),
+  ] as const
+  const validFalse = parsed.backupRequired === false && hasExactKeys(parsed, falseKeys)
+  const validTrue = parsed.backupRequired === true && hasExactKeys(parsed, trueKeys) &&
+    typeof parsed.backupBasename == 'string' && BACKUP_BASENAME_PATTERN.test(parsed.backupBasename) &&
+    Number.isSafeInteger(parsed.backupByteLength) && (parsed.backupByteLength as number) > 0 &&
+    typeof parsed.backupSha256 == 'string' && SHA256_PATTERN.test(parsed.backupSha256) &&
+    parsed.backupSourceSchemaVersion == 6
+  if ((!validFalse && !validTrue) || !validCutoverBase(parsed, 2) ||
+    canonicalJson(parsed as JsonValue) != detailsJson) throw failure('phase4_cutover_marker_invalid')
+  return parsed as unknown as CutoverDetailsV2
+}
+
+const parseCutoverDetails = (detailsJson: string): CutoverDetails => {
+  let parsed: unknown
+  try { parsed = JSON.parse(detailsJson) } catch { throw failure('phase4_cutover_marker_invalid') }
+  if (!isPlainRecord(parsed)) throw failure('phase4_cutover_marker_invalid')
+  if (parsed.version === 1) return parseCutoverDetailsV1(parsed, detailsJson)
+  if (parsed.version === 2) return parseCutoverDetailsV2(parsed, detailsJson)
+  throw failure('phase4_cutover_marker_invalid')
+}
+
 export const readCutoverMarker = (
   db: Database.Database,
   readWriteMarker: StrictMarkerRow<typeof READ_WRITE_MARKER_NAME>,
-): { marker: StrictMarkerRow<typeof CUTOVER_MARKER_NAME>, details: CutoverDetailsV1 } => {
+): { marker: StrictMarkerRow<typeof CUTOVER_MARKER_NAME>, details: CutoverDetails } => {
   const marker = readMarkerRow(db, CUTOVER_MARKER_NAME)
   if (marker == null) throw failure('phase4_cutover_marker_invalid')
   const details = parseCutoverDetails(marker.detailsJson)
   if (details.completedAtMs != marker.completedAtMs ||
     details.readWriteMarkerSha256 != markerRowSha256(readWriteMarker) ||
-    marker.sourceSha256 != framedSha256('lx.storage.phase4.cutover-details.v1', details as unknown as JsonValue)) {
+    marker.sourceSha256 != framedSha256(
+      `lx.storage.phase4.cutover-details.v${details.version}`,
+      details as unknown as JsonValue,
+    )) {
     throw failure('phase4_cutover_marker_invalid')
   }
   return { marker, details }
@@ -705,6 +763,7 @@ const assertNoRemovedObjectReferences = (db: Database.Database): void => {
 
 export const verifySchema6CutoverPrerequisites = (db: Database.Database): {
   rawMarker: RawLyricMarkerRow
+  rawLyricsDeletedRows: number
   readWriteMarker: StrictMarkerRow<typeof READ_WRITE_MARKER_NAME>
 } => {
   verifyLedger(db, 6)
@@ -712,7 +771,7 @@ export const verifySchema6CutoverPrerequisites = (db: Database.Database): {
   const rawMarker = verifyRawMarker(db, 'schema6-current')
   const readWriteMarker = verifyReadWriteMarker(db, rawMarker)
   if (readMarkerRow(db, CUTOVER_MARKER_NAME) != null) throw failure('phase4_cutover_marker_invalid')
-  return { rawMarker, readWriteMarker }
+  return { rawMarker, rawLyricsDeletedRows: rawMarkerDetails(rawMarker).sourceRows, readWriteMarker }
 }
 
 export const verifySchema6RollbackState = (db: Database.Database): boolean => {
@@ -728,6 +787,7 @@ export const verifySchema7SteadyState = (db: Database.Database): {
   rawMarker: RawLyricMarkerRow
   readWriteMarker: StrictMarkerRow<typeof READ_WRITE_MARKER_NAME>
   cutoverMarker: StrictMarkerRow<typeof CUTOVER_MARKER_NAME>
+  cutoverDetails: CutoverDetails
   backupPreparedMarker: BackupPreparedMarkerV1 | null
 } => {
   verifyLedger(db, 7)
@@ -738,21 +798,29 @@ export const verifySchema7SteadyState = (db: Database.Database): {
   assertNoRemovedObjectReferences(db)
   const rawMarker = verifyRawMarker(db, 'schema7-historical')
   const readWriteMarker = verifyReadWriteMarker(db, rawMarker)
+  const cutover = readCutoverMarker(db, readWriteMarker)
   const preparedRow = readBackupPreparedMarker(db)
   let backupPreparedMarker: BackupPreparedMarkerV1 | null = null
-  if (preparedRow != null) {
+  if (cutover.details.version == 2 && preparedRow != null) {
+    throw failure('phase4_cutover_marker_invalid')
+  } else if (cutover.details.version == 1 && preparedRow != null) {
     const details = parseBackupPreparedDetails(preparedRow.detailsJson)
     if (details.readWriteMarkerSha256 != markerRowSha256(readWriteMarker)) {
       throw failure('backup_prepared_source_changed')
     }
     backupPreparedMarker = Object.freeze({ ...preparedRow, details: Object.freeze({ ...details }) })
   }
-  const cutover = readCutoverMarker(db, readWriteMarker)
   const ledger7 = db.prepare('SELECT applied_at_ms AS appliedAtMs FROM schema_migrations WHERE version = 7').get() as { appliedAtMs: unknown } | undefined
   if (ledger7 == null || ledger7.appliedAtMs != cutover.marker.completedAtMs) {
     throw failure('phase4_cutover_marker_invalid')
   }
-  return { rawMarker, readWriteMarker, cutoverMarker: cutover.marker, backupPreparedMarker }
+  return {
+    rawMarker,
+    readWriteMarker,
+    cutoverMarker: cutover.marker,
+    cutoverDetails: cutover.details,
+    backupPreparedMarker,
+  }
 }
 
 const editedRows = (db: Database.Database): string[][] => {
@@ -781,13 +849,31 @@ const editedSnapshot = (db: Database.Database): { count: number, sha256: string 
 
 export const applySchema7CacheCleanup = (
   db: Database.Database,
-  appliedAtMs: number,
+  cacheCleanup: CacheCleanupMigrationContext,
 ): void => {
-  if (!isSafeTimestamp(appliedAtMs)) throw failure('phase4_cutover_marker_invalid')
-  const { readWriteMarker } = verifySchema6CutoverPrerequisites(db)
+  let detailsJson: string
+  try { detailsJson = canonicalJson(cacheCleanup.cutover as unknown as JsonValue) } catch {
+    throw failure('phase4_cutover_marker_invalid')
+  }
+  const details = parseCutoverDetails(detailsJson)
+  if (details.version != 2) throw failure('phase4_cutover_marker_invalid')
+  const { rawLyricsDeletedRows, readWriteMarker } = verifySchema6CutoverPrerequisites(db)
+  if (details.readWriteMarkerSha256 != markerRowSha256(readWriteMarker) ||
+    details.rawLyricsDeletedRows != rawLyricsDeletedRows) throw failure('phase4_cutover_marker_invalid')
+  const preparedMarker = verifyBackupPreparedMarker(db, readWriteMarker)
+  if (details.backupRequired) {
+    if (preparedMarker == null || preparedMarker.completedAtMs != details.completedAtMs ||
+      preparedMarker.details.backupBasename != details.backupBasename ||
+      preparedMarker.details.readWriteMarkerSha256 != details.readWriteMarkerSha256 ||
+      preparedMarker.details.sourceSchemaVersion != details.backupSourceSchemaVersion) {
+      throw failure('backup_prepared_source_changed')
+    }
+  } else if (preparedMarker != null) {
+    throw failure('phase4_cutover_marker_invalid')
+  }
   const editedBefore = editedSnapshot(db)
   const deleted = deleteAuthoritativeRawRows(db)
-  if (countAuthoritativeRawRows(db) != 0) {
+  if (deleted != details.rawLyricsDeletedRows || countAuthoritativeRawRows(db) != 0) {
     throw failure('phase4_cutover_failed')
   }
   const editedAfter = editedSnapshot(db)
@@ -803,20 +889,22 @@ export const applySchema7CacheCleanup = (
   assertNoRemovedObjectReferences(db)
   verifyExactStructure(db, databaseSchema7Contract, explicitSchema7Indexes)
 
-  const details: CutoverDetailsV1 = {
-    completedAtMs: appliedAtMs,
-    fromSchemaVersion: 6,
-    rawLyricsDeletedRows: deleted,
-    readWriteMarkerSha256: markerRowSha256(readWriteMarker),
-    removedObjects: [...SCHEMA7_REMOVED_OBJECTS],
-    toSchemaVersion: 7,
-    version: 1,
+  if (preparedMarker != null && db.prepare(`
+    DELETE FROM migration_markers
+    WHERE name = ? AND source_sha256 = ? AND completed_at_ms = ? AND details_json = ?
+  `).run(
+    preparedMarker.name,
+    preparedMarker.sourceSha256,
+    preparedMarker.completedAtMs,
+    preparedMarker.detailsJson,
+  ).changes != 1) {
+    throw failure('backup_prepared_source_changed')
   }
   const marker: StrictMarkerRow<typeof CUTOVER_MARKER_NAME> = {
     name: CUTOVER_MARKER_NAME,
-    sourceSha256: framedSha256('lx.storage.phase4.cutover-details.v1', details as unknown as JsonValue),
-    completedAtMs: appliedAtMs,
-    detailsJson: canonicalJson(details as unknown as JsonValue),
+    sourceSha256: framedSha256('lx.storage.phase4.cutover-details.v2', details as unknown as JsonValue),
+    completedAtMs: details.completedAtMs,
+    detailsJson,
   }
   db.prepare(`
     INSERT INTO migration_markers(name, source_sha256, completed_at_ms, details_json)
@@ -827,8 +915,16 @@ export const applySchema7CacheCleanup = (
     stored.detailsJson != marker.detailsJson) throw failure('phase4_cutover_marker_invalid')
 }
 
-export const verifySchema7AfterMigration = (db: Database.Database): void => {
-  verifySchema7SteadyState(db)
+export const verifySchema7AfterMigration = (
+  db: Database.Database,
+  cacheCleanup: CacheCleanupMigrationContext,
+): void => {
+  const state = verifySchema7SteadyState(db)
+  if (state.cutoverDetails.version != 2 ||
+    canonicalJson(state.cutoverDetails as unknown as JsonValue) !=
+      canonicalJson(cacheCleanup.cutover as unknown as JsonValue)) {
+    throw failure('phase4_cutover_marker_invalid')
+  }
 }
 
 export const verifyCutoverBackup = (

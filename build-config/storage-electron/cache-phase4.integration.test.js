@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
@@ -235,17 +236,28 @@ describe('fixture-only Phase 4 durability acceptance', () => {
     assert.deepEqual(await phase4.initializePhase4(), { schemaVersion: 7, typedOwnershipVerified: true })
     assert.equal(dbService.getDatabaseInitialization().schemaVersion, 7)
     assert.deepEqual(snapshotDurableFixture(fixture, dbService.getAppDB()), beforeCutover)
+    const cutoverRow = dbService.getAppDB().prepare(`
+      SELECT details_json AS detailsJson FROM migration_markers
+      WHERE name = 'legacy_cache_v1.cutover'
+    `).get()
+    const cutoverDetails = JSON.parse(cutoverRow.detailsJson)
+    assert.equal(cutoverDetails.version, 2)
+    assert.equal(cutoverDetails.backupRequired, true)
+    assert.equal(cutoverDetails.backupSourceSchemaVersion, 6)
+    assert.equal(fs.statSync(path.join(fixture.backupsRoot, cutoverDetails.backupBasename)).size,
+      cutoverDetails.backupByteLength)
+    assert.equal(dbService.getAppDB().prepare(`
+      SELECT 1 FROM migration_markers WHERE name = 'legacy_cache_v1.backup_prepared'
+    `).get(), undefined)
 
     const backupNames = fs.readdirSync(fixture.backupsRoot)
-    const finalName = backupNames.find(name => /^lx\.data\.db\.pre-migration-v6-to-v7\.[a-f0-9]{64}\.backup$/.test(name))
-    const stageName = backupNames.find(name => /^\.lx-backup-[a-f0-9]{32}\.stage$/.test(name))
-    assert.equal(typeof finalName, 'string')
-    assert.equal(typeof stageName, 'string')
-    const finalStats = fs.lstatSync(path.join(fixture.backupsRoot, finalName), { bigint: true })
-    const stageStats = fs.lstatSync(path.join(fixture.backupsRoot, stageName), { bigint: true })
-    assert.equal(finalStats.ino, stageStats.ino)
-    assert.equal(finalStats.dev, stageStats.dev)
-    assert.equal(finalStats.nlink, 2n)
+    assert.equal(backupNames.includes(cutoverDetails.backupBasename), true)
+    assert.match(cutoverDetails.backupBasename,
+      /^lx\.data\.db\.pre-migration-v6-to-v7\.[a-f0-9]{32}\.backup$/)
+    const backupPath = path.join(fixture.backupsRoot, cutoverDetails.backupBasename)
+    assert.equal(fs.lstatSync(backupPath, { bigint: true }).nlink, 1n)
+    assert.equal(crypto.createHash('sha256').update(fs.readFileSync(backupPath)).digest('hex'),
+      cutoverDetails.backupSha256)
 
     const harness = createCacheManagerHarness(fixture)
     const cleared = await harness.manager.clearAll()

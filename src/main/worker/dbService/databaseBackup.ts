@@ -28,13 +28,13 @@ export interface OnlineBackupReservation extends ExclusiveArtifactReservation {
 }
 
 export interface VerifiedOnlineBackupGuard {
-  path: string
-  basename: string
-  sha256: string
-  byteLength: number
-  sourceSchemaVersion: number
-  revalidate: () => void
-  close: () => void
+  readonly path: string
+  readonly basename: string
+  readonly sha256: string
+  readonly byteLength: number
+  readonly sourceSchemaVersion: number
+  readonly revalidate: () => void
+  readonly close: () => void
 }
 
 interface OnlineReservationMetadata {

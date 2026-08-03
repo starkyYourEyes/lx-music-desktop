@@ -616,6 +616,59 @@ describe('guarded online backup', () => {
     assert.equal(rootClosed, true)
   })
 
+  it('wraps a frozen primary error without discarding cleanup context', () => {
+    const root = tempDir('lx-recovery-frozen-primary-cleanup-')
+    const backupsRoot = path.join(root, 'backups')
+    const direct = require('../../src/main/storage/directDirectory.js')
+    const primaryError = Object.freeze(Object.assign(
+      new Error('frozen root revalidation failure'),
+      { code: 'frozen_primary_failure' },
+    ))
+    const cleanupError = new Error('injected frozen-primary close failure')
+    let rootGuard
+    let revalidationFailed = false
+    const guardedDirect = {
+      ...direct,
+      validateDirectDirectory(directoryPath, options) {
+        const guard = direct.validateDirectDirectory(directoryPath, options)
+        if (path.resolve(directoryPath) == path.resolve(backupsRoot)) rootGuard = guard
+        return guard
+      },
+      revalidateDirectDirectory(guard) {
+        if (guard == rootGuard && !revalidationFailed) {
+          revalidationFailed = true
+          throw primaryError
+        }
+        return direct.revalidateDirectDirectory(guard)
+      },
+      closeDirectDirectory(guard) {
+        if (guard == rootGuard) throw cleanupError
+        return direct.closeDirectDirectory(guard)
+      },
+    }
+    const backup = loadBackupWithBoundaries({ directDirectoryModule: guardedDirect })
+    let thrown
+    try {
+      backup.reserveOnlineBackup({
+        backupsRoot,
+        basenamePrefix: 'lx.data.db.backup',
+        sourceSchemaVersion: 2,
+      })
+    } catch (error) {
+      thrown = error
+    }
+    assert.throws(() => fs.fstatSync(rootGuard.descriptor), error => error?.code == 'EBADF')
+
+    assert.equal(thrown instanceof AggregateError, true)
+    assert.equal(thrown.cause, primaryError)
+    assert.equal(thrown.code, primaryError.code)
+    assert.equal(thrown.message, primaryError.message)
+    assert.equal(Object.isFrozen(thrown.cleanupErrors), true)
+    assert.equal(thrown.cleanupErrors.includes(cleanupError), true)
+    assert.equal(thrown.errors.includes(primaryError), true)
+    assert.equal(thrown.errors.includes(cleanupError), true)
+  })
+
   it('does not close a same-directory descriptor reused after guarded close', () => {
     const root = tempDir('lx-recovery-root-close-reuse-')
     const backupsRoot = path.join(root, 'backups')

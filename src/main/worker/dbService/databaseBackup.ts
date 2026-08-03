@@ -100,8 +100,31 @@ const withCleanupContext = (primary: Error, cleanupErrors: readonly Error[]): Er
       enumerable: false,
       value: Object.freeze([...(contextual.cleanupErrors ?? []), ...cleanupErrors]),
     })
-  } catch {}
-  return contextual
+    return contextual
+  } catch (error) {
+    const fallbackCleanup = Object.freeze([
+      ...cleanupErrors,
+      asError(error, 'backup_cleanup_context_attachment_failed'),
+    ])
+    const aggregate = new AggregateError(
+      [primary, ...fallbackCleanup],
+      primary.message,
+      { cause: primary },
+    ) as AggregateError & CleanupAwareError & { code?: string }
+    Object.defineProperty(aggregate, 'cleanupErrors', {
+      configurable: false,
+      enumerable: false,
+      value: fallbackCleanup,
+    })
+    if ('code' in primary && typeof primary.code == 'string') {
+      Object.defineProperty(aggregate, 'code', {
+        configurable: false,
+        enumerable: true,
+        value: primary.code,
+      })
+    }
+    return aggregate
+  }
 }
 
 const closeCapturedDirectGuard = (guard: DirectDirectoryGuard): Error[] => {

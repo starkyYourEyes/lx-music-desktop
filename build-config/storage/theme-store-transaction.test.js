@@ -172,10 +172,9 @@ test('failed durable theme save preserves disk and published state and reclaims 
     assert.deepEqual(await fsp.readdir(assetRoot), ['existing.img'])
     assert.equal(
       fs.existsSync(path.join(runTempRoot, 'theme-editor', staged.stagingId)),
-      process.platform == 'linux',
+      false,
     )
     assert.deepEqual(await fsp.readFile(externalImage), pngBytes)
-    await manager.discardThemeImage({ stagingId: staged.stagingId })
     await assert.rejects(manager.discardThemeImage({ stagingId: staged.stagingId }), /theme_stage_invalid/)
   } finally {
     await store?.flush().catch(() => {})

@@ -16,8 +16,9 @@ process.env.TMP = fixtureBase
 const modulePath = path.join(__dirname, '../../src/main/services/themeAssetManager.ts')
 const lifecyclePath = path.join(__dirname, '../../src/main/utils/tempLifecycle.ts')
 const storagePaths = loadTsModule(path.join(__dirname, '../../src/main/utils/storagePaths.ts'))
-const loadManager = (fsPromises = fsp) => loadTsModule(modulePath, {
+const loadManager = (fsPromises = fsp, fsSync = fs) => loadTsModule(modulePath, {
   '@main/utils/storagePaths': storagePaths,
+  'node:fs': fsSync,
   'node:fs/promises': fsPromises,
 })
 const loadLifecycle = (fsPromises = fsp) => loadTsModule(lifecyclePath, {
@@ -26,10 +27,6 @@ const loadLifecycle = (fsPromises = fsp) => loadTsModule(lifecyclePath, {
 })
 const sha256 = async(targetPath) => crypto.createHash('sha256').update(await fsp.readFile(targetPath)).digest('hex')
 const exists = async(targetPath) => await fsp.lstat(targetPath).then(() => true, () => false)
-const nodeIdentity = async(targetPath) => {
-  const stat = await fsp.lstat(targetPath, { bigint: true })
-  return { dev: String(stat.dev), ino: String(stat.ino) }
-}
 const pngBytes = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360f8cfc000000301010018dd8db10000000049454e44ae426082', 'hex')
 const linuxDescriptorFd = targetPath => {
   const match = String(targetPath).match(/[\\/]proc[\\/]self[\\/]fd[\\/](\d+)[\\/]/)
@@ -58,7 +55,51 @@ const trackDirectoryHandle = (handle, descriptorState) => {
   }
 }
 
-const createManager = async(fixture, fsPromises = fsp) => {
+const createLinuxStageAdapter = (hooks = {}) => {
+  let stagingChild
+  const directoryDescriptor = { fd: null, closed: true }
+  const stageDescriptor = { path: null, closed: true }
+  const isStagePath = targetPath => stagingChild != null &&
+    path.dirname(String(targetPath)) == stagingChild && /^[a-f0-9]{32}$/i.test(path.basename(String(targetPath)))
+  const fileSystem = {
+    ...fsp,
+    async open(targetPath, flags, mode) {
+      if (!isLinuxDescriptorPath(targetPath) && path.basename(String(targetPath)) == 'theme-editor' &&
+        String(flags) == 'r') {
+        stagingChild = String(targetPath)
+        return trackDirectoryHandle(await fsp.open(targetPath, flags, mode), directoryDescriptor)
+      }
+      const actualPath = mapLinuxDescriptorPath(targetPath, stagingChild, directoryDescriptor)
+      const handle = await fsp.open(actualPath, flags, mode)
+      if (!isStagePath(actualPath) || String(flags) != 'r') return handle
+      stageDescriptor.path = String(actualPath)
+      stageDescriptor.closed = false
+      await hooks.afterStageDescriptorOpen?.({ stagePath: String(actualPath), handle })
+      return {
+        fd: handle.fd,
+        stat: handle.stat.bind(handle),
+        read: handle.read.bind(handle),
+        async close() {
+          stageDescriptor.closed = true
+          await handle.close()
+        },
+      }
+    },
+    async lstat(targetPath, options) {
+      const actualPath = mapLinuxDescriptorPath(targetPath, stagingChild, directoryDescriptor)
+      if (isStagePath(actualPath)) {
+        await hooks.beforeStagePathInspect?.({
+          stagePath: String(actualPath),
+          descriptorOpen: stageDescriptor.path == String(actualPath) && !stageDescriptor.closed,
+        })
+      }
+      return fsp.lstat(actualPath, options)
+    },
+  }
+  return { fileSystem, stageDescriptor }
+}
+
+const createManager = async(fixture, fsPromises = fsp, fsSync = fs) => {
   const profileRoot = path.join(fixture.path, 'profile')
   const tempRoot = path.join(fixture.path, 'temp')
   await fsp.mkdir(tempRoot, { recursive: true })
@@ -66,7 +107,7 @@ const createManager = async(fixture, fsPromises = fsp) => {
   const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
   const runTempRoot = reservation.runTempRoot
   const runTemp = await createRunTempHandle({ reservation })
-  const { createThemeAssetManager } = loadManager(fsPromises)
+  const { createThemeAssetManager } = loadManager(fsPromises, fsSync)
   return {
     manager: createThemeAssetManager({ profileRoot, runTemp, runTempRoot }),
     profileRoot,
@@ -200,6 +241,152 @@ test('rejects a replaced regular staged file and preserves the replacement', {
   }
 })
 
+test('copies a disk stage only from its retained read descriptor', async() => {
+  // Catches promotion that closes the stage descriptor before proving the pathname still names that descriptor.
+  const fixture = createTestStorageRoot('theme-descriptor-replacement')
+  const originalPlatform = process.platform
+  const parkedStage = path.join(fixture.path, 'parked-stage')
+  const replacementBytes = Buffer.concat([pngBytes, Buffer.from('replacement')])
+  let replaced = false
+  let checkedWhileDescriptorOpen = false
+  try {
+    Object.defineProperty(process, 'platform', { value: 'linux' })
+    const externalImage = path.join(fixture.path, 'external.png')
+    await fsp.writeFile(externalImage, pngBytes)
+    const adapter = createLinuxStageAdapter({
+      async afterStageDescriptorOpen({ stagePath }) {
+        if (replaced) return
+        replaced = true
+        await fsp.rename(stagePath, parkedStage)
+        await fsp.writeFile(stagePath, replacementBytes, { flag: 'wx' })
+      },
+      async beforeStagePathInspect({ descriptorOpen }) {
+        if (replaced && descriptorOpen) checkedWhileDescriptorOpen = true
+      },
+    })
+    const { manager } = await createManager(fixture, adapter.fileSystem)
+    const staged = await manager.stageThemeImage({ sourcePath: externalImage })
+
+    await assert.rejects(promote(manager, staged), /theme_stage_invalid/)
+
+    assert.equal(replaced, true)
+    assert.equal(checkedWhileDescriptorOpen, true)
+    assert.deepEqual(await fsp.readFile(staged.previewPath), replacementBytes)
+    assert.deepEqual(await fsp.readFile(parkedStage), pngBytes)
+  } finally {
+    Object.defineProperty(process, 'platform', { value: originalPlatform })
+    fixture.cleanup()
+  }
+})
+
+test('revalidates the stage pathname before and after durable copy', async() => {
+  // Catches publication that verifies the stage only before reserving the durable artifact.
+  const fixture = createTestStorageRoot('theme-stage-copy-revalidation')
+  const originalPlatform = process.platform
+  let profileRoot
+  let beforeCopyChecks = 0
+  let afterCopyChecks = 0
+  try {
+    Object.defineProperty(process, 'platform', { value: 'linux' })
+    const externalImage = path.join(fixture.path, 'external.png')
+    await fsp.writeFile(externalImage, pngBytes)
+    const adapter = createLinuxStageAdapter({
+      async beforeStagePathInspect({ descriptorOpen }) {
+        if (!descriptorOpen || profileRoot == null) return
+        const assetRoot = path.join(profileRoot, 'assets', 'theme-images')
+        const durableExists = await fsp.readdir(assetRoot).then(entries => entries.some(name => name.endsWith('.img')), () => false)
+        if (durableExists) afterCopyChecks++
+        else beforeCopyChecks++
+      },
+    })
+    const created = await createManager(fixture, adapter.fileSystem)
+    profileRoot = created.profileRoot
+    const staged = await created.manager.stageThemeImage({ sourcePath: externalImage })
+
+    await promote(created.manager, staged)
+
+    assert.ok(beforeCopyChecks > 0)
+    assert.ok(afterCopyChecks > 0)
+  } finally {
+    Object.defineProperty(process, 'platform', { value: originalPlatform })
+    fixture.cleanup()
+  }
+})
+
+test('preserves a stage replacement and never invokes settings commit', async() => {
+  // Catches a stage pathname race after durable publication but before stage retirement.
+  const fixture = createTestStorageRoot('theme-stage-replacement-before-settings')
+  const originalPlatform = process.platform
+  const replacementBytes = Buffer.concat([pngBytes, Buffer.from('replacement')])
+  let profileRoot
+  let replaced = false
+  let commitCalled = false
+  try {
+    Object.defineProperty(process, 'platform', { value: 'linux' })
+    const externalImage = path.join(fixture.path, 'external.png')
+    const parkedStage = path.join(fixture.path, 'parked-stage')
+    await fsp.writeFile(externalImage, pngBytes)
+    const adapter = createLinuxStageAdapter({
+      async beforeStagePathInspect({ stagePath, descriptorOpen }) {
+        if (!descriptorOpen || profileRoot == null) return
+        const assetRoot = path.join(profileRoot, 'assets', 'theme-images')
+        const durableExists = await fsp.readdir(assetRoot).then(entries => entries.some(name => name.endsWith('.img')), () => false)
+        if (replaced || !durableExists) return
+        replaced = true
+        await fsp.rename(stagePath, parkedStage)
+        await fsp.writeFile(stagePath, replacementBytes, { flag: 'wx' })
+      },
+    })
+    const created = await createManager(fixture, adapter.fileSystem)
+    profileRoot = created.profileRoot
+    const staged = await created.manager.stageThemeImage({ sourcePath: externalImage })
+
+    await assert.rejects(
+      created.manager.promoteThemeImage(staged, async promoted => {
+        commitCalled = true
+        return promoted
+      }),
+      /theme_stage_invalid/,
+    )
+
+    assert.equal(replaced, true)
+    assert.equal(commitCalled, false)
+    assert.deepEqual(await fsp.readFile(staged.previewPath), replacementBytes)
+    assert.deepEqual(await fsp.readdir(path.join(profileRoot, 'assets', 'theme-images')), [])
+  } finally {
+    Object.defineProperty(process, 'platform', { value: originalPlatform })
+    fixture.cleanup()
+  }
+})
+
+test('retires the disk stage before invoking the settings commit', async() => {
+  // Catches commit-before-retirement ordering that leaves a retryable stage after settings failure.
+  const fixture = createTestStorageRoot('theme-retire-before-settings')
+  const originalPlatform = process.platform
+  try {
+    Object.defineProperty(process, 'platform', { value: 'linux' })
+    const externalImage = path.join(fixture.path, 'external.png')
+    await fsp.writeFile(externalImage, pngBytes)
+    const adapter = createLinuxStageAdapter()
+    const { manager } = await createManager(fixture, adapter.fileSystem)
+    const staged = await manager.stageThemeImage({ sourcePath: externalImage })
+    const events = []
+
+    await manager.promoteThemeImage(staged, async promoted => {
+      events.push('settings')
+      assert.equal(await exists(staged.previewPath), false)
+      assert.equal(await exists(promoted.previewPath), true)
+      return promoted
+    })
+
+    assert.deepEqual(events, ['settings'])
+    await assert.rejects(promote(manager, staged), /theme_stage_invalid/)
+  } finally {
+    Object.defineProperty(process, 'platform', { value: originalPlatform })
+    fixture.cleanup()
+  }
+})
+
 test('caps reads from one source handle when the external image grows during staging', async() => {
   // Catches staging that performs an unbounded path read or accepts bytes after the selected file grows past 8 MiB.
   const fixture = createTestStorageRoot('theme-growing-source')
@@ -239,61 +426,6 @@ test('caps reads from one source handle when the external image grows during sta
       assert.equal(await exists(stagingChild), false)
     }
   } finally {
-    fixture.cleanup()
-  }
-})
-
-test('restores an unowned staged replacement moved at the quarantine rename boundary', async() => {
-  // Catches cleanup that strands or removes the node actually moved after staged-file validation races.
-  const fixture = createTestStorageRoot('theme-quarantine-rename-race')
-  const originalPlatform = process.platform
-  try {
-    Object.defineProperty(process, 'platform', { value: 'linux' })
-    const externalImage = path.join(fixture.path, 'external.png')
-    const externalSentinel = path.join(fixture.path, 'external-sentinel.bin')
-    const parkedOriginal = path.join(fixture.path, 'parked-original.png')
-    let stagingChild
-    const replacementBytes = Buffer.concat([pngBytes, Buffer.from('replacement')])
-    await fsp.writeFile(externalImage, pngBytes)
-    await fsp.writeFile(externalSentinel, replacementBytes)
-    const replacementIdentity = await nodeIdentity(externalSentinel)
-    let raced = false
-    const descriptorState = { fd: null, closed: true }
-    const injectedFs = {
-      ...fsp,
-      async open(targetPath, flags, mode) {
-        if (String(targetPath) == stagingChild && String(flags) == 'r') {
-          return trackDirectoryHandle(await fsp.open(targetPath, flags, mode), descriptorState)
-        }
-        return fsp.open(mapLinuxDescriptorPath(targetPath, stagingChild, descriptorState), flags, mode)
-      },
-      async rename(source, target) {
-        if (!raced && path.dirname(String(source)) == stagingChild &&
-          /^[a-f0-9]{32}$/i.test(path.basename(String(source))) && String(target).includes('.quarantine-')) {
-          raced = true
-          await fsp.rename(source, parkedOriginal)
-          await fsp.link(externalSentinel, source)
-        }
-        return fsp.rename(source, target)
-      },
-    }
-    const { manager, runTempRoot } = await createManager(fixture, injectedFs)
-    stagingChild = path.join(runTempRoot, 'theme-editor')
-    const staged = await manager.stageThemeImage({ sourcePath: externalImage })
-    const stagedPath = path.join(stagingChild, staged.stagingId)
-
-    await assert.rejects(manager.discardThemeImage({ stagingId: staged.stagingId }), /theme_stage_invalid/)
-
-    assert.equal(raced, true)
-    assert.equal(descriptorState.closed, true)
-    assert.deepEqual(await nodeIdentity(stagedPath), replacementIdentity)
-    assert.deepEqual(await nodeIdentity(externalSentinel), replacementIdentity)
-    assert.deepEqual(await fsp.readFile(stagedPath), replacementBytes)
-    assert.deepEqual(await fsp.readFile(parkedOriginal), pngBytes)
-    assert.deepEqual(await fsp.readFile(externalSentinel), replacementBytes)
-    assert.deepEqual(await fsp.readdir(stagingChild), [staged.stagingId])
-  } finally {
-    Object.defineProperty(process, 'platform', { value: originalPlatform })
     fixture.cleanup()
   }
 })
@@ -432,89 +564,6 @@ test('uses a Linux directory descriptor path instead of a lexical staging create
   }
 })
 
-test('restores an unowned replacement raced into failed Linux staging cleanup', async() => {
-  // Catches identity-check-then-unlink cleanup that deletes a replacement of its failed exclusive create.
-  const fixture = createTestStorageRoot('theme-stage-failure-cleanup-race')
-  const originalPlatform = process.platform
-  try {
-    Object.defineProperty(process, 'platform', { value: 'linux' })
-    const externalImage = path.join(fixture.path, 'external.png')
-    const externalSentinel = path.join(fixture.path, 'external-sentinel.bin')
-    const parkedCreated = path.join(fixture.path, 'parked-created-stage')
-    let stagingChild
-    const replacementBytes = Buffer.from('preserve-cleanup-replacement')
-    const writeFailure = new Error('injected_stage_write_failure')
-    await fsp.writeFile(externalImage, pngBytes)
-    await fsp.writeFile(externalSentinel, replacementBytes)
-    let createdName = ''
-    let writeFailed = false
-    let raced = false
-    const descriptorState = { fd: null, closed: true }
-    const injectedFs = {
-      ...fsp,
-      async open(targetPath, flags, mode) {
-        if (String(targetPath) == stagingChild && String(flags) == 'r') {
-          return trackDirectoryHandle(await fsp.open(targetPath, flags, mode), descriptorState)
-        }
-        const actualPath = mapLinuxDescriptorPath(targetPath, stagingChild, descriptorState)
-        const handle = await fsp.open(actualPath, flags, mode)
-        if (!isLinuxDescriptorPath(targetPath) || String(flags) != 'wx') return handle
-        createdName = path.basename(String(targetPath))
-        return {
-          stat: handle.stat.bind(handle),
-          async writeFile() {
-            writeFailed = true
-            throw writeFailure
-          },
-          sync: handle.sync.bind(handle),
-          close: handle.close.bind(handle),
-        }
-      },
-      async lstat(targetPath, options) {
-        const actualPath = mapLinuxDescriptorPath(targetPath, stagingChild, descriptorState)
-        const stat = await fsp.lstat(actualPath, options)
-        if (writeFailed && !raced && isLinuxDescriptorPath(targetPath) &&
-          path.basename(String(targetPath)) == createdName) {
-          raced = true
-          await fsp.rename(actualPath, parkedCreated)
-          await fsp.link(externalSentinel, actualPath)
-        }
-        return stat
-      },
-      async rename(source, target) {
-        const actualSource = mapLinuxDescriptorPath(source, stagingChild, descriptorState)
-        const actualTarget = mapLinuxDescriptorPath(target, stagingChild, descriptorState)
-        if (writeFailed && !raced && isLinuxDescriptorPath(source) &&
-          path.basename(String(source)) == createdName && String(target).includes('.quarantine-')) {
-          raced = true
-          await fsp.rename(actualSource, parkedCreated)
-          await fsp.link(externalSentinel, actualSource)
-        }
-        return fsp.rename(actualSource, actualTarget)
-      },
-      async unlink(targetPath) {
-        return fsp.unlink(mapLinuxDescriptorPath(targetPath, stagingChild, descriptorState))
-      },
-    }
-    const { manager, runTempRoot } = await createManager(fixture, injectedFs)
-    stagingChild = path.join(runTempRoot, 'theme-editor')
-
-    await assert.rejects(manager.stageThemeImage({ sourcePath: externalImage }), error => error === writeFailure)
-
-    const replacementPath = path.join(stagingChild, createdName)
-    assert.equal(raced, true)
-    assert.equal(descriptorState.closed, true)
-    assert.deepEqual(await nodeIdentity(replacementPath), await nodeIdentity(externalSentinel))
-    assert.deepEqual(await fsp.readFile(replacementPath), replacementBytes)
-    assert.deepEqual(await fsp.readFile(externalSentinel), replacementBytes)
-    assert.equal((await fsp.lstat(parkedCreated)).size, 0)
-    assert.deepEqual(await fsp.readdir(stagingChild), [createdName])
-  } finally {
-    Object.defineProperty(process, 'platform', { value: originalPlatform })
-    fixture.cleanup()
-  }
-})
-
 test('keeps Windows and Darwin stages in bounded main memory without staging files', async() => {
   // Catches non-Linux staging that reaches a lexical wx or exposes the selected external source path.
   const originalPlatform = process.platform
@@ -611,44 +660,190 @@ test('publishes only a complete durable asset and rolls it back when the commit 
 
     assert.equal(commitObserved, true)
     assert.deepEqual(await fsp.readdir(path.join(profileRoot, 'assets', 'theme-images')), [])
-    assert.equal(await exists(path.join(runTempRoot, 'theme-editor', staged.stagingId)), process.platform == 'linux')
-    const retried = await promote(manager, staged)
-    assert.deepEqual(await fsp.readFile(path.join(profileRoot, 'assets', 'theme-images', retried.fileName)), pngBytes)
+    assert.equal(await exists(path.join(runTempRoot, 'theme-editor', staged.stagingId)), false)
+    await assert.rejects(promote(manager, staged), /theme_stage_invalid/)
+    await assert.rejects(manager.discardThemeImage({ stagingId: staged.stagingId }), /theme_stage_invalid/)
   } finally {
     fixture.cleanup()
   }
 })
 
-test('reclaims the final when publication temp retirement fails before commit', async() => {
-  // Catches a final link orphaned when publishAsset throws before returning its rollback identity to the transaction.
-  const fixture = createTestStorageRoot('theme-publication-cleanup-failure')
+test('rolls back the exact durable target through isolation', async() => {
+  // Catches rollback that unlinks a stable pathname instead of moving and reclaiming the captured artifact.
+  const fixture = createTestStorageRoot('theme-exact-durable-rollback')
+  const originalRenameSync = fs.renameSync
+  let promotedPath
+  let isolatedPath
   try {
     const externalImage = path.join(fixture.path, 'external.png')
     await fsp.writeFile(externalImage, pngBytes)
-    const retirementFailure = new Error('injected_publication_temp_retirement_failure')
-    let failedRetirement = false
-    const injectedFs = {
-      ...fsp,
-      async rename(source, target) {
-        if (!failedRetirement && path.basename(String(source)).startsWith('.owned-theme-') &&
-          String(target).includes('.quarantine-')) {
-          failedRetirement = true
-          throw retirementFailure
-        }
-        return fsp.rename(source, target)
-      },
+    fs.renameSync = function(source, target) {
+      if (promotedPath != null && path.resolve(String(source)) == path.resolve(promotedPath)) isolatedPath = String(target)
+      return originalRenameSync.call(this, source, target)
     }
-    const { manager, profileRoot, runTempRoot } = await createManager(fixture, injectedFs)
+    const { manager, profileRoot } = await createManager(fixture)
+    const staged = await manager.stageThemeImage({ sourcePath: externalImage })
+    const failure = new Error('injected_settings_failure')
+
+    await assert.rejects(
+      manager.promoteThemeImage(staged, async promoted => {
+        promotedPath = promoted.previewPath
+        throw failure
+      }),
+      error => error === failure,
+    )
+
+    assert.match(isolatedPath, /\.isolate-[a-f0-9]{32}[\\/]payload$/i)
+    assert.deepEqual(await fsp.readdir(path.join(profileRoot, 'assets', 'theme-images')), [])
+    assert.equal(await exists(path.dirname(isolatedPath)), false)
+    await assert.rejects(promote(manager, staged), /theme_stage_invalid/)
+  } finally {
+    fs.renameSync = originalRenameSync
+    fixture.cleanup()
+  }
+})
+
+test('retains an ambiguous durable rollback target without unlinking it', async() => {
+  // Catches rollback that deletes a replacement raced into the durable artifact pathname.
+  const fixture = createTestStorageRoot('theme-ambiguous-durable-rollback')
+  const originalRenameSync = fs.renameSync
+  const replacementBytes = Buffer.from('durable replacement')
+  let promotedPath
+  let isolationPath
+  try {
+    const externalImage = path.join(fixture.path, 'external.png')
+    await fsp.writeFile(externalImage, pngBytes)
+    fs.renameSync = function(source, target) {
+      const result = originalRenameSync.call(this, source, target)
+      if (promotedPath != null && path.resolve(String(source)) == path.resolve(promotedPath)) {
+        isolationPath = path.dirname(String(target))
+        fs.writeFileSync(source, replacementBytes, { flag: 'wx' })
+      }
+      return result
+    }
+    const { manager } = await createManager(fixture)
     const staged = await manager.stageThemeImage({ sourcePath: externalImage })
 
-    await assert.rejects(promote(manager, staged), error => error === retirementFailure)
+    await assert.rejects(
+      manager.promoteThemeImage(staged, async promoted => {
+        promotedPath = promoted.previewPath
+        throw new Error('injected_settings_failure')
+      }),
+      /theme_asset_invalid/,
+    )
 
-    assert.equal(failedRetirement, true)
-    assert.deepEqual(await fsp.readdir(path.join(profileRoot, 'assets', 'theme-images')), [])
-    assert.equal(await exists(path.join(runTempRoot, 'theme-editor', staged.stagingId)), process.platform == 'linux')
-    const retried = await promote(manager, staged)
-    assert.deepEqual(await fsp.readFile(path.join(profileRoot, 'assets', 'theme-images', retried.fileName)), pngBytes)
+    assert.deepEqual(await fsp.readFile(promotedPath), replacementBytes)
+    assert.deepEqual(await fsp.readFile(path.join(isolationPath, 'payload')), pngBytes)
+    assert.deepEqual(await fsp.readdir(isolationPath), ['payload'])
   } finally {
+    fs.renameSync = originalRenameSync
+    fixture.cleanup()
+  }
+})
+
+test('publishes and rolls back when the filesystem adapter has no link method', async() => {
+  // Catches durable publication or legacy migration that still depends on hard-link support.
+  const fixture = createTestStorageRoot('theme-no-link-adapter')
+  try {
+    const fileSystem = { ...fsp }
+    const syncFileSystem = { ...fs }
+    delete fileSystem.link
+    delete syncFileSystem.link
+    delete syncFileSystem.linkSync
+    const externalImage = path.join(fixture.path, 'external.png')
+    await fsp.writeFile(externalImage, pngBytes)
+    const { manager, profileRoot } = await createManager(fixture, fileSystem, syncFileSystem)
+    const legacy = path.join(profileRoot, 'theme_images', 'old.png')
+    await fsp.mkdir(path.dirname(legacy), { recursive: true })
+    await fsp.writeFile(legacy, pngBytes)
+
+    await manager.prepareThemeAssetStorage()
+    const promoted = await promote(manager, await manager.stageThemeImage({ sourcePath: externalImage }))
+    const failedStage = await manager.stageThemeImage({ sourcePath: externalImage })
+    const failure = new Error('injected_settings_failure')
+    await assert.rejects(
+      manager.promoteThemeImage(failedStage, async() => { throw failure }),
+      error => error === failure,
+    )
+
+    assert.deepEqual(await fsp.readFile(path.join(profileRoot, 'assets', 'theme-images', 'old.png')), pngBytes)
+    assert.deepEqual(await fsp.readFile(promoted.previewPath), pngBytes)
+    assert.deepEqual(
+      (await fsp.readdir(path.join(profileRoot, 'assets', 'theme-images'))).sort(),
+      ['old.png', promoted.fileName].sort(),
+    )
+    await assert.rejects(promote(manager, failedStage), /theme_stage_invalid/)
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('discard isolates and reclaims the exact disk stage', async() => {
+  // Catches discard that directly renames/unlinks the stable stage pathname.
+  const fixture = createTestStorageRoot('theme-discard-exact-stage')
+  const originalPlatform = process.platform
+  const originalRenameSync = fs.renameSync
+  let stagedPath
+  let isolatedPath
+  try {
+    Object.defineProperty(process, 'platform', { value: 'linux' })
+    const externalImage = path.join(fixture.path, 'external.png')
+    await fsp.writeFile(externalImage, pngBytes)
+    fs.renameSync = function(source, target) {
+      if (stagedPath != null && path.resolve(String(source)) == path.resolve(stagedPath)) isolatedPath = String(target)
+      return originalRenameSync.call(this, source, target)
+    }
+    const adapter = createLinuxStageAdapter()
+    const { manager } = await createManager(fixture, adapter.fileSystem)
+    const staged = await manager.stageThemeImage({ sourcePath: externalImage })
+    stagedPath = staged.previewPath
+
+    await manager.discardThemeImage({ stagingId: staged.stagingId })
+
+    assert.match(isolatedPath, /\.isolate-[a-f0-9]{32}[\\/]payload$/i)
+    assert.equal(await exists(staged.previewPath), false)
+    assert.equal(await exists(path.dirname(isolatedPath)), false)
+    await assert.rejects(manager.discardThemeImage({ stagingId: staged.stagingId }), /theme_stage_invalid/)
+  } finally {
+    fs.renameSync = originalRenameSync
+    Object.defineProperty(process, 'platform', { value: originalPlatform })
+    fixture.cleanup()
+  }
+})
+
+test('discard preserves a replacement raced into stage isolation', async() => {
+  // Catches discard that restores over or unlinks a replacement after isolating the exact stage.
+  const fixture = createTestStorageRoot('theme-discard-stage-replacement')
+  const originalPlatform = process.platform
+  const originalRenameSync = fs.renameSync
+  const replacementBytes = Buffer.from('stage replacement')
+  let stagedPath
+  let isolationPath
+  try {
+    Object.defineProperty(process, 'platform', { value: 'linux' })
+    const externalImage = path.join(fixture.path, 'external.png')
+    await fsp.writeFile(externalImage, pngBytes)
+    fs.renameSync = function(source, target) {
+      const result = originalRenameSync.call(this, source, target)
+      if (stagedPath != null && path.resolve(String(source)) == path.resolve(stagedPath)) {
+        isolationPath = path.dirname(String(target))
+        fs.writeFileSync(source, replacementBytes, { flag: 'wx' })
+      }
+      return result
+    }
+    const adapter = createLinuxStageAdapter()
+    const { manager } = await createManager(fixture, adapter.fileSystem)
+    const staged = await manager.stageThemeImage({ sourcePath: externalImage })
+    stagedPath = staged.previewPath
+
+    await assert.rejects(manager.discardThemeImage({ stagingId: staged.stagingId }), /theme_stage_invalid/)
+
+    assert.deepEqual(await fsp.readFile(stagedPath), replacementBytes)
+    assert.deepEqual(await fsp.readFile(path.join(isolationPath, 'payload')), pngBytes)
+    assert.deepEqual(await fsp.readdir(isolationPath), ['payload'])
+  } finally {
+    fs.renameSync = originalRenameSync
+    Object.defineProperty(process, 'platform', { value: originalPlatform })
     fixture.cleanup()
   }
 })

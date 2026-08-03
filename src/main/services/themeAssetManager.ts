@@ -1,6 +1,25 @@
 import crypto from 'node:crypto'
+import nativeFs from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import {
+  closeDirectDirectory,
+  validateDirectDirectory,
+  type DirectDirectoryGuard,
+  type NodeIdentity,
+} from '../storage/directDirectory'
+import {
+  closeArtifactGuard,
+  completeExclusiveArtifact,
+  reserveExclusiveArtifact,
+  revalidateImmutableArtifact,
+  type BoundedByteSource,
+  type ImmutableArtifactGuard,
+} from '../storage/exclusiveArtifact'
+import {
+  isolateOwnedPath,
+  reclaimIsolatedPayload,
+} from '../storage/exclusiveIsolation'
 import { assertContainedPath } from '@main/utils/storagePaths'
 import type { RunTempHandle, RunTempChildOwnership } from '@main/utils/tempLifecycle'
 
@@ -29,9 +48,7 @@ export interface ThemeAssetManager {
   getThemeImagesPath: () => string
 }
 
-interface FileIdentity {
-  dev: string
-  ino: string
+interface FileIdentity extends NodeIdentity {
   size: string
   mtimeNs: string
   ctimeNs: string
@@ -57,6 +74,21 @@ interface MemoryStagedFile {
 
 type StagedFile = DiskStagedFile | MemoryStagedFile
 type DirectoryHandle = Awaited<ReturnType<typeof fs.open>>
+type VerifiedThemeStage =
+  | {
+    backing: 'memory'
+    record: MemoryStagedFile
+    bytes: Buffer
+    close: () => Promise<void>
+  }
+  | {
+    backing: 'disk'
+    record: DiskStagedFile
+    bytes: Buffer
+    descriptor: Awaited<ReturnType<typeof fs.open>>
+    descriptorIdentity: FileIdentity
+    close: () => Promise<void>
+  }
 
 const imageMime = (bytes: Buffer): string | null => {
   if (bytes.length < 12) return null
@@ -80,25 +112,44 @@ const identityOf = (stat: Awaited<ReturnType<typeof inspect>>): FileIdentity => 
   mtimeNs: String(stat.mtimeNs),
   ctimeNs: String(stat.ctimeNs),
 })
-const sameNode = (left: FileIdentity, right: FileIdentity): boolean =>
+const sameNode = (left: NodeIdentity, right: NodeIdentity): boolean =>
   left.dev == right.dev && left.ino == right.ino
 const sameFile = (left: FileIdentity, right: FileIdentity): boolean =>
   sameNode(left, right) && left.size == right.size && left.mtimeNs == right.mtimeNs && left.ctimeNs == right.ctimeNs
-const sameFileAfterRename = (left: FileIdentity, right: FileIdentity): boolean =>
+const sameFileAfterMove = (left: FileIdentity, right: FileIdentity): boolean =>
   sameNode(left, right) && left.size == right.size && left.mtimeNs == right.mtimeNs
 const samePathIdentity = (left: { dev: string, ino: string }, right: { dev: string, ino: string }): boolean =>
   left.dev == right.dev && left.ino == right.ino
 const isOpaqueId = (value: string): boolean => /^[a-f0-9]{32}$/i.test(value)
 const sha256 = (bytes: Buffer): string => crypto.createHash('sha256').update(bytes).digest('hex')
+const byteSource = (bytes: Buffer): BoundedByteSource => ({
+  byteLength: bytes.length,
+  read: (offset, maximumBytes) => Buffer.from(bytes.subarray(offset, offset + maximumBytes)),
+})
 
-const missing = async(targetPath: string): Promise<boolean> => {
-  try {
-    await inspect(targetPath)
-    return false
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code == 'ENOENT') return true
-    throw error
+const fixedThemeError = (error: unknown, fallback: string): Error => {
+  if (error instanceof Error && error.message.startsWith('theme_')) return error
+  const code = error != null && typeof error == 'object' && 'code' in error ? String(error.code) : ''
+  if (code.startsWith('artifact_') || code.startsWith('direct_directory_') || code.startsWith('isolation_')) {
+    return new Error(fallback)
   }
+  return error instanceof Error ? error : new Error(fallback)
+}
+
+const readNativeDescriptor = (descriptor: number, byteLength: number): Buffer => {
+  if (!Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > MAX_IMAGE_BYTES) {
+    throw new Error('theme_asset_invalid')
+  }
+  const bytes = Buffer.allocUnsafe(byteLength)
+  let offset = 0
+  while (offset < bytes.length) {
+    const read = nativeFs.readSync(descriptor, bytes, offset, bytes.length - offset, offset)
+    if (read <= 0) throw new Error('theme_asset_invalid')
+    offset += read
+  }
+  const extra = Buffer.allocUnsafe(1)
+  if (nativeFs.readSync(descriptor, extra, 0, 1, offset) != 0) throw new Error('theme_asset_invalid')
+  return bytes
 }
 
 const assertDirectFilePath = (rootPath: string, targetPath: string, errorCode: string): void => {
@@ -215,92 +266,79 @@ export const createThemeAssetManager = (input: {
   const assertOwnedFile = async(rootPath: string, owned: OwnedFile, errorCode: string): Promise<void> => {
     assertDirectFilePath(rootPath, owned.filePath, errorCode)
     const stat = await inspect(owned.filePath)
-    if (stat.isSymbolicLink() || !stat.isFile() || !sameFile(identityOf(stat), owned.identity)) {
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink != 1n || !sameFile(identityOf(stat), owned.identity)) {
       throw new Error(errorCode)
     }
   }
 
-  const assertRenamedOwnedFile = async(rootPath: string, owned: OwnedFile, errorCode: string): Promise<void> => {
-    assertDirectFilePath(rootPath, owned.filePath, errorCode)
-    const stat = await inspect(owned.filePath)
-    if (stat.isSymbolicLink() || !stat.isFile() || !sameFileAfterRename(identityOf(stat), owned.identity)) {
-      throw new Error(errorCode)
-    }
-  }
-
-  const quarantineAndRemove = async(
+  const openRootGuard = (
     rootPath: string,
-    owned: OwnedFile,
-    validateRoot: () => Promise<void>,
+    expectedIdentity: NodeIdentity,
     errorCode: string,
-  ): Promise<void> => {
-    await validateRoot()
-    await assertOwnedFile(rootPath, owned, errorCode)
-    const quarantinePath = path.join(rootPath, `.${path.basename(owned.filePath)}.quarantine-${crypto.randomUUID()}`)
-    assertDirectFilePath(rootPath, quarantinePath, errorCode)
-    if (!await missing(quarantinePath)) throw new Error(errorCode)
-    await fs.rename(owned.filePath, quarantinePath)
-    const movedIdentity = identityOf(await inspect(quarantinePath))
+  ): DirectDirectoryGuard => {
+    let guard: DirectDirectoryGuard | null = null
     try {
-      await validateRoot()
-      await assertRenamedOwnedFile(rootPath, { ...owned, filePath: quarantinePath }, errorCode)
-      await fs.unlink(quarantinePath)
-    } catch (error) {
-      try {
-        await validateRoot()
-        const currentIdentity = identityOf(await inspect(quarantinePath))
-        if (!sameNode(currentIdentity, movedIdentity)) throw new Error(errorCode)
-        if (await missing(owned.filePath)) await fs.rename(quarantinePath, owned.filePath)
-      } catch {}
-      throw error
-    }
-  }
-
-  const removeOwnedNodeIfCurrent = async(
-    rootPath: string,
-    filePath: string,
-    expectedIdentity: FileIdentity,
-    validateRoot: () => Promise<void>,
-    errorCode: string,
-  ): Promise<void> => {
-    try {
-      const currentIdentity = identityOf(await inspect(filePath))
-      if (!sameNode(currentIdentity, expectedIdentity)) return
-      await quarantineAndRemove(rootPath, { filePath, identity: currentIdentity }, validateRoot, errorCode)
-    } catch {}
-  }
-
-  const removeOpenedFileIfCurrent = async(
-    openPath: string,
-    expectedIdentity: FileIdentity,
-    errorCode: string,
-  ): Promise<void> => {
-    const quarantinePath = path.join(
-      path.dirname(openPath),
-      `.${path.basename(openPath)}.quarantine-${crypto.randomUUID()}`,
-    )
-    if (!await missing(quarantinePath)) throw new Error(errorCode)
-    await fs.rename(openPath, quarantinePath)
-    const movedIdentity = identityOf(await inspect(quarantinePath))
-    if (!sameNode(movedIdentity, expectedIdentity)) {
-      try {
-        const currentIdentity = identityOf(await inspect(quarantinePath))
-        if (!sameNode(currentIdentity, movedIdentity)) throw new Error(errorCode)
-        if (await missing(openPath)) await fs.rename(quarantinePath, openPath)
-      } catch {}
-      return
-    }
-    try {
-      const currentIdentity = identityOf(await inspect(quarantinePath))
-      if (!sameNode(currentIdentity, movedIdentity)) throw new Error(errorCode)
-      await fs.unlink(quarantinePath)
+      guard = validateDirectDirectory(rootPath)
+      if (!samePathIdentity(guard.identity, expectedIdentity)) throw new Error(errorCode)
+      return guard
     } catch {
-      try {
-        const currentIdentity = identityOf(await inspect(quarantinePath))
-        if (!sameNode(currentIdentity, movedIdentity)) throw new Error(errorCode)
-        if (await missing(openPath)) await fs.rename(quarantinePath, openPath)
-      } catch {}
+      if (guard != null) {
+        try { closeDirectDirectory(guard) } catch {}
+      }
+      throw new Error(errorCode)
     }
+  }
+
+  const verifyDescriptorPath = async(
+    descriptor: Awaited<ReturnType<typeof fs.open>>,
+    descriptorIdentity: FileIdentity,
+    targetPath: string,
+    errorCode: string,
+    afterMove = false,
+  ): Promise<void> => {
+    try {
+      const descriptorStat = await descriptor.stat({ bigint: true })
+      const pathStat = await inspect(targetPath)
+      const currentDescriptorIdentity = identityOf(descriptorStat)
+      const currentPathIdentity = identityOf(pathStat)
+      if (!descriptorStat.isFile() || descriptorStat.nlink != 1n ||
+        pathStat.isSymbolicLink() || !pathStat.isFile() || pathStat.nlink != 1n ||
+        !(afterMove
+          ? sameFileAfterMove(currentDescriptorIdentity, descriptorIdentity)
+          : sameFile(currentDescriptorIdentity, descriptorIdentity)) ||
+        !sameFile(currentPathIdentity, currentDescriptorIdentity)) throw new Error(errorCode)
+    } catch {
+      throw new Error(errorCode)
+    }
+  }
+
+  const isolateAndReclaim = async(input: {
+    root: DirectDirectoryGuard
+    filePath: string
+    identity: NodeIdentity
+    prefix: string
+    verify: (payloadPath: string) => Promise<void>
+    errorCode: string
+  }): Promise<void> => {
+    let isolated
+    try {
+      isolated = await isolateOwnedPath({
+        source: {
+          root: input.root,
+          path: input.filePath,
+          basename: path.basename(input.filePath),
+          identity: input.identity,
+          kind: 'file',
+        },
+        prefix: input.prefix,
+        verifySource: input.verify,
+      })
+    } catch {
+      throw new Error(input.errorCode)
+    }
+    if (isolated.state != 'isolated') throw new Error(input.errorCode)
+    const reclaimed = await reclaimIsolatedPayload({ guard: isolated.guard, verifyPayload: input.verify })
+    if (reclaimed.state != 'reclaimed') throw new Error(input.errorCode)
   }
 
   const writeOwnedFile = async(
@@ -316,14 +354,14 @@ export const createThemeAssetManager = (input: {
     assertDirectFilePath(rootPath, targetPath, errorCode)
     const openPath = options.openPath ?? targetPath
     const handle = await fs.open(openPath, 'wx')
-    let openedIdentity: FileIdentity | null = null
     try {
       const opened = await handle.stat({ bigint: true })
-      if (!opened.isFile()) throw new Error(errorCode)
-      openedIdentity = identityOf(opened)
+      if (!opened.isFile() || opened.nlink != 1n) throw new Error(errorCode)
+      const openedIdentity = identityOf(opened)
       await options.validateRoot?.()
       const created = await inspect(targetPath)
-      if (created.isSymbolicLink() || !created.isFile() || !sameFile(identityOf(created), openedIdentity)) {
+      if (created.isSymbolicLink() || !created.isFile() || created.nlink != 1n ||
+        !sameFile(identityOf(created), openedIdentity)) {
         throw new Error(errorCode)
       }
       await handle.writeFile(bytes)
@@ -336,20 +374,11 @@ export const createThemeAssetManager = (input: {
       return { filePath: targetPath, identity: pathIdentity }
     } catch (error) {
       try { await handle.close() } catch {}
-      if (openedIdentity != null) {
-        try {
-          if (openPath != targetPath) await removeOpenedFileIfCurrent(openPath, openedIdentity, errorCode)
-          else {
-            const current = identityOf(await inspect(openPath))
-            if (sameNode(current, openedIdentity)) await fs.unlink(openPath)
-          }
-        } catch {}
-      }
       throw error
     }
   }
 
-  const verifyStaged = async(stagingId: string, previewPath?: string): Promise<{ record: StagedFile, bytes: Buffer }> => {
+  const openVerifiedStage = async(stagingId: string, previewPath?: string): Promise<VerifiedThemeStage> => {
     if (!isOpaqueId(stagingId)) throw new Error('theme_stage_invalid')
     const record = stages.get(stagingId)
     if (record == null) throw new Error('theme_stage_invalid')
@@ -358,39 +387,105 @@ export const createThemeAssetManager = (input: {
         (previewPath != null && previewPath != toDataUrl(record.bytes, record.mime))) {
         throw new Error('theme_stage_invalid')
       }
-      return { record, bytes: Buffer.from(record.bytes) }
+      return { backing: 'memory', record, bytes: Buffer.from(record.bytes), close: async() => {} }
     }
     const ownership = await getStagingOwnership()
     if (record.filePath != stagePath(ownership, stagingId) ||
       (previewPath != null && previewPath != record.previewPath)) throw new Error('theme_stage_invalid')
-    await assertOwnedFile(ownership.childPath, record, 'theme_stage_invalid')
-    const bytes = await readStableRegularFile(record.filePath, 'theme_stage_invalid', 'theme_stage_invalid')
-    await assertStagingOwnership(ownership)
-    await assertOwnedFile(ownership.childPath, record, 'theme_stage_invalid')
-    if (!isImage(bytes)) throw new Error('theme_stage_invalid')
-    return { record, bytes }
+    let descriptor: Awaited<ReturnType<typeof fs.open>> | null = null
+    try {
+      await assertStagingOwnership(ownership)
+      await assertOwnedFile(ownership.childPath, record, 'theme_stage_invalid')
+      descriptor = await fs.open(record.filePath, 'r')
+      const descriptorStat = await descriptor.stat({ bigint: true })
+      const descriptorIdentity = identityOf(descriptorStat)
+      if (!descriptorStat.isFile() || descriptorStat.nlink != 1n ||
+        !sameFileAfterMove(descriptorIdentity, record.identity)) throw new Error('theme_stage_invalid')
+      await verifyDescriptorPath(descriptor, descriptorIdentity, record.filePath, 'theme_stage_invalid')
+      const bytes = await readCapped(descriptor, 'theme_stage_invalid')
+      await verifyDescriptorPath(descriptor, descriptorIdentity, record.filePath, 'theme_stage_invalid')
+      await assertStagingOwnership(ownership)
+      if (!isImage(bytes)) throw new Error('theme_stage_invalid')
+      const retainedDescriptor = descriptor
+      descriptor = null
+      return {
+        backing: 'disk',
+        record,
+        bytes,
+        descriptor: retainedDescriptor,
+        descriptorIdentity,
+        close: async() => { await retainedDescriptor.close() },
+      }
+    } catch {
+      try { await descriptor?.close() } catch {}
+      throw new Error('theme_stage_invalid')
+    }
   }
 
-  const retireStage = async(record: StagedFile): Promise<void> => {
-    if (record.backing == 'memory') {
-      if (stages.get(record.stagingId) == record) {
-        stages.delete(record.stagingId)
-        memoryStageBytes -= record.bytes.length
-      }
+  const revalidateStageAgainstDescriptor = async(stage: VerifiedThemeStage): Promise<void> => {
+    if (stage.backing == 'memory') {
+      if (stages.get(stage.record.stagingId) != stage.record ||
+        stage.record.bytes.length > MAX_IMAGE_BYTES || imageMime(stage.record.bytes) != stage.record.mime ||
+        !stage.bytes.equals(stage.record.bytes)) throw new Error('theme_stage_invalid')
       return
     }
     const ownership = await getStagingOwnership()
-    await quarantineAndRemove(
-      ownership.childPath,
-      record,
-      async() => {
-        const current = await getStagingOwnership()
-        if (current.childPath != ownership.childPath ||
-          !samePathIdentity(current.childIdentity, ownership.childIdentity)) throw new Error('theme_stage_invalid')
-      },
+    if (stage.record.filePath != stagePath(ownership, stage.record.stagingId)) throw new Error('theme_stage_invalid')
+    await assertStagingOwnership(ownership)
+    await verifyDescriptorPath(
+      stage.descriptor,
+      stage.descriptorIdentity,
+      stage.record.filePath,
       'theme_stage_invalid',
     )
-    stages.delete(record.stagingId)
+  }
+
+  const consumeThemeStage = async(stage: VerifiedThemeStage): Promise<void> => {
+    if (stage.backing == 'memory') {
+      const record = stage.record
+      if (stages.get(record.stagingId) != record) throw new Error('theme_stage_invalid')
+      stages.delete(record.stagingId)
+      memoryStageBytes -= record.bytes.length
+      return
+    }
+    const record = stage.record
+    const ownership = await getStagingOwnership()
+    await assertStagingOwnership(ownership)
+    await revalidateStageAgainstDescriptor(stage)
+    const root = openRootGuard(ownership.childPath, ownership.childIdentity, 'theme_stage_invalid')
+    try {
+      try {
+        await isolateAndReclaim({
+          root,
+          filePath: record.filePath,
+          identity: stage.descriptorIdentity,
+          prefix: `.${record.stagingId}.isolate-`,
+          verify: async payloadPath => {
+            await verifyDescriptorPath(
+              stage.descriptor,
+              stage.descriptorIdentity,
+              payloadPath,
+              'theme_stage_invalid',
+              true,
+            )
+            const payloadBytes = await readCapped(stage.descriptor, 'theme_stage_invalid')
+            if (sha256(payloadBytes) != sha256(stage.bytes)) throw new Error('theme_stage_invalid')
+            await verifyDescriptorPath(
+              stage.descriptor,
+              stage.descriptorIdentity,
+              payloadPath,
+              'theme_stage_invalid',
+              true,
+            )
+          },
+          errorCode: 'theme_stage_invalid',
+        })
+      } finally {
+        if (stages.get(record.stagingId) == record) stages.delete(record.stagingId)
+      }
+    } finally {
+      closeDirectDirectory(root)
+    }
   }
 
   const withStage = async<T>(stagingId: string, operation: () => Promise<T>): Promise<T> => {
@@ -402,19 +497,6 @@ export const createThemeAssetManager = (input: {
     } finally {
       if (stageTails.get(stagingId) == current) stageTails.delete(stagingId)
     }
-  }
-
-  const createAssetTemp = async(bytes: Buffer): Promise<OwnedFile> => {
-    await ensureAssetRoot()
-    for (let attempts = 0; attempts < 8; attempts++) {
-      const targetPath = path.join(assetRoot, `.owned-theme-${crypto.randomBytes(16).toString('hex')}.tmp`)
-      try {
-        return await writeOwnedFile(assetRoot, targetPath, bytes, 'theme_asset_invalid')
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code != 'EEXIST') throw error
-      }
-    }
-    throw new Error('theme_asset_collision')
   }
 
   const createDiskStage = async(bytes: Buffer): Promise<DiskStagedFile> => {
@@ -447,15 +529,6 @@ export const createThemeAssetManager = (input: {
       failure ??= error
     }
     if (failure != null) {
-      if (owned != null) {
-        await removeOwnedNodeIfCurrent(
-          ownership.childPath,
-          owned.filePath,
-          owned.identity,
-          async() => { await assertStagingOwnership(ownership) },
-          'theme_stage_invalid',
-        )
-      }
       throw failure instanceof Error ? failure : new Error('theme_stage_invalid')
     }
     const record: DiskStagedFile = {
@@ -468,15 +541,8 @@ export const createThemeAssetManager = (input: {
       await assertStagingOwnership(ownership)
       await assertOwnedFile(ownership.childPath, record, 'theme_stage_invalid')
       return record
-    } catch (error) {
-      await removeOwnedNodeIfCurrent(
-        ownership.childPath,
-        record.filePath,
-        record.identity,
-        async() => { await assertStagingOwnership(ownership) },
-        'theme_stage_invalid',
-      )
-      throw error
+    } catch {
+      throw new Error('theme_stage_invalid')
     }
   }
 
@@ -500,60 +566,135 @@ export const createThemeAssetManager = (input: {
     throw new Error('theme_stage_collision')
   }
 
-  const publishAsset = async(temp: OwnedFile, preferredName?: string): Promise<{ promoted: PromotedThemeImage, final: OwnedFile }> => {
-    await ensureAssetRoot()
-    for (let attempts = 0; attempts < 8; attempts++) {
-      const fileName = preferredName ?? `${crypto.randomBytes(16).toString('hex')}.img`
-      const targetPath = path.join(assetRoot, fileName)
-      assertDirectFilePath(assetRoot, targetPath, 'theme_asset_invalid')
-      try {
-        await fs.link(temp.filePath, targetPath)
-      } catch (error) {
-        if (preferredName == null && (error as NodeJS.ErrnoException).code == 'EEXIST') continue
-        throw error
-      }
-      try {
-        const finalIdentity = identityOf(await inspect(targetPath))
-        if (!sameNode(finalIdentity, temp.identity)) throw new Error('theme_asset_invalid')
-        const currentTemp = { filePath: temp.filePath, identity: identityOf(await inspect(temp.filePath)) }
-        await quarantineAndRemove(assetRoot, currentTemp, ensureAssetRoot, 'theme_asset_invalid')
-        const publishedIdentity = identityOf(await inspect(targetPath))
-        if (!sameFileAfterRename(publishedIdentity, finalIdentity)) throw new Error('theme_asset_invalid')
-        return {
-          promoted: { fileName, previewPath: targetPath },
-          final: { filePath: targetPath, identity: publishedIdentity },
-        }
-      } catch (error) {
-        await removeOwnedNodeIfCurrent(assetRoot, targetPath, temp.identity, ensureAssetRoot, 'theme_asset_invalid')
-        await removeOwnedNodeIfCurrent(assetRoot, temp.filePath, temp.identity, ensureAssetRoot, 'theme_asset_invalid')
-        throw error
-      }
+  const readOwnedPayload = async(
+    targetPath: string,
+    expectedIdentity: NodeIdentity,
+    expectedHash: string | null,
+    errorCode: string,
+  ): Promise<Buffer> => {
+    let descriptor: Awaited<ReturnType<typeof fs.open>> | null = null
+    try {
+      const before = await inspect(targetPath)
+      if (before.isSymbolicLink() || !before.isFile() || before.nlink != 1n ||
+        !sameNode(identityOf(before), expectedIdentity)) throw new Error(errorCode)
+      const beforeIdentity = identityOf(before)
+      descriptor = await fs.open(targetPath, 'r')
+      await verifyDescriptorPath(descriptor, beforeIdentity, targetPath, errorCode)
+      const bytes = await readCapped(descriptor, errorCode)
+      await verifyDescriptorPath(descriptor, beforeIdentity, targetPath, errorCode)
+      if (expectedHash != null && sha256(bytes) != expectedHash) throw new Error(errorCode)
+      return bytes
+    } catch {
+      throw new Error(errorCode)
+    } finally {
+      try { await descriptor?.close() } catch {}
     }
-    throw new Error('theme_asset_collision')
+  }
+
+  const completeThemeTarget = (root: DirectDirectoryGuard, bytes: Buffer): ImmutableArtifactGuard => {
+    const expectedHash = sha256(bytes)
+    return completeExclusiveArtifact(
+      reserveExclusiveArtifact(root, {
+        prefix: '',
+        suffix: '.img',
+        artifactKind: 'theme-image-v1',
+      }),
+      byteSource(bytes),
+      {
+        verifyReadOnly: ({ readDescriptor, sha256: actualHash, byteLength }) => {
+          const readBack = readNativeDescriptor(readDescriptor, byteLength)
+          if (byteLength != bytes.length || actualHash != expectedHash || sha256(readBack) != expectedHash ||
+            !isImage(readBack)) throw new Error('theme_asset_invalid')
+        },
+      },
+    )
+  }
+
+  const rollbackDurableTarget = async(guard: ImmutableArtifactGuard): Promise<void> => {
+    try {
+      revalidateImmutableArtifact(guard)
+    } catch {
+      try { closeArtifactGuard(guard) } catch {}
+      throw new Error('theme_asset_invalid')
+    }
+    closeArtifactGuard(guard)
+    await isolateAndReclaim({
+      root: guard.root,
+      filePath: guard.path,
+      identity: guard.identity,
+      prefix: `.${guard.basename}.isolate-`,
+      verify: async payloadPath => {
+        const bytes = await readOwnedPayload(payloadPath, guard.identity, guard.sha256, 'theme_asset_invalid')
+        if (bytes.length != guard.byteLength || !isImage(bytes)) throw new Error('theme_asset_invalid')
+      },
+      errorCode: 'theme_asset_invalid',
+    })
   }
 
   const installLegacy = async(fileName: string, bytes: Buffer): Promise<void> => {
+    await ensureAssetRoot()
     const targetPath = path.join(assetRoot, fileName)
     assertDirectFilePath(assetRoot, targetPath, 'theme_asset_migration_conflict')
-    if (!await missing(targetPath)) {
-      const current = await readStableRegularFile(targetPath, 'theme_asset_migration_conflict', 'theme_asset_migration_conflict')
-      if (sha256(current) != sha256(bytes)) throw new Error('theme_asset_migration_conflict')
-      return
-    }
-    const temp = await createAssetTemp(bytes)
-    let final: OwnedFile | null = null
+    const root = openRootGuard(assetRoot, assetRootIdentity!, 'theme_asset_migration_conflict')
+    let descriptor: Awaited<ReturnType<typeof fs.open>> | null = null
+    let createdIdentity: NodeIdentity | null = null
     try {
-      const published = await publishAsset(temp, fileName)
-      final = published.final
-      const readBack = await readStableRegularFile(final.filePath, 'theme_asset_migration_conflict', 'theme_asset_migration_conflict')
-      if (sha256(readBack) != sha256(bytes)) throw new Error('theme_asset_migration_conflict')
-    } catch (error) {
-      if (final != null) {
-        try { await quarantineAndRemove(assetRoot, final, ensureAssetRoot, 'theme_asset_invalid') } catch {}
-      } else {
-        try { await quarantineAndRemove(assetRoot, temp, ensureAssetRoot, 'theme_asset_invalid') } catch {}
+      try {
+        descriptor = await fs.open(targetPath, 'wx', 0o600)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code != 'EEXIST') throw error
+        const existing = await inspect(targetPath)
+        if (existing.isSymbolicLink() || !existing.isFile() || existing.nlink != 1n) {
+          throw new Error('theme_asset_migration_conflict')
+        }
+        await readOwnedPayload(
+          targetPath,
+          identityOf(existing),
+          sha256(bytes),
+          'theme_asset_migration_conflict',
+        )
+        return
       }
-      throw error
+      const opened = await descriptor.stat({ bigint: true })
+      if (!opened.isFile() || opened.nlink != 1n) throw new Error('theme_asset_migration_conflict')
+      createdIdentity = identityOf(opened)
+      await descriptor.writeFile(bytes)
+      await descriptor.sync()
+      const written = await descriptor.stat({ bigint: true })
+      if (!written.isFile() || written.nlink != 1n || !sameNode(identityOf(written), createdIdentity)) {
+        throw new Error('theme_asset_migration_conflict')
+      }
+      await descriptor.close()
+      descriptor = null
+      await readOwnedPayload(
+        targetPath,
+        createdIdentity,
+        sha256(bytes),
+        'theme_asset_migration_conflict',
+      )
+    } catch (error) {
+      try { await descriptor?.close() } catch {}
+      descriptor = null
+      if (createdIdentity != null) {
+        try {
+          await isolateAndReclaim({
+            root,
+            filePath: targetPath,
+            identity: createdIdentity,
+            prefix: `.${fileName}.isolate-`,
+            verify: async payloadPath => {
+              await readOwnedPayload(payloadPath, createdIdentity!, null, 'theme_asset_migration_conflict')
+            },
+            errorCode: 'theme_asset_migration_conflict',
+          })
+        } catch {
+          throw new Error('theme_asset_migration_conflict')
+        }
+      }
+      throw fixedThemeError(error, 'theme_asset_migration_conflict')
+    } finally {
+      try { await descriptor?.close() } catch {}
+      closeDirectDirectory(root)
     }
   }
 
@@ -593,31 +734,46 @@ export const createThemeAssetManager = (input: {
       return { stagingId: record.stagingId, previewPath: record.previewPath }
     },
     promoteThemeImage: async(staged, commit) => await withStage(staged.stagingId, async() => {
-      const { record, bytes } = await verifyStaged(staged.stagingId, staged.previewPath)
-      const temp = await createAssetTemp(bytes)
-      let final: OwnedFile | null = null
+      const stage = await openVerifiedStage(staged.stagingId, staged.previewPath)
+      let root: DirectDirectoryGuard | null = null
+      let durable: ImmutableArtifactGuard | null = null
       try {
-        await verifyStaged(staged.stagingId, staged.previewPath)
-        const published = await publishAsset(temp)
-        final = published.final
-        const readBack = await readStableRegularFile(final.filePath, 'theme_asset_invalid', 'theme_asset_invalid')
-        if (sha256(readBack) != sha256(bytes)) throw new Error('theme_asset_invalid')
-        const result = await commit(published.promoted)
-        try { await retireStage(record) } catch {}
-        return result
+        await ensureAssetRoot()
+        root = openRootGuard(assetRoot, assetRootIdentity!, 'theme_asset_invalid')
+        durable = completeThemeTarget(root, stage.bytes)
+        await revalidateStageAgainstDescriptor(stage)
+        await consumeThemeStage(stage)
+        return await commit({ fileName: durable.basename, previewPath: durable.path })
       } catch (error) {
-        if (final != null) {
-          try { await quarantineAndRemove(assetRoot, final, ensureAssetRoot, 'theme_asset_invalid') } catch {}
-        } else {
-          try { await quarantineAndRemove(assetRoot, temp, ensureAssetRoot, 'theme_asset_invalid') } catch {}
+        if (durable != null) {
+          try {
+            await rollbackDurableTarget(durable)
+          } catch {
+            durable = null
+            throw new Error('theme_asset_invalid')
+          }
+          durable = null
         }
-        throw error
+        throw fixedThemeError(error, 'theme_asset_invalid')
+      } finally {
+        await stage.close()
+        if (durable != null) {
+          try { closeArtifactGuard(durable) } catch {}
+        }
+        if (root != null) closeDirectDirectory(root)
       }
     }),
     discardThemeImage: async({ stagingId }) => {
       await withStage(stagingId, async() => {
-        const { record } = await verifyStaged(stagingId)
-        await retireStage(record)
+        const stage = await openVerifiedStage(stagingId)
+        try {
+          await revalidateStageAgainstDescriptor(stage)
+          await consumeThemeStage(stage)
+        } catch (error) {
+          throw fixedThemeError(error, 'theme_stage_invalid')
+        } finally {
+          await stage.close()
+        }
       })
     },
   }

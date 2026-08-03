@@ -459,6 +459,7 @@ const expectedObjects = (contract: SchemaContract, indexes: readonly string[]): 
   ...contract.tables.map(table => [table.name, 'table'] as const),
   ...indexes.map(name => [name, 'index'] as const),
 ])
+const quotedIdentifier = (value: string): string => `"${value.replaceAll('"', '""')}"`
 
 const verifyExactStructure = (
   db: Database.Database,
@@ -478,6 +479,16 @@ const verifyExactStructure = (
   const expected = expectedObjects(contract, indexes)
   if (actual.size != expected.size || [...expected].some(([name, type]) => actual.get(name) != type)) {
     throw failure('phase4_schema_invalid')
+  }
+  for (const table of contract.tables) {
+    const columns = db.pragma(`table_xinfo(${quotedIdentifier(table.name)})`) as Array<{
+      name: unknown
+      hidden: unknown
+    }>
+    if (columns.length != table.columns.length || columns.some((column, index) =>
+      column.name != table.columns[index].name || column.hidden != 0)) {
+      throw failure('phase4_schema_invalid')
+    }
   }
 }
 
@@ -533,7 +544,6 @@ const canonicalSqliteValue = (value: unknown): CanonicalSqliteValue => {
 }
 
 const compareUtf8 = (left: string, right: string): number => Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
-const quotedIdentifier = (value: string): string => `"${value.replaceAll('"', '""')}"`
 
 export function backupPreparedSourceSha256(
   db: Database.Database,
@@ -567,8 +577,9 @@ export function backupPreparedSourceSha256(
       const contract = databaseSchema6Contract.tables.find(table => table.name == tableName)
       const columns = contract?.columns.map(column => column.name) ?? ['name', 'seq']
       if (tableName == 'sqlite_sequence') {
-        const actualColumns = (db.prepare('PRAGMA table_info(sqlite_sequence)').all() as Array<{ name: unknown }>).map(row => row.name)
-        if (actualColumns.length != 2 || actualColumns[0] != 'name' || actualColumns[1] != 'seq') {
+        const actualColumns = db.pragma('table_xinfo(sqlite_sequence)') as Array<{ name: unknown, hidden: unknown }>
+        if (actualColumns.length != 2 || actualColumns[0].name != 'name' || actualColumns[0].hidden != 0 ||
+          actualColumns[1].name != 'seq' || actualColumns[1].hidden != 0) {
           throw failure('backup_prepared_source_changed')
         }
       }

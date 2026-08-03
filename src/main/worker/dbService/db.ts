@@ -813,21 +813,34 @@ const performDatabaseAdvance = async(
   const currentVersion = getSchemaVersion(db)
   if (currentVersion == 7) {
     const { readWriteMarker, backupPreparedMarker } = cutover.verifySchema7SteadyState(db)
-    const backupPath = backupPreparedMarker == null
+    const preparedBackup = backupPreparedMarker == null
       ? null
-      : resolveContainedPath(initialization.backupsRoot, backupPreparedMarker.details.backupBasename, path)
-    if (backupPath != null) {
+      : {
+          marker: backupPreparedMarker,
+          path: resolveContainedPath(initialization.backupsRoot, backupPreparedMarker.details.backupBasename, path),
+        }
+    if (preparedBackup != null) {
       try {
+        const readWriteMarkerSha256 = cutover.markerRowSha256(readWriteMarker)
         verifyLegacyOnlineBackup(
-          backupPath,
+          preparedBackup.path,
           getNativeOptions(),
-          cutoverBackupVerifier(cutover.markerRowSha256(readWriteMarker)),
+          backupDb => {
+            cutover.verifyCutoverBackup(backupDb, readWriteMarkerSha256)
+            const sourceSha256 = cutover.backupPreparedSourceSha256(backupDb, {
+              details: preparedBackup.marker.details,
+              completedAtMs: preparedBackup.marker.completedAtMs,
+            })
+            if (sourceSha256 != preparedBackup.marker.sourceSha256) {
+              throw createDatabaseError('database_advance_backup_invalid')
+            }
+          },
         )
       } catch {
         throw createDatabaseError('database_advance_backup_invalid')
       }
     }
-    return publishSchema7(initialization, backupPath, [])
+    return publishSchema7(initialization, preparedBackup?.path ?? null, [])
   }
   if (currentVersion != 6) throw createDatabaseError('database_advance_schema_invalid')
 

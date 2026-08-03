@@ -703,6 +703,30 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
     assert.equal(listPreparedCandidates().length, 1)
   })
 
+  it('rejects an added ordinary column before preparing a backup', async() => {
+    await prepareExistingSchema6('cache-cutover-unknown-ordinary-column')
+    preparedFixture.db.exec('ALTER TABLE local_state ADD COLUMN review_extra TEXT')
+
+    await assert.rejects(advanceExistingSchema6(), /phase4_schema_invalid/)
+    assert.equal(fs.existsSync(preparedFixture.backupsRoot), false)
+    assert.equal(markerRow(preparedFixture.db, 'legacy_cache_v1.backup_prepared'), null)
+  })
+
+  it('rejects a generated column hidden from table_info before preparing a backup', async() => {
+    await prepareExistingSchema6('cache-cutover-unknown-generated-column')
+    preparedFixture.db.exec(`
+      ALTER TABLE local_state ADD COLUMN review_generated TEXT
+      GENERATED ALWAYS AS (value_json) VIRTUAL
+    `)
+    assert.equal(preparedFixture.db.pragma('table_info(local_state)').some(row => row.name == 'review_generated'), false)
+    assert.equal(preparedFixture.db.pragma('table_xinfo(local_state)').some(row =>
+      row.name == 'review_generated' && row.hidden != 0), true)
+
+    await assert.rejects(advanceExistingSchema6(), /phase4_schema_invalid/)
+    assert.equal(fs.existsSync(preparedFixture.backupsRoot), false)
+    assert.equal(markerRow(preparedFixture.db, 'legacy_cache_v1.backup_prepared'), null)
+  })
+
   it('retains an unreferenced zero-byte artifact when the prepared-marker commit fails', async() => {
     await prepareExistingSchema6('cache-cutover-prepared-commit-failure')
     const db = preparedFixture.db
@@ -797,7 +821,7 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
     assert.deepEqual(markerRow(db, 'legacy_cache_v1.read_write_verified'), readWriteBefore)
   })
 
-  it('publishes an already-committed schema 7 on retry without replaying migration or backup', async() => {
+  it('authenticates a prepared schema-6 backup before publishing an already-committed schema 7', async() => {
     const paths = await createSchema6Fixture('cache-cutover-publication-retry')
     const db = dbService.getAppDB()
     seedLyrics(db)
@@ -821,16 +845,32 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
       const backupName = backupsAfterCommit.find(name => name.endsWith('.backup'))
       assert.equal(typeof backupName, 'string')
       const backupPath = path.join(paths.backupsRoot, backupName)
-      const backupBytes = fs.readFileSync(backupPath)
-
-      fs.writeFileSync(backupPath, 'invalid replacement')
-      await assert.rejects(
-        phase4.initializePhase4(),
-        error => error?.code == 'database_advance_backup_invalid',
-      )
+      const originalPath = `${backupPath}.review-original`
+      const replacementPath = `${backupPath}.review-replacement`
+      fs.copyFileSync(backupPath, replacementPath)
+      const replacement = new Database(replacementPath)
+      replacement.prepare(`
+        INSERT INTO local_state(key, version, value_json, updated_at_ms)
+        VALUES ('view_prev_state', 1, '{"review":true}', 30)
+        ON CONFLICT(key) DO UPDATE SET
+          version = excluded.version,
+          value_json = excluded.value_json,
+          updated_at_ms = excluded.updated_at_ms
+      `).run()
+      replacement.close()
+      fs.renameSync(backupPath, originalPath)
+      fs.renameSync(replacementPath, backupPath)
+      try {
+        await assert.rejects(
+          phase4.initializePhase4(),
+          error => error?.code == 'database_advance_backup_invalid',
+        )
+      } finally {
+        fs.unlinkSync(backupPath)
+        fs.renameSync(originalPath, backupPath)
+      }
       assert.equal(publicationAttempts, 1)
       assert.equal(rawRepository.getRawLyricFallbackState(), 'cutover-pending-cache-only')
-      fs.writeFileSync(backupPath, backupBytes)
 
       assert.deepEqual(await phase4.initializePhase4(), { schemaVersion: 7, typedOwnershipVerified: true })
       assert.equal(publicationAttempts, 2)

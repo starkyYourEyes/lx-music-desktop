@@ -7,6 +7,12 @@ const {
 
 const reservations = new WeakMap()
 const maximumChunkBytes = 1024 * 1024
+const artifactKinds = new Set([
+  'database-backup-v1',
+  'theme-image-v1',
+  'portable-smoke-v1',
+  'test-v1',
+])
 
 const artifactError = code => Object.assign(new Error(code), { code })
 const identityOf = stat => ({ dev: String(stat.dev), ino: String(stat.ino) })
@@ -63,7 +69,7 @@ const artifactBasename = (prefix, suffix, randomBytes) => {
 }
 
 const reservationOptions = options => {
-  if (options == null || typeof options != 'object' || typeof options.artifactKind != 'string') {
+  if (options == null || typeof options != 'object' || !artifactKinds.has(options.artifactKind)) {
     throw artifactError('artifact_invalid')
   }
   return options
@@ -72,13 +78,14 @@ const reservationOptions = options => {
 const reserveExclusiveArtifact = (root, options) => {
   const settings = reservationOptions(options)
   for (let attempt = 0; attempt < 8; attempt++) {
-    revalidateDirectDirectory(root)
     const basename = artifactBasename(settings.prefix, settings.suffix, settings.randomBytes)
     const artifactPath = path.join(root.path, basename)
     let descriptor
     try {
+      revalidateDirectDirectory(root)
       descriptor = fs.openSync(artifactPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o600)
     } catch (error) {
+      revalidateDirectDirectory(root)
       if (isCollision(error)) continue
       throw error
     }
@@ -106,7 +113,7 @@ const reserveExclusiveArtifact = (root, options) => {
 }
 
 const verifiedFailure = error => {
-  if (error?.code == 'direct_directory_changed' || error?.code == 'artifact_changed') return error
+  if (error?.code == 'direct_directory_changed' || error?.code == 'artifact_changed' || error?.code == 'artifact_invalid') return error
   return artifactError('artifact_verification_failed')
 }
 
@@ -149,10 +156,11 @@ const hashReadDescriptor = (descriptor, expectedLength) => {
 const completeExclusiveArtifact = (reservation, source, options = {}) => {
   const metadata = artifactMetadata(reservation)
   if (metadata.closed || metadata.complete) throw artifactError('artifact_invalid')
-  const chunkBytes = options.chunkBytes ?? maximumChunkBytes
-  if (!Number.isSafeInteger(chunkBytes) || chunkBytes <= 0 || chunkBytes > maximumChunkBytes) throw artifactError('artifact_invalid')
   let readDescriptor
   try {
+    if (options == null || typeof options != 'object') throw artifactError('artifact_invalid')
+    const chunkBytes = options.chunkBytes ?? maximumChunkBytes
+    if (!Number.isSafeInteger(chunkBytes) || chunkBytes <= 0 || chunkBytes > maximumChunkBytes) throw artifactError('artifact_invalid')
     validateArtifact(reservation, metadata)
     writeBoundedSource(metadata.descriptor, source, chunkBytes)
     fs.fsyncSync(metadata.descriptor)

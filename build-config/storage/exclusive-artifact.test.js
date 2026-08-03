@@ -97,6 +97,65 @@ describe('exclusive immutable artifact', () => {
     closeDirectDirectory(root)
   })
 
+  it('closes retained attempts after write and fsync failures', () => {
+    for (const operation of ['write', 'fsync']) {
+      const fixture = createFixture()
+      const root = validateDirectDirectory(fixture.root)
+      const reservation = reserveExclusiveArtifact(root, {
+        prefix: '.lx-artifact-', suffix: '.attempt', artifactKind: 'test-v1',
+      })
+      const original = operation == 'write' ? fs.writeSync : fs.fsyncSync
+      fs[operation == 'write' ? 'writeSync' : 'fsyncSync'] = () => { throw new Error(`injected ${operation} failure`) }
+      try {
+        assert.throws(() => completeExclusiveArtifact(reservation, sourceOf(Buffer.from('partial'))),
+          error => error.code == 'artifact_verification_failed')
+      } finally {
+        fs[operation == 'write' ? 'writeSync' : 'fsyncSync'] = original
+      }
+      assert.equal(fs.readdirSync(fixture.root).length, 1)
+      assert.throws(() => fs.fstatSync(reservation.descriptor), error => error.code == 'EBADF')
+      closeArtifactReservation(reservation)
+      closeDirectDirectory(root)
+    }
+  })
+
+  it('rejects bounded sources that are short, long, or make zero progress', () => {
+    const invalidSources = [
+      { byteLength: 4, read: () => Buffer.from('abc') },
+      { byteLength: 3, read: () => Buffer.from('toolong') },
+      { byteLength: 3, read: () => Buffer.alloc(0) },
+    ]
+    for (const source of invalidSources) {
+      const fixture = createFixture()
+      const root = validateDirectDirectory(fixture.root)
+      const reservation = reserveExclusiveArtifact(root, {
+        prefix: '.lx-artifact-', suffix: '.attempt', artifactKind: 'test-v1',
+      })
+      assert.throws(() => completeExclusiveArtifact(reservation, source),
+        error => error.code == 'artifact_verification_failed')
+      assert.equal(fs.readdirSync(fixture.root).length, 1)
+      assert.throws(() => fs.fstatSync(reservation.descriptor), error => error.code == 'EBADF')
+      closeArtifactReservation(reservation)
+      closeDirectDirectory(root)
+    }
+  })
+
+  it('closes a retained reservation when chunkBytes is invalid', () => {
+    const fixture = createFixture()
+    const root = validateDirectDirectory(fixture.root)
+    const reservation = reserveExclusiveArtifact(root, {
+      prefix: '.lx-artifact-', suffix: '.attempt', artifactKind: 'test-v1',
+    })
+
+    assert.throws(() => completeExclusiveArtifact(reservation, sourceOf(Buffer.from('bytes')), { chunkBytes: 0 }),
+      error => error.code == 'artifact_invalid')
+    assert.equal(fs.readdirSync(fixture.root).length, 1)
+    assert.throws(() => fs.fstatSync(reservation.descriptor), error => error.code == 'EBADF')
+
+    closeArtifactReservation(reservation)
+    closeDirectDirectory(root)
+  })
+
   it('closing an abandoned reservation retains its zero-length attempt', () => {
     const fixture = createFixture()
     const root = validateDirectDirectory(fixture.root)
@@ -107,6 +166,30 @@ describe('exclusive immutable artifact', () => {
     closeArtifactReservation(reservation)
     closeArtifactReservation(reservation)
     assert.equal(fs.statSync(reservation.path).size, 0)
+
+    closeDirectDirectory(root)
+  })
+
+  it('closes a completed guard idempotently while retaining its artifact', () => {
+    const { fixture, root, guard } = completeFixtureArtifact(Buffer.from('complete'))
+
+    closeArtifactGuard(guard)
+    closeArtifactGuard(guard)
+    assert.equal(fs.readFileSync(guard.path, 'utf8'), 'complete')
+    assert.throws(() => fs.fstatSync(guard.descriptor), error => error.code == 'EBADF')
+
+    assert.deepEqual(fs.readdirSync(fixture.root), [guard.basename])
+    closeDirectDirectory(root)
+  })
+
+  it('rejects an artifact kind outside the declared union before reserving', () => {
+    const fixture = createFixture()
+    const root = validateDirectDirectory(fixture.root)
+
+    assert.throws(() => reserveExclusiveArtifact(root, {
+      prefix: '.lx-artifact-', suffix: '.attempt', artifactKind: 'unknown-v1',
+    }), error => error.code == 'artifact_invalid')
+    assert.deepEqual(fs.readdirSync(fixture.root), [])
 
     closeDirectDirectory(root)
   })
@@ -147,6 +230,69 @@ describe('exclusive immutable artifact', () => {
       }
       closeDirectDirectory(root)
     }
+  })
+
+  it('revalidates after random generation and after the final collision', () => {
+    const fixture = createFixture()
+    let changed = false
+    let guardedDescriptor
+    const fsApi = {
+      ...fs,
+      fstatSync(descriptor, options) {
+        const stat = fs.fstatSync(descriptor, options)
+        return changed && descriptor == guardedDescriptor
+          ? { dev: stat.dev, ino: BigInt(stat.ino) + 1n }
+          : stat
+      },
+    }
+    const root = validateDirectDirectory(fixture.root, { fsApi })
+    guardedDescriptor = root.descriptor
+    let openCalls = 0
+    const originalOpen = fs.openSync
+    fs.openSync = (...args) => {
+      openCalls++
+      return originalOpen(...args)
+    }
+    try {
+      assert.throws(() => reserveExclusiveArtifact(root, {
+        prefix: '.lx-artifact-', suffix: '.attempt', artifactKind: 'test-v1',
+        randomBytes: () => {
+          changed = true
+          return Buffer.alloc(16, 3)
+        },
+      }), error => error.code == 'direct_directory_changed')
+    } finally {
+      fs.openSync = originalOpen
+    }
+    assert.equal(openCalls, 0)
+    closeDirectDirectory(root)
+
+    const collisionFixture = createFixture()
+    changed = false
+    const collisionRoot = validateDirectDirectory(collisionFixture.root, { fsApi })
+    guardedDescriptor = collisionRoot.descriptor
+    const token = Buffer.alloc(16, 4).toString('hex')
+    fs.writeFileSync(path.join(collisionFixture.root, `.lx-artifact-${token}.attempt`), 'retained')
+    let attempts = 0
+    fs.openSync = (...args) => {
+      try {
+        return originalOpen(...args)
+      } finally {
+        attempts++
+        if (attempts == 8) changed = true
+      }
+    }
+    try {
+      assert.throws(() => reserveExclusiveArtifact(collisionRoot, {
+        prefix: '.lx-artifact-', suffix: '.attempt', artifactKind: 'test-v1',
+        randomBytes: () => Buffer.alloc(16, 4),
+      }), error => error.code == 'direct_directory_changed')
+    } finally {
+      fs.openSync = originalOpen
+    }
+    assert.equal(attempts, 8)
+    assert.deepEqual(fs.readdirSync(collisionFixture.root), [`.lx-artifact-${token}.attempt`])
+    closeDirectDirectory(collisionRoot)
   })
 
   it('rejects pathname and root replacement at final guard revalidation', () => {

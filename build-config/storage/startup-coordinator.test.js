@@ -25,6 +25,7 @@ require.extensions['.ts'] = (module, filename) => {
 }
 
 const coordinatorPath = '../../src/main/startup/storageCoordinator.ts'
+const bootstrapPath = '../../src/main/bootstrap.ts'
 const portableMigrationPath = '../../src/main/migration/portableProfile.js'
 const runStatePath = '../../src/main/startup/runState.ts'
 const recoveryPath = '../../src/main/startup/recovery.ts'
@@ -270,6 +271,60 @@ const loadWorkerAdapter = databaseInit => {
   }
 }
 
+describe('portable bootstrap sequencing', () => {
+  for (const failedPhase of ['retirement', 'preparation']) {
+    it(`awaits portable ${failedPhase} failure before application loading`, async() => {
+      const calls = []
+      const retirementResult = failedPhase == 'retirement'
+        ? { state: 'failed', error: new Error('retirement_failed') }
+        : { state: 'not-acknowledged' }
+      const preparationResult = { state: 'failed', error: new Error('preparation_failed') }
+      const { bootstrap } = loadTsModule(path.join(__dirname, bootstrapPath), {
+        electron: { app: {} },
+        './migration/legacyUserData': {
+          getPortableUserDataPaths: () => ({ appDataPath: 'C:\\portable', userDataPath: 'C:\\portable\\userData' }),
+          migrateLegacyUserData: async() => { throw new Error('unexpected legacy migration') },
+        },
+        './migration/portableProfile': {
+          retireAcknowledgedPortableSource: async() => {
+            calls.push('retirement:start')
+            await Promise.resolve()
+            calls.push('retirement:end')
+            return retirementResult
+          },
+          preparePortableProfile: async() => {
+            calls.push('preparation:start')
+            await Promise.resolve()
+            calls.push('preparation:end')
+            return preparationResult
+          },
+        },
+        './utils/storagePaths': {
+          initializeStoragePaths: async() => { calls.push('storage:init') },
+          resolveApplicationCacheRoot: () => 'C:\\cache',
+        },
+      })
+      const electronApp = {
+        getPath: () => 'C:\\portable\\app.exe',
+        setPath: () => { calls.push('setPath') },
+        exit: code => { calls.push(`exit:${code}`) },
+      }
+
+      const originalConsoleError = console.error
+      try {
+        console.error = () => {}
+        await bootstrap(electronApp, async() => { calls.push('application') }, { platform: 'win32', env: {} })
+      } finally {
+        console.error = originalConsoleError
+      }
+
+      assert.deepEqual(calls, failedPhase == 'retirement'
+        ? ['retirement:start', 'retirement:end', 'exit:1']
+        : ['retirement:start', 'retirement:end', 'preparation:start', 'preparation:end', 'exit:1'])
+    })
+  }
+})
+
 describe('storage startup coordinator', () => {
   it('rejects invalid raw worker markers before Phase 4 can mutate the app database', async() => {
     if (!supportsWorkerDatabase) return runElectronChild()
@@ -358,12 +413,14 @@ describe('storage startup coordinator', () => {
       { name: 'schema 6 cannot be verified', value: { schemaVersion: 6, typedOwnershipVerified: true } },
       { name: 'non-plain object', value: Object.assign(Object.create(null), { schemaVersion: 7, typedOwnershipVerified: true }) },
     ]
-    for (const testCase of cases) await t.test(testCase.name, async() => {
-      const { deps } = createDeps({ initializePhase4: async() => testCase.value })
-      assert.deepEqual(await createCoordinator(deps).start(), {
-        status: 'fatal', reason: 'cache_phase4_result_invalid',
+    for (const testCase of cases) {
+      await t.test(testCase.name, async() => {
+        const { deps } = createDeps({ initializePhase4: async() => testCase.value })
+        assert.deepEqual(await createCoordinator(deps).start(), {
+          status: 'fatal', reason: 'cache_phase4_result_invalid',
+        })
       })
-    })
+    }
   })
 
   it('arms portable acknowledgement only for verified schema 7', async t => {
@@ -372,27 +429,29 @@ describe('storage startup coordinator', () => {
       { name: 'schema 7 degraded', phase4: { schemaVersion: 7, typedOwnershipVerified: false }, acknowledgements: 0 },
       { name: 'schema 7 verified', phase4: { schemaVersion: 7, typedOwnershipVerified: true }, acknowledgements: 1 },
     ]
-    for (const testCase of cases) await t.test(testCase.name, async() => {
-      let acknowledgements = 0
-      const { deps } = createDeps({ initializePhase4: async() => testCase.phase4 })
-      deps.portableProfileToken = Object.freeze({
-        version: 1,
-        portableRoot: 'C:\\portable-fixture',
-        promotionRunId: 'promotion-run',
-        startupRunId: 'startup-run',
-        destinationIdentity: Object.freeze({ dev: '1', ino: '2' }),
+    for (const testCase of cases) {
+      await t.test(testCase.name, async() => {
+        let acknowledgements = 0
+        const { deps } = createDeps({ initializePhase4: async() => testCase.phase4 })
+        deps.portableProfileToken = Object.freeze({
+          version: 1,
+          portableRoot: 'C:\\portable-fixture',
+          promotionRunId: 'promotion-run',
+          startupRunId: 'startup-run',
+          destinationIdentity: Object.freeze({ dev: '1', ino: '2' }),
+        })
+        deps.acknowledgePortableProfileStartup = async() => {
+          acknowledgements++
+          return { state: 'typed-only-acknowledged' }
+        }
+        const coordinator = createCoordinator(deps)
+        assert.deepEqual(await coordinator.start(), {
+          status: 'ready', schemaVersion: testCase.phase4.schemaVersion,
+        })
+        await coordinator.shutdown()
+        assert.equal(acknowledgements, testCase.acknowledgements)
       })
-      deps.acknowledgePortableProfileStartup = async() => {
-        acknowledgements++
-        return { state: 'typed-only-acknowledged' }
-      }
-      const coordinator = createCoordinator(deps)
-      assert.deepEqual(await coordinator.start(), {
-        status: 'ready', schemaVersion: testCase.phase4.schemaVersion,
-      })
-      await coordinator.shutdown()
-      assert.equal(acknowledgements, testCase.acknowledgements)
-    })
+    }
   })
 
   it('runs the default Phase 4 worker in prerequisite-initialize-settings order', async() => {
@@ -729,7 +788,7 @@ describe('storage startup coordinator', () => {
       preparePortableProfile,
       retireAcknowledgedPortableSource,
     } = require(portableMigrationPath)
-    const prepared = preparePortableProfile({ ...paths, runId: 'startup-1', logger: { info() {}, warn() {}, error() {} } })
+    const prepared = await preparePortableProfile({ ...paths, runId: 'startup-1', logger: { info() {}, warn() {}, error() {} } })
     assert.equal(prepared.state, 'promoted')
     const { calls, deps } = createDeps()
     deps.initializePhase4 = async() => {
@@ -753,11 +812,11 @@ describe('storage startup coordinator', () => {
     assert.ok(calls.indexOf('db:close') < calls.indexOf('run-state:clean'))
     assert.ok(calls.indexOf('run-state:clean') < calls.indexOf('portable:acknowledge'))
     assert.equal(JSON.parse(fs.readFileSync(journalPath, 'utf8')).state, 'typed-only-acknowledged')
-    assert.equal(retireAcknowledgedPortableSource({
+    assert.equal((await retireAcknowledgedPortableSource({
       ...paths,
       runId: 'startup-2',
       logger: { info() {}, warn() {}, error() {} },
-    }).state, 'retired')
+    })).state, 'retired')
     assert.equal(fs.existsSync(paths.sourceRoot), false)
     assert.equal(fs.readFileSync(path.join(paths.profileRoot, 'settings.json'), 'utf8'), '{"volume":0.5}')
   })
@@ -770,7 +829,7 @@ describe('storage startup coordinator', () => {
       retireAcknowledgedPortableSource,
     } = require(portableMigrationPath)
     const logger = { info() {}, warn() {}, error() {} }
-    const firstPreparation = preparePortableProfile({ ...paths, runId: 'startup-1', logger })
+    const firstPreparation = await preparePortableProfile({ ...paths, runId: 'startup-1', logger })
     const first = createDeps()
     first.deps.initializePhase4 = async() => {
       fs.writeFileSync(path.join(paths.profileRoot, 'lx.data.db'), 'typed-after-unclean-startup')
@@ -781,9 +840,9 @@ describe('storage startup coordinator', () => {
     assert.equal((await createCoordinator(first.deps).start()).status, 'ready')
     fs.writeFileSync(path.join(paths.profileRoot, 'settings.json'), '{"unclean":true}')
 
-    assert.equal(retireAcknowledgedPortableSource({ ...paths, runId: 'startup-2', logger }).state, 'not-acknowledged')
+    assert.equal((await retireAcknowledgedPortableSource({ ...paths, runId: 'startup-2', logger })).state, 'not-acknowledged')
     assert.equal(fs.existsSync(paths.sourceRoot), true)
-    const retry = preparePortableProfile({ ...paths, runId: 'startup-2', logger })
+    const retry = await preparePortableProfile({ ...paths, runId: 'startup-2', logger })
     assert.equal(retry.state, 'already-promoted')
     const second = createDeps()
     second.deps.initializePhase4 = async() => ({ schemaVersion: 7, typedOwnershipVerified: true })
@@ -793,7 +852,7 @@ describe('storage startup coordinator', () => {
     assert.equal((await retryCoordinator.start()).status, 'ready')
     await retryCoordinator.shutdown()
 
-    assert.equal(retireAcknowledgedPortableSource({ ...paths, runId: 'startup-3', logger }).state, 'retired')
+    assert.equal((await retireAcknowledgedPortableSource({ ...paths, runId: 'startup-3', logger })).state, 'retired')
     assert.equal(fs.readFileSync(path.join(paths.profileRoot, 'settings.json'), 'utf8'), '{"unclean":true}')
   })
 
@@ -879,7 +938,7 @@ describe('storage startup coordinator', () => {
       retireAcknowledgedPortableSource,
     } = require(portableMigrationPath)
     const logger = { info() {}, warn() {}, error() {} }
-    const prepared = preparePortableProfile({ ...paths, runId: 'startup-1', logger })
+    const prepared = await preparePortableProfile({ ...paths, runId: 'startup-1', logger })
     const { calls, deps } = createDeps()
     deps.initializePhase4 = async() => ({ schemaVersion: 7, typedOwnershipVerified: true })
     deps.portableProfileToken = prepared.token
@@ -898,8 +957,8 @@ describe('storage startup coordinator', () => {
     const journalPath = path.join(paths.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
     assert.equal(JSON.parse(fs.readFileSync(journalPath, 'utf8')).state, 'promoted')
     assert.equal(fs.existsSync(paths.sourceRoot), true)
-    assert.equal(retireAcknowledgedPortableSource({ ...paths, runId: 'startup-2', logger }).state, 'not-acknowledged')
-    assert.equal(preparePortableProfile({ ...paths, runId: 'startup-2', logger }).state, 'already-promoted')
+    assert.equal((await retireAcknowledgedPortableSource({ ...paths, runId: 'startup-2', logger })).state, 'not-acknowledged')
+    assert.equal((await preparePortableProfile({ ...paths, runId: 'startup-2', logger })).state, 'already-promoted')
   })
 
   it('uses the exact portable token and finalizer captured when startup reached ready', async() => {

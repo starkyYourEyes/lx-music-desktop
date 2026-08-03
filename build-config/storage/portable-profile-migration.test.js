@@ -33,6 +33,23 @@ const replaceDirectoryWithSameContent = directoryPath => {
   return originalPath
 }
 
+const readJournal = (fixture, journalFile) => JSON.parse(fs.readFileSync(
+  path.join(fixture.portableRoot, journalFile),
+  'utf8',
+))
+
+const retirementIsolationPath = (fixture, journal) => path.join(
+  path.dirname(fixture.sourceRoot),
+  journal.retirement.isolationBasename,
+)
+
+const prepareAcknowledgedFixture = async(fixture, migration) => {
+  const prepared = await migration.preparePortableProfile(fixture)
+  assert.equal(prepared.state, 'promoted')
+  await migration.acknowledgePortableProfileStartup(prepared.token)
+  return prepared
+}
+
 const legacyJournalFrom = journal => ({
   version: 1,
   sourceManifestHash: journal.sourceManifestHash,
@@ -54,13 +71,6 @@ const legacyReceiptFrom = journal => ({
   nonce: '0123456789abcdef0123456789abcdef',
 })
 
-const makeLockMetadata = pid => JSON.stringify({
-  version: 1,
-  pid,
-  nonce: '0123456789abcdef0123456789abcdef',
-  createdAt: '2026-07-29T00:00:00.000Z',
-})
-
 const createDirectoryLink = (t, targetPath, linkPath) => {
   try {
     fs.symlinkSync(targetPath, linkPath, process.platform == 'win32' ? 'junction' : 'dir')
@@ -80,6 +90,238 @@ afterEach(() => {
 })
 
 describe('portable profile migration journal', () => {
+  it('durably records retirement-intent before moving LxDatas', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    await prepareAcknowledgedFixture(fixture, migration)
+    const events = []
+
+    const result = await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-2',
+      afterJournalWrite(journal) { events.push(journal.state) },
+      beforeSourceRename() { events.push('rename') },
+    })
+
+    assert.equal(result.state, 'retired')
+    assert.deepEqual(events.slice(0, 2), ['retirement-intent', 'rename'])
+    assert.equal(readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE).state, 'retired')
+  })
+
+  it('records an exact interrupted payload as retired-retained without deleting it', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    await prepareAcknowledgedFixture(fixture, migration)
+    const interrupted = await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-2',
+      afterJournalWrite(journal) {
+        if (journal.state == 'retirement-isolated') throw new Error('interrupt_after_isolation')
+      },
+    })
+    assert.equal(interrupted.state, 'failed')
+    const isolatedJournal = readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    const isolationPath = retirementIsolationPath(fixture, isolatedJournal)
+    const payloadPath = path.join(isolationPath, 'payload')
+    assert.equal(exists(payloadPath), true)
+
+    const result = await migration.retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' })
+
+    assert.equal(result.state, 'failed')
+    assert.equal(readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE).state, 'retired-retained')
+    assert.equal(exists(payloadPath), true)
+  })
+
+  it('finalizes retired-retained when the exact payload is removed and its private directory is empty', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    await prepareAcknowledgedFixture(fixture, migration)
+    await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-2',
+      afterJournalWrite(journal) {
+        if (journal.state == 'retirement-isolated') throw new Error('interrupt_after_isolation')
+      },
+    })
+    await migration.retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' })
+    const retainedJournal = readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    const isolationPath = retirementIsolationPath(fixture, retainedJournal)
+    fs.rmSync(path.join(isolationPath, 'payload'), { recursive: true, force: false })
+
+    const result = await migration.retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-4' })
+
+    assert.equal(result.state, 'retired')
+    assert.equal(readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE).state, 'retired')
+    assert.deepEqual(fs.readdirSync(isolationPath), [])
+  })
+
+  it('preserves a source replacement introduced at the retirement rename boundary', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const replacementRoot = `${fixture.sourceRoot}-replacement`
+    const movedRoot = `${fixture.sourceRoot}-original`
+    fs.mkdirSync(replacementRoot)
+    fs.writeFileSync(path.join(replacementRoot, 'replacement'), 'must-survive')
+    const migration = require(migrationModule)
+    await prepareAcknowledgedFixture(fixture, migration)
+
+    const result = await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-2',
+      beforeSourceRename() {
+        fs.renameSync(fixture.sourceRoot, movedRoot)
+        fs.renameSync(replacementRoot, fixture.sourceRoot)
+      },
+    })
+
+    assert.equal(result.state, 'failed')
+    assert.equal(fs.readFileSync(path.join(fixture.sourceRoot, 'replacement'), 'utf8'), 'must-survive')
+    assert.equal(fs.readFileSync(path.join(movedRoot, 'lx.data.db'), 'utf8'), 'database-v1')
+  })
+
+  it('resumes only the exact journal-bound empty retirement isolation', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    await prepareAcknowledgedFixture(fixture, migration)
+    const interrupted = await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-2',
+      afterJournalWrite(journal) {
+        if (journal.state == 'retirement-intent') throw new Error('interrupt_after_intent')
+      },
+    })
+    assert.equal(interrupted.state, 'failed')
+    const intentJournal = readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    const isolationPath = retirementIsolationPath(fixture, intentJournal)
+    assert.deepEqual(fs.readdirSync(isolationPath), [])
+    let observedIsolation
+
+    const result = await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-3',
+      beforeSourceRename() { observedIsolation = isolationPath },
+    })
+
+    assert.equal(result.state, 'retired')
+    assert.equal(observedIsolation, isolationPath)
+  })
+
+  it('fails closed when the journal-bound retirement isolation identity changes', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    await prepareAcknowledgedFixture(fixture, migration)
+    await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-2',
+      afterJournalWrite(journal) {
+        if (journal.state == 'retirement-intent') throw new Error('interrupt_after_intent')
+      },
+    })
+    const intentJournal = readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    const isolationPath = retirementIsolationPath(fixture, intentJournal)
+    const movedIsolation = `${isolationPath}-original`
+    fs.renameSync(isolationPath, movedIsolation)
+    fs.mkdirSync(isolationPath)
+
+    const result = await migration.retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' })
+
+    assert.equal(result.state, 'failed')
+    assert.equal(exists(fixture.sourceRoot), true)
+    assert.equal(exists(isolationPath), true)
+    assert.equal(exists(movedIsolation), true)
+  })
+
+  it('retains unexpected entries in the journal-bound private isolation', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    await prepareAcknowledgedFixture(fixture, migration)
+    await migration.retireAcknowledgedPortableSource({
+      ...fixture,
+      runId: 'startup-2',
+      afterJournalWrite(journal) {
+        if (journal.state == 'retirement-intent') throw new Error('interrupt_after_intent')
+      },
+    })
+    const intentJournal = readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    const isolationPath = retirementIsolationPath(fixture, intentJournal)
+    const unexpectedPath = path.join(isolationPath, 'unexpected')
+    fs.writeFileSync(unexpectedPath, 'retain')
+
+    const result = await migration.retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' })
+
+    assert.equal(result.state, 'failed')
+    assert.equal(exists(fixture.sourceRoot), true)
+    assert.equal(fs.readFileSync(unexpectedPath, 'utf8'), 'retain')
+  })
+
+  it('preserves unreferenced portable retirement isolations', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    await prepareAcknowledgedFixture(fixture, migration)
+    const unreferencedPath = path.join(
+      path.dirname(fixture.sourceRoot),
+      '.lx-portable-retired-0123456789abcdef0123456789abcdef',
+    )
+    fs.mkdirSync(unreferencedPath)
+    fs.writeFileSync(path.join(unreferencedPath, 'operator-data'), 'retain')
+
+    const result = await migration.retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-2' })
+
+    assert.equal(result.state, 'retired')
+    assert.equal(fs.readFileSync(path.join(unreferencedPath, 'operator-data'), 'utf8'), 'retain')
+  })
+
+  it('upgrades an identity-bound version-1 journal only after exact source and destination reverify', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    const prepared = await migration.preparePortableProfile(fixture)
+    const journalPath = path.join(fixture.portableRoot, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    const versionOne = readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    versionOne.version = 1
+    delete versionOne.retirement
+    fs.writeFileSync(journalPath, JSON.stringify(versionOne, null, 2))
+
+    const resumed = await migration.preparePortableProfile({ ...fixture, runId: 'startup-2' })
+
+    assert.equal(resumed.state, 'already-promoted')
+    assert.equal(resumed.token.promotionRunId, prepared.token.promotionRunId)
+    assert.deepEqual(readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE), {
+      ...versionOne,
+      version: 2,
+      preparationRunId: 'startup-2',
+      retirement: null,
+    })
+  })
+
+  it('does not upgrade an identity-bound version-1 journal after destination manifest mismatch', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const migration = require(migrationModule)
+    await migration.preparePortableProfile(fixture)
+    const journalPath = path.join(fixture.portableRoot, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    const versionOne = readJournal(fixture, migration.PORTABLE_PROFILE_JOURNAL_FILE)
+    versionOne.version = 1
+    delete versionOne.retirement
+    const versionOneRaw = JSON.stringify(versionOne, null, 2)
+    fs.writeFileSync(journalPath, versionOneRaw)
+    fs.writeFileSync(path.join(fixture.profileRoot, 'lx.data.db'), 'changed-destination')
+
+    const result = await migration.preparePortableProfile({ ...fixture, runId: 'startup-2' })
+
+    assert.equal(result.state, 'failed')
+    assert.match(result.error.message, /destination manifest/i)
+    assert.equal(fs.readFileSync(journalPath, 'utf8'), versionOneRaw)
+    assert.equal(exists(fixture.sourceRoot), true)
+  })
+
   it('promotes only LxDatas and retains it through the acknowledged startup', async() => {
     const fixture = createFixture()
     seedSource(fixture)
@@ -92,7 +334,7 @@ describe('portable profile migration journal', () => {
       retireAcknowledgedPortableSource,
     } = require(migrationModule)
 
-    const first = preparePortableProfile(fixture)
+    const first = await preparePortableProfile(fixture)
 
     assert.equal(first.state, 'promoted')
     assert.equal(exists(fixture.sourceRoot), true)
@@ -103,28 +345,28 @@ describe('portable profile migration journal', () => {
     const acknowledged = await acknowledgePortableProfileStartup(first.token)
     assert.equal(acknowledged.state, 'typed-only-acknowledged')
     assert.equal(exists(fixture.sourceRoot), true)
-    assert.equal(retireAcknowledgedPortableSource(fixture).state, 'same-startup')
+    assert.equal((await retireAcknowledgedPortableSource(fixture)).state, 'same-startup')
     assert.equal(exists(fixture.sourceRoot), true)
 
     const nextStartup = { ...fixture, runId: 'startup-2' }
-    assert.equal(retireAcknowledgedPortableSource(nextStartup).state, 'retired')
+    assert.equal((await retireAcknowledgedPortableSource(nextStartup)).state, 'retired')
     assert.equal(exists(fixture.sourceRoot), false)
     assert.equal(exists(path.join(fixture.portableRoot, 'userData')), true)
     assert.equal(fs.readFileSync(path.join(fixture.portableRoot, 'userData', 'outside.txt'), 'utf8'), 'do-not-copy')
   })
 
-  it('leaves a fresh portable install untouched when no legacy LxDatas exists', () => {
+  it('leaves a fresh portable install untouched when no legacy LxDatas exists', async() => {
     const fixture = createFixture()
     const { preparePortableProfile } = require(migrationModule)
 
-    const result = preparePortableProfile(fixture)
+    const result = await preparePortableProfile(fixture)
 
     assert.equal(result.state, 'source-missing')
     assert.equal(exists(fixture.profileRoot), false)
     assert.equal(result.token, undefined)
   })
 
-  it('cleans an interrupted owned stage and succeeds on retry', () => {
+  it('reclaims a failed owned stage and succeeds on retry', async() => {
     const fixture = createFixture()
     seedSource(fixture)
     const { preparePortableProfile } = require(migrationModule)
@@ -136,52 +378,50 @@ describe('portable profile migration journal', () => {
         stagePath = fs.mkdtempSync(prefix)
         return stagePath
       },
-      cpSync(source, destination, options) {
-        fs.cpSync(source, destination, options)
-        if (interrupted) throw new Error('copy interrupted')
-      },
-      rmSync(target, options) {
-        if (interrupted && target == stagePath) throw new Error('simulated process interruption')
-        return fs.rmSync(target, options)
+      write(descriptor, buffer, offset, length, position, callback) {
+        if (interrupted) return process.nextTick(callback, new Error('copy interrupted'))
+        return fs.write(descriptor, buffer, offset, length, position, callback)
       },
     }
 
-    const first = preparePortableProfile({ ...fixture, fsApi })
+    const first = await preparePortableProfile({ ...fixture, fsApi })
     assert.equal(first.state, 'failed')
-    assert.equal(exists(stagePath), true)
+    assert.equal(exists(stagePath), false)
     interrupted = false
 
-    const second = preparePortableProfile(fixture)
+    const second = await preparePortableProfile(fixture)
     assert.equal(second.state, 'promoted')
     assert.equal(exists(stagePath), false)
     assert.equal(fs.readFileSync(path.join(fixture.profileRoot, 'nested', 'config.json'), 'utf8'), '{"theme":"dark"}')
   })
 
-  it('keeps an active lock and reclaims the same lock after its owner is dead', () => {
+  it('fails while the real migration lease is held and succeeds after release', async() => {
     const fixture = createFixture()
     seedSource(fixture)
     const { PORTABLE_PROFILE_LOCK_FILE, preparePortableProfile } = require(migrationModule)
+    const { acquireMigrationLease, releaseMigrationLease } = require('../../src/main/migration/migrationLease')
     const lockPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_LOCK_FILE)
-    fs.writeFileSync(lockPath, makeLockMetadata(2147483647))
+    const lease = await acquireMigrationLease({ rootPath: fixture.portableRoot, lockPath, logger: silentLogger })
 
-    const blocked = preparePortableProfile({ ...fixture, isProcessAlive: () => true })
+    const blocked = await preparePortableProfile(fixture)
     assert.equal(blocked.state, 'failed')
     assert.equal(exists(lockPath), true)
     assert.equal(exists(fixture.profileRoot), false)
 
-    const recovered = preparePortableProfile({ ...fixture, isProcessAlive: () => false })
+    await releaseMigrationLease(lease)
+    const recovered = await preparePortableProfile(fixture)
     assert.equal(recovered.state, 'promoted')
     assert.equal(exists(lockPath), false)
   })
 
-  it('refuses a non-empty destination without a valid matching journal', () => {
+  it('refuses a non-empty destination without a valid matching journal', async() => {
     const fixture = createFixture()
     seedSource(fixture)
     fs.mkdirSync(fixture.profileRoot)
     fs.writeFileSync(path.join(fixture.profileRoot, 'collision.txt'), 'unowned')
     const { preparePortableProfile } = require(migrationModule)
 
-    const result = preparePortableProfile(fixture)
+    const result = await preparePortableProfile(fixture)
 
     assert.equal(result.state, 'failed')
     assert.match(result.error.message, /destination/i)
@@ -189,7 +429,7 @@ describe('portable profile migration journal', () => {
     assert.equal(fs.readFileSync(path.join(fixture.sourceRoot, 'lx.data.db'), 'utf8'), 'database-v1')
   })
 
-  it('does not promote a copy when the source mutates and succeeds from the new source on retry', () => {
+  it('does not promote a copy when the source mutates and succeeds from the new source on retry', async() => {
     const fixture = createFixture()
     seedSource(fixture)
     const databasePath = path.join(fixture.sourceRoot, 'lx.data.db')
@@ -197,23 +437,25 @@ describe('portable profile migration journal', () => {
     let mutate = true
     const fsApi = {
       ...fs,
-      cpSync(source, destination, options) {
-        fs.cpSync(source, destination, options)
-        if (mutate) fs.writeFileSync(databasePath, 'database-v2')
+      write(descriptor, buffer, offset, length, position, callback) {
+        fs.write(descriptor, buffer, offset, length, position, (error, ...values) => {
+          if (mutate) fs.writeFileSync(databasePath, 'database-v2')
+          callback(error, ...values)
+        })
       },
     }
 
-    const first = preparePortableProfile({ ...fixture, fsApi })
+    const first = await preparePortableProfile({ ...fixture, fsApi })
     assert.equal(first.state, 'failed')
     assert.equal(exists(fixture.profileRoot), false)
     mutate = false
 
-    const second = preparePortableProfile({ ...fixture, fsApi })
+    const second = await preparePortableProfile({ ...fixture, fsApi })
     assert.equal(second.state, 'promoted')
     assert.equal(fs.readFileSync(path.join(fixture.profileRoot, 'lx.data.db'), 'utf8'), 'database-v2')
   })
 
-  it('rejects a linked source entry without reading or modifying its target', t => {
+  it('rejects a linked source entry without reading or modifying its target', async t => {
     const fixture = createFixture()
     seedSource(fixture)
     const externalRoot = path.join(fixture.portableRoot, 'external')
@@ -222,35 +464,24 @@ describe('portable profile migration journal', () => {
     if (!createDirectoryLink(t, externalRoot, path.join(fixture.sourceRoot, 'linked'))) return
     const { preparePortableProfile } = require(migrationModule)
 
-    const result = preparePortableProfile(fixture)
+    const result = await preparePortableProfile(fixture)
 
     assert.equal(result.state, 'failed')
     assert.equal(exists(fixture.profileRoot), false)
     assert.equal(fs.readFileSync(path.join(externalRoot, 'sentinel'), 'utf8'), 'external')
   })
 
-  it('serializes two creators so only one promotion owns the destination', () => {
+  it('serializes two creators so only one promotion owns the destination', async() => {
     const fixture = createFixture()
     seedSource(fixture)
     const { preparePortableProfile } = require(migrationModule)
-    let concurrentResult
-    let attempted = false
-    const fsApi = {
-      ...fs,
-      cpSync(source, destination, options) {
-        if (!attempted) {
-          attempted = true
-          concurrentResult = preparePortableProfile({ ...fixture, isProcessAlive: () => true })
-        }
-        fs.cpSync(source, destination, options)
-      },
-    }
+    const results = await Promise.all([
+      preparePortableProfile(fixture),
+      preparePortableProfile({ ...fixture, runId: 'startup-2' }),
+    ])
 
-    const creator = preparePortableProfile({ ...fixture, fsApi })
-
-    assert.equal(concurrentResult.state, 'failed')
-    assert.equal(creator.state, 'promoted')
-    assert.equal(preparePortableProfile({ ...fixture, runId: 'startup-2' }).state, 'already-promoted')
+    assert.deepEqual(results.map(result => result.state).sort(), ['already-promoted', 'promoted'])
+    assert.equal((await preparePortableProfile({ ...fixture, runId: 'startup-3' })).state, 'already-promoted')
     assert.equal(fs.readFileSync(path.join(fixture.profileRoot, 'lx.data.db'), 'utf8'), 'database-v1')
   })
 
@@ -275,11 +506,11 @@ describe('portable profile migration journal', () => {
       },
     }
 
-    const collision = preparePortableProfile({ ...fixture, fsApi })
+    const collision = await preparePortableProfile({ ...fixture, fsApi })
 
     assert.equal(collision.state, 'failed')
     assert.equal(fs.readFileSync(path.join(fixture.profileRoot, 'collision.txt'), 'utf8'), 'unowned')
-    const retry = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+    const retry = await preparePortableProfile({ ...fixture, runId: 'startup-2' })
     assert.equal(retry.state, 'failed')
     assert.equal(retry.token, undefined)
 
@@ -299,7 +530,7 @@ describe('portable profile migration journal', () => {
     assert.equal(exists(journalPath), false)
   })
 
-  it('finalizes a post-rename receipt and removes its orphaned owned stage on retry', () => {
+  it('finalizes a post-rename receipt without claiming an unreferenced owned stage', async() => {
     const fixture = createFixture()
     seedSource(fixture)
     const {
@@ -309,7 +540,7 @@ describe('portable profile migration journal', () => {
       preparePortableProfile,
     } = require(migrationModule)
     const { STAGE_MARKER_FILE } = require('../../src/main/migration/guardedDirectoryMigration.js')
-    assert.equal(preparePortableProfile(fixture).state, 'promoted')
+    assert.equal((await preparePortableProfile(fixture)).state, 'promoted')
     const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
     const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
     fs.unlinkSync(journalPath)
@@ -333,15 +564,15 @@ describe('portable profile migration journal', () => {
       directoryIdentity: { dev: String(stageIdentity.dev), ino: String(stageIdentity.ino) },
     }))
 
-    const retry = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+    const retry = await preparePortableProfile({ ...fixture, runId: 'startup-2' })
 
     assert.equal(retry.state, 'already-promoted')
-    assert.equal(exists(stagePath), false)
+    assert.equal(exists(stagePath), true)
     assert.equal(exists(path.join(fixture.portableRoot, PORTABLE_PROFILE_RECEIPT_FILE)), false)
     assert.equal(JSON.parse(fs.readFileSync(journalPath, 'utf8')).state, 'promoted')
   })
 
-  it('keeps a valid legacy promoted journal usable without issuing deletion authority', () => {
+  it('keeps a valid legacy promoted journal usable without issuing deletion authority', async() => {
     const fixture = createFixture()
     seedSource(fixture)
     const {
@@ -349,19 +580,19 @@ describe('portable profile migration journal', () => {
       preparePortableProfile,
       retireAcknowledgedPortableSource,
     } = require(migrationModule)
-    assert.equal(preparePortableProfile(fixture).state, 'promoted')
+    assert.equal((await preparePortableProfile(fixture)).state, 'promoted')
     const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
     const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
     const legacyRaw = JSON.stringify(legacyJournalFrom(journal), null, 2)
     fs.writeFileSync(journalPath, legacyRaw)
 
-    const resumed = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+    const resumed = await preparePortableProfile({ ...fixture, runId: 'startup-2' })
 
     assert.equal(resumed.state, 'already-promoted')
     assert.equal(resumed.token, undefined)
     assert.equal(exists(fixture.sourceRoot), true)
     assert.equal(fs.readFileSync(journalPath, 'utf8'), legacyRaw)
-    assert.equal(retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' }).state, 'not-acknowledged')
+    assert.equal((await retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' })).state, 'not-acknowledged')
   })
 
   it('keeps a legacy typed-only journal usable without deletion authority', async() => {
@@ -373,26 +604,26 @@ describe('portable profile migration journal', () => {
       preparePortableProfile,
       retireAcknowledgedPortableSource,
     } = require(migrationModule)
-    const promoted = preparePortableProfile(fixture)
+    const promoted = await preparePortableProfile(fixture)
     await acknowledgePortableProfileStartup(promoted.token)
     const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
     const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
     const legacyRaw = JSON.stringify(legacyJournalFrom(journal), null, 2)
     fs.writeFileSync(journalPath, legacyRaw)
 
-    const firstLaterRun = retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-2' })
+    const firstLaterRun = await retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-2' })
 
     assert.equal(firstLaterRun.state, 'not-acknowledged')
     assert.equal(exists(fixture.sourceRoot), true)
-    const prepared = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+    const prepared = await preparePortableProfile({ ...fixture, runId: 'startup-2' })
     assert.equal(prepared.state, 'already-acknowledged')
     assert.equal(prepared.token, undefined)
     assert.equal(fs.readFileSync(journalPath, 'utf8'), legacyRaw)
-    assert.equal(retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' }).state, 'not-acknowledged')
+    assert.equal((await retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' })).state, 'not-acknowledged')
     assert.equal(exists(fixture.sourceRoot), true)
   })
 
-  it('recovers a legacy pending receipt without creating deletion authority', () => {
+  it('recovers a legacy pending receipt without creating deletion authority', async() => {
     const fixture = createFixture()
     seedSource(fixture)
     const {
@@ -403,7 +634,7 @@ describe('portable profile migration journal', () => {
       retireAcknowledgedPortableSource,
     } = require(migrationModule)
     const { STAGE_MARKER_FILE } = require('../../src/main/migration/guardedDirectoryMigration.js')
-    assert.equal(preparePortableProfile(fixture).state, 'promoted')
+    assert.equal((await preparePortableProfile(fixture)).state, 'promoted')
     const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
     const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
     fs.unlinkSync(journalPath)
@@ -418,19 +649,19 @@ describe('portable profile migration journal', () => {
       directoryIdentity: { dev: String(stageIdentity.dev), ino: String(stageIdentity.ino) },
     }))
 
-    const recovered = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+    const recovered = await preparePortableProfile({ ...fixture, runId: 'startup-2' })
 
     assert.equal(recovered.state, 'already-promoted')
     assert.equal(exists(fixture.sourceRoot), true)
     assert.equal(exists(receiptPath), false)
-    assert.equal(exists(stagePath), false)
+    assert.equal(exists(stagePath), true)
     assert.equal(recovered.token, undefined)
     const recoveredJournal = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
     assert.equal(recoveredJournal.userDataIdentity, undefined)
     assert.equal(recoveredJournal.sourceIdentity, undefined)
     assert.equal(recoveredJournal.version, 1)
     assert.equal(recoveredJournal.state, 'promoted')
-    assert.equal(retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' }).state, 'not-acknowledged')
+    assert.equal((await retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' })).state, 'not-acknowledged')
     assert.equal(exists(fixture.sourceRoot), true)
   })
 
@@ -444,16 +675,16 @@ describe('portable profile migration journal', () => {
         preparePortableProfile,
         retireAcknowledgedPortableSource,
       } = require(migrationModule)
-      assert.equal(preparePortableProfile(fixture).state, 'promoted')
+      assert.equal((await preparePortableProfile(fixture)).state, 'promoted')
       const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
       const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
       fs.writeFileSync(journalPath, JSON.stringify(legacyJournalFrom(journal), null, 2))
       const replacementTarget = target == 'source' ? fixture.sourceRoot : path.dirname(fixture.sourceRoot)
       const originalRoot = replaceDirectoryWithSameContent(replacementTarget)
 
-      const resumed = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+      const resumed = await preparePortableProfile({ ...fixture, runId: 'startup-2' })
       if (resumed.token != null) await acknowledgePortableProfileStartup(resumed.token)
-      const retirement = retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' })
+      const retirement = await retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' })
 
       assert.equal(retirement.state, 'not-acknowledged')
       assert.equal(resumed.token, undefined)
@@ -474,7 +705,7 @@ describe('portable profile migration journal', () => {
         preparePortableProfile,
         retireAcknowledgedPortableSource,
       } = require(migrationModule)
-      assert.equal(preparePortableProfile(fixture).state, 'promoted')
+      assert.equal((await preparePortableProfile(fixture)).state, 'promoted')
       const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
       const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
       fs.unlinkSync(journalPath)
@@ -485,9 +716,9 @@ describe('portable profile migration journal', () => {
       const replacementTarget = target == 'source' ? fixture.sourceRoot : path.dirname(fixture.sourceRoot)
       const originalRoot = replaceDirectoryWithSameContent(replacementTarget)
 
-      const recovered = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+      const recovered = await preparePortableProfile({ ...fixture, runId: 'startup-2' })
       if (recovered.token != null) await acknowledgePortableProfileStartup(recovered.token)
-      const retirement = retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' })
+      const retirement = await retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' })
 
       assert.equal(retirement.state, 'not-acknowledged')
       assert.equal(recovered.token, undefined)
@@ -499,7 +730,7 @@ describe('portable profile migration journal', () => {
     })
   }
 
-  it('fails closed on an ambiguous legacy receipt beside a bound journal', () => {
+  it('fails closed on an ambiguous legacy receipt beside a bound journal', async() => {
     const fixture = createFixture()
     seedSource(fixture)
     const {
@@ -507,14 +738,14 @@ describe('portable profile migration journal', () => {
       PORTABLE_PROFILE_RECEIPT_FILE,
       preparePortableProfile,
     } = require(migrationModule)
-    assert.equal(preparePortableProfile(fixture).state, 'promoted')
+    assert.equal((await preparePortableProfile(fixture)).state, 'promoted')
     const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
     const receiptPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_RECEIPT_FILE)
     const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
     fs.writeFileSync(receiptPath, JSON.stringify(legacyReceiptFrom(journal), null, 2))
     fs.rmSync(fixture.profileRoot, { recursive: true, force: false })
 
-    const result = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+    const result = await preparePortableProfile({ ...fixture, runId: 'startup-2' })
 
     assert.equal(result.state, 'failed')
     assert.equal(exists(fixture.sourceRoot), true)
@@ -522,18 +753,18 @@ describe('portable profile migration journal', () => {
     assert.equal(exists(receiptPath), true)
   })
 
-  it('does not enrich a legacy journal when its recorded source manifest no longer matches', () => {
+  it('does not enrich a legacy journal when its recorded source manifest no longer matches', async() => {
     const fixture = createFixture()
     seedSource(fixture)
     const { PORTABLE_PROFILE_JOURNAL_FILE, preparePortableProfile } = require(migrationModule)
-    assert.equal(preparePortableProfile(fixture).state, 'promoted')
+    assert.equal((await preparePortableProfile(fixture)).state, 'promoted')
     const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
     const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'))
     const legacyRaw = JSON.stringify(legacyJournalFrom(journal), null, 2)
     fs.writeFileSync(journalPath, legacyRaw)
     fs.writeFileSync(path.join(fixture.sourceRoot, 'lx.data.db'), 'changed-before-upgrade')
 
-    const result = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+    const result = await preparePortableProfile({ ...fixture, runId: 'startup-2' })
 
     assert.equal(result.state, 'failed')
     assert.match(result.error.message, /source manifest/i)
@@ -549,7 +780,7 @@ describe('portable profile migration journal', () => {
       acknowledgePortableProfileStartup,
       preparePortableProfile,
     } = require(migrationModule)
-    const promoted = preparePortableProfile(fixture)
+    const promoted = await preparePortableProfile(fixture)
     const mismatched = { ...promoted.token, promotionRunId: 'wrong-promotion' }
 
     await assert.rejects(acknowledgePortableProfileStartup(mismatched), /token/i)
@@ -570,7 +801,7 @@ describe('portable profile migration journal', () => {
         acknowledgePortableProfileStartup,
         preparePortableProfile,
       } = require(migrationModule)
-      const promoted = preparePortableProfile(fixture)
+      const promoted = await preparePortableProfile(fixture)
       const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
       const journalBeforeAcknowledgement = fs.readFileSync(journalPath, 'utf8')
       fs.renameSync(fixture.profileRoot, movedProfileRoot)
@@ -594,7 +825,7 @@ describe('portable profile migration journal', () => {
       acknowledgePortableProfileStartup,
       preparePortableProfile,
     } = require(migrationModule)
-    const promoted = preparePortableProfile(fixture)
+    const promoted = await preparePortableProfile(fixture)
     const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
     const journalBeforeAcknowledgement = fs.readFileSync(journalPath, 'utf8')
     const originalSourceRoot = replaceDirectoryWithSameContent(fixture.sourceRoot)
@@ -615,7 +846,7 @@ describe('portable profile migration journal', () => {
       acknowledgePortableProfileStartup,
       preparePortableProfile,
     } = require(migrationModule)
-    const promoted = preparePortableProfile(fixture)
+    const promoted = await preparePortableProfile(fixture)
     const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
     const journalBeforeAcknowledgement = fs.readFileSync(journalPath, 'utf8')
     const originalUserDataRoot = replaceDirectoryWithSameContent(userDataRoot)
@@ -635,7 +866,7 @@ describe('portable profile migration journal', () => {
       acknowledgePortableProfileStartup,
       preparePortableProfile,
     } = require(migrationModule)
-    const promoted = preparePortableProfile(fixture)
+    const promoted = await preparePortableProfile(fixture)
     const journalPath = path.join(fixture.portableRoot, PORTABLE_PROFILE_JOURNAL_FILE)
     const journalBeforeAcknowledgement = fs.readFileSync(journalPath, 'utf8')
 
@@ -656,15 +887,15 @@ describe('portable profile migration journal', () => {
       preparePortableProfile,
       retireAcknowledgedPortableSource,
     } = require(migrationModule)
-    assert.equal(preparePortableProfile(fixture).state, 'promoted')
+    assert.equal((await preparePortableProfile(fixture)).state, 'promoted')
     fs.writeFileSync(path.join(fixture.profileRoot, 'lx.data.db'), 'typed-schema-v7')
 
-    const retry = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+    const retry = await preparePortableProfile({ ...fixture, runId: 'startup-2' })
 
     assert.equal(retry.state, 'already-promoted')
     assert.equal(await acknowledgePortableProfileStartup(retry.token).then(result => result.state), 'typed-only-acknowledged')
-    assert.equal(retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-2' }).state, 'same-startup')
-    assert.equal(retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' }).state, 'retired')
+    assert.equal((await retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-2' })).state, 'same-startup')
+    assert.equal((await retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-3' })).state, 'retired')
     assert.equal(fs.readFileSync(path.join(fixture.profileRoot, 'lx.data.db'), 'utf8'), 'typed-schema-v7')
   })
 
@@ -677,12 +908,12 @@ describe('portable profile migration journal', () => {
         preparePortableProfile,
         retireAcknowledgedPortableSource,
       } = require(migrationModule)
-      const promoted = preparePortableProfile(fixture)
+      const promoted = await preparePortableProfile(fixture)
       await acknowledgePortableProfileStartup(promoted.token)
       const changedRoot = mutation == 'source' ? fixture.sourceRoot : fixture.profileRoot
       fs.writeFileSync(path.join(changedRoot, 'lx.data.db'), `${mutation}-changed`)
 
-      const result = retireAcknowledgedPortableSource({ ...fixture, runId: `later-${mutation}` })
+      const result = await retireAcknowledgedPortableSource({ ...fixture, runId: `later-${mutation}` })
 
       assert.equal(result.state, 'failed', mutation)
       assert.equal(exists(fixture.sourceRoot), true, mutation)
@@ -697,11 +928,11 @@ describe('portable profile migration journal', () => {
       preparePortableProfile,
       retireAcknowledgedPortableSource,
     } = require(migrationModule)
-    const promoted = preparePortableProfile(fixture)
+    const promoted = await preparePortableProfile(fixture)
     await acknowledgePortableProfileStartup(promoted.token)
     const originalSourceRoot = replaceDirectoryWithSameContent(fixture.sourceRoot)
 
-    const result = retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-2' })
+    const result = await retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-2' })
 
     assert.equal(result.state, 'failed')
     assert.equal(fs.readFileSync(path.join(fixture.sourceRoot, 'lx.data.db'), 'utf8'), 'database-v1')
@@ -717,11 +948,11 @@ describe('portable profile migration journal', () => {
       preparePortableProfile,
       retireAcknowledgedPortableSource,
     } = require(migrationModule)
-    const promoted = preparePortableProfile(fixture)
+    const promoted = await preparePortableProfile(fixture)
     await acknowledgePortableProfileStartup(promoted.token)
     const originalUserDataRoot = replaceDirectoryWithSameContent(userDataRoot)
 
-    const result = retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-2' })
+    const result = await retireAcknowledgedPortableSource({ ...fixture, runId: 'startup-2' })
 
     assert.equal(result.state, 'failed')
     assert.equal(fs.readFileSync(path.join(fixture.sourceRoot, 'lx.data.db'), 'utf8'), 'database-v1')
@@ -740,10 +971,10 @@ describe('portable profile migration journal', () => {
       preparePortableProfile,
       retireAcknowledgedPortableSource,
     } = require(migrationModule)
-    const promoted = preparePortableProfile(fixture)
+    const promoted = await preparePortableProfile(fixture)
     await acknowledgePortableProfileStartup(promoted.token)
 
-    const result = retireAcknowledgedPortableSource({
+    const result = await retireAcknowledgedPortableSource({
       ...fixture,
       runId: 'startup-2',
       beforeSourceRetirement() {
@@ -766,10 +997,10 @@ describe('portable profile migration journal', () => {
       preparePortableProfile,
       retireAcknowledgedPortableSource,
     } = require(migrationModule)
-    const promoted = preparePortableProfile(fixture)
+    const promoted = await preparePortableProfile(fixture)
     await acknowledgePortableProfileStartup(promoted.token)
 
-    const result = retireAcknowledgedPortableSource({
+    const result = await retireAcknowledgedPortableSource({
       ...fixture,
       runId: 'startup-2',
       beforeSourceRetirement() {

@@ -36,12 +36,7 @@ export const bootstrap = async(
     let retirement
     let preparation
     try {
-      retirement = retireAcknowledgedPortableSource({
-        portableRoot: portablePaths.appDataPath,
-        runId: startupRunId,
-        logger: console,
-      })
-      preparation = preparePortableProfile({
+      retirement = await retireAcknowledgedPortableSource({
         portableRoot: portablePaths.appDataPath,
         runId: startupRunId,
         logger: console,
@@ -53,6 +48,17 @@ export const bootstrap = async(
     }
     if (retirement.state == 'failed') {
       console.error('Portable profile source retirement failed; startup has been aborted.', retirement.error)
+      electronApp.exit(1)
+      return
+    }
+    try {
+      preparation = await preparePortableProfile({
+        portableRoot: portablePaths.appDataPath,
+        runId: startupRunId,
+        logger: console,
+      })
+    } catch (error) {
+      console.error('Portable profile validation failed; startup has been aborted.', error)
       electronApp.exit(1)
       return
     }

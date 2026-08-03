@@ -30,6 +30,7 @@ export const bootstrap = async(
   let legacyRoot: string
   let applicationCacheRoot: string
   global.portableProfileStartup = null
+  global.runTempReservation = null
   if (portablePaths != null) {
     const startupRunId = crypto.randomUUID()
     const retirement = retireAcknowledgedPortableSource({
@@ -72,16 +73,24 @@ export const bootstrap = async(
     })
   }
 
-  const storagePaths = initializeStoragePaths({
-    profileRoot,
-    applicationCacheRoot,
-    tempBase: electronApp.getPath('temp'),
-    portableRoot: portablePaths?.appDataPath ?? null,
-  })
-  electronApp.setPath('userData', storagePaths.profileRoot)
-  electronApp.setPath('sessionData', storagePaths.sessionDataRoot)
-  global.storagePaths = storagePaths
-  global.lxDataPath = storagePaths.profileRoot
+  let initialized
+  try {
+    initialized = await initializeStoragePaths({
+      profileRoot,
+      applicationCacheRoot,
+      tempBase: electronApp.getPath('temp'),
+      portableRoot: portablePaths?.appDataPath ?? null,
+    })
+  } catch (error) {
+    console.error('Storage root validation failed; startup has been aborted.', error)
+    electronApp.exit(1)
+    return
+  }
+  electronApp.setPath('userData', initialized.paths.profileRoot)
+  electronApp.setPath('sessionData', initialized.paths.sessionDataRoot)
+  global.storagePaths = initialized.paths
+  global.runTempReservation = initialized.runTempReservation
+  global.lxDataPath = initialized.paths.profileRoot
   global.lxOldDataPath = legacyRoot
   await loadApplication()
 }

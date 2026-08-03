@@ -26,10 +26,11 @@ const identityOf = async(targetPath) => {
 
 const createOwnedArtworkConfig = async(fixture) => {
   const tempRoot = path.join(fixture.path, 'temp')
-  const runTempRoot = path.join(tempRoot, 'run-current')
-  await fsp.mkdir(runTempRoot, { recursive: true })
-  const { createRunTempHandle } = loadLifecycle()
-  const handle = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+  await fsp.mkdir(tempRoot, { recursive: true })
+  const { prepareRunTempLifecycle, createRunTempHandle } = loadLifecycle()
+  const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
+  const runTempRoot = reservation.runTempRoot
+  const handle = await createRunTempHandle({ reservation })
   const childPath = await handle.createChild('local-artwork')
   return {
     handle,

@@ -1,6 +1,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { PROJECT_IDENTITY } from '../../common/projectIdentity'
+import {
+  closeDirectDirectory,
+  createDirectChildDirectory,
+  validateDirectDirectory,
+  type DirectDirectoryGuard,
+} from '../storage/directDirectory'
+import type { RunTempReservation } from './tempLifecycle'
 
 export interface StoragePaths {
   profileRoot: string
@@ -27,6 +34,11 @@ export interface ApplicationCacheRootInput {
 }
 
 type ResolvedStoragePaths = Omit<StoragePaths, 'runTempRoot'>
+
+export interface InitializedStoragePaths {
+  paths: Readonly<StoragePaths>
+  runTempReservation: RunTempReservation
+}
 
 export const resolveApplicationCacheRoot = (input: ApplicationCacheRootInput): string => {
   const pathApi = input.platform == 'win32' ? path.win32 : path.posix
@@ -111,10 +123,56 @@ export const resolveStoragePaths = (input: StoragePathResolutionInput): Resolved
   })
 }
 
-export const initializeStoragePaths = (input: StoragePathResolutionInput): Readonly<StoragePaths> => {
+const isMissing = (error: unknown): boolean =>
+  error != null && typeof error == 'object' && 'code' in error && error.code == 'ENOENT'
+
+const ensureDirectDirectory = (directoryPath: string): DirectDirectoryGuard => {
+  const resolved = path.resolve(directoryPath)
+  try {
+    fs.lstatSync(resolved, { bigint: true })
+    return validateDirectDirectory(resolved)
+  } catch (error) {
+    if (!isMissing(error)) throw error
+  }
+  const parentPath = path.dirname(resolved)
+  if (parentPath == resolved) throw new Error('direct_directory_invalid')
+  const parent = ensureDirectDirectory(parentPath)
+  try {
+    return createDirectChildDirectory(parent, path.basename(resolved), { mode: 0o700 })
+  } finally {
+    closeDirectDirectory(parent)
+  }
+}
+
+const validateAndCreateRequiredRoots = async(resolved: ResolvedStoragePaths): Promise<void> => {
+  const roots = [resolved.profileRoot, resolved.tempRoot, resolved.runtimeRoot, resolved.sessionDataRoot]
+  for (const root of roots) {
+    const guard = ensureDirectDirectory(root)
+    closeDirectDirectory(guard)
+  }
+}
+
+const validateOptionalRootIfPresent = async(rootPath: string): Promise<void> => {
+  try {
+    fs.lstatSync(rootPath, { bigint: true })
+  } catch (error) {
+    if (isMissing(error)) return
+    throw error
+  }
+  const guard = validateDirectDirectory(rootPath)
+  closeDirectDirectory(guard)
+}
+
+export const initializeStoragePaths = async(input: StoragePathResolutionInput): Promise<InitializedStoragePaths> => {
   const resolved = resolveStoragePaths(input)
-  fs.mkdirSync(resolved.profileRoot, { recursive: true })
-  fs.mkdirSync(resolved.tempRoot, { recursive: true })
-  const runTempRoot = fs.mkdtempSync(path.join(resolved.tempRoot, 'run-'))
-  return Object.freeze({ ...resolved, runTempRoot })
+  await validateAndCreateRequiredRoots(resolved)
+  await validateOptionalRootIfPresent(resolved.cacheRoot)
+  await validateOptionalRootIfPresent(resolved.backupsRoot)
+  const { prepareRunTempLifecycle, scavengeRunTempRoots } = await import('./tempLifecycle')
+  await scavengeRunTempRoots(resolved.tempRoot)
+  const runTempReservation = await prepareRunTempLifecycle({ tempRoot: resolved.tempRoot })
+  return {
+    paths: Object.freeze({ ...resolved, runTempRoot: runTempReservation.runTempRoot }),
+    runTempReservation,
+  }
 }

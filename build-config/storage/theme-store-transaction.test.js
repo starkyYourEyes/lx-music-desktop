@@ -127,13 +127,12 @@ test('failed durable theme save preserves disk and published state and reclaims 
   try {
     const profileRoot = path.join(fixture.path, 'profile')
     const tempRoot = path.join(fixture.path, 'temp')
-    const runTempRoot = path.join(tempRoot, 'run-current')
     const storePath = path.join(fixture.path, 'theme.json')
     const externalImage = path.join(fixture.path, 'external.png')
     const assetRoot = path.join(profileRoot, 'assets', 'theme-images')
     const unrelatedAsset = path.join(assetRoot, 'existing.img')
     const priorTheme = createTheme('prior', 'existing.img')
-    await fsp.mkdir(runTempRoot, { recursive: true })
+    await fsp.mkdir(tempRoot, { recursive: true })
     await fsp.mkdir(assetRoot, { recursive: true })
     await fsp.writeFile(unrelatedAsset, 'unrelated durable asset')
     await fsp.writeFile(externalImage, pngBytes)
@@ -142,10 +141,12 @@ test('failed durable theme save preserves disk and published state and reclaims 
     const { Store } = require('../../src/main/utils/store.ts')
     store = activeThemeStore = new Store(storePath, false, failingStoreFileSystem())
     const storagePaths = loadTsModule(path.join(__dirname, '../../src/main/utils/storagePaths.ts'))
-    const { createRunTempHandle } = loadTsModule(path.join(__dirname, '../../src/main/utils/tempLifecycle.ts'), {
+    const { prepareRunTempLifecycle, createRunTempHandle } = loadTsModule(path.join(__dirname, '../../src/main/utils/tempLifecycle.ts'), {
       '@main/utils/storagePaths': storagePaths,
     })
-    const runTemp = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+    const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
+    const runTempRoot = reservation.runTempRoot
+    const runTemp = await createRunTempHandle({ reservation })
     const { createThemeAssetManager } = loadTsModule(path.join(__dirname, '../../src/main/services/themeAssetManager.ts'), {
       '@main/utils/storagePaths': storagePaths,
     })

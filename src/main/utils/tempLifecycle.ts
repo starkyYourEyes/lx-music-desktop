@@ -1,16 +1,29 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { assertContainedPath } from '@main/utils/storagePaths'
+import {
+  closeDirectDirectory,
+  revalidateDirectDirectory,
+  validateDirectDirectory,
+  type NodeIdentity,
+} from '../storage/directDirectory'
 
 const OWNER_MARKER = '.owner.v1.json'
 const runChildren = new Set(['theme-editor', 'local-artwork', 'backup-import'])
 
 export type RunTempChild = 'theme-editor' | 'local-artwork' | 'backup-import'
 
-export interface PathIdentity {
-  dev: string
-  ino: string
+export type PathIdentity = NodeIdentity
+
+export interface RunTempReservation {
+  tempRoot: string
+  tempRootIdentity: NodeIdentity
+  runTempRoot: string
+  runTempIdentity: NodeIdentity
+  markerPath: string
+  markerIdentity: NodeIdentity
+  markerRaw: string
+  runId: string
 }
 
 export interface RunTempChildOwnership {
@@ -51,6 +64,8 @@ interface MarkerDocument {
   directoryIdentity: PathIdentity
 }
 
+const reservations = new WeakSet<RunTempReservation>()
+
 const inspect = async(targetPath: string) => await fs.lstat(targetPath, { bigint: true })
 const identityOf = (stat: Awaited<ReturnType<typeof inspect>>): PathIdentity => ({
   dev: String(stat.dev),
@@ -66,31 +81,33 @@ const invalidOwner = (): Error => new Error('run_temp_owner_invalid')
 const invalidChild = (): Error => new Error('run_temp_child_invalid')
 
 const assertDirectChildPath = (rootPath: string, childPath: string, error: () => Error): void => {
-  try {
-    assertContainedPath(rootPath, childPath)
-  } catch {
-    throw error()
-  }
   if (pathKey(path.dirname(path.resolve(childPath))) != pathKey(path.resolve(rootPath))) throw error()
 }
 
 const captureRoot = async(tempRoot: string): Promise<RootOwnership> => {
   const resolvedRoot = path.resolve(tempRoot)
-  const stat = await inspect(resolvedRoot)
-  if (stat.isSymbolicLink() || !stat.isDirectory()) throw invalidRoot()
-  const realRoot = await fs.realpath(resolvedRoot)
-  if (pathKey(realRoot) != pathKey(resolvedRoot)) throw invalidRoot()
-  return { tempRoot: resolvedRoot, tempRootIdentity: identityOf(stat) }
+  let guard
+  try {
+    guard = validateDirectDirectory(resolvedRoot)
+    return { tempRoot: resolvedRoot, tempRootIdentity: { ...guard.identity } }
+  } catch {
+    throw invalidRoot()
+  } finally {
+    if (guard != null) closeDirectDirectory(guard)
+  }
 }
 
 const assertRoot = async(ownership: RootOwnership): Promise<void> => {
-  const before = await inspect(ownership.tempRoot)
-  if (before.isSymbolicLink() || !before.isDirectory() ||
-    !sameIdentity(identityOf(before), ownership.tempRootIdentity)) throw invalidRoot()
-  const realRoot = await fs.realpath(ownership.tempRoot)
-  if (pathKey(realRoot) != pathKey(ownership.tempRoot)) throw invalidRoot()
-  const after = await inspect(ownership.tempRoot)
-  if (!sameIdentity(identityOf(after), ownership.tempRootIdentity)) throw invalidRoot()
+  let guard
+  try {
+    guard = validateDirectDirectory(ownership.tempRoot)
+    revalidateDirectDirectory(guard)
+    if (!sameIdentity(guard.identity, ownership.tempRootIdentity)) throw invalidRoot()
+  } catch {
+    throw invalidRoot()
+  } finally {
+    if (guard != null) closeDirectDirectory(guard)
+  }
 }
 
 const parseMarker = (raw: string): MarkerDocument => {
@@ -195,24 +212,69 @@ export const scavengeRunTempRoots = async(tempRoot: string): Promise<void> => {
   }
 }
 
-export const createRunTempHandle = async(input: {
+export const prepareRunTempLifecycle = async(input: {
   tempRoot: string
-  runTempRoot: string
   runId?: string
-}): Promise<RunTempHandle> => {
+}): Promise<RunTempReservation> => {
   const root = await captureRoot(input.tempRoot)
-  const runTempRoot = path.resolve(input.runTempRoot)
-  assertDirectChildPath(root.tempRoot, runTempRoot, invalidRoot)
-  const runStat = await inspect(runTempRoot)
-  if (runStat.isSymbolicLink() || !runStat.isDirectory()) throw invalidRoot()
-  const runTempIdentity = identityOf(runStat)
   const runId = input.runId ?? crypto.randomUUID()
-  const marker = markerPath(runTempRoot)
-  assertDirectChildPath(runTempRoot, marker, invalidOwner)
-  const markerDocument: MarkerDocument = { version: 1, runId, directoryIdentity: runTempIdentity }
-  await fs.writeFile(marker, JSON.stringify(markerDocument), { encoding: 'utf8', flag: 'wx' })
-  const ownership = await inspectRun(root, runTempRoot)
-  if (ownership.runId != runId || !sameIdentity(ownership.runTempIdentity, runTempIdentity)) throw invalidOwner()
+  let tempGuard
+  let runGuard
+  try {
+    tempGuard = validateDirectDirectory(root.tempRoot)
+    revalidateDirectDirectory(tempGuard)
+    const runTempRoot = path.join(root.tempRoot, `run-${crypto.randomUUID()}`)
+    assertDirectChildPath(root.tempRoot, runTempRoot, invalidRoot)
+    await fs.mkdir(runTempRoot, { mode: 0o700 })
+    revalidateDirectDirectory(tempGuard)
+    runGuard = validateDirectDirectory(runTempRoot)
+    const marker = markerPath(runTempRoot)
+    assertDirectChildPath(runTempRoot, marker, invalidOwner)
+    const markerDocument: MarkerDocument = { version: 1, runId, directoryIdentity: { ...runGuard.identity } }
+    const markerRaw = JSON.stringify(markerDocument)
+    await fs.writeFile(marker, markerRaw, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+    const ownership = await inspectRun(root, runTempRoot)
+    revalidateDirectDirectory(tempGuard)
+    revalidateDirectDirectory(runGuard)
+    const reservation: RunTempReservation = Object.freeze({
+      tempRoot: root.tempRoot,
+      tempRootIdentity: Object.freeze({ ...root.tempRootIdentity }),
+      runTempRoot,
+      runTempIdentity: Object.freeze({ ...ownership.runTempIdentity }),
+      markerPath: marker,
+      markerIdentity: Object.freeze({ ...ownership.markerIdentity }),
+      markerRaw: ownership.markerRaw,
+      runId: ownership.runId,
+    })
+    reservations.add(reservation)
+    return reservation
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('run_temp_')) throw error
+    throw invalidRoot()
+  } finally {
+    if (runGuard != null) closeDirectDirectory(runGuard)
+    if (tempGuard != null) closeDirectDirectory(tempGuard)
+  }
+}
+
+const assertReservation = async(reservation: RunTempReservation): Promise<RunOwnership> => {
+  if (!reservations.has(reservation)) throw invalidOwner()
+  const root: RootOwnership = {
+    tempRoot: reservation.tempRoot,
+    tempRootIdentity: reservation.tempRootIdentity,
+  }
+  const ownership = await inspectRun(root, reservation.runTempRoot)
+  if (markerPath(reservation.runTempRoot) != reservation.markerPath ||
+    !sameIdentity(ownership.runTempIdentity, reservation.runTempIdentity) ||
+    !sameIdentity(ownership.markerIdentity, reservation.markerIdentity) ||
+    ownership.markerRaw != reservation.markerRaw || ownership.runId != reservation.runId) throw invalidOwner()
+  return ownership
+}
+
+export const createRunTempHandle = async(input: {
+  reservation: RunTempReservation
+}): Promise<RunTempHandle> => {
+  const ownership = await assertReservation(input?.reservation)
   const children = new Map<RunTempChild, ChildOwnership>()
 
   const assertChild = async(child: ChildOwnership): Promise<void> => {
@@ -234,10 +296,14 @@ export const createRunTempHandle = async(input: {
     await assertOwnedRunAt(ownership, ownership.runTempRoot)
     const childPath = path.join(ownership.runTempRoot, name)
     assertDirectChildPath(ownership.runTempRoot, childPath, invalidChild)
+    let childGuard
     try {
-      await fs.mkdir(childPath)
+      await fs.mkdir(childPath, { mode: 0o700 })
+      childGuard = validateDirectDirectory(childPath)
     } catch {
       throw invalidChild()
+    } finally {
+      if (childGuard != null) closeDirectDirectory(childGuard)
     }
     const stat = await inspect(childPath)
     if (stat.isSymbolicLink() || !stat.isDirectory()) throw invalidChild()

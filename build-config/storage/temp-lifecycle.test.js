@@ -21,19 +21,39 @@ const loadLifecycle = (fsPromises = fsp) => loadTsModule(modulePath, {
 
 const exists = async(targetPath) => await fsp.lstat(targetPath).then(() => true, () => false)
 
+test('adopts only the bootstrap-created run directory and owner marker', async() => {
+  const fixture = createTestStorageRoot('temp-reservation-adoption')
+  try {
+    const tempRoot = path.join(fixture.path, 'temp')
+    const foreign = path.join(fixture.path, 'foreign')
+    await fsp.mkdir(tempRoot, { recursive: true })
+    await fsp.mkdir(foreign)
+    const { prepareRunTempLifecycle, createRunTempHandle } = loadLifecycle()
+    const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
+
+    await assert.rejects(
+      createRunTempHandle({ reservation: { ...reservation, runTempRoot: foreign } }),
+      /run_temp_owner_invalid/,
+    )
+  } finally {
+    fixture.cleanup()
+  }
+})
+
 test('run cleanup removes only the owned direct child and preserves neighboring content', async() => {
   // Catches a cleanup implementation that recursively deletes tempRoot or accepts an unmarked sibling.
   const fixture = createTestStorageRoot('temp-lifecycle')
   try {
     const tempRoot = path.join(fixture.path, 'temp')
-    const runTempRoot = path.join(tempRoot, 'run-current')
     const neighboringRun = path.join(tempRoot, 'run-neighbor')
-    await fsp.mkdir(runTempRoot, { recursive: true })
+    await fsp.mkdir(tempRoot, { recursive: true })
     await fsp.mkdir(neighboringRun, { recursive: true })
     await fsp.writeFile(path.join(neighboringRun, 'keep.txt'), 'preserve')
 
-    const { createRunTempHandle } = loadLifecycle()
-    const handle = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+    const { prepareRunTempLifecycle, createRunTempHandle } = loadLifecycle()
+    const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
+    const runTempRoot = reservation.runTempRoot
+    const handle = await createRunTempHandle({ reservation })
     const artwork = await handle.createChild('local-artwork')
     await fsp.writeFile(path.join(artwork, 'cover.png'), 'image')
     await handle.cleanup()
@@ -50,14 +70,14 @@ test('startup scavenging removes a marked stale run but refuses an unmarked dire
   const fixture = createTestStorageRoot('temp-scavenge')
   try {
     const tempRoot = path.join(fixture.path, 'temp')
-    const staleRun = path.join(tempRoot, 'run-stale')
     const foreignRun = path.join(tempRoot, 'run-foreign')
-    await fsp.mkdir(staleRun, { recursive: true })
+    await fsp.mkdir(tempRoot, { recursive: true })
     await fsp.mkdir(foreignRun, { recursive: true })
     await fsp.writeFile(path.join(foreignRun, 'keep.txt'), 'preserve')
 
-    const { createRunTempHandle, scavengeRunTempRoots } = loadLifecycle()
-    await createRunTempHandle({ tempRoot, runTempRoot: staleRun, runId: 'stale' })
+    const { prepareRunTempLifecycle, scavengeRunTempRoots } = loadLifecycle()
+    const reservation = await prepareRunTempLifecycle({ tempRoot, runId: 'stale' })
+    const staleRun = reservation.runTempRoot
     await scavengeRunTempRoots(tempRoot)
 
     assert.equal(await exists(staleRun), false)
@@ -72,10 +92,11 @@ test('local artwork child is contained in its main-owned run directory', async()
   const fixture = createTestStorageRoot('temp-artwork')
   try {
     const tempRoot = path.join(fixture.path, 'temp')
-    const runTempRoot = path.join(tempRoot, 'run-current')
-    await fsp.mkdir(runTempRoot, { recursive: true })
-    const { createRunTempHandle } = loadLifecycle()
-    const handle = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+    await fsp.mkdir(tempRoot, { recursive: true })
+    const { prepareRunTempLifecycle, createRunTempHandle } = loadLifecycle()
+    const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
+    const runTempRoot = reservation.runTempRoot
+    const handle = await createRunTempHandle({ reservation })
     const artwork = await handle.createChild('local-artwork')
 
     assert.equal(path.dirname(artwork), runTempRoot)
@@ -91,10 +112,10 @@ test('cleanup refuses a replacement directory with copied owner bytes', async() 
   const fixture = createTestStorageRoot('temp-replaced-run')
   try {
     const tempRoot = path.join(fixture.path, 'temp')
-    const runTempRoot = path.join(tempRoot, 'run-current')
     const originalRun = path.join(tempRoot, 'original-run-node')
-    const replacementSentinel = path.join(runTempRoot, 'replacement.txt')
-    await fsp.mkdir(runTempRoot, { recursive: true })
+    await fsp.mkdir(tempRoot, { recursive: true })
+    let runTempRoot
+    let replacementSentinel
     let armReplacement = false
     let replaced = false
     const injectedFs = {
@@ -111,8 +132,11 @@ test('cleanup refuses a replacement directory with copied owner bytes', async() 
         return bytes
       },
     }
-    const { createRunTempHandle } = loadLifecycle(injectedFs)
-    const handle = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+    const { prepareRunTempLifecycle, createRunTempHandle } = loadLifecycle(injectedFs)
+    const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
+    runTempRoot = reservation.runTempRoot
+    replacementSentinel = path.join(runTempRoot, 'replacement.txt')
+    const handle = await createRunTempHandle({ reservation })
     armReplacement = true
 
     await assert.rejects(handle.cleanup(), /run_temp_(root|owner)_invalid/)
@@ -129,9 +153,9 @@ test('cleanup quarantines the owned run before recursive removal', async() => {
   const fixture = createTestStorageRoot('temp-quarantine')
   try {
     const tempRoot = path.join(fixture.path, 'temp')
-    const runTempRoot = path.join(tempRoot, 'run-current')
-    const replacementSentinel = path.join(runTempRoot, 'replacement.txt')
-    await fsp.mkdir(runTempRoot, { recursive: true })
+    await fsp.mkdir(tempRoot, { recursive: true })
+    let runTempRoot
+    let replacementSentinel
     let injectedReplacement = false
     const injectedFs = {
       ...fsp,
@@ -144,8 +168,11 @@ test('cleanup quarantines the owned run before recursive removal', async() => {
         }
       },
     }
-    const { createRunTempHandle } = loadLifecycle(injectedFs)
-    const handle = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+    const { prepareRunTempLifecycle, createRunTempHandle } = loadLifecycle(injectedFs)
+    const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
+    runTempRoot = reservation.runTempRoot
+    replacementSentinel = path.join(runTempRoot, 'replacement.txt')
+    const handle = await createRunTempHandle({ reservation })
 
     await handle.cleanup()
 
@@ -163,10 +190,10 @@ test('cleanup restores a replacement moved by the quarantine rename race', async
   const fixture = createTestStorageRoot('temp-quarantine-replacement')
   try {
     const tempRoot = path.join(fixture.path, 'temp')
-    const runTempRoot = path.join(tempRoot, 'run-current')
     const parkedOriginal = path.join(tempRoot, 'parked-original')
-    const replacementSentinel = path.join(runTempRoot, 'replacement.txt')
-    await fsp.mkdir(runTempRoot, { recursive: true })
+    await fsp.mkdir(tempRoot, { recursive: true })
+    let runTempRoot
+    let replacementSentinel
     let swapped = false
     const injectedFs = {
       ...fsp,
@@ -182,8 +209,11 @@ test('cleanup restores a replacement moved by the quarantine rename race', async
         return fsp.rename(source, target)
       },
     }
-    const { createRunTempHandle } = loadLifecycle(injectedFs)
-    const handle = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+    const { prepareRunTempLifecycle, createRunTempHandle } = loadLifecycle(injectedFs)
+    const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
+    runTempRoot = reservation.runTempRoot
+    replacementSentinel = path.join(runTempRoot, 'replacement.txt')
+    const handle = await createRunTempHandle({ reservation })
 
     await assert.rejects(handle.cleanup(), /run_temp_(root|owner)_invalid/)
 

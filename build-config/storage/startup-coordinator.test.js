@@ -986,13 +986,14 @@ describe('storage startup coordinator', () => {
     // Catches an early shutdown throw that skips temp cleanup, or cleanup that replaces the first failure.
     const fixtureRoot = tempDirectory('shutdown-temp-cleanup')
     const tempRoot = path.join(fixtureRoot, 'temp')
-    const runTempRoot = path.join(tempRoot, 'run-current')
-    await fsp.mkdir(runTempRoot, { recursive: true })
+    await fsp.mkdir(tempRoot, { recursive: true })
     const storagePathsModule = loadTsModule(path.join(__dirname, '../../src/main/utils/storagePaths.ts'))
-    const { createRunTempHandle } = loadTsModule(path.join(__dirname, '../../src/main/utils/tempLifecycle.ts'), {
+    const { prepareRunTempLifecycle, createRunTempHandle } = loadTsModule(path.join(__dirname, '../../src/main/utils/tempLifecycle.ts'), {
       '@main/utils/storagePaths': storagePathsModule,
     })
-    const handle = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+    const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
+    const runTempRoot = reservation.runTempRoot
+    const handle = await createRunTempHandle({ reservation })
     const firstFailure = new Error('first_store_failure')
     const { calls, deps } = createDeps({
       flushStores: async() => {
@@ -1022,13 +1023,14 @@ describe('storage startup coordinator', () => {
     // Catches a post-database markClean rejection that bypasses the temp lifecycle finally block.
     const fixtureRoot = tempDirectory('shutdown-mark-cleanup')
     const tempRoot = path.join(fixtureRoot, 'temp')
-    const runTempRoot = path.join(tempRoot, 'run-current')
-    await fsp.mkdir(runTempRoot, { recursive: true })
+    await fsp.mkdir(tempRoot, { recursive: true })
     const storagePathsModule = loadTsModule(path.join(__dirname, '../../src/main/utils/storagePaths.ts'))
-    const { createRunTempHandle } = loadTsModule(path.join(__dirname, '../../src/main/utils/tempLifecycle.ts'), {
+    const { prepareRunTempLifecycle, createRunTempHandle } = loadTsModule(path.join(__dirname, '../../src/main/utils/tempLifecycle.ts'), {
       '@main/utils/storagePaths': storagePathsModule,
     })
-    const handle = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+    const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
+    const runTempRoot = reservation.runTempRoot
+    const handle = await createRunTempHandle({ reservation })
     const markFailure = new Error('run_state_clean_failed')
     const { calls, deps } = createDeps({
       cleanupTempLifecycle: async() => {

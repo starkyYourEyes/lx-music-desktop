@@ -111,28 +111,87 @@ describe('storage path contract', () => {
     })
   })
 
-  it('initializes one immutable per-run temp root without creating the cache root', () => {
+  it('creates runtime and sessionData before publication while leaving cache and backups absent', async() => {
     const root = createFixture('storage-path-init')
     const profileRoot = path.join(root, 'profile')
     const applicationCacheRoot = path.join(root, 'application-cache')
     const tempBase = path.join(root, 'os-temp')
     const { initializeStoragePaths } = require(storagePathsModule)
 
-    const paths = initializeStoragePaths({
+    const initialized = await initializeStoragePaths({
       profileRoot,
       applicationCacheRoot,
       tempBase,
       portableRoot: null,
     })
 
+    const { paths, runTempReservation } = initialized
     assert.equal(Object.isFrozen(paths), true)
     assert.equal(path.dirname(paths.runTempRoot), paths.tempRoot)
     assert.equal(fs.statSync(paths.runTempRoot).isDirectory(), true)
     assert.equal(fs.statSync(paths.profileRoot).isDirectory(), true)
+    assert.equal(fs.statSync(paths.runtimeRoot).isDirectory(), true)
+    assert.equal(fs.statSync(paths.sessionDataRoot).isDirectory(), true)
     assert.equal(fs.existsSync(paths.cacheRoot), false)
+    assert.equal(fs.existsSync(paths.backupsRoot), false)
+    assert.equal(fs.existsSync(path.join(paths.runTempRoot, '.owner.v1.json')), true)
+    assert.equal(runTempReservation.runTempRoot, paths.runTempRoot)
     const originalCacheRoot = paths.cacheRoot
     paths.cacheRoot = path.join(root, 'replacement')
     assert.equal(paths.cacheRoot, originalCacheRoot)
+  })
+
+  it('rejects a parent identity swap during direct-child creation', () => {
+    const root = createFixture('direct-directory-parent-swap')
+    const parentPath = path.join(root, 'parent')
+    const replacementPath = path.join(root, 'replacement')
+    fs.mkdirSync(parentPath)
+    const { validateDirectDirectory, createDirectChildDirectory, closeDirectDirectory } = require('../../src/main/storage/directDirectory.js')
+    const parent = validateDirectDirectory(parentPath)
+    fs.renameSync(parentPath, replacementPath)
+    fs.mkdirSync(parentPath)
+    try {
+      assert.throws(
+        () => createDirectChildDirectory(parent, 'child', { mode: 0o700 }),
+        error => error.code == 'direct_directory_changed',
+      )
+    } finally {
+      closeDirectDirectory(parent)
+    }
+  })
+
+  it('rejects existing linked cache and backups roots before publication', async(t) => {
+    const root = createFixture('storage-optional-linked-roots')
+    const outside = createFixture('storage-optional-linked-outside')
+    const profileRoot = path.join(root, 'profile')
+    const applicationCacheRoot = path.join(root, 'application-cache')
+    const tempBase = path.join(root, 'temp-base')
+    fs.mkdirSync(profileRoot, { recursive: true })
+    fs.mkdirSync(applicationCacheRoot)
+    fs.mkdirSync(tempBase)
+    const { initializeStoragePaths, resolveStoragePaths } = require(storagePathsModule)
+    const resolved = resolveStoragePaths({ profileRoot, applicationCacheRoot, tempBase, portableRoot: null })
+    for (const targetPath of [resolved.cacheRoot, resolved.backupsRoot]) {
+      try {
+        fs.symlinkSync(outside, targetPath, process.platform == 'win32' ? 'junction' : 'dir')
+      } catch (error) {
+        if (process.platform == 'win32' && error.code == 'EPERM') return t.skip('Directory links require privileges on this Windows host')
+        throw error
+      }
+    }
+    await assert.rejects(initializeStoragePaths({ profileRoot, applicationCacheRoot, tempBase, portableRoot: null }), /direct_directory_invalid/)
+  })
+
+  it('rejects a Windows reparse directory even when it reports as a directory', () => {
+    const root = createFixture('storage-reparse-adapter')
+    const { validateDirectDirectory } = require('../../src/main/storage/directDirectory.js')
+    const realpathSync = targetPath => path.resolve(targetPath) == path.resolve(root)
+      ? path.join(root, 'reparse-target')
+      : fs.realpathSync(targetPath)
+    realpathSync.native = realpathSync
+    const fsApi = { ...fs, realpathSync }
+
+    assert.throws(() => validateDirectDirectory(root, { fsApi }), /direct_directory_invalid/)
   })
 
   it('rejects traversal and linked ancestors when asserting containment', t => {
@@ -171,6 +230,32 @@ describe('storage path contract', () => {
 })
 
 describe('early Electron bootstrap', () => {
+  it('rejects existing linked portable profile when no legacy source exists', async(t) => {
+    const root = createFixture('storage-portable-linked-profile')
+    const portableRoot = path.join(root, 'portable')
+    const outside = createFixture('storage-portable-linked-outside')
+    const calls = []
+    fs.mkdirSync(portableRoot)
+    try {
+      fs.symlinkSync(outside, path.join(portableRoot, 'profile'), process.platform == 'win32' ? 'junction' : 'dir')
+    } catch (error) {
+      if (process.platform == 'win32' && error.code == 'EPERM') return t.skip('Directory links require privileges on this Windows host')
+      throw error
+    }
+    const fakeElectron = {
+      getPath(name) {
+        return { exe: path.join(root, 'app.exe'), temp: path.join(root, 'temp') }[name]
+      },
+      setPath(name) { calls.push(name) },
+      exit(code) { calls.push(`exit:${code}`) },
+    }
+    const { bootstrap } = require(bootstrapModule)
+
+    await bootstrap(fakeElectron, async() => { calls.push('application') }, { platform: 'win32', env: {} })
+
+    assert.deepEqual(calls, ['exit:1'])
+  })
+
   it('sets userData and sessionData before loading application modules', async() => {
     const root = createFixture('storage-bootstrap')
     const appData = path.join(root, 'roaming')

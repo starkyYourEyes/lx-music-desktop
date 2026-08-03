@@ -60,10 +60,11 @@ const trackDirectoryHandle = (handle, descriptorState) => {
 const createManager = async(fixture, fsPromises = fsp) => {
   const profileRoot = path.join(fixture.path, 'profile')
   const tempRoot = path.join(fixture.path, 'temp')
-  const runTempRoot = path.join(tempRoot, 'run-current')
-  await fsp.mkdir(runTempRoot, { recursive: true })
-  const { createRunTempHandle } = loadLifecycle()
-  const runTemp = await createRunTempHandle({ tempRoot, runTempRoot, runId: crypto.randomUUID() })
+  await fsp.mkdir(tempRoot, { recursive: true })
+  const { prepareRunTempLifecycle, createRunTempHandle } = loadLifecycle()
+  const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
+  const runTempRoot = reservation.runTempRoot
+  const runTemp = await createRunTempHandle({ reservation })
   const { createThemeAssetManager } = loadManager(fsPromises)
   return {
     manager: createThemeAssetManager({ profileRoot, runTemp, runTempRoot }),
@@ -231,7 +232,7 @@ test('restores an unowned staged replacement moved at the quarantine rename boun
     const externalImage = path.join(fixture.path, 'external.png')
     const externalSentinel = path.join(fixture.path, 'external-sentinel.bin')
     const parkedOriginal = path.join(fixture.path, 'parked-original.png')
-    const stagingChild = path.join(fixture.path, 'temp', 'run-current', 'theme-editor')
+    let stagingChild
     const replacementBytes = Buffer.concat([pngBytes, Buffer.from('replacement')])
     await fsp.writeFile(externalImage, pngBytes)
     await fsp.writeFile(externalSentinel, replacementBytes)
@@ -256,7 +257,8 @@ test('restores an unowned staged replacement moved at the quarantine rename boun
         return fsp.rename(source, target)
       },
     }
-    const { manager } = await createManager(fixture, injectedFs)
+    const { manager, runTempRoot } = await createManager(fixture, injectedFs)
+    stagingChild = path.join(runTempRoot, 'theme-editor')
     const staged = await manager.stageThemeImage({ sourcePath: externalImage })
     const stagedPath = path.join(stagingChild, staged.stagingId)
 
@@ -283,10 +285,10 @@ test('pins Linux staging creation to the owned child across a parent swap and re
   try {
     Object.defineProperty(process, 'platform', { value: 'linux' })
     const externalImage = path.join(fixture.path, 'external.png')
-    const stagingChild = path.join(fixture.path, 'temp', 'run-current', 'theme-editor')
-    const parkedChild = `${stagingChild}.parked`
+    let stagingChild
+    let parkedChild
     const outsideChild = path.join(fixture.path, 'outside-theme-editor')
-    const parkedSentinel = path.join(stagingChild, 'parked-sentinel.txt')
+    let parkedSentinel
     const outsideSentinel = path.join(outsideChild, 'outside-sentinel.txt')
     await fsp.writeFile(externalImage, pngBytes)
     await fsp.mkdir(outsideChild)
@@ -341,6 +343,9 @@ test('pins Linux staging creation to the owned child across a parent swap and re
       },
     }
     const created = await createManager(fixture, injectedFs)
+    stagingChild = path.join(created.runTempRoot, 'theme-editor')
+    parkedChild = `${stagingChild}.parked`
+    parkedSentinel = path.join(stagingChild, 'parked-sentinel.txt')
     await created.runTemp.createChild('theme-editor')
     await fsp.writeFile(parkedSentinel, 'preserve-parked')
 
@@ -372,7 +377,7 @@ test('uses a Linux directory descriptor path instead of a lexical staging create
   try {
     Object.defineProperty(process, 'platform', { value: 'linux' })
     const externalImage = path.join(fixture.path, 'external.png')
-    const stagingChild = path.join(fixture.path, 'temp', 'run-current', 'theme-editor')
+    let stagingChild
     await fsp.writeFile(externalImage, pngBytes)
     let descriptorCreates = 0
     let lexicalCreates = 0
@@ -390,7 +395,8 @@ test('uses a Linux directory descriptor path instead of a lexical staging create
         return fsp.open(mapLinuxDescriptorPath(targetPath, stagingChild, descriptorState), flags, mode)
       },
     }
-    const { manager } = await createManager(fixture, injectedFs)
+    const { manager, runTempRoot } = await createManager(fixture, injectedFs)
+    stagingChild = path.join(runTempRoot, 'theme-editor')
 
     const staged = await manager.stageThemeImage({ sourcePath: externalImage })
 
@@ -415,7 +421,7 @@ test('restores an unowned replacement raced into failed Linux staging cleanup', 
     const externalImage = path.join(fixture.path, 'external.png')
     const externalSentinel = path.join(fixture.path, 'external-sentinel.bin')
     const parkedCreated = path.join(fixture.path, 'parked-created-stage')
-    const stagingChild = path.join(fixture.path, 'temp', 'run-current', 'theme-editor')
+    let stagingChild
     const replacementBytes = Buffer.from('preserve-cleanup-replacement')
     const writeFailure = new Error('injected_stage_write_failure')
     await fsp.writeFile(externalImage, pngBytes)
@@ -470,7 +476,8 @@ test('restores an unowned replacement raced into failed Linux staging cleanup', 
         return fsp.unlink(mapLinuxDescriptorPath(targetPath, stagingChild, descriptorState))
       },
     }
-    const { manager } = await createManager(fixture, injectedFs)
+    const { manager, runTempRoot } = await createManager(fixture, injectedFs)
+    stagingChild = path.join(runTempRoot, 'theme-editor')
 
     await assert.rejects(manager.stageThemeImage({ sourcePath: externalImage }), error => error === writeFailure)
 

@@ -158,11 +158,13 @@ const createCacheService = options => {
   return service
 }
 
-const createAppFixture = async({ withPrerequisite = true, prefix = 'cache-db' } = {}) => {
+const createAppFixture = async({ withPrerequisite = true, prefix = 'cache-db', nestedCacheParent = false } = {}) => {
   const fixture = createTestStorageRoot(prefix)
   fixtures.push(fixture)
   const profileRoot = path.join(fixture.path, 'profile')
-  const cacheRoot = path.join(fixture.path, 'cache')
+  const cacheParent = nestedCacheParent ? path.join(fixture.path, 'cache-parent') : fixture.path
+  if (nestedCacheParent) fs.mkdirSync(cacheParent)
+  const cacheRoot = path.join(cacheParent, 'cache')
   const backupsRoot = path.join(fixture.path, 'backups')
   const appDbPath = path.join(profileRoot, 'lx.data.db')
   const startup = await dbService.init({
@@ -182,7 +184,7 @@ const createAppFixture = async({ withPrerequisite = true, prefix = 'cache-db' } 
     `).run(marker.name, marker.sourceSha256, marker.completedAtMs, marker.detailsJson)
   }
   db.pragma('wal_checkpoint(PASSIVE)')
-  return { fixture, profileRoot, cacheRoot, backupsRoot, appDbPath, db }
+  return { fixture, profileRoot, cacheParent, cacheRoot, backupsRoot, appDbPath, db }
 }
 
 const closeService = async service => {
@@ -256,9 +258,10 @@ const createCacheFromSchemaSource = (cachePath, schemaSource) => {
 }
 
 describe('guarded cache database', () => {
-  it('does not touch the cache target before the Phase 3 prerequisite', async() => {
-    const { cacheRoot, appDbPath } = await createAppFixture({ withPrerequisite: false })
+  it('creates a missing cache root only after re-reading the phase-3 prerequisite', async() => {
+    const { cacheParent, cacheRoot, appDbPath } = await createAppFixture({ withPrerequisite: false })
     const before = appFingerprint(appDbPath)
+    const parentBefore = nodeIdentity(cacheParent)
     const service = createCacheService()
 
     await assert.rejects(service.openCacheDatabase(), error =>
@@ -266,8 +269,38 @@ describe('guarded cache database', () => {
       error?.code == 'cache_phase3_prerequisite_invalid')
 
     assert.equal(fs.existsSync(cacheRoot), false)
+    assert.equal(fs.existsSync(path.join(cacheRoot, 'cache.db')), false)
+    assert.deepEqual(nodeIdentity(cacheParent), parentBefore)
     assert.deepEqual(appFingerprint(appDbPath), before)
     assert.equal(await service.getCacheLifecycleState(), 'closed')
+  })
+
+  it('rejects a cache-root parent replacement before child creation', async() => {
+    const { fixture, cacheParent, cacheRoot, appDbPath } = await createAppFixture({
+      prefix: 'cache-parent-replacement',
+      nestedCacheParent: true,
+    })
+    const parked = path.join(fixture.path, 'parked-cache-parent')
+    let swapped = false
+    const fileSystem = {
+      ...fs,
+      mkdirSync(targetPath, options) {
+        if (!swapped && path.resolve(String(targetPath)) == path.resolve(cacheRoot)) {
+          swapped = true
+          fs.renameSync(cacheParent, parked)
+          fs.mkdirSync(cacheParent)
+        }
+        return fs.mkdirSync(targetPath, options)
+      },
+    }
+    const before = appFingerprint(appDbPath)
+    const service = createCacheService({ fileSystem })
+
+    assert.deepEqual(await service.openCacheDatabase(), {
+      status: 'unavailable', schemaVersion: null, diagnostic: 'cache_target_invalid',
+    })
+    assert.equal(swapped, true)
+    assert.deepEqual(appFingerprint(appDbPath), before)
   })
 
   it('creates schema version 1 with the exact ownership tables, indexes, foreign keys, and ledger', async() => {

@@ -8,6 +8,12 @@ import { verifyCacheSchema } from './cacheSchemaContract'
 import { getDatabaseInitialization } from './db'
 import { getCachePhasePrerequisite } from './modules/phase3'
 import {
+  closeDirectDirectory,
+  createDirectChildDirectory,
+  revalidateDirectDirectory,
+  validateDirectDirectory,
+} from '../../storage/directDirectory'
+import {
   acquireExpectedSqliteTarget,
   closeSqliteGuardDescriptor,
   isExclusiveSqliteFile,
@@ -227,27 +233,26 @@ const prepareCacheRoot = (
   pathModule: typeof path,
 ): CacheRootOwnership => {
   const resolved = pathModule.resolve(cacheRoot)
+  const parentPath = pathModule.dirname(resolved)
+  let parent
+  let root
   try {
-    const existing = fileSystem.lstatSync(resolved)
-    if (existing.isSymbolicLink() || !existing.isDirectory()) throw fixedError('cache_target_invalid')
-  } catch (error) {
-    if (!isMissing(error)) throw error
+    parent = validateDirectDirectory(parentPath, { fsApi: fileSystem, pathApi: pathModule })
     try {
-      fileSystem.mkdirSync(resolved, { recursive: true, mode: 0o700 })
-    } catch (mkdirError) {
-      try {
-        const raced = fileSystem.lstatSync(resolved)
-        if (raced.isSymbolicLink() || !raced.isDirectory()) throw fixedError('cache_target_invalid')
-      } catch (inspectError) {
-        if (sourceCode(inspectError) == 'cache_target_invalid') throw inspectError
-      }
-      throw mkdirError
+      root = validateDirectDirectory(resolved, { fsApi: fileSystem, pathApi: pathModule })
+    } catch (error) {
+      if (!isMissing(error) && (error as { code?: unknown })?.code != 'direct_directory_invalid') throw error
+      root = createDirectChildDirectory(parent, pathModule.basename(resolved), { mode: 0o700 })
     }
+    revalidateDirectDirectory(parent)
+    revalidateDirectDirectory(root)
+    return { path: resolved, realPath: root.realPath, identity: sqliteFileIdentity(fileSystem.lstatSync(resolved)) }
+  } catch (error) {
+    throw fixedError('cache_target_invalid')
+  } finally {
+    if (root != null) closeDirectDirectory(root)
+    if (parent != null) closeDirectDirectory(parent)
   }
-  const stats = fileSystem.lstatSync(resolved)
-  if (stats.isSymbolicLink() || !stats.isDirectory()) throw fixedError('cache_target_invalid')
-  const realPath = fileSystem.realpathSync(resolved)
-  return { path: resolved, realPath, identity: sqliteFileIdentity(stats) }
 }
 
 const validateCacheRoot = (

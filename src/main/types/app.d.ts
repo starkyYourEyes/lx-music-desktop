@@ -10,6 +10,7 @@ import { type AccountRepository } from '@main/storage/accounts/accountRepository
 import { type StoragePaths } from '@main/utils/storagePaths'
 import { type PortableProfileStartupToken } from '@main/migration/portableProfile'
 import { type RunTempHandle } from '@main/utils/tempLifecycle'
+import { type RunTempReservation } from '@main/utils/tempLifecycle'
 import { type ThemeAssetManager } from '@main/services/themeAssetManager'
 import { type SessionRegistry } from '@main/services/sessionRegistry'
 import { type CacheManager } from '@main/services/cacheManager'
@@ -66,6 +67,7 @@ declare global {
   var lxDataPath: string
   var lxOldDataPath: string
   var storagePaths: Readonly<StoragePaths>
+  var runTempReservation: RunTempReservation | null
   var portableProfileStartup: { token: PortableProfileStartupToken } | null
   var lx: Lx
   var appWorder: AppWorder

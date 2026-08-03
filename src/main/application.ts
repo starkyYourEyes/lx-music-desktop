@@ -17,7 +17,7 @@ import { checkCredentialStartup, createStorageCoordinator } from '@main/startup/
 import { showStorageRecovery } from '@main/startup/recovery'
 import { readLegacyDataSource } from '@main/migration/legacyData/source'
 import { acknowledgePortableProfileStartup } from '@main/migration/portableProfile'
-import { createRunTempHandle, scavengeRunTempRoots } from '@main/utils/tempLifecycle'
+import { createRunTempHandle } from '@main/utils/tempLifecycle'
 import { createThemeAssetManager } from '@main/services/themeAssetManager'
 import { createCacheManager } from '@main/services/cacheManager'
 import { STORAGE_CACHE_GENERATION_EVENT } from '@common/storage/cache'
@@ -37,11 +37,10 @@ const getStorageCoordinator = () => {
     cacheManager: global.lx.cacheManager,
     runState: createRunState({ runtimeRoot: global.storagePaths.runtimeRoot }),
     initializeTempLifecycle: async() => {
-      await scavengeRunTempRoots(global.storagePaths.tempRoot)
-      global.lx.runTemp = await createRunTempHandle({
-        tempRoot: global.storagePaths.tempRoot,
-        runTempRoot: global.storagePaths.runTempRoot,
-      })
+      const reservation = global.runTempReservation
+      if (reservation == null) throw new Error('run_temp_owner_invalid')
+      global.runTempReservation = null
+      global.lx.runTemp = await createRunTempHandle({ reservation })
       const themeAssets = createThemeAssetManager({
         profileRoot: global.storagePaths.profileRoot,
         runTemp: global.lx.runTemp,

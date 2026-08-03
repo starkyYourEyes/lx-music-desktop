@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const fs = require('node:fs')
 const Module = require('node:module')
 const path = require('node:path')
@@ -263,6 +264,11 @@ const createV2Database = databasePath => {
   return db
 }
 
+const readSchemaVersion = databasePath => {
+  const db = openTracked(databasePath, { readonly: true, fileMustExist: true })
+  return Number(db.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value)
+}
+
 const clearDbServiceCache = () => {
   for (const filename of [
     '../../src/main/worker/dbService/db.ts',
@@ -349,692 +355,221 @@ const initOptions = paths => ({
   targetSchemaVersion: 6,
 })
 
-describe('online backup', () => {
-  it('kills live-file copy implementations by backing up committed WAL frames', async() => {
-    const root = tempDir('lx-recovery-wal-')
-    const source = path.join(root, 'source.db')
-    const destination = path.join(root, 'nested', 'backup.db')
-    const db = openTracked(source)
-    db.pragma('journal_mode = WAL')
-    db.pragma('wal_autocheckpoint = 0')
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    const actualSerialize = db.serialize.bind(db)
-    const snapshotDb = new Proxy(db, {
-      get(target, property) {
-        if (property == 'backup') return () => { throw new Error('incremental backup API must not be used') }
-        if (property == 'serialize') return actualSerialize
-        const value = Reflect.get(target, property)
-        return typeof value == 'function' ? value.bind(target) : value
-      },
-    })
-    const { createOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
+describe('guarded online backup', () => {
+  const createGuardedBackup = ({ db, backupsRoot, basenamePrefix = 'lx.data.db.backup', sourceSchemaVersion = 2, verifier } = {}) => {
+    const backup = require('../../src/main/worker/dbService/databaseBackup.ts')
+    const reservation = backup.reserveOnlineBackup({ backupsRoot, basenamePrefix, sourceSchemaVersion })
+    return backup.completeOnlineBackup(db, reservation, {}, verifier ?? (() => {}))
+  }
 
-    await createOnlineBackup(snapshotDb, destination)
+  it('writes one unique direct backup with no stage link or rename', () => {
+    const root = tempDir('lx-recovery-unique-backup-')
+    const backupsRoot = path.join(root, 'backups')
+    const db = createV2Database(path.join(root, 'source.db'))
+    const snapshot = db.serialize()
+    assert.equal(snapshot[18], 2)
+    assert.equal(snapshot[19], 2)
 
-    const restored = openTracked(destination, { readonly: true, fileMustExist: true })
-    assert.equal(restored.prepare('SELECT count(*) count FROM items').get().count, 1)
+    const guard = createGuardedBackup({ db, backupsRoot })
+
+    assert.match(guard.basename, /^lx\.data\.db\.backup\.[a-f0-9]{32}\.backup$/)
+    assert.deepEqual(backupArtifactNames(backupsRoot), [guard.basename])
+    assert.equal(fs.lstatSync(guard.path, { bigint: true }).nlink, 1n)
+    assert.deepEqual(fs.readFileSync(guard.path), snapshot)
+    assert.equal(guard.sha256, crypto.createHash('sha256').update(snapshot).digest('hex'))
+    const restored = openTracked(guard.path, { readonly: true, fileMustExist: true })
     assert.equal(restored.pragma('quick_check', { simple: true }), 'ok')
+    guard.close()
   })
 
-  it('retains exactly one random staging pathname as the final backup hard link', async() => {
-    const root = tempDir('lx-recovery-retained-stage-')
-    const destination = path.join(root, 'backup.db')
-    const db = openTracked(':memory:')
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    const { createOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
-
-    await createOnlineBackup(db, destination)
-
-    const stageNames = stageArtifactNames(root)
-    assert.equal(stageNames.length, 1)
-    assert.deepEqual(backupArtifactNames(root).sort(), [stageNames[0], 'backup.db'].sort())
-    const stagePath = path.join(root, stageNames[0])
-    const stage = fs.lstatSync(stagePath, { bigint: true })
-    const final = fs.lstatSync(destination, { bigint: true })
-    assert.equal(stage.nlink, 2n)
-    assert.equal(final.nlink, 2n)
-    assert.equal(stage.dev, final.dev)
-    assert.equal(stage.ino, final.ino)
-    assert.deepEqual(fs.readFileSync(stagePath), fs.readFileSync(destination))
-  })
-
-  it('does not count a stage-pattern destination as its retained staging pathname', async() => {
-    const root = tempDir('lx-recovery-stage-pattern-destination-')
-    const destinationName = '.lx-backup-00000000000000000000000000000000.stage'
-    const destination = path.join(root, destinationName)
-    const db = openTracked(':memory:')
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    const { createOnlineBackup, verifyOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
-    await createOnlineBackup(db, destination)
-
-    let semanticChecks = 0
-    verifyOnlineBackup(destination, {}, backup => {
-      semanticChecks++
-      assert.equal(backup.prepare('SELECT count(*) AS count FROM items').get().count, 1)
-    })
-
-    assert.equal(semanticChecks, 1)
-    assert.equal(stageArtifactNames(root).length, 2)
-    const retainedStageName = stageArtifactNames(root).find(name => name != destinationName)
-    assert.notEqual(retainedStageName, undefined)
-    const retainedStage = fs.lstatSync(path.join(root, retainedStageName), { bigint: true })
-    const final = fs.lstatSync(destination, { bigint: true })
-    assert.equal(retainedStage.dev, final.dev)
-    assert.equal(retainedStage.ino, final.ino)
-    assert.equal(final.nlink, 2n)
-  })
-
-  it('fully verifies a one-link final after explicit offline staging cleanup', async() => {
-    const root = tempDir('lx-recovery-offline-stage-cleanup-')
-    const destination = path.join(root, 'backup.db')
-    const db = openTracked(':memory:')
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    const { createOnlineBackup, verifyOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
-    await createOnlineBackup(db, destination)
-    const stageNames = stageArtifactNames(root)
-    assert.equal(stageNames.length, 1)
-
-    fs.unlinkSync(path.join(root, stageNames[0]))
-    let semanticChecks = 0
-    verifyOnlineBackup(destination, {}, backup => {
-      semanticChecks++
-      assert.equal(backup.prepare('SELECT count(*) AS count FROM items').get().count, 1)
-    })
-
-    assert.equal(semanticChecks, 1)
-    assert.equal(fs.lstatSync(destination, { bigint: true }).nlink, 1n)
-  })
-
-  it('rejects a final backup with an unsupported third hard link', async() => {
-    const root = tempDir('lx-recovery-unsupported-backup-links-')
-    const destination = path.join(root, 'backup.db')
-    const db = openTracked(':memory:')
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    const { createOnlineBackup, verifyOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
-    await createOnlineBackup(db, destination)
-    fs.linkSync(destination, path.join(root, 'unsupported-third-link'))
-
-    assert.throws(
-      () => verifyOnlineBackup(destination),
-      /backup_file_ownership_invalid/,
-    )
-  })
-
-  it('rejects a two-link final whose second name is not a retained staging pathname', () => {
-    const root = tempDir('lx-recovery-foreign-backup-link-')
-    const destination = path.join(root, 'backup.db')
-    const db = openTracked(':memory:')
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    fs.writeFileSync(destination, db.serialize(), { mode: 0o600 })
-    fs.linkSync(destination, path.join(root, 'foreign-link'))
-    const { verifyOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
-
-    assert.throws(
-      () => verifyOnlineBackup(destination),
-      /backup_file_ownership_invalid/,
-    )
-  })
-
-  it('kills overwrite implementations by preserving an existing backup artifact', async() => {
-    const root = tempDir('lx-recovery-no-overwrite-')
-    const source = path.join(root, 'source.db')
-    const destination = path.join(root, 'backup.db')
-    const db = openTracked(source)
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY)')
-    fs.writeFileSync(destination, 'verified artifact')
-    const { createOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
-
-    await assert.rejects(createOnlineBackup(db, destination))
-
-    assert.equal(fs.readFileSync(destination, 'utf8'), 'verified artifact')
-  })
-
-  it('preserves a raced replacement that wins before backup publication', async() => {
-    const root = tempDir('lx-recovery-backup-publish-race-')
-    const destination = path.join(root, 'backup.db')
-    const db = openTracked(':memory:')
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    const actualSerialize = db.serialize.bind(db)
-    let winnerBytes
-    let winnerIdentity
-    const racedDb = new Proxy(db, {
-      get(target, property) {
-        if (property != 'serialize') {
-          const value = Reflect.get(target, property)
-          return typeof value == 'function' ? value.bind(target) : value
-        }
-        return () => {
-          const result = actualSerialize()
-          const winner = new Database(destination)
-          winner.exec("CREATE TABLE raced_winner(value TEXT); INSERT INTO raced_winner VALUES ('must survive')")
-          winner.close()
-          winnerBytes = fs.readFileSync(destination)
-          winnerIdentity = fs.lstatSync(destination, { bigint: true })
-          return result
-        }
-      },
-    })
-    const { createOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
-
-    await assert.rejects(createOnlineBackup(racedDb, destination))
-
-    const after = fs.lstatSync(destination, { bigint: true })
-    assert.deepEqual(fs.readFileSync(destination), winnerBytes)
-    assert.equal(after.dev, winnerIdentity.dev)
-    assert.equal(after.ino, winnerIdentity.ino)
-    const stageNames = stageArtifactNames(root)
-    assert.equal(stageNames.length, 1)
-    assert.deepEqual(backupArtifactNames(root).sort(), [stageNames[0], 'backup.db'].sort())
-    assert.equal(fs.lstatSync(path.join(root, stageNames[0]), { bigint: true }).nlink, 1n)
-  })
-
-  it('preserves a raced replacement inserted at the exclusive link boundary', async() => {
-    const root = tempDir('lx-recovery-backup-link-race-')
-    const destination = path.join(root, 'backup.db')
-    const db = openTracked(':memory:')
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    const backupModulePath = require.resolve('../../src/main/worker/dbService/databaseBackup.ts')
-    delete require.cache[backupModulePath]
-    const originalLoad = Module._load
-    let winnerBytes
-    let winnerIdentity
-    const racingFs = {
-      ...fs,
-      linkSync(sourcePath, destinationPath) {
-        if (path.resolve(destinationPath) == path.resolve(destination)) {
-          const winner = new Database(destination)
-          winner.exec("CREATE TABLE raced_link_winner(value TEXT); INSERT INTO raced_link_winner VALUES ('must survive')")
-          winner.close()
-          winnerBytes = fs.readFileSync(destination)
-          winnerIdentity = fs.lstatSync(destination, { bigint: true })
-        }
-        return fs.linkSync(sourcePath, destinationPath)
-      },
-    }
-    Module._load = function(request, parent, isMain) {
-      if (request == 'node:fs') return racingFs
-      return originalLoad.call(this, request, parent, isMain)
-    }
-    let createOnlineBackup
-    try {
-      createOnlineBackup = require(backupModulePath).createOnlineBackup
-    } finally {
-      Module._load = originalLoad
-    }
-
-    try {
-      await assert.rejects(createOnlineBackup(db, destination), error => error?.code == 'EEXIST')
-    } finally {
-      delete require.cache[backupModulePath]
-    }
-
-    const after = fs.lstatSync(destination, { bigint: true })
-    assert.deepEqual(fs.readFileSync(destination), winnerBytes)
-    assert.equal(after.dev, winnerIdentity.dev)
-    assert.equal(after.ino, winnerIdentity.ino)
-    const stageNames = stageArtifactNames(root)
-    assert.equal(stageNames.length, 1)
-    assert.deepEqual(backupArtifactNames(root).sort(), [stageNames[0], 'backup.db'].sort())
-    assert.equal(fs.lstatSync(path.join(root, stageNames[0]), { bigint: true }).nlink, 1n)
-  })
-
-  it('retains both attempt-owned links without unlink or rename after post-publication validation fails', async() => {
-    const root = tempDir('lx-recovery-backup-post-link-failure-')
-    const destination = path.join(root, 'backup.db')
-    const db = openTracked(':memory:')
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    const backupModulePath = require.resolve('../../src/main/worker/dbService/databaseBackup.ts')
-    delete require.cache[backupModulePath]
-    const originalLoad = Module._load
-    const validationFailure = new Error('injected_backup_post_publication_validation_failure')
-    let publishedStage
-    let publishedBytes
-    let publishedIdentity
-    let linked = false
-    let failedValidation = false
-    const destructiveCalls = []
-    const injectedRealpathSync = (...args) => fs.realpathSync(...args)
-    injectedRealpathSync.native = targetPath => {
-      const result = fs.realpathSync.native(targetPath)
-      if (linked && !failedValidation && path.resolve(targetPath) == path.resolve(destination)) {
-        failedValidation = true
-        throw validationFailure
-      }
-      return result
-    }
-    const injectedFs = {
-      ...fs,
-      linkSync(sourcePath, destinationPath) {
-        const result = fs.linkSync(sourcePath, destinationPath)
-        if (path.resolve(destinationPath) == path.resolve(destination)) {
-          publishedStage = path.resolve(sourcePath)
-          publishedBytes = fs.readFileSync(sourcePath)
-          publishedIdentity = fs.lstatSync(sourcePath, { bigint: true })
-          linked = true
-        }
-        return result
-      },
-      realpathSync: injectedRealpathSync,
-      unlinkSync(targetPath) {
-        destructiveCalls.push(['unlink', path.resolve(targetPath)])
-        return fs.unlinkSync(targetPath)
-      },
-      renameSync(sourcePath, destinationPath) {
-        destructiveCalls.push(['rename', path.resolve(sourcePath), path.resolve(destinationPath)])
-        return fs.renameSync(sourcePath, destinationPath)
-      },
-    }
-    Module._load = function(request, parent, isMain) {
-      if (request == 'node:fs') return injectedFs
-      return originalLoad.call(this, request, parent, isMain)
-    }
-    let createOnlineBackup
-    try {
-      createOnlineBackup = require(backupModulePath).createOnlineBackup
-    } finally {
-      Module._load = originalLoad
-    }
-
-    try {
-      await assert.rejects(createOnlineBackup(db, destination), error => error === validationFailure)
-    } finally {
-      delete require.cache[backupModulePath]
-    }
-
-    assert.equal(failedValidation, true)
-    assert.deepEqual(destructiveCalls, [])
-    assert.deepEqual(backupArtifactNames(root).sort(), [path.basename(publishedStage), 'backup.db'].sort())
-    for (const artifactPath of [publishedStage, destination]) {
-      const after = fs.lstatSync(artifactPath, { bigint: true })
-      assert.deepEqual(fs.readFileSync(artifactPath), publishedBytes)
-      assert.equal(after.dev, publishedIdentity.dev)
-      assert.equal(after.ino, publishedIdentity.ino)
-      assert.equal(after.nlink, 2n)
-    }
-  })
-
-  it('preserves a stage replacement inserted after linked identity validation', async() => {
-    const root = tempDir('lx-recovery-backup-stage-retirement-race-')
-    const destination = path.join(root, 'backup.db')
-    const db = openTracked(':memory:')
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    const backupModulePath = require.resolve('../../src/main/worker/dbService/databaseBackup.ts')
-    delete require.cache[backupModulePath]
-    const originalLoad = Module._load
-    const replacementBytes = Buffer.from('replacement inserted after linked validation')
-    let stagePath
-    let replacementIdentity
-    let raced = false
-    const racingRealpathSync = (...args) => fs.realpathSync(...args)
-    racingRealpathSync.native = targetPath => {
-      const result = fs.realpathSync.native(targetPath)
-      if (!raced && stagePath != null && fs.existsSync(destination) &&
-        path.resolve(targetPath) == stagePath) {
-        raced = true
-        fs.unlinkSync(stagePath)
-        fs.writeFileSync(stagePath, replacementBytes, { flag: 'wx', mode: 0o600 })
-        replacementIdentity = fs.lstatSync(stagePath, { bigint: true })
-      }
-      return result
-    }
-    const racingFs = {
-      ...fs,
-      linkSync(sourcePath, destinationPath) {
-        const result = fs.linkSync(sourcePath, destinationPath)
-        if (path.resolve(destinationPath) == path.resolve(destination)) stagePath = path.resolve(sourcePath)
-        return result
-      },
-      realpathSync: racingRealpathSync,
-    }
-    Module._load = function(request, parent, isMain) {
-      if (request == 'node:fs') return racingFs
-      return originalLoad.call(this, request, parent, isMain)
-    }
-    let createOnlineBackup
-    try {
-      createOnlineBackup = require(backupModulePath).createOnlineBackup
-    } finally {
-      Module._load = originalLoad
-    }
-
-    try {
-      await assert.rejects(createOnlineBackup(db, destination))
-    } finally {
-      delete require.cache[backupModulePath]
-    }
-
-    assert.equal(raced, true)
-    const after = fs.lstatSync(stagePath, { bigint: true })
-    assert.deepEqual(fs.readFileSync(stagePath), replacementBytes)
-    assert.equal(after.dev, replacementIdentity.dev)
-    assert.equal(after.ino, replacementIdentity.ino)
-  })
-
-  it('preserves a final replacement inserted after linked identity validation', async() => {
-    const root = tempDir('lx-recovery-backup-final-validation-race-')
-    const destination = path.join(root, 'backup.db')
-    const db = openTracked(':memory:')
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    const backupModulePath = require.resolve('../../src/main/worker/dbService/databaseBackup.ts')
-    delete require.cache[backupModulePath]
-    const originalLoad = Module._load
-    const replacementBytes = Buffer.from('final replacement inserted after linked validation')
-    let stagePath
-    let replacementIdentity
-    let raced = false
-    const racingRealpathSync = (...args) => fs.realpathSync(...args)
-    racingRealpathSync.native = targetPath => {
-      const result = fs.realpathSync.native(targetPath)
-      if (!raced && stagePath != null && path.resolve(targetPath) == path.resolve(destination)) {
-        raced = true
-        fs.unlinkSync(destination)
-        fs.writeFileSync(destination, replacementBytes, { flag: 'wx', mode: 0o600 })
-        replacementIdentity = fs.lstatSync(destination, { bigint: true })
-      }
-      return result
-    }
-    const racingFs = {
-      ...fs,
-      linkSync(sourcePath, destinationPath) {
-        const result = fs.linkSync(sourcePath, destinationPath)
-        if (path.resolve(destinationPath) == path.resolve(destination)) stagePath = path.resolve(sourcePath)
-        return result
-      },
-      realpathSync: racingRealpathSync,
-    }
-    Module._load = function(request, parent, isMain) {
-      if (request == 'node:fs') return racingFs
-      return originalLoad.call(this, request, parent, isMain)
-    }
-    let createOnlineBackup
-    try {
-      createOnlineBackup = require(backupModulePath).createOnlineBackup
-    } finally {
-      Module._load = originalLoad
-    }
-
-    try {
-      await assert.rejects(createOnlineBackup(db, destination))
-    } finally {
-      delete require.cache[backupModulePath]
-    }
-
-    assert.equal(raced, true)
-    const after = fs.lstatSync(destination, { bigint: true })
-    assert.deepEqual(fs.readFileSync(destination), replacementBytes)
-    assert.equal(after.dev, replacementIdentity.dev)
-    assert.equal(after.ino, replacementIdentity.ino)
-  })
-
-  it('preserves a raced replacement of its attempt-owned staging file', async() => {
-    const root = tempDir('lx-recovery-backup-stage-race-')
-    const destination = path.join(root, 'backup.db')
-    const db = openTracked(':memory:')
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    const actualSerialize = db.serialize.bind(db)
-    let winnerBytes
-    let winnerIdentity
-    let stagePath
-    const racedDb = new Proxy(db, {
-      get(target, property) {
-        if (property != 'serialize') {
-          const value = Reflect.get(target, property)
-          return typeof value == 'function' ? value.bind(target) : value
-        }
-        return () => {
-          const result = actualSerialize()
-          const stageName = fs.readdirSync(root).find(name => name.startsWith('.lx-backup-') && name.endsWith('.stage'))
-          assert.equal(typeof stageName, 'string')
-          stagePath = path.join(root, stageName)
-          fs.unlinkSync(stagePath)
-          const winner = new Database(stagePath)
-          winner.exec("CREATE TABLE raced_stage(value TEXT); INSERT INTO raced_stage VALUES ('must survive')")
-          winner.close()
-          winnerBytes = fs.readFileSync(stagePath)
-          winnerIdentity = fs.lstatSync(stagePath, { bigint: true })
-          return result
-        }
-      },
-    })
-    const { createOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
-
-    await assert.rejects(createOnlineBackup(racedDb, destination))
-
-    assert.equal(fs.existsSync(destination), false)
-    const after = fs.lstatSync(stagePath, { bigint: true })
-    assert.equal(fs.readFileSync(stagePath).equals(winnerBytes), true)
-    assert.equal(after.dev, winnerIdentity.dev)
-    assert.equal(after.ino, winnerIdentity.ino)
-  })
-
-  it('does not overwrite a staging replacement that wins before snapshot writing begins', async() => {
-    const root = tempDir('lx-recovery-backup-stage-open-race-')
-    const destination = path.join(root, 'backup.db')
-    const db = openTracked(':memory:')
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    const actualSerialize = db.serialize.bind(db)
-    let winnerBytes
-    let winnerIdentity
-    let stagePath
-    const racedDb = new Proxy(db, {
-      get(target, property) {
-        if (property != 'serialize') {
-          const value = Reflect.get(target, property)
-          return typeof value == 'function' ? value.bind(target) : value
-        }
-        return () => {
-          const stageName = fs.readdirSync(root).find(name => name.startsWith('.lx-backup-') && name.endsWith('.stage'))
-          assert.equal(typeof stageName, 'string')
-          stagePath = path.join(root, stageName)
-          fs.unlinkSync(stagePath)
-          const winner = new Database(stagePath)
-          winner.exec("CREATE TABLE raced_stage_winner(value TEXT); INSERT INTO raced_stage_winner VALUES ('must remain byte-identical')")
-          winner.close()
-          winnerBytes = fs.readFileSync(stagePath)
-          winnerIdentity = fs.lstatSync(stagePath, { bigint: true })
-          return actualSerialize()
-        }
-      },
-    })
-    const { createOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
-
-    await assert.rejects(createOnlineBackup(racedDb, destination))
-
-    assert.equal(fs.existsSync(destination), false)
-    const after = fs.lstatSync(stagePath, { bigint: true })
-    assert.equal(fs.readFileSync(stagePath).equals(winnerBytes), true)
-    assert.equal(after.dev, winnerIdentity.dev)
-    assert.equal(after.ino, winnerIdentity.ino)
-  })
-
-  it('kills check-then-write races by atomically reserving one concurrent destination owner', async() => {
-    const root = tempDir('lx-recovery-atomic-backup-')
-    const destination = path.join(root, 'backup.db')
-    const db = openTracked(':memory:')
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    const actualSerialize = db.serialize.bind(db)
-    let snapshotCalls = 0
-    const coordinatedDb = new Proxy(db, {
-      get(target, property) {
-        if (property != 'serialize') {
-          const value = Reflect.get(target, property)
-          return typeof value == 'function' ? value.bind(target) : value
-        }
-        return () => {
-          snapshotCalls++
-          return actualSerialize()
-        }
-      },
-    })
-    const { createOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
-
-    const results = await Promise.allSettled([
-      createOnlineBackup(coordinatedDb, destination),
-      createOnlineBackup(coordinatedDb, destination),
-    ])
-
-    assert.equal(snapshotCalls, 1)
-    assert.equal(results.filter(result => result.status == 'fulfilled').length, 1)
-    assert.equal(results.filter(result => result.status == 'rejected').length, 1)
-    const restored = openTracked(destination, { readonly: true, fileMustExist: true })
-    assert.equal(restored.prepare('SELECT count(*) count FROM items').get().count, 1)
-    assert.equal(restored.pragma('quick_check', { simple: true }), 'ok')
-  })
-
-  it('fails closed and retains its owned stage after snapshot, write, or fsync failure', async t => {
-    for (const failurePoint of ['serialize', 'write', 'fsync']) await t.test(failurePoint, async() => {
-      const root = tempDir(`lx-recovery-snapshot-${failurePoint}-failure-`)
-      const destination = path.join(root, 'backup.db')
-      const db = openTracked(':memory:')
-      db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-      const failure = new Error(`injected_snapshot_${failurePoint}_failure`)
-      const snapshotDb = failurePoint == 'serialize'
-        ? new Proxy(db, {
-            get(target, property) {
-              if (property == 'serialize') return () => { throw failure }
-              const value = Reflect.get(target, property)
-              return typeof value == 'function' ? value.bind(target) : value
-            },
-          })
-        : db
-      const backupModulePath = require.resolve('../../src/main/worker/dbService/databaseBackup.ts')
-      delete require.cache[backupModulePath]
-      const originalLoad = Module._load
-      const destructiveCalls = []
-      const injectedFs = {
-        ...fs,
-        writeSync(...args) {
-          if (failurePoint == 'write') throw failure
-          return fs.writeSync(...args)
-        },
-        fsyncSync(...args) {
-          if (failurePoint == 'fsync') throw failure
-          return fs.fsyncSync(...args)
-        },
-        unlinkSync(targetPath) {
-          destructiveCalls.push(['unlink', path.resolve(targetPath)])
-          return fs.unlinkSync(targetPath)
-        },
-        renameSync(sourcePath, destinationPath) {
-          destructiveCalls.push(['rename', path.resolve(sourcePath), path.resolve(destinationPath)])
-          return fs.renameSync(sourcePath, destinationPath)
-        },
-      }
-      Module._load = function(request, parent, isMain) {
-        if (request == 'node:fs') return injectedFs
-        return originalLoad.call(this, request, parent, isMain)
-      }
-      let createOnlineBackup
-      try {
-        createOnlineBackup = require(backupModulePath).createOnlineBackup
-      } finally {
-        Module._load = originalLoad
-      }
-
-      try {
-        await assert.rejects(createOnlineBackup(snapshotDb, destination), error => error === failure)
-      } finally {
-        delete require.cache[backupModulePath]
-      }
-
-      assert.equal(db.prepare('SELECT count(*) AS count FROM items').get().count, 1)
-      assert.equal(db.pragma('quick_check', { simple: true }), 'ok')
-      assert.equal(fs.existsSync(destination), false)
-      assert.deepEqual(destructiveCalls, [])
-      const stageNames = stageArtifactNames(root)
-      assert.equal(stageNames.length, 1)
-      assert.deepEqual(backupArtifactNames(root), stageNames)
-      assert.equal(fs.lstatSync(path.join(root, stageNames[0]), { bigint: true }).nlink, 1n)
-    })
-  })
-
-  it('rejects an invalid backup candidate without deleting or renaming its stage', async() => {
-    const root = tempDir('lx-recovery-invalid-backup-')
-    const destination = path.join(root, 'backup.db')
-    const invalidBytes = Buffer.from('not sqlite')
-    const fakeDb = { serialize: () => invalidBytes }
-    const backupModulePath = require.resolve('../../src/main/worker/dbService/databaseBackup.ts')
-    delete require.cache[backupModulePath]
-    const originalLoad = Module._load
-    const destructiveCalls = []
-    const injectedFs = {
-      ...fs,
-      unlinkSync(targetPath) {
-        destructiveCalls.push(['unlink', path.resolve(targetPath)])
-        return fs.unlinkSync(targetPath)
-      },
-      renameSync(sourcePath, destinationPath) {
-        destructiveCalls.push(['rename', path.resolve(sourcePath), path.resolve(destinationPath)])
-        return fs.renameSync(sourcePath, destinationPath)
-      },
-    }
-    Module._load = function(request, parent, isMain) {
-      if (request == 'node:fs') return injectedFs
-      return originalLoad.call(this, request, parent, isMain)
-    }
-    let createOnlineBackup
-    try {
-      createOnlineBackup = require(backupModulePath).createOnlineBackup
-    } finally {
-      Module._load = originalLoad
-    }
-
-    try {
-      await assert.rejects(createOnlineBackup(fakeDb, destination))
-    } finally {
-      delete require.cache[backupModulePath]
-    }
-
-    assert.equal(fs.existsSync(destination), false)
-    assert.deepEqual(destructiveCalls, [])
-    const stageNames = stageArtifactNames(root)
-    assert.equal(stageNames.length, 1)
-    assert.deepEqual(backupArtifactNames(root), stageNames)
-    const stagePath = path.join(root, stageNames[0])
-    assert.deepEqual(fs.readFileSync(stagePath), invalidBytes)
-    assert.equal(fs.lstatSync(stagePath, { bigint: true }).nlink, 1n)
-  })
-
-  it('uses the packaged native binding when verifying an online backup', async() => {
-    const root = tempDir('lx-recovery-packaged-binding-')
-    const source = path.join(root, 'source.db')
-    const destination = path.join(root, 'backup.db')
-    const expectedNativeBinding = require.resolve('better-sqlite3/build/Release/better_sqlite3.node')
-    const db = openTracked(source)
-    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
-    const backupPath = require.resolve('../../src/main/worker/dbService/databaseBackup.ts')
-    delete require.cache[backupPath]
-    const originalLoad = Module._load
-    class PackagedBindingDatabase {
-      constructor(filename, options) {
-        if (!options?.readonly || !options.fileMustExist) {
-          throw new Error('backup_verification_must_be_readonly')
-        }
-        if (options?.readonly && options.nativeBinding != expectedNativeBinding) {
-          throw new Error('packaged_default_binding_lookup_failed')
-        }
-        return new Database(filename, options)
-      }
-    }
-    Module._load = function(request, parent, isMain) {
-      if (request == 'better-sqlite3') return PackagedBindingDatabase
-      return originalLoad.call(this, request, parent, isMain)
-    }
-    try {
-      const { createOnlineBackup } = require(backupPath)
-
-      await createOnlineBackup(db, destination, {
-        nativeBinding: expectedNativeBinding,
-        readonly: false,
-        fileMustExist: false,
+  it('rejects mixed or invalid SQLite journal header versions without rewriting the attempt', () => {
+    for (const versions of [[2, 1], [3, 3]]) {
+      const root = tempDir(`lx-recovery-invalid-header-${versions.join('-')}-`)
+      const backupsRoot = path.join(root, 'backups')
+      const db = createV2Database(':memory:')
+      const bytes = Buffer.from(db.serialize())
+      bytes[18] = versions[0]
+      bytes[19] = versions[1]
+      const source = new Proxy(db, {
+        get: (target, property) => property == 'serialize' ? () => Buffer.from(bytes) : Reflect.get(target, property),
       })
-    } finally {
-      Module._load = originalLoad
-      delete require.cache[backupPath]
-    }
+      const backup = require('../../src/main/worker/dbService/databaseBackup.ts')
+      const reservation = backup.reserveOnlineBackup({
+        backupsRoot,
+        basenamePrefix: 'lx.data.db.backup',
+        sourceSchemaVersion: 2,
+      })
 
-    const restored = openTracked(destination, { readonly: true, fileMustExist: true })
-    assert.equal(restored.pragma('quick_check', { simple: true }), 'ok')
+      assert.throws(() => backup.completeOnlineBackup(source, reservation, {}, () => {}))
+      assert.deepEqual(backupArtifactNames(backupsRoot), [reservation.basename])
+      assert.deepEqual(fs.readFileSync(reservation.path), bytes)
+    }
+  })
+
+  it('retains one partial unique attempt on write or verification failure', () => {
+    for (const failure of ['write', 'verification']) {
+      const root = tempDir(`lx-recovery-partial-${failure}-`)
+      const backupsRoot = path.join(root, 'backups')
+      const db = createV2Database(':memory:')
+      const backup = require('../../src/main/worker/dbService/databaseBackup.ts')
+      const reservation = backup.reserveOnlineBackup({
+        backupsRoot,
+        basenamePrefix: 'lx.data.db.backup',
+        sourceSchemaVersion: 2,
+      })
+      const source = failure == 'write'
+        ? new Proxy(db, { get: (target, property) => property == 'serialize' ? () => 'not bytes' : Reflect.get(target, property) })
+        : db
+
+      assert.throws(
+        () => backup.completeOnlineBackup(source, reservation, {}, () => {
+          if (failure == 'verification') throw new Error('injected verification failure')
+        }),
+      )
+
+      assert.deepEqual(backupArtifactNames(backupsRoot), [reservation.basename])
+      assert.equal(fs.lstatSync(reservation.path, { bigint: true }).nlink, 1n)
+      assert.throws(() => fs.fstatSync(reservation.descriptor), error => error?.code == 'EBADF')
+      assert.throws(() => fs.fstatSync(reservation.root.descriptor), error => error?.code == 'EBADF')
+    }
+  })
+
+  it('does not overwrite or choose an occupied artifact', () => {
+    const root = tempDir('lx-recovery-occupied-backup-')
+    const backupsRoot = path.join(root, 'backups')
+    fs.mkdirSync(backupsRoot)
+    const occupied = 'lx.data.db.backup.00000000000000000000000000000000.backup'
+    fs.writeFileSync(path.join(backupsRoot, occupied), 'occupied')
+    const db = createV2Database(':memory:')
+
+    const guard = createGuardedBackup({ db, backupsRoot })
+
+    assert.notEqual(guard.basename, occupied)
+    assert.equal(fs.readFileSync(path.join(backupsRoot, occupied), 'utf8'), 'occupied')
+    assert.deepEqual(backupArtifactNames(backupsRoot).sort(), [occupied, guard.basename].sort())
+    guard.close()
+  })
+
+  it('rejects in-place mutation without deleting the changed artifact', () => {
+    const root = tempDir('lx-recovery-in-place-backup-change-')
+    const backupsRoot = path.join(root, 'backups')
+    const db = createV2Database(':memory:')
+    const guard = createGuardedBackup({ db, backupsRoot })
+    const changedBytes = Buffer.alloc(guard.byteLength, 0x58)
+    fs.writeFileSync(guard.path, changedBytes)
+
+    assert.throws(() => guard.revalidate(), /backup_evidence_changed/)
+    assert.deepEqual(fs.readFileSync(guard.path), changedBytes)
+    guard.close()
+  })
+
+  it('rejects a generic or wrong-kind reservation at database completion', () => {
+    const root = tempDir('lx-recovery-wrong-kind-')
+    const backupsRoot = path.join(root, 'backups')
+    fs.mkdirSync(backupsRoot)
+    const { validateDirectDirectory, closeDirectDirectory } = require('../../src/main/storage/directDirectory.js')
+    const { reserveExclusiveArtifact, closeArtifactReservation } = require('../../src/main/storage/exclusiveArtifact.js')
+    const rootGuard = validateDirectDirectory(backupsRoot)
+    const generic = reserveExclusiveArtifact(rootGuard, {
+      prefix: 'not-a-database.',
+      suffix: '.backup',
+      artifactKind: 'test-v1',
+    })
+    const db = createV2Database(':memory:')
+    const { completeOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
+
+    assert.throws(() => completeOnlineBackup(db, generic, {}, () => {}), /backup_reservation_invalid/)
+
+    closeArtifactReservation(generic)
+    closeDirectDirectory(rootGuard)
+  })
+
+  it('closes both artifact and owned root descriptors when an online reservation is abandoned', () => {
+    const root = tempDir('lx-recovery-close-reservation-')
+    const backup = require('../../src/main/worker/dbService/databaseBackup.ts')
+    const reservation = backup.reserveOnlineBackup({
+      backupsRoot: path.join(root, 'backups'),
+      basenamePrefix: 'lx.data.db.backup',
+      sourceSchemaVersion: 2,
+    })
+
+    backup.closeOnlineBackupReservation(reservation)
+
+    assert.throws(() => fs.fstatSync(reservation.descriptor), error => error?.code == 'EBADF')
+    assert.throws(() => fs.fstatSync(reservation.root.descriptor), error => error?.code == 'EBADF')
+  })
+
+  it('reopens recorded backup evidence read-only and rejects hash length or schema mismatch', () => {
+    const root = tempDir('lx-recovery-recorded-backup-')
+    const backupsRoot = path.join(root, 'backups')
+    const db = createV2Database(':memory:')
+    const backup = require('../../src/main/worker/dbService/databaseBackup.ts')
+    const completed = createGuardedBackup({ db, backupsRoot })
+    const record = {
+      backupsRoot,
+      basename: completed.basename,
+      expectedSha256: completed.sha256,
+      expectedByteLength: completed.byteLength,
+      expectedSourceSchemaVersion: completed.sourceSchemaVersion,
+      nativeOptions: {},
+      verifier: candidate => assert.equal(candidate.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value, '2'),
+    }
+    completed.close()
+
+    const recorded = backup.verifyRecordedOnlineBackup(record)
+    recorded.revalidate()
+    recorded.close()
+    assert.throws(() => backup.verifyRecordedOnlineBackup({ ...record, expectedSha256: '0'.repeat(64) }))
+    assert.throws(() => backup.verifyRecordedOnlineBackup({ ...record, expectedByteLength: record.expectedByteLength + 1 }))
+    assert.throws(() => backup.verifyRecordedOnlineBackup({ ...record, expectedSourceSchemaVersion: 3 }))
+  })
+
+  it('verifies a legacy one-link backup only through the compatibility API', () => {
+    const root = tempDir('lx-recovery-legacy-backup-')
+    const filePath = path.join(root, 'legacy.backup')
+    const db = createV2Database(':memory:')
+    fs.writeFileSync(filePath, db.serialize(), { mode: 0o600 })
+    const { verifyLegacyOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
+    let checked = false
+
+    verifyLegacyOnlineBackup(filePath, {}, candidate => {
+      checked = candidate.pragma('quick_check', { simple: true }) == 'ok'
+    })
+
+    assert.equal(checked, true)
+  })
+
+  it('verifies a legacy retained-stage hard-link pair only through the compatibility API', () => {
+    const root = tempDir('lx-recovery-legacy-linked-backup-')
+    const stagePath = path.join(root, `.lx-backup-${'a'.repeat(32)}.stage`)
+    const filePath = path.join(root, 'legacy.backup')
+    const db = createV2Database(':memory:')
+    fs.writeFileSync(stagePath, db.serialize(), { mode: 0o600 })
+    fs.linkSync(stagePath, filePath)
+    const { verifyLegacyOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
+
+    verifyLegacyOnlineBackup(filePath, {}, candidate => {
+      assert.equal(candidate.pragma('quick_check', { simple: true }), 'ok')
+    })
+
+    assert.equal(fs.lstatSync(stagePath, { bigint: true }).nlink, 2n)
+    assert.equal(fs.lstatSync(filePath, { bigint: true }).nlink, 2n)
+  })
+
+  it('verifies legacy WAL snapshot bytes without rewriting their header', () => {
+    const root = tempDir('lx-recovery-legacy-wal-backup-')
+    const filePath = path.join(root, 'legacy.backup')
+    const db = createV2Database(path.join(root, 'source.db'))
+    const snapshot = db.serialize()
+    assert.deepEqual([snapshot[18], snapshot[19]], [2, 2])
+    fs.writeFileSync(filePath, snapshot, { mode: 0o600 })
+    const { verifyLegacyOnlineBackup } = require('../../src/main/worker/dbService/databaseBackup.ts')
+
+    verifyLegacyOnlineBackup(filePath, {}, candidate => {
+      assert.equal(candidate.pragma('quick_check', { simple: true }), 'ok')
+    })
+
+    assert.deepEqual(fs.readFileSync(filePath), snapshot)
   })
 })
 
@@ -1176,6 +711,118 @@ describe('PRAGMA structural verification', () => {
 })
 
 describe('database startup orchestration', () => {
+  it('keeps the guard open through migration and rejects final replacement', async() => {
+    const paths = makePaths('lx-recovery-final-backup-replacement-')
+    createV2Database(paths.databasePath).close()
+    const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
+    let replaced = false
+    const dbService = loadDbServiceWithBoundaries({
+      backupModule: {
+        ...actualBackup,
+        completeOnlineBackup(...args) {
+          const guard = actualBackup.completeOnlineBackup(...args)
+          return Object.freeze({
+            ...guard,
+            revalidate() {
+              if (!replaced) {
+                fs.renameSync(guard.path, `${guard.path}.original`)
+                fs.writeFileSync(guard.path, 'replacement', { flag: 'wx', mode: 0o600 })
+                replaced = true
+              }
+              guard.revalidate()
+            },
+          })
+        },
+      },
+    })
+
+    const result = await dbService.init(initOptions(paths))
+
+    assert.equal(result.status, 'recovery')
+    assert.equal(result.reason, 'backup_failed')
+    assert.equal(readSchemaVersion(paths.databasePath), 2)
+    const attempts = backupArtifactNames(paths.backupsRoot)
+      .filter(name => name.endsWith('.backup'))
+    assert.equal(attempts.length, 1)
+    assert.equal(fs.readFileSync(path.join(paths.backupsRoot, attempts[0]), 'utf8'), 'replacement')
+  })
+
+  it('retains existedBeforeOpen across cached init and schema publication', async() => {
+    const paths = makePaths('lx-recovery-existence-snapshot-')
+    createCurrentDatabase(paths.databasePath).close()
+    const dbService = loadDbServiceWithBoundaries()
+
+    const first = await dbService.init(initOptions(paths))
+    const cached = await dbService.init(initOptions(paths))
+
+    assert.equal(dbService.getDatabaseInitialization().existedBeforeOpen, true)
+    assert.deepEqual(cached, first)
+  })
+
+  it('publishes committed schema 7 state before propagating a backup guard close failure', async() => {
+    const paths = makePaths('lx-recovery-advance-close-failure-')
+    createCurrentDatabase(paths.databasePath).close()
+    const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
+    const dbService = loadDbServiceWithBoundaries({
+      backupModule: {
+        ...actualBackup,
+        completeOnlineBackup(...args) {
+          const guard = actualBackup.completeOnlineBackup(...args)
+          return Object.freeze({
+            ...guard,
+            close() {
+              guard.close()
+              throw Object.assign(new Error('injected backup guard close failure'), {
+                code: 'injected_backup_guard_close_failure',
+              })
+            },
+          })
+        },
+      },
+    })
+    const cutover = require('../../src/main/migration/cache/cutover.ts')
+    const originals = {
+      markerRowSha256: cutover.markerRowSha256,
+      verifyCutoverBackup: cutover.verifyCutoverBackup,
+      verifySchema6CutoverPrerequisites: cutover.verifySchema6CutoverPrerequisites,
+      verifySchema7SteadyState: cutover.verifySchema7SteadyState,
+    }
+    Object.assign(cutover, {
+      markerRowSha256: () => 'a'.repeat(64),
+      verifyCutoverBackup: () => {},
+      verifySchema6CutoverPrerequisites: () => ({ readWriteMarker: {} }),
+      verifySchema7SteadyState: () => ({ readWriteMarker: {} }),
+    })
+    try {
+      const initialized = await dbService.init(initOptions(paths))
+      assert.equal(initialized.status, 'ready')
+
+      await assert.rejects(
+        dbService.advanceAppDatabase({ targetSchemaVersion: 7, backupsRoot: paths.backupsRoot }),
+        error => error?.code == 'database_advance_backup_invalid',
+      )
+
+      assert.equal(readSchemaVersion(paths.databasePath), 7)
+      assert.equal(dbService.getDatabaseInitialization().schemaVersion, 7)
+      const retried = await dbService.advanceAppDatabase({ targetSchemaVersion: 7, backupsRoot: paths.backupsRoot })
+      assert.equal(retried.schemaVersion, 7)
+      assert.match(retried.backupPath, /[a-f0-9]{32}\.backup$/)
+    } finally {
+      Object.assign(cutover, originals)
+    }
+  })
+
+  it('rejects caller-supplied existence state', async() => {
+    const paths = makePaths('lx-recovery-caller-existence-')
+    const dbService = loadDbServiceWithBoundaries()
+
+    await assert.rejects(
+      dbService.init({ ...initOptions(paths), existedBeforeOpen: true }),
+      error => error?.code == 'database_initialization_invalid',
+    )
+    assert.equal(fs.existsSync(paths.databasePath), false)
+  })
+
   it('kills fresh writes before authoritative pragmas by configuring FK and WAL before baseline DDL', async() => {
     const paths = makePaths('lx-recovery-fresh-order-')
     const events = []
@@ -1219,7 +866,7 @@ describe('database startup orchestration', () => {
     const actualVerify = require('../../src/main/worker/dbService/verifyDB.ts')
     const dbService = loadDbServiceWithBoundaries({
       backupModule: {
-        createOnlineBackup: async() => {
+        reserveOnlineBackup: () => {
           backupCalls++
           throw new Error('fresh startup must not create a backup')
         },
@@ -1261,7 +908,7 @@ describe('database startup orchestration', () => {
           if (typeof options?.nativeBinding != 'string') throw new Error('startup_native_binding_missing')
           expectedNativeBinding = options.nativeBinding
         } else {
-          verificationOpens.push({ filename: path.resolve(filename), options })
+          verificationOpens.push({ fromBytes: Buffer.isBuffer(filename), options })
           if (options.nativeBinding != expectedNativeBinding) {
             throw new Error('packaged_default_binding_lookup_failed')
           }
@@ -1294,15 +941,8 @@ describe('database startup orchestration', () => {
         readonly: true,
         fileMustExist: true,
       }
-      assert.deepEqual(verificationOpens.map(entry => entry.options), [expectedOptions, expectedOptions])
-      assert.equal(path.dirname(verificationOpens[0].filename), path.resolve(paths.backupsRoot))
-      assert.equal(path.dirname(verificationOpens[1].filename), path.resolve(paths.backupsRoot))
-      assert.match(path.basename(verificationOpens[0].filename), /^\.lx-backup-[0-9a-f]{32}\.stage$/)
-      assert.match(
-        path.basename(verificationOpens[1].filename),
-        /^lx\.data\.db\.pre-migration-v2-to-v6\.\d+-\d+\.backup$/,
-      )
-      assert.notEqual(verificationOpens[0].filename, verificationOpens[1].filename)
+      assert.deepEqual(verificationOpens.map(entry => entry.options), [expectedOptions])
+      assert.equal(verificationOpens[0].fromBytes, true)
     } finally {
       dbService.close()
       clearDbServiceCache()
@@ -1318,9 +958,10 @@ describe('database startup orchestration', () => {
     const actualVerify = require('../../src/main/worker/dbService/verifyDB.ts')
     const dbService = loadDbServiceWithBoundaries({
       backupModule: {
-        createOnlineBackup: async(...args) => {
+        ...actualBackup,
+        completeOnlineBackup: (...args) => {
           events.push('backup')
-          return actualBackup.createOnlineBackup(...args)
+          return actualBackup.completeOnlineBackup(...args)
         },
       },
       migrateModule: {
@@ -1356,7 +997,7 @@ describe('database startup orchestration', () => {
     const calls = []
     const actualVerify = require('../../src/main/worker/dbService/verifyDB.ts')
     const dbService = loadDbServiceWithBoundaries({
-      backupModule: { createOnlineBackup: async() => { calls.push('backup') } },
+      backupModule: { reserveOnlineBackup: () => { calls.push('backup'); throw new Error('unexpected backup') } },
       verifyModule: {
         ...actualVerify,
         verifyDatabase: (db, options) => {
@@ -1519,7 +1160,7 @@ describe('database startup orchestration', () => {
     const paths = makePaths('lx-recovery-backup-fail-')
     createV2Database(paths.databasePath).close()
     const dbService = loadDbServiceWithBoundaries({
-      backupModule: { createOnlineBackup: async() => { throw new Error('secret backup failure') } },
+      backupModule: { reserveOnlineBackup: () => { throw new Error('secret backup failure') } },
     })
 
     const result = await dbService.init(initOptions(paths))
@@ -1538,11 +1179,14 @@ describe('database startup orchestration', () => {
   it('kills migration-after-invalid-backup by preserving the failed candidate and v2 source', async() => {
     const paths = makePaths('lx-recovery-invalid-candidate-')
     createV2Database(paths.databasePath).close()
+    const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
     const dbService = loadDbServiceWithBoundaries({
       backupModule: {
-        createOnlineBackup: async(_db, destination) => {
-          fs.writeFileSync(destination, 'invalid backup candidate')
-          throw new Error('backup verification failed')
+        ...actualBackup,
+        completeOnlineBackup(db, reservation, nativeOptions) {
+          return actualBackup.completeOnlineBackup(db, reservation, nativeOptions, () => {
+            throw new Error('backup verification failed')
+          })
         },
       },
     })
@@ -1550,7 +1194,8 @@ describe('database startup orchestration', () => {
     const result = await dbService.init(initOptions(paths))
 
     assert.equal(result.reason, 'backup_failed')
-    assert.equal(fs.readFileSync(result.backupPath, 'utf8'), 'invalid backup candidate')
+    assert.equal(fs.existsSync(result.backupPath), true)
+    assert.equal(fs.lstatSync(result.backupPath, { bigint: true }).nlink, 1n)
     const readonly = openTracked(paths.databasePath, { readonly: true, fileMustExist: true })
     assert.equal(readonly.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value, '2')
     assert.equal(readonly.prepare("SELECT 1 FROM sqlite_master WHERE name = 'schema_migrations'").get(), undefined)
@@ -1760,25 +1405,17 @@ describe('database startup orchestration', () => {
     assert.throws(() => dbService.getAppDB(), /database_not_ready/)
   })
 
-  it('kills backup collision overwrites by selecting the first unused counter', async() => {
+  it('kills backup collision overwrites by selecting a unique direct artifact', async() => {
     const paths = makePaths('lx-recovery-collision-')
     createV2Database(paths.databasePath).close()
     fs.mkdirSync(paths.backupsRoot, { recursive: true })
-    const originalNow = Date.now
-    Date.now = () => 1234
-    const occupied = path.join(paths.backupsRoot, `lx.data.db.pre-migration-v2-to-v${currentSchemaVersion}.1234-0.backup`)
+    const occupied = path.join(paths.backupsRoot, `lx.data.db.pre-migration-v2-to-v${currentSchemaVersion}.00000000000000000000000000000000.backup`)
     fs.writeFileSync(occupied, 'existing verified artifact')
-    try {
-      const dbService = loadDbServiceWithBoundaries()
-      const result = await dbService.init(initOptions(paths))
-      assert.equal(result.backupPath, path.join(
-        path.resolve(paths.backupsRoot),
-        `lx.data.db.pre-migration-v2-to-v${currentSchemaVersion}.1234-1.backup`,
-      ))
-      assert.equal(fs.readFileSync(occupied, 'utf8'), 'existing verified artifact')
-    } finally {
-      Date.now = originalNow
-    }
+    const dbService = loadDbServiceWithBoundaries()
+    const result = await dbService.init(initOptions(paths))
+    assert.match(path.basename(result.backupPath), /^lx\.data\.db\.pre-migration-v2-to-v6\.[a-f0-9]{32}\.backup$/)
+    assert.notEqual(result.backupPath, occupied)
+    assert.equal(fs.readFileSync(occupied, 'utf8'), 'existing verified artifact')
   })
 
   it('kills data-path traversal by rejecting a resolved database candidate outside its root', async() => {
@@ -2027,23 +1664,15 @@ describe('database startup orchestration', () => {
     }
   })
 
-  it('kills backup-path traversal by rejecting a resolved candidate outside backupsRoot', async() => {
+  it('keeps unique backup publication beneath backupsRoot', async() => {
     const paths = makePaths('lx-recovery-backup-containment-')
     createV2Database(paths.databasePath).close()
-    const escaped = path.join(paths.root, 'escaped-backup.db')
-    const pathModule = {
-      ...path,
-      resolve: (...segments) => typeof segments.at(-1) == 'string' && segments.at(-1).endsWith('.backup')
-        ? escaped
-        : path.resolve(...segments),
-    }
-    const dbService = loadDbServiceWithBoundaries({ pathModule })
+    const dbService = loadDbServiceWithBoundaries()
 
     const result = await dbService.init(initOptions(paths))
 
-    assert.equal(result.reason, 'backup_failed')
-    assert.equal(result.backupPath, null)
-    assert.equal(fs.existsSync(escaped), false)
+    assert.deepEqual({ status: result.status, reason: result.reason ?? null }, { status: 'ready', reason: null })
+    assert.equal(path.dirname(result.backupPath), path.resolve(paths.backupsRoot))
   })
 
   it('kills stale connection leaks by making close idempotent and health closed', async() => {
@@ -2181,16 +1810,12 @@ describe('database startup orchestration', () => {
     assert.equal(writeCloseCalls, 2)
   })
 
-  it('kills duplicate same-key initialization by sharing backup work and cloning cached results', async() => {
+  it('reuses cached initialization without repeating guarded backup work', async() => {
     const paths = makePaths('lx-recovery-init-reuse-')
     createV2Database(paths.databasePath).close()
     const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
     let openCalls = 0
     let backupCalls = 0
-    let releaseBackup
-    let signalBackupStarted
-    const backupStarted = new Promise(resolve => { signalBackupStarted = resolve })
-    const backupBarrier = new Promise(resolve => { releaseBackup = resolve })
     class TrackingDatabase {
       constructor(...args) {
         openCalls++
@@ -2200,68 +1825,42 @@ describe('database startup orchestration', () => {
     const dbService = loadDbServiceWithBoundaries({
       DatabaseImplementation: TrackingDatabase,
       backupModule: {
-        createOnlineBackup: async(...args) => {
+        ...actualBackup,
+        completeOnlineBackup(...args) {
           backupCalls++
-          signalBackupStarted()
-          await backupBarrier
-          return actualBackup.createOnlineBackup(...args)
+          return actualBackup.completeOnlineBackup(...args)
         },
       },
     })
-    const firstPromise = dbService.init(initOptions(paths))
-    await backupStarted
-    const secondPromise = dbService.init({
+    const first = await dbService.init(initOptions(paths))
+    const opensAfterFirst = openCalls
+    const second = await dbService.init({
       dataPath: path.join(paths.dataPath, '.'),
       cacheRoot: path.join(paths.cacheRoot, 'nested', '..'),
       backupsRoot: path.join(paths.backupsRoot, 'nested', '..'),
       previousShutdownWasClean: true,
       targetSchemaVersion: 6,
     })
-    await new Promise(resolve => setImmediate(resolve))
-    releaseBackup()
-
-    const [first, second] = await Promise.all([firstPromise, secondPromise])
-
     assert.equal(first.status, 'ready')
     assert.deepEqual(second, first)
     assert.notEqual(second, first)
-    assert.equal(openCalls, 1)
+    assert.equal(openCalls, opensAfterFirst)
     assert.equal(backupCalls, 1)
     const stableHandle = dbService.getAppDB()
     first.migratedVersions.push(99)
     const third = await dbService.init(initOptions(paths))
     assert.deepEqual(third.migratedVersions, currentMigrationVersions)
     assert.equal(dbService.getAppDB(), stableHandle)
-    assert.equal(openCalls, 1)
+    assert.equal(openCalls, opensAfterFirst)
     assert.equal(backupCalls, 1)
   })
 
-  it('kills profile replacement by rejecting different keys while active and initialized', async() => {
+  it('rejects profile replacement after initialization', async() => {
     const firstPaths = makePaths('lx-recovery-init-conflict-a-')
     const secondPaths = makePaths('lx-recovery-init-conflict-b-')
     createV2Database(firstPaths.databasePath).close()
-    const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
-    let releaseBackup
-    let signalBackupStarted
-    const backupStarted = new Promise(resolve => { signalBackupStarted = resolve })
-    const backupBarrier = new Promise(resolve => { releaseBackup = resolve })
-    const dbService = loadDbServiceWithBoundaries({
-      backupModule: {
-        createOnlineBackup: async(...args) => {
-          signalBackupStarted()
-          await backupBarrier
-          return actualBackup.createOnlineBackup(...args)
-        },
-      },
-    })
-    const firstPromise = dbService.init(initOptions(firstPaths))
-    await backupStarted
-    const activeConflict = dbService.init(initOptions(secondPaths))
-    setTimeout(releaseBackup, 50)
-
-    await assert.rejects(activeConflict, error =>
-      error.message == 'database_initialization_conflict' && error.code == 'database_initialization_conflict')
-    const first = await firstPromise
+    const dbService = loadDbServiceWithBoundaries()
+    const first = await dbService.init(initOptions(firstPaths))
     assert.equal(first.status, 'ready')
     const stableHandle = dbService.getAppDB()
     await assert.rejects(dbService.init(initOptions(secondPaths)), error =>
@@ -2362,38 +1961,6 @@ describe('database startup orchestration', () => {
     assert.equal(fs.existsSync(secondPaths.databasePath), true)
   })
 
-  it('kills orphaned initializing writers by invalidating an active attempt on close', async() => {
-    const firstPaths = makePaths('lx-recovery-init-cancel-a-')
-    const secondPaths = makePaths('lx-recovery-init-cancel-b-')
-    createV2Database(firstPaths.databasePath).close()
-    const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
-    let releaseBackup
-    let signalBackupStarted
-    const backupStarted = new Promise(resolve => { signalBackupStarted = resolve })
-    const backupBarrier = new Promise(resolve => { releaseBackup = resolve })
-    const dbService = loadDbServiceWithBoundaries({
-      backupModule: {
-        createOnlineBackup: async(...args) => {
-          signalBackupStarted()
-          await backupBarrier
-          return actualBackup.createOnlineBackup(...args)
-        },
-      },
-    })
-    const cancelled = dbService.init(initOptions(firstPaths))
-    await backupStarted
-
-    dbService.close()
-    const replacement = dbService.init(initOptions(secondPaths))
-    await new Promise(resolve => setImmediate(resolve))
-    releaseBackup()
-
-    await assert.rejects(cancelled, error =>
-      error.message == 'database_initialization_cancelled' && error.code == 'database_initialization_cancelled')
-    assert.equal((await replacement).status, 'ready')
-    assert.equal(dbService.getDatabaseHealth().status, 'ready')
-    assert.equal(dbService.getAppDB().open, true)
-  })
 })
 
 describe('worker startup API', () => {

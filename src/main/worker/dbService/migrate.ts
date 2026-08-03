@@ -140,6 +140,7 @@ export const getPendingMigrations = (
 interface MigrationOptions {
   now?: () => number
   targetSchemaVersion?: number
+  beforeCommit?: () => void
 }
 
 const applyMigrations = (
@@ -179,6 +180,8 @@ const applyMigrations = (
     appliedVersions.push(migration.version)
     toVersion = migration.version
   }
+
+  options?.beforeCommit?.()
 
   return { fromVersion, toVersion, applied: appliedVersions }
 }

@@ -373,7 +373,7 @@ const databaseBoundaries = (fixtureCase, databasePath, tracker) => {
     case 'before_backup':
       return {
         backupModule: {
-          createOnlineBackup: async() => {
+          reserveOnlineBackup: () => {
             tracker.hit()
             throw new Error('injected before backup')
           },
@@ -382,8 +382,10 @@ const databaseBoundaries = (fixtureCase, databasePath, tracker) => {
     case 'after_backup':
       return {
         backupModule: {
-          createOnlineBackup: async(...args) => {
-            await actualBackup.createOnlineBackup(...args)
+          ...actualBackup,
+          completeOnlineBackup: (...args) => {
+            const guard = actualBackup.completeOnlineBackup(...args)
+            guard.close()
             tracker.hit()
             throw new Error('injected after backup')
           },

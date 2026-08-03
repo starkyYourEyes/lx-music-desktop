@@ -1,7 +1,13 @@
 import Database from 'better-sqlite3'
 import fs from 'node:fs'
 import path from 'node:path'
-import { createOnlineBackup, verifyOnlineBackup, type OnlineBackupVerifier } from './databaseBackup'
+import {
+  completeOnlineBackup,
+  reserveOnlineBackup,
+  verifyLegacyOnlineBackup,
+  type OnlineBackupVerifier,
+  type VerifiedOnlineBackupGuard,
+} from './databaseBackup'
 import { bootstrapDatabaseSchema, getPendingMigrations, getSchemaVersion, runMigrations } from './migrate'
 import { migrations } from './migrations'
 import type { MigrationRunResult } from './migrations/types'
@@ -72,6 +78,7 @@ interface ReadyInitialization {
   cacheRoot: string
   backupsRoot: string
   schemaVersion: 6 | 7
+  existedBeforeOpen: boolean
 }
 
 let writeDb: Database.Database | null = null
@@ -147,22 +154,6 @@ export const close = (): void => {
   }
   if (failure instanceof Error) throw failure
   if (failure != null) throw new Error('database_close_failed')
-}
-
-const allocateBackupPath = (
-  backupsRoot: string,
-  fromVersion: number,
-  toVersion: number,
-): string => {
-  const resolvedBackupDir = path.resolve(backupsRoot)
-  fs.mkdirSync(resolvedBackupDir, { recursive: true })
-  const timestamp = Date.now()
-  for (let counter = 0; counter < Number.MAX_SAFE_INTEGER; counter++) {
-    const name = `lx.data.db.pre-migration-v${fromVersion}-to-v${toVersion}.${timestamp}-${counter}.backup`
-    const candidate = resolveContainedPath(resolvedBackupDir, name, path)
-    if (!pathExists(candidate)) return candidate
-  }
-  throw new Error('backup_name_exhausted')
 }
 
 const reopenReadOnly = (
@@ -290,11 +281,30 @@ const verifySchema7SteadyState = (db: Database.Database): void => {
   cutover.verifySchema7SteadyState(db)
 }
 
+const validInitializationOptions = (options: unknown): options is DatabaseInitOptions => {
+  if (options == null || typeof options != 'object' || Array.isArray(options) ||
+    Object.getPrototypeOf(options) != Object.prototype) return false
+  const keys = Reflect.ownKeys(options)
+  if (keys.length != 5 || !keys.every(key => typeof key == 'string' && [
+    'dataPath',
+    'cacheRoot',
+    'backupsRoot',
+    'previousShutdownWasClean',
+    'targetSchemaVersion',
+  ].includes(key))) return false
+  return typeof (options as DatabaseInitOptions).dataPath == 'string' &&
+    typeof (options as DatabaseInitOptions).cacheRoot == 'string' &&
+    typeof (options as DatabaseInitOptions).backupsRoot == 'string' &&
+    typeof (options as DatabaseInitOptions).previousShutdownWasClean == 'boolean' &&
+    typeof (options as DatabaseInitOptions).targetSchemaVersion == 'number'
+}
+
 const resolveInitialization = (options: DatabaseInitOptions): {
   key: string
   options: DatabaseInitOptions
 } => {
   try {
+    if (!validInitializationOptions(options)) throw new Error('database_initialization_invalid')
     const normalized = {
       ...options,
       dataPath: path.resolve(options.dataPath),
@@ -462,6 +472,7 @@ const initializeDatabase = async(
       cacheRoot: options.cacheRoot,
       backupsRoot: options.backupsRoot,
       schemaVersion: 7,
+      existedBeforeOpen: existed,
     })
     return { status: 'ready', existed, schemaVersion: 7, migratedVersions: [], backupPath: null }
   }
@@ -482,10 +493,18 @@ const initializeDatabase = async(
   }
 
   let backupPath: string | null = null
+  let backupGuard: VerifiedOnlineBackupGuard | null = null
   if (existed && pending.length > 0) {
     try {
-      backupPath = allocateBackupPath(options.backupsRoot, fromVersion, pending[pending.length - 1].version)
-      await createOnlineBackup(localWriteDb, backupPath, nativeOptions)
+      const reservation = reserveOnlineBackup({
+        backupsRoot: options.backupsRoot,
+        basenamePrefix: `lx.data.db.pre-migration-v${fromVersion}-to-v${pending[pending.length - 1].version}`,
+        sourceSchemaVersion: fromVersion,
+      })
+      backupPath = reservation.path
+      backupGuard = completeOnlineBackup(localWriteDb, reservation, nativeOptions, backupDb => {
+        if (getSchemaVersion(backupDb) != fromVersion) throw createDatabaseError('database_backup_schema_invalid')
+      })
     } catch {
       if (!isCurrentAttempt(generation, key)) {
         closeConnection(localWriteDb)
@@ -502,6 +521,7 @@ const initializeDatabase = async(
       )
     }
     if (!isCurrentAttempt(generation, key)) {
+      try { backupGuard?.close() } catch {}
       closeConnection(localWriteDb)
       throw createDatabaseError('database_initialization_cancelled')
     }
@@ -509,22 +529,41 @@ const initializeDatabase = async(
 
   let migratedVersions: number[] = []
   let schemaVersion: number
+  let backupRevalidationFailed = false
   try {
     if (pending.length > 0) {
       migratedVersions = runMigrations(localWriteDb, migrations, {
         targetSchemaVersion: options.targetSchemaVersion,
+        beforeCommit: backupGuard == null
+          ? undefined
+          : () => {
+              try {
+                backupGuard?.revalidate()
+              } catch (error) {
+                backupRevalidationFailed = true
+                throw error
+              }
+            },
       }).applied
     }
     schemaVersion = getSchemaVersion(localWriteDb)
   } catch {
+    try { backupGuard?.close() } catch {}
     return enterRecovery(
-      'migration_failed',
+      backupRevalidationFailed ? 'backup_failed' : 'migration_failed',
       databasePath,
       backupPath,
-      ['migration.failed'],
+      [backupRevalidationFailed ? 'backup.failed' : 'migration.failed'],
       localWriteDb,
       nativeOptions,
       target,
+    )
+  }
+  try {
+    backupGuard?.close()
+  } catch {
+    return enterRecovery(
+      'backup_failed', databasePath, backupPath, ['backup.failed'], localWriteDb, nativeOptions, target,
     )
   }
 
@@ -567,6 +606,7 @@ const initializeDatabase = async(
     cacheRoot: options.cacheRoot,
     backupsRoot: options.backupsRoot,
     schemaVersion: schemaVersion as 6,
+    existedBeforeOpen: existed,
   })
   return { status: 'ready', existed, schemaVersion, migratedVersions, backupPath }
 }
@@ -577,6 +617,9 @@ export const init = async(options: DatabaseInitOptions): Promise<DatabaseStartup
     throw createDatabaseError('database_direct_schema7_forbidden')
   }
   const resolved = resolveInitialization(options)
+  if (resolved.key == 'invalid_initialization_options') {
+    throw createDatabaseError('database_initialization_invalid')
+  }
   if (initializationKey != null && initializationKey != resolved.key) {
     return Promise.reject(createDatabaseError('database_initialization_conflict'))
   }
@@ -627,6 +670,7 @@ export const getDatabaseInitialization = (): Readonly<{
   cacheRoot: string
   backupsRoot: string
   schemaVersion: 6 | 7
+  existedBeforeOpen: boolean
 }> => {
   if (health.status != 'ready' || writeDb == null || readyInitialization == null ||
     (readyInitialization.schemaVersion != 6 && readyInitialization.schemaVersion != 7)) {
@@ -636,6 +680,7 @@ export const getDatabaseInitialization = (): Readonly<{
     cacheRoot: readyInitialization.cacheRoot,
     backupsRoot: readyInitialization.backupsRoot,
     schemaVersion: readyInitialization.schemaVersion,
+    existedBeforeOpen: readyInitialization.existedBeforeOpen,
   })
 }
 
@@ -661,31 +706,30 @@ const verifyCutoverBackupFile = (
     if (path.resolve(path.dirname(backupPath)) != path.resolve(backupsRoot)) {
       throw createDatabaseError('database_advance_backup_invalid')
     }
-    verifyOnlineBackup(backupPath, nativeOptions, cutoverBackupVerifier(readWriteMarkerSha256))
+    verifyLegacyOnlineBackup(backupPath, nativeOptions, cutoverBackupVerifier(readWriteMarkerSha256))
   } catch {
     throw createDatabaseError('database_advance_backup_invalid')
   }
 }
 
-const ensureCutoverBackup = async(
+const ensureCutoverBackup = (
   db: Database.Database,
   backupsRoot: string,
   readWriteMarkerSha256: string,
-): Promise<string> => {
-  const backupPath = backupPathFor(backupsRoot, readWriteMarkerSha256)
+): VerifiedOnlineBackupGuard => {
   const nativeOptions = getNativeOptions()
-  if (!pathExists(backupPath)) {
-    try {
-      await createOnlineBackup(db, backupPath, nativeOptions, cutoverBackupVerifier(readWriteMarkerSha256))
-    } catch (error) {
-      if (!pathExists(backupPath)) throw error
-    }
-  }
-  verifyCutoverBackupFile(backupsRoot, backupPath, readWriteMarkerSha256, nativeOptions)
-  return backupPath
+  const reservation = reserveOnlineBackup({
+    backupsRoot,
+    basenamePrefix: `lx.data.db.pre-migration-v6-to-v7.${readWriteMarkerSha256}`,
+    sourceSchemaVersion: 6,
+  })
+  return completeOnlineBackup(db, reservation, nativeOptions, cutoverBackupVerifier(readWriteMarkerSha256))
 }
 
-const runCacheCutoverMigration = (db: Database.Database): MigrationRunResult => db.transaction(() => {
+const runCacheCutoverMigration = (
+  db: Database.Database,
+  beforeCommit?: () => void,
+): MigrationRunResult => db.transaction(() => {
   const fromVersion = getSchemaVersion(db)
   if (fromVersion != 6) throw createDatabaseError('database_advance_schema_invalid')
   // eslint-disable-next-line @typescript-eslint/no-var-requires -- Load migration 7 only during the schema-6-to-7 transition.
@@ -704,6 +748,7 @@ const runCacheCutoverMigration = (db: Database.Database): MigrationRunResult => 
     throw new Error('Migration 7 could not update the legacy version mirror')
   }
   migration7.verify?.(db, context)
+  beforeCommit?.()
   return { fromVersion: 6, toVersion: 7, applied: [7] }
 })()
 
@@ -739,7 +784,11 @@ const performDatabaseAdvance = async(
   const currentVersion = getSchemaVersion(db)
   if (currentVersion == 7) {
     const { readWriteMarker } = cutover.verifySchema7SteadyState(db)
-    const candidate = backupPathFor(initialization.backupsRoot, cutover.markerRowSha256(readWriteMarker))
+    const publishedBackup = cachedStartupResult?.status == 'ready' ? cachedStartupResult.backupPath : null
+    const candidate = publishedBackup ?? backupPathFor(
+      initialization.backupsRoot,
+      cutover.markerRowSha256(readWriteMarker),
+    )
     const backupPath = pathExists(candidate) ? candidate : null
     if (backupPath != null) {
       verifyCutoverBackupFile(initialization.backupsRoot, backupPath, cutover.markerRowSha256(readWriteMarker), getNativeOptions())
@@ -750,25 +799,33 @@ const performDatabaseAdvance = async(
 
   const prerequisites = cutover.verifySchema6CutoverPrerequisites(db)
   const readWriteMarkerSha256 = cutover.markerRowSha256(prerequisites.readWriteMarker)
-  const backupPath = await ensureCutoverBackup(db, initialization.backupsRoot, readWriteMarkerSha256)
+  const backupGuard = initialization.existedBeforeOpen
+    ? ensureCutoverBackup(db, initialization.backupsRoot, readWriteMarkerSha256)
+    : null
+  const backupPath = backupGuard?.path ?? null
   if (generation != lifecycleGeneration || writeDb != db || health.status != 'ready') {
+    try { backupGuard?.close() } catch {}
     throw createDatabaseError('database_advance_cancelled')
   }
 
   const refreshed = cutover.verifySchema6CutoverPrerequisites(db)
   if (cutover.markerRowSha256(refreshed.readWriteMarker) != readWriteMarkerSha256) {
+    try { backupGuard?.close() } catch {}
     throw createDatabaseError('database_advance_schema_invalid')
   }
 
   enterRawLyricCutoverPending()
   try {
-    const migration = runCacheCutoverMigration(db)
+    const migration = runCacheCutoverMigration(db, backupGuard == null
+      ? undefined
+      : () => { backupGuard.revalidate() })
     if (migration.fromVersion != 6 || migration.toVersion != 7 ||
       migration.applied.length != 1 || migration.applied[0] != 7) {
       throw createDatabaseError('database_advance_migration_invalid')
     }
     cutover.verifySchema7SteadyState(db)
   } catch (error) {
+    try { backupGuard?.close() } catch {}
     try {
       cutover.verifySchema7SteadyState(db)
       enterRawLyricSchema7CacheOnly()
@@ -777,7 +834,15 @@ const performDatabaseAdvance = async(
     }
     throw error
   }
-  return publishSchema7(initialization, backupPath, [7])
+  let backupCloseFailed = false
+  try {
+    backupGuard?.close()
+  } catch {
+    backupCloseFailed = true
+  }
+  const published = publishSchema7(initialization, backupPath, [7])
+  if (backupCloseFailed) throw createDatabaseError('database_advance_backup_invalid')
+  return published
 }
 
 const resolveAdvance = (input: DatabaseAdvanceOptions): {

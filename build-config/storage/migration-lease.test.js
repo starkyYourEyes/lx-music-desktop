@@ -4,6 +4,7 @@ const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 
 const properLockfile = require('proper-lockfile')
+const { getLocks } = require('proper-lockfile/lib/lockfile')
 const {
   acquireMigrationLease,
   releaseMigrationLease,
@@ -176,6 +177,75 @@ describe('migration lease', () => {
     assert.deepEqual(fs.readdirSync(fixture.lockPath), [])
   })
 
+  // Catches retry adopting and deleting a stale replacement after the first candidate identity check rejects it.
+  it('poisons acquisition after a stale candidate identity replacement', async() => {
+    const fixture = createFixture()
+    const movedCandidate = `${fixture.lockPath}.first-candidate`
+    fs.mkdirSync(fixture.lockPath)
+    const staleTime = new Date(Date.now() - 31_000)
+    fs.utimesSync(fixture.lockPath, staleTime, staleTime)
+    const originalLock = properLockfile.lock
+    let replacementIdentity
+    properLockfile.lock = (file, options) => {
+      const controlledRmdir = options.fs.rmdir.bind(options.fs)
+      let injected = false
+      options.fs.rmdir = (targetPath, callback) => {
+        if (!injected) {
+          injected = true
+          fs.renameSync(targetPath, movedCandidate)
+          fs.mkdirSync(targetPath)
+          const replacementStaleTime = new Date(Date.now() - 40_000)
+          fs.utimesSync(targetPath, replacementStaleTime, replacementStaleTime)
+          replacementIdentity = identityOf(fs.lstatSync(targetPath, { bigint: true }))
+        }
+        controlledRmdir(targetPath, callback)
+      }
+      return originalLock(file, options)
+    }
+    try {
+      await assert.rejects(acquireMigrationLease(fixture.options), /migration_lease_invalid/)
+    } finally {
+      properLockfile.lock = originalLock
+    }
+
+    assert.deepEqual(identityOf(fs.lstatSync(fixture.lockPath, { bigint: true })), replacementIdentity)
+    assert.equal(fs.lstatSync(movedCandidate).isDirectory(), true)
+    assert.deepEqual(fs.readdirSync(fixture.lockPath), [])
+  })
+
+  // Catches retry rebinding and deleting the same stale inode after its observed stale mtime changes.
+  it('poisons acquisition after a stale candidate changes to another stale mtime', async() => {
+    const fixture = createFixture()
+    fs.mkdirSync(fixture.lockPath)
+    const staleTime = new Date(Date.now() - 31_000)
+    fs.utimesSync(fixture.lockPath, staleTime, staleTime)
+    const candidateIdentity = identityOf(fs.lstatSync(fixture.lockPath, { bigint: true }))
+    const originalLock = properLockfile.lock
+    let changedStaleTime
+    properLockfile.lock = (file, options) => {
+      const controlledRmdir = options.fs.rmdir.bind(options.fs)
+      let injected = false
+      options.fs.rmdir = (targetPath, callback) => {
+        if (!injected) {
+          injected = true
+          changedStaleTime = new Date(Date.now() - 45_000)
+          fs.utimesSync(targetPath, changedStaleTime, changedStaleTime)
+        }
+        controlledRmdir(targetPath, callback)
+      }
+      return originalLock(file, options)
+    }
+    try {
+      await assert.rejects(acquireMigrationLease(fixture.options), /migration_lease_invalid/)
+    } finally {
+      properLockfile.lock = originalLock
+    }
+
+    assert.deepEqual(identityOf(fs.lstatSync(fixture.lockPath, { bigint: true })), candidateIdentity)
+    assert.equal(fs.statSync(fixture.lockPath).mtimeMs, changedStaleTime.getTime())
+    assert.deepEqual(fs.readdirSync(fixture.lockPath), [])
+  })
+
   // Catches an adapter that does not permit the package heartbeat or lets a fresh live lease be reclaimed as stale.
   it('keeps a live heartbeat lease blocking competing acquisition', async() => {
     const fixture = createFixture()
@@ -218,10 +288,45 @@ describe('migration lease', () => {
       return error?.code == 'migration_lease_compromised' && error.message == 'migration_lease_compromised'
     })
     assert.throws(() => lease.assertHeld(), error => error === firstError)
+    const mutationErrors = []
+    for (const mutation of [
+      () => callAdapter(options.fs.mkdir.bind(options.fs), fixture.lockPath),
+      () => callAdapter(options.fs.utimes.bind(options.fs), fixture.lockPath, new Date(), new Date()),
+      () => callAdapter(options.fs.rmdir.bind(options.fs), fixture.lockPath),
+    ]) {
+      mutationErrors.push(await mutation().then(() => null, error => error))
+    }
+    assert.deepEqual(mutationErrors, [firstError, firstError, firstError])
+    assert.equal(fs.lstatSync(fixture.lockPath).isDirectory(), true)
     await assert.rejects(releaseMigrationLease(lease), error => error === firstError)
+    assert.equal(getLocks()[fixture.rootPath], undefined)
     assert.throws(() => lease.assertHeld(), /migration_lease_invalid/)
     assert.equal(fs.lstatSync(fixture.lockPath).isDirectory(), true)
     assert.deepEqual(fs.readdirSync(fixture.lockPath), [])
+  })
+
+  // Catches post-acquisition validation failure leaking the package heartbeat and in-process ownership entry.
+  it('clears package lifecycle after post-acquisition identity compromise', async() => {
+    const fixture = createFixture()
+    const movedOwnedLock = `${fixture.lockPath}.owned`
+    const originalLock = properLockfile.lock
+    properLockfile.lock = async(file, options) => {
+      const packageRelease = await originalLock(file, options)
+      assert.ok(getLocks()[fixture.rootPath])
+      fs.renameSync(fixture.lockPath, movedOwnedLock)
+      fs.mkdirSync(fixture.lockPath)
+      fs.writeFileSync(path.join(fixture.lockPath, 'replacement'), 'keep-post-acquire')
+      return packageRelease
+    }
+    try {
+      await assert.rejects(acquireMigrationLease(fixture.options), /migration_lease_compromised/)
+    } finally {
+      properLockfile.lock = originalLock
+    }
+
+    assert.equal(getLocks()[fixture.rootPath], undefined)
+    assert.equal(fs.readFileSync(path.join(fixture.lockPath, 'replacement'), 'utf8'), 'keep-post-acquire')
+    assert.equal(fs.lstatSync(movedOwnedLock).isDirectory(), true)
   })
 
   // Catches a root identity swap that would let heartbeat or release act in an attacker-controlled replacement root.

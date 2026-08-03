@@ -67,6 +67,18 @@ const markCompromised = (state, cause) => {
   return state.compromised
 }
 
+const poisonAcquisition = (state, cause) => {
+  if (state.acquisitionPoison == null) {
+    state.acquisitionPoison = leaseError('migration_lease_invalid', cause)
+  }
+  return state.acquisitionPoison
+}
+
+const assertAdapterActive = state => {
+  if (state.compromised != null) throw state.compromised
+  if (state.acquisitionPoison != null) throw state.acquisitionPoison
+}
+
 const assertRoot = (state, owned = state.ownedIdentity != null) => {
   try {
     revalidateDirectDirectory(state.rootGuard)
@@ -148,6 +160,7 @@ const validateAdapterPath = (state, targetPath) => {
 const createControlledFs = state => ({
   mkdir(targetPath, callback) {
     try {
+      assertAdapterActive(state)
       validateAdapterPath(state, targetPath)
       assertRoot(state)
     } catch (error) {
@@ -171,6 +184,7 @@ const createControlledFs = state => ({
 
   stat(targetPath, callback) {
     try {
+      assertAdapterActive(state)
       validateAdapterPath(state, targetPath)
     } catch (error) {
       return process.nextTick(callback, error)
@@ -194,6 +208,7 @@ const createControlledFs = state => ({
 
   readdir(targetPath, callback) {
     try {
+      assertAdapterActive(state)
       validateAdapterPath(state, targetPath)
     } catch (error) {
       return process.nextTick(callback, error)
@@ -203,6 +218,7 @@ const createControlledFs = state => ({
 
   utimes(targetPath, atime, mtime, callback) {
     try {
+      assertAdapterActive(state)
       validateAdapterPath(state, targetPath)
       assertOwnedLock(state)
     } catch (error) {
@@ -220,33 +236,35 @@ const createControlledFs = state => ({
   },
 
   rmdir(targetPath, callback) {
+    const hasStaleCandidate = state.ownedIdentity == null && state.candidateIdentity != null
     try {
+      assertAdapterActive(state)
       validateAdapterPath(state, targetPath)
-      assertRoot(state)
-      const stat = inspectLockSync(state)
-      const expectedIdentity = state.ownedIdentity ?? state.candidateIdentity
-      if (expectedIdentity == null || !sameIdentity(identityOf(stat), expectedIdentity)) {
-        throw state.ownedIdentity == null
-          ? leaseError('migration_lease_invalid')
-          : markCompromised(state, leaseError('migration_lease_invalid'))
+      let stat
+      if (state.ownedIdentity != null) {
+        stat = assertOwnedLock(state)
+      } else {
+        assertRoot(state)
+        stat = inspectLockSync(state)
+        if (!hasStaleCandidate || !sameIdentity(identityOf(stat), state.candidateIdentity) ||
+          stat.mtime.getTime() != state.candidateMtimeMs ||
+          stat.mtime.getTime() >= Date.now() - PRODUCTION_LEASE_OPTIONS.stale) {
+          throw leaseError('migration_lease_invalid')
+        }
+        assertRoot(state)
       }
-      if (state.ownedIdentity == null &&
-        (stat.mtime.getTime() != state.candidateMtimeMs ||
-          stat.mtime.getTime() >= Date.now() - PRODUCTION_LEASE_OPTIONS.stale)) {
-        throw leaseError('migration_lease_invalid')
-      }
-      assertRoot(state)
     } catch (error) {
-      if (isMissing(error)) {
-        if (state.ownedIdentity != null) markCompromised(state, error)
-        state.candidateIdentity = null
-        state.candidateMtimeMs = null
+      if (error === state.compromised || error === state.acquisitionPoison) {
+        return process.nextTick(callback, error)
       }
+      if (hasStaleCandidate) return process.nextTick(callback, poisonAcquisition(state, error))
+      if (isMissing(error) && state.ownedIdentity != null) return process.nextTick(callback, markCompromised(state, error))
       return process.nextTick(callback, error)
     }
     fs.rmdir(state.lockPath, error => {
       if (error != null) {
-        if (isMissing(error) && state.ownedIdentity != null) markCompromised(state, error)
+        if (isMissing(error) && state.ownedIdentity != null) return callback(markCompromised(state, error))
+        if (isMissing(error) && hasStaleCandidate) return callback(poisonAcquisition(state, error))
         return callback(error)
       }
       try {
@@ -257,7 +275,7 @@ const createControlledFs = state => ({
         state.candidateMtimeMs = null
         callback(null)
       } catch (error) {
-        callback(error)
+        callback(hasStaleCandidate ? poisonAcquisition(state, error) : error)
       }
     })
   },
@@ -280,6 +298,7 @@ const acquireMigrationLease = async input => {
     candidateMtimeMs: null,
     removedIdentity: null,
     compromised: null,
+    acquisitionPoison: null,
   }
   const controlledFs = createControlledFs(state)
   let packageRelease
@@ -293,6 +312,9 @@ const acquireMigrationLease = async input => {
     })
     assertOwnedLock(state)
   } catch (error) {
+    if (packageRelease != null) {
+      try { await packageRelease() } catch {}
+    }
     closeDirectDirectory(rootGuard)
     throw error
   }
@@ -316,11 +338,21 @@ const releaseMigrationLease = async lease => {
   if (metadata == null) throw leaseError('migration_lease_invalid')
   let releaseError
   try {
-    lease.assertHeld()
-    await metadata.packageRelease()
-    if (metadata.state.compromised != null) throw metadata.state.compromised
-  } catch (error) {
-    releaseError = error
+    try {
+      lease.assertHeld()
+    } catch (error) {
+      releaseError = error
+    }
+    if (releaseError != null) {
+      try { await metadata.packageRelease() } catch {}
+    } else {
+      try {
+        await metadata.packageRelease()
+        if (metadata.state.compromised != null) throw metadata.state.compromised
+      } catch (error) {
+        releaseError = error
+      }
+    }
   } finally {
     leaseMetadata.delete(lease)
     try {

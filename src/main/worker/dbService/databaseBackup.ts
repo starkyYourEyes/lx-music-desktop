@@ -87,6 +87,51 @@ const directBasename = (basename: string): boolean => basename.length > 0 && bas
 const safeSchemaVersion = (value: unknown): value is number =>
   typeof value == 'number' && Number.isSafeInteger(value) && value > 0
 
+interface CleanupAwareError extends Error {
+  cleanupErrors?: readonly Error[]
+}
+
+const withCleanupContext = (primary: Error, cleanupErrors: readonly Error[]): Error => {
+  if (cleanupErrors.length == 0) return primary
+  const contextual = primary as CleanupAwareError
+  try {
+    Object.defineProperty(contextual, 'cleanupErrors', {
+      configurable: true,
+      enumerable: false,
+      value: Object.freeze([...(contextual.cleanupErrors ?? []), ...cleanupErrors]),
+    })
+  } catch {}
+  return contextual
+}
+
+const closeCapturedDirectGuard = (guard: DirectDirectoryGuard): Error[] => {
+  const cleanupErrors: Error[] = []
+  try {
+    closeDirectDirectory(guard)
+    return cleanupErrors
+  } catch (error) {
+    cleanupErrors.push(asError(error, 'backup_root_close_failed'))
+  }
+
+  try {
+    // Metadata-backed revalidation distinguishes a pre-close throw from an
+    // ambiguous post-close numeric descriptor that may already be reused.
+    revalidateDirectDirectory(guard)
+  } catch (error) {
+    cleanupErrors.push(asError(error, 'backup_root_close_ownership_unknown'))
+    return cleanupErrors
+  }
+  try {
+    fs.closeSync(guard.descriptor)
+  } catch (error) {
+    if (error != null && typeof error == 'object' && 'code' in error && error.code == 'EBADF') {
+      return cleanupErrors
+    }
+    cleanupErrors.push(asError(error, 'backup_root_descriptor_close_failed'))
+  }
+  return cleanupErrors
+}
+
 const closeRoot = (metadata: { root: DirectDirectoryGuard, closed: boolean }): void => {
   if (metadata.closed) return
   metadata.closed = true
@@ -107,13 +152,14 @@ const openBackupRoot = (backupsRoot: string): DirectDirectoryGuard => {
   if (!directBasename(basename) || ownerPath == resolved) throw failure('backup_root_invalid')
   const owner = validateDirectDirectory(ownerPath)
   let root: DirectDirectoryGuard | null = null
-  const closeOpenedRoot = (): void => {
-    if (root == null) return
+  const closeOpenedRoot = (): Error[] => {
+    if (root == null) return []
     const opened = root
     root = null
-    closeDirectDirectory(opened)
+    return closeCapturedDirectGuard(opened)
   }
   let operationError: Error | null = null
+  const cleanupErrors: Error[] = []
   try {
     revalidateDirectDirectory(owner)
     fs.mkdirSync(resolved, { mode: 0o700 })
@@ -124,14 +170,16 @@ const openBackupRoot = (backupsRoot: string): DirectDirectoryGuard => {
   } catch (error) {
     operationError = asError(error, 'backup_root_invalid')
   }
-  try {
-    closeDirectDirectory(owner)
-  } catch (error) {
-    operationError ??= asError(error, 'backup_root_close_failed')
+  const ownerCloseErrors = closeCapturedDirectGuard(owner)
+  if (operationError == null && ownerCloseErrors.length > 0) {
+    operationError = ownerCloseErrors[0]
+    cleanupErrors.push(...ownerCloseErrors.slice(1))
+  } else {
+    cleanupErrors.push(...ownerCloseErrors)
   }
   if (operationError != null) {
-    try { closeOpenedRoot() } catch {}
-    throw operationError
+    cleanupErrors.push(...closeOpenedRoot())
+    throw withCleanupContext(operationError, cleanupErrors)
   }
   return root!
 }

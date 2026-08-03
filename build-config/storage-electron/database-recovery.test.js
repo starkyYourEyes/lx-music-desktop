@@ -565,6 +565,132 @@ describe('guarded online backup', () => {
     assert.equal(rootClosed, true)
   })
 
+  it('finishes root descriptor cleanup and preserves context when guarded close throws', () => {
+    const root = tempDir('lx-recovery-root-close-error-')
+    const backupsRoot = path.join(root, 'backups')
+    const direct = require('../../src/main/storage/directDirectory.js')
+    const primaryError = new Error('injected root revalidation failure')
+    const cleanupError = new Error('injected root guarded-close failure')
+    let rootGuard
+    let revalidationFailed = false
+    const guardedDirect = {
+      ...direct,
+      validateDirectDirectory(directoryPath, options) {
+        const guard = direct.validateDirectDirectory(directoryPath, options)
+        if (path.resolve(directoryPath) == path.resolve(backupsRoot)) rootGuard = guard
+        return guard
+      },
+      revalidateDirectDirectory(guard) {
+        if (guard == rootGuard && !revalidationFailed) {
+          revalidationFailed = true
+          throw primaryError
+        }
+        return direct.revalidateDirectDirectory(guard)
+      },
+      closeDirectDirectory(guard) {
+        if (guard == rootGuard) throw cleanupError
+        return direct.closeDirectDirectory(guard)
+      },
+    }
+    const backup = loadBackupWithBoundaries({ directDirectoryModule: guardedDirect })
+    let thrown
+    try {
+      backup.reserveOnlineBackup({
+        backupsRoot,
+        basenamePrefix: 'lx.data.db.backup',
+        sourceSchemaVersion: 2,
+      })
+    } catch (error) {
+      thrown = error
+    }
+    let rootClosed = false
+    try {
+      fs.fstatSync(rootGuard.descriptor)
+    } catch (error) {
+      rootClosed = error?.code == 'EBADF'
+    }
+    if (!rootClosed) fs.closeSync(rootGuard.descriptor)
+
+    assert.equal(thrown, primaryError)
+    assert.deepEqual(thrown.cleanupErrors, [cleanupError])
+    assert.equal(rootClosed, true)
+  })
+
+  it('does not close a same-directory descriptor reused after guarded close', () => {
+    const root = tempDir('lx-recovery-root-close-reuse-')
+    const backupsRoot = path.join(root, 'backups')
+    const direct = require('../../src/main/storage/directDirectory.js')
+    const primaryError = new Error('injected root revalidation failure')
+    const cleanupError = new Error('injected post-close failure')
+    let rootGuard
+    let replacementDescriptor
+    let revalidationFailed = false
+    const guardedDirect = {
+      ...direct,
+      validateDirectDirectory(directoryPath, options) {
+        const guard = direct.validateDirectDirectory(directoryPath, options)
+        if (path.resolve(directoryPath) == path.resolve(backupsRoot)) rootGuard = guard
+        return guard
+      },
+      revalidateDirectDirectory(guard) {
+        if (guard == rootGuard && !revalidationFailed) {
+          revalidationFailed = true
+          throw primaryError
+        }
+        return direct.revalidateDirectDirectory(guard)
+      },
+      closeDirectDirectory(guard) {
+        if (guard != rootGuard) return direct.closeDirectDirectory(guard)
+        direct.closeDirectDirectory(guard)
+        replacementDescriptor = fs.openSync(backupsRoot, 'r')
+        throw cleanupError
+      },
+    }
+    const reusedDescriptorFs = new Proxy(fs, {
+      get(target, property) {
+        if (property == 'fstatSync') {
+          return (descriptor, options) => fs.fstatSync(
+            descriptor == rootGuard?.descriptor && replacementDescriptor != null
+              ? replacementDescriptor
+              : descriptor,
+            options,
+          )
+        }
+        if (property == 'closeSync') {
+          return descriptor => fs.closeSync(
+            descriptor == rootGuard?.descriptor && replacementDescriptor != null
+              ? replacementDescriptor
+              : descriptor,
+          )
+        }
+        return Reflect.get(target, property)
+      },
+    })
+    const backup = loadBackupWithBoundaries({
+      directDirectoryModule: guardedDirect,
+      fileSystem: reusedDescriptorFs,
+    })
+    let thrown
+    try {
+      backup.reserveOnlineBackup({
+        backupsRoot,
+        basenamePrefix: 'lx.data.db.backup',
+        sourceSchemaVersion: 2,
+      })
+    } catch (error) {
+      thrown = error
+    }
+    let replacementOpen = false
+    try {
+      replacementOpen = fs.fstatSync(replacementDescriptor).isDirectory()
+    } catch {}
+    if (replacementOpen) fs.closeSync(replacementDescriptor)
+
+    assert.equal(thrown, primaryError)
+    assert.equal(thrown.cleanupErrors.includes(cleanupError), true)
+    assert.equal(replacementOpen, true)
+  })
+
   it('rejects and retains a backup root created by a raced winner', () => {
     const root = tempDir('lx-recovery-root-creation-race-')
     const backupsRoot = path.join(root, 'backups')

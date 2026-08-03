@@ -193,6 +193,7 @@
     "music-metadata": "^11.12.0",
     "needle": "^3.5.0",
     "node-id3": "^0.2.9",
+    "proper-lockfile": "4.1.2",
     "sortablejs": "^1.15.7",
     "tunnel": "^0.0.6",
     "undici": "^7.22.0",

@@ -249,6 +249,38 @@ describe('serialized cache lifecycle', () => {
     assert.deepEqual(order, ['write', 'read', 'prune'])
   })
 
+  it('aborts only the exact active reset lease, releases queued work, and never opens a fresh database', async() => {
+    await createFixture('cache-abort-reset')
+    let opens = 0
+    class CountingDatabase {
+      constructor(filename, options) {
+        opens++
+        return new Database(filename, options)
+      }
+    }
+    const service = createService({
+      DatabaseImplementation: CountingDatabase,
+      randomUUID: () => '11111111-1111-4111-8111-111111111111',
+    })
+    assert.equal((await service.openCacheDatabase()).status, 'created')
+    const lease = await service.beginCacheReset()
+    const queued = service.runCacheRead(() => assert.fail('queued callback ran after reset abort'))
+    assert.equal(await isSettled(queued), false)
+    assert.equal(typeof service.abortCacheReset, 'function')
+
+    await assert.rejects(
+      service.abortCacheReset({ resetId: '22222222-2222-4222-8222-222222222222' }),
+      error => error?.code == 'cache_operation_failed' && error?.message == 'cache_operation_failed',
+    )
+    assert.equal(await isSettled(queued), false)
+    await service.abortCacheReset(lease)
+
+    assert.equal(opens, 1)
+    assert.equal(await service.getCacheLifecycleState(), 'unavailable')
+    assert.deepEqual(await queued, { status: 'unavailable', code: 'cache_delete_failed' })
+    await assert.rejects(service.abortCacheReset(lease), error => error?.code == 'cache_operation_failed')
+  })
+
   it('maps repository callback errors to fixed diagnostics, closes the handle, and disables later work', async(t) => {
     const cases = [
       { code: 'PRIVATE_CALLBACK_6F10', expected: 'cache_operation_failed' },
@@ -629,7 +661,9 @@ describe('serialized cache lifecycle', () => {
       delete require.cache[indexPath]
     }
 
-    for (const method of ['openCacheDatabase', 'beginCacheReset', 'finishCacheReset', 'getCacheLifecycleState']) {
+    for (const method of [
+      'openCacheDatabase', 'beginCacheReset', 'finishCacheReset', 'abortCacheReset', 'getCacheLifecycleState',
+    ]) {
       assert.equal(typeof exposed[method], 'function')
     }
     for (const privateName of [

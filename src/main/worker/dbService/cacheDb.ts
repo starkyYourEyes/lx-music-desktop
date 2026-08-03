@@ -68,6 +68,7 @@ export interface CacheWorkerLifecycle {
   openCacheDatabase: () => Promise<CacheOpenResult>
   beginCacheReset: () => Promise<CacheResetLease>
   finishCacheReset: (input: CacheResetLease) => Promise<CacheOpenResult>
+  abortCacheReset: (input: CacheResetLease) => Promise<void>
   getCacheLifecycleState: () => Promise<CacheLifecycleState>
 }
 
@@ -1102,6 +1103,17 @@ export const createCacheDatabaseService = (
     })
   }
 
+  const abortCacheReset = async(input: CacheResetLease): Promise<void> => {
+    if (!isPlainLease(input) || activeReset?.status != 'held' || activeReset.resetId != input.resetId) {
+      throw fixedError('cache_operation_failed')
+    }
+    activeReset.status = 'finishing'
+    setUnavailable('cache_delete_failed')
+    activeReset = null
+    queueRunning = false
+    drainQueue()
+  }
+
   const getCacheLifecycleState = async(): Promise<CacheLifecycleState> => Promise.resolve(state)
 
   const runCacheRead = async <T>(
@@ -1166,6 +1178,7 @@ export const createCacheDatabaseService = (
     closeCacheDatabase,
     beginCacheReset,
     finishCacheReset,
+    abortCacheReset,
     getCacheLifecycleState,
     runCacheRead,
     runCacheWrite,
@@ -1180,6 +1193,7 @@ export const openCacheDatabase = cacheDatabaseService.openCacheDatabase
 export const closeCacheDatabase = cacheDatabaseService.closeCacheDatabase
 export const beginCacheReset = cacheDatabaseService.beginCacheReset
 export const finishCacheReset = cacheDatabaseService.finishCacheReset
+export const abortCacheReset = cacheDatabaseService.abortCacheReset
 export const getCacheLifecycleState = cacheDatabaseService.getCacheLifecycleState
 export const runCacheRead = cacheDatabaseService.runCacheRead
 export const runCacheWrite = cacheDatabaseService.runCacheWrite

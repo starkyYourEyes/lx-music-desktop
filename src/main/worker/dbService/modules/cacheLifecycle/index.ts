@@ -1,4 +1,5 @@
 import {
+  abortCacheReset,
   beginCacheReset,
   finishCacheReset,
   getCacheLifecycleState,
@@ -18,6 +19,7 @@ export {
   openCacheDatabase,
   beginCacheReset,
   finishCacheReset,
+  abortCacheReset,
   getCacheLifecycleState,
 }
 

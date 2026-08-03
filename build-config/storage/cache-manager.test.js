@@ -25,13 +25,13 @@ const temporaryRoot = () => {
 }
 
 const deferred = () => {
-  let resolve
-  let reject
-  const promise = new Promise((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise
-    reject = rejectPromise
+  let complete
+  let fail
+  const promise = new Promise((resolve, reject) => {
+    complete = resolve
+    fail = reject
   })
-  return { promise, resolve, reject }
+  return { promise, resolve: complete, reject: fail }
 }
 
 const write = (filePath, value) => {
@@ -52,6 +52,7 @@ const createManagerHarness = ({
   ],
   begin,
   finish,
+  abort,
   clearSessions,
   publish,
   fileSystem = fs,
@@ -70,6 +71,10 @@ const createManagerHarness = ({
       events.push('worker:finish-reset')
       if (finish) return finish(lease)
       return reopenResult
+    },
+    async abortCacheReset(lease) {
+      events.push('worker:abort-reset')
+      return abort?.(lease)
     },
   }
   const registry = {
@@ -104,14 +109,42 @@ const createManagerHarness = ({
 }
 
 describe('protected main-only cache manager', () => {
-  it('uses only the owned DB inventory and registered Chromium categories in reset order', async() => {
+  it('isolates all SQLite artifacts before reclaiming or reopening', async() => {
     const harness = createManagerHarness()
-
-    const result = await harness.manager.clearAll()
+    const nativeRename = fs.renameSync
+    const nativeRm = fs.rmSync
+    let reclaimed = 0
+    fs.renameSync = (source, destination) => {
+      const name = path.basename(source)
+      const result = nativeRename(source, destination)
+      if (['cache.db', 'cache.db-wal', 'cache.db-shm'].includes(name)) harness.events.push(`${name}.isolated`)
+      return result
+    }
+    fs.rmSync = (target, options) => {
+      if (path.basename(target) == 'payload') {
+        if (reclaimed == 0) {
+          assert.equal(['cache.db', 'cache.db-wal', 'cache.db-shm']
+            .every(name => !fs.existsSync(path.join(harness.cacheRoot, name))), true)
+          harness.events.push('stable.absent')
+        }
+        const result = nativeRm(target, options)
+        if (++reclaimed == 3) harness.events.push('payloads.reclaimed')
+        return result
+      }
+      return nativeRm(target, options)
+    }
+    let result
+    try {
+      result = await harness.manager.clearAll()
+    } finally {
+      fs.renameSync = nativeRename
+      fs.rmSync = nativeRm
+    }
 
     assert.deepEqual(harness.events, [
       'worker:begin-reset',
-      'delete:cache.db', 'delete:cache.db-wal', 'delete:cache.db-shm',
+      'cache.db.isolated', 'cache.db-wal.isolated', 'cache.db-shm.isolated',
+      'stable.absent', 'payloads.reclaimed',
       'sessions:clear-registered',
       'worker:finish-reset',
       'broadcast:generation:1',
@@ -141,44 +174,89 @@ describe('protected main-only cache manager', () => {
     assert.equal(harness.events.filter(value => value == 'worker:begin-reset').length, 1)
   })
 
-  it('always finishes an acquired reset lease after delete and session failures', async() => {
-    let unlinkCalls = 0
-    const failingFs = new Proxy(fs, {
-      get(target, property, receiver) {
-        if (property != 'unlinkSync') return Reflect.get(target, property, receiver)
-        return targetPath => {
-          unlinkCalls++
-          if (path.basename(targetPath) == 'cache.db') throw Object.assign(new Error('private delete failure'), { code: 'EPERM' })
-          return target.unlinkSync(targetPath)
-        }
-      },
-    })
-    const harness = createManagerHarness({
-      fileSystem: failingFs,
-      sessionResults: [
-        { key: 'user-api:one', category: 'cache', status: 'failed', code: 'session_cache_clear_failed' },
-        { key: 'user-api:one', category: 'cache-storage', status: 'cleared' },
-        { key: 'user-api:one', category: 'code-cache', status: 'cleared' },
-      ],
-      reopenResult: { status: 'ready', schemaVersion: 1, diagnostic: null },
-    })
+  it('retains an isolated payload when exact reclamation fails and aborts without reopening', async() => {
+    const harness = createManagerHarness()
+    const nativeRm = fs.rmSync
+    let injected = false
+    fs.rmSync = (target, options) => {
+      if (!injected && path.basename(target) == 'payload') {
+        injected = true
+        throw Object.assign(new Error('private reclaim failure'), { code: 'EPERM' })
+      }
+      return nativeRm(target, options)
+    }
+    let result
+    try {
+      result = await harness.manager.clearAll()
+    } finally {
+      fs.rmSync = nativeRm
+    }
 
-    const result = await harness.manager.clearAll()
-
-    assert.equal(unlinkCalls, 3)
-    assert.equal(harness.events.includes('sessions:clear-registered'), true)
-    assert.equal(harness.events.at(-1), 'worker:finish-reset')
+    assert.deepEqual(harness.events, ['worker:begin-reset', 'worker:abort-reset'])
     assert.deepEqual(harness.broadcasts, [])
     assert.deepEqual(result, {
       status: 'degraded',
       generation: 0,
       components: [
         { component: 'cache-db', key: 'cache.db', status: 'failed', code: 'cache_delete_failed' },
-        { component: 'chromium-http', key: 'user-api:one', status: 'failed', code: 'session_cache_clear_failed' },
-        { component: 'chromium-cache-storage', key: 'user-api:one', status: 'cleared' },
-        { component: 'chromium-code', key: 'user-api:one', status: 'cleared' },
       ],
     })
+    const retained = fs.readdirSync(harness.cacheRoot)
+      .filter(name => /^\.cache\.db(?:-wal|-shm)?\.isolate-/.test(name))
+    assert.equal(retained.length, 1)
+    assert.equal(fs.existsSync(path.join(harness.cacheRoot, retained[0], 'payload')), true)
+  })
+
+  it('preserves a replacement raced into cache isolation and does not reopen', async() => {
+    const harness = createManagerHarness()
+    const replacementPath = path.join(harness.cacheRoot, 'cache.db-wal')
+    const nativeRename = fs.renameSync
+    fs.renameSync = (source, destination) => {
+      const result = nativeRename(source, destination)
+      if (path.resolve(source) == path.resolve(replacementPath)) write(replacementPath, 'replacement')
+      return result
+    }
+    let result
+    try {
+      result = await harness.manager.clearAll()
+    } finally {
+      fs.renameSync = nativeRename
+    }
+
+    assert.equal(result.status, 'degraded')
+    assert.deepEqual(harness.events, ['worker:begin-reset', 'worker:abort-reset'])
+    assert.deepEqual(harness.broadcasts, [])
+    assert.equal(fs.readFileSync(replacementPath, 'utf8'), 'replacement')
+    const retained = fs.readdirSync(harness.cacheRoot)
+      .filter(name => /^\.cache\.db(?:-wal)?\.isolate-/.test(name))
+    assert.equal(retained.length, 2)
+    for (const name of retained) assert.equal(fs.existsSync(path.join(harness.cacheRoot, name, 'payload')), true)
+  })
+
+  it('preserves a replacement raced into payload reclamation and does not reopen', async() => {
+    const harness = createManagerHarness()
+    const replacementPath = path.join(harness.cacheRoot, 'cache.db')
+    const nativeRm = fs.rmSync
+    let injected = false
+    fs.rmSync = (target, options) => {
+      const result = nativeRm(target, options)
+      if (!injected && path.basename(target) == 'payload') {
+        injected = true
+        write(replacementPath, 'replacement')
+      }
+      return result
+    }
+    let result
+    try {
+      result = await harness.manager.clearAll()
+    } finally {
+      fs.rmSync = nativeRm
+    }
+
+    assert.equal(result.status, 'degraded')
+    assert.deepEqual(harness.events, ['worker:begin-reset', 'worker:abort-reset'])
+    assert.deepEqual(harness.broadcasts, [])
+    assert.equal(fs.readFileSync(replacementPath, 'utf8'), 'replacement')
   })
 
   it('does not delete or clear sessions when reset lease acquisition fails', async() => {
@@ -188,33 +266,37 @@ describe('protected main-only cache manager', () => {
 
     assert.deepEqual(harness.events, ['worker:begin-reset'])
     assert.deepEqual(result, {
-      status: 'degraded', generation: 0,
+      status: 'degraded',
+      generation: 0,
       components: [{ component: 'cache-db', key: 'cache.db', status: 'failed', code: 'cache_close_failed' }],
     })
   })
 
-  it('publishes a fresh generation after session failure but not after unavailable or ready reopen', async() => {
+  it('publishes a fresh generation when only a named Chromium category fails', async() => {
     const sessionFailure = createManagerHarness({
       sessionResults: [{ key: 'main:win-main', category: 'cache', status: 'failed', code: 'session_cache_clear_failed' }],
       reopenResult: { status: 'recreated', schemaVersion: 1, diagnostic: null },
     })
+    const failedSessionResult = await sessionFailure.manager.clearAll()
+
+    assert.equal(failedSessionResult.status, 'degraded')
+    assert.equal(failedSessionResult.generation, 1)
+    assert.deepEqual(sessionFailure.broadcasts, [1])
+  })
+
+  it('does not publish a generation after thrown, unavailable, or ready reopen results', async() => {
+    const thrown = createManagerHarness({ finish: async() => { throw new Error('private reopen failure') } })
     const unavailable = createManagerHarness({
       reopenResult: { status: 'unavailable', schemaVersion: null, diagnostic: 'cache_reopen_failed' },
     })
     const ready = createManagerHarness({ reopenResult: { status: 'ready', schemaVersion: 1, diagnostic: null } })
 
-    const failedSessionResult = await sessionFailure.manager.clearAll()
-    const unavailableResult = await unavailable.manager.clearAll()
-    const readyResult = await ready.manager.clearAll()
-
-    assert.equal(failedSessionResult.status, 'degraded')
-    assert.equal(failedSessionResult.generation, 1)
-    assert.deepEqual(sessionFailure.broadcasts, [1])
-    assert.equal(unavailableResult.status, 'degraded')
-    assert.equal(unavailableResult.generation, 0)
-    assert.deepEqual(unavailable.broadcasts, [])
-    assert.equal(readyResult.generation, 0)
-    assert.deepEqual(ready.broadcasts, [])
+    for (const harness of [thrown, unavailable, ready]) {
+      const result = await harness.manager.clearAll()
+      assert.equal(result.generation, 0)
+      assert.deepEqual(harness.broadcasts, [])
+    }
+    assert.equal((await thrown.manager.clearAll()).status, 'degraded')
   })
 
   it('keeps its fresh generation when the best-effort publisher throws', async() => {
@@ -225,7 +307,7 @@ describe('protected main-only cache manager', () => {
   })
 
   it('preserves durable and non-owned fixtures on success and every injected component failure', async() => {
-    for (const failure of ['none', 'delete', 'sessions', 'reopen']) {
+    for (const failure of ['none', 'reclaim', 'sessions', 'reopen']) {
       const fixtureRoot = temporaryRoot()
       const fixtures = new Map([
         ['profile/config_v2.json', 'settings'], ['profile/app.db', 'app-db'],
@@ -237,22 +319,27 @@ describe('protected main-only cache manager', () => {
         ['cache/artwork/cover.jpg', 'artwork'], ['cache/audio/song.mp3', 'audio'],
       ])
       for (const [relative, bytes] of fixtures) write(path.join(fixtureRoot, relative), bytes)
-      const failingFs = failure == 'delete' ? new Proxy(fs, {
-        get(target, property, receiver) {
-          if (property != 'unlinkSync') return Reflect.get(target, property, receiver)
-          return targetPath => { throw Object.assign(new Error('delete failed'), { code: 'EPERM', targetPath }) }
-        },
-      }) : fs
       const harness = createManagerHarness({
         rootPath: fixtureRoot,
-        fileSystem: failingFs,
         clearSessions: failure == 'sessions' ? async() => { throw new Error('sessions failed') } : undefined,
         finish: failure == 'reopen'
           ? async() => { throw new Error('reopen failed') }
           : undefined,
       })
-
-      await harness.manager.clearAll()
+      const nativeRm = fs.rmSync
+      if (failure == 'reclaim') {
+        fs.rmSync = (target, options) => {
+          if (path.basename(target) == 'payload') {
+            throw Object.assign(new Error('reclaim failed'), { code: 'EPERM', target })
+          }
+          return nativeRm(target, options)
+        }
+      }
+      try {
+        await harness.manager.clearAll()
+      } finally {
+        fs.rmSync = nativeRm
+      }
 
       for (const [relative, bytes] of fixtures) {
         assert.equal(fs.readFileSync(path.join(fixtureRoot, relative), 'utf8'), bytes, `${failure}: ${relative}`)
@@ -262,7 +349,7 @@ describe('protected main-only cache manager', () => {
 })
 
 describe('owned cache artifact inventory', () => {
-  it('captures ownership when clearing after startup creates the cache root', () => {
+  it('captures ownership when clearing after startup creates the cache root', async() => {
     const fixtureRoot = temporaryRoot()
     const cacheRoot = path.join(fixtureRoot, 'cache')
     const { createCacheArtifactInventory } = loadInventory()
@@ -270,11 +357,11 @@ describe('owned cache artifact inventory', () => {
     fs.mkdirSync(cacheRoot)
     for (const name of ['cache.db', 'cache.db-wal', 'cache.db-shm']) write(path.join(cacheRoot, name), name)
 
-    assert.deepEqual(inventory.clearOwnedArtifacts(), { status: 'cleared' })
+    assert.deepEqual(await inventory.clearOwnedArtifacts(), { status: 'cleared' })
     assert.deepEqual(fs.readdirSync(cacheRoot), [])
   })
 
-  it('rejects a linked cache root and linked or non-file direct children without touching their targets', () => {
+  it('rejects a linked cache root and linked or non-file direct children without touching their targets', async() => {
     const fixtureRoot = temporaryRoot()
     const externalRoot = path.join(fixtureRoot, 'external')
     fs.mkdirSync(externalRoot)
@@ -283,7 +370,7 @@ describe('owned cache artifact inventory', () => {
     const linkedRoot = path.join(fixtureRoot, 'linked-cache')
     fs.symlinkSync(externalRoot, linkedRoot, 'junction')
     const { createCacheArtifactInventory } = loadInventory()
-    assert.deepEqual(createCacheArtifactInventory({ cacheRoot: linkedRoot }).clearOwnedArtifacts(), {
+    assert.deepEqual(await createCacheArtifactInventory({ cacheRoot: linkedRoot }).clearOwnedArtifacts(), {
       status: 'failed', code: 'cache_target_invalid', failedArtifact: null,
     })
     assert.equal(fs.readFileSync(externalFile, 'utf8'), 'outside')
@@ -292,67 +379,63 @@ describe('owned cache artifact inventory', () => {
     fs.mkdirSync(cacheRoot)
     fs.linkSync(externalFile, path.join(cacheRoot, 'cache.db'))
     fs.mkdirSync(path.join(cacheRoot, 'cache.db-wal'))
-    assert.deepEqual(createCacheArtifactInventory({ cacheRoot }).clearOwnedArtifacts(), {
+    assert.deepEqual(await createCacheArtifactInventory({ cacheRoot }).clearOwnedArtifacts(), {
       status: 'failed', code: 'cache_target_invalid', failedArtifact: 'cache.db',
     })
     assert.equal(fs.readFileSync(externalFile, 'utf8'), 'outside')
   })
 
-  it('rejects a target identity race at destructive revalidation and preserves the replacement', () => {
+  it('retains an isolated payload and preserves a stable-path replacement', async() => {
     const fixtureRoot = temporaryRoot()
     const cacheRoot = path.join(fixtureRoot, 'cache')
     fs.mkdirSync(cacheRoot)
     const databasePath = path.join(cacheRoot, 'cache.db')
     write(databasePath, 'original')
-    let targetInspections = 0
-    const racingFs = new Proxy(fs, {
-      get(target, property, receiver) {
-        if (property != 'lstatSync') return Reflect.get(target, property, receiver)
-        return targetPath => {
-          if (path.resolve(targetPath) == path.resolve(databasePath) && ++targetInspections == 2) {
-            fs.renameSync(databasePath, `${databasePath}.old`)
-            write(databasePath, 'replacement')
-          }
-          return target.lstatSync(targetPath)
-        }
-      },
-    })
     const { createCacheArtifactInventory } = loadInventory()
+    const nativeRename = fs.renameSync
+    fs.renameSync = (source, destination) => {
+      const result = nativeRename(source, destination)
+      if (path.resolve(source) == path.resolve(databasePath)) write(databasePath, 'replacement')
+      return result
+    }
+    let result
+    try {
+      result = await createCacheArtifactInventory({ cacheRoot }).clearOwnedArtifacts()
+    } finally {
+      fs.renameSync = nativeRename
+    }
 
-    const result = createCacheArtifactInventory({ cacheRoot, fileSystem: racingFs }).clearOwnedArtifacts()
-
-    assert.deepEqual(result, { status: 'failed', code: 'cache_target_invalid', failedArtifact: 'cache.db' })
+    assert.deepEqual(result, { status: 'failed', code: 'cache_delete_failed', failedArtifact: 'cache.db' })
     assert.equal(fs.readFileSync(databasePath, 'utf8'), 'replacement')
+    const retained = fs.readdirSync(cacheRoot).find(name => /^\.cache\.db\.isolate-/.test(name))
+    assert.equal(typeof retained, 'string')
+    assert.equal(fs.readFileSync(path.join(cacheRoot, retained, 'payload'), 'utf8'), 'original')
   })
 
-  it('revalidates target identity immediately before unlink', () => {
+  it('never unlinks a stable cache artifact directly', async() => {
     const fixtureRoot = temporaryRoot()
     const cacheRoot = path.join(fixtureRoot, 'cache')
     fs.mkdirSync(cacheRoot)
-    const databasePath = path.join(cacheRoot, 'cache.db')
-    write(databasePath, 'original')
-    let targetInspections = 0
-    const racingFs = new Proxy(fs, {
+    for (const name of ['cache.db', 'cache.db-wal', 'cache.db-shm']) write(path.join(cacheRoot, name), name)
+    let unlinks = 0
+    const guardedFs = new Proxy(fs, {
       get(target, property, receiver) {
-        if (property != 'lstatSync') return Reflect.get(target, property, receiver)
+        if (property != 'unlinkSync') return Reflect.get(target, property, receiver)
         return targetPath => {
-          if (path.resolve(targetPath) == path.resolve(databasePath) && ++targetInspections == 3) {
-            fs.renameSync(databasePath, `${databasePath}.old`)
-            write(databasePath, 'replacement')
-          }
-          return target.lstatSync(targetPath)
+          unlinks++
+          return target.unlinkSync(targetPath)
         }
       },
     })
     const { createCacheArtifactInventory } = loadInventory()
 
-    const result = createCacheArtifactInventory({ cacheRoot, fileSystem: racingFs }).clearOwnedArtifacts()
+    const result = await createCacheArtifactInventory({ cacheRoot, fileSystem: guardedFs }).clearOwnedArtifacts()
 
-    assert.deepEqual(result, { status: 'failed', code: 'cache_target_invalid', failedArtifact: 'cache.db' })
-    assert.equal(fs.readFileSync(databasePath, 'utf8'), 'replacement')
+    assert.deepEqual(result, { status: 'cleared' })
+    assert.equal(unlinks, 0)
   })
 
-  it('rejects a cache-root identity race before deleting a direct child', () => {
+  it('rejects a cache-root identity race before isolating a direct child', async() => {
     const fixtureRoot = temporaryRoot()
     const cacheRoot = path.join(fixtureRoot, 'cache')
     fs.mkdirSync(cacheRoot)
@@ -361,18 +444,18 @@ describe('owned cache artifact inventory', () => {
     const racingFs = new Proxy(fs, {
       get(target, property, receiver) {
         if (property != 'lstatSync') return Reflect.get(target, property, receiver)
-        return targetPath => {
+        return (targetPath, ...args) => {
           if (path.resolve(targetPath) == path.resolve(cacheRoot) && ++rootInspections > 1) {
             fs.renameSync(cacheRoot, `${cacheRoot}.old`)
             fs.mkdirSync(cacheRoot)
             write(path.join(cacheRoot, 'cache.db'), 'replacement')
           }
-          return target.lstatSync(targetPath)
+          return target.lstatSync(targetPath, ...args)
         }
       },
     })
     const { createCacheArtifactInventory } = loadInventory()
-    const result = createCacheArtifactInventory({ cacheRoot, fileSystem: racingFs }).clearOwnedArtifacts()
+    const result = await createCacheArtifactInventory({ cacheRoot, fileSystem: racingFs }).clearOwnedArtifacts()
     assert.deepEqual(result, { status: 'failed', code: 'cache_target_invalid', failedArtifact: 'cache.db' })
     assert.equal(fs.readFileSync(path.join(cacheRoot, 'cache.db'), 'utf8'), 'replacement')
     assert.equal(fs.readFileSync(path.join(`${cacheRoot}.old`, 'cache.db'), 'utf8'), 'owned')
@@ -380,7 +463,11 @@ describe('owned cache artifact inventory', () => {
 })
 
 const music = id => ({
-  id, name: `name-${id}`, singer: `singer-${id}`, source: 'local', interval: null,
+  id,
+  name: `name-${id}`,
+  singer: `singer-${id}`,
+  source: 'local',
+  interval: null,
   meta: { songId: id, albumName: `album-${id}`, qualitys: [], _qualitys: {} },
 })
 
@@ -396,7 +483,8 @@ const loadMusicGenerationHarness = findMusic => {
     '@renderer/utils/ipc': {
       getOtherSourcesFromCache: async() => [],
       putOtherSourcesInCache: async(identity, candidates) => { writes.push({ identity, candidates }) },
-      getMusicUrl: async() => '', getPlayerLyric: async() => ({ lyric: '' }),
+      getMusicUrl: async() => '',
+      getPlayerLyric: async() => ({ lyric: '' }),
     },
     '@renderer/store/setting': { appSetting: { 'player.isS2t': false } },
     '@renderer/utils': { langS2T: async value => value, toNewMusicInfo: value => value, toOldMusicInfo: value => value },
@@ -453,7 +541,8 @@ describe('renderer cache generation adaptation', () => {
       '@common/rendererIpc': {
         rendererOn: (name, listener) => calls.push(['on', name, listener]),
         rendererOff: (name, listener) => calls.push(['off', name, listener]),
-        rendererInvoke: async() => {}, rendererSend: () => {},
+        rendererInvoke: async() => {},
+        rendererSend: () => {},
       },
       '@common/utils/vueTools': { markRaw: value => value, toRaw: value => value },
       '@common/utils': { log: { error: () => {} } },

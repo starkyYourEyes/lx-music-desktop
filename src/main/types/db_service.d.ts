@@ -48,6 +48,16 @@ declare namespace LX {
       resetId: string
     }
 
+    /* eslint-disable @typescript-eslint/method-signature-style -- Preserve the worker lifecycle interface contract. */
+    interface CacheWorkerLifecycle {
+      openCacheDatabase(): Promise<CacheOpenResult>
+      beginCacheReset(): Promise<CacheResetLease>
+      finishCacheReset(input: CacheResetLease): Promise<CacheOpenResult>
+      abortCacheReset(input: CacheResetLease): Promise<void>
+      getCacheLifecycleState(): Promise<CacheLifecycleState>
+    }
+    /* eslint-enable @typescript-eslint/method-signature-style */
+
     type CacheReadResult<T> = { status: 'hit', value: T } | { status: 'miss' } | { status: 'unavailable', code: CacheDiagnosticCode }
     type CacheWriteResult = { status: 'stored' } | { status: 'unavailable', code: CacheDiagnosticCode }
 

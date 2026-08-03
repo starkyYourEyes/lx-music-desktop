@@ -27,6 +27,8 @@ interface CacheResetWorker {
   beginCacheReset(): Promise<LX.DBService.CacheResetLease>
   // eslint-disable-next-line @typescript-eslint/method-signature-style -- Preserve method parameter bivariance in the worker contract.
   finishCacheReset(input: LX.DBService.CacheResetLease): Promise<LX.DBService.CacheOpenResult>
+  // eslint-disable-next-line @typescript-eslint/method-signature-style -- Preserve method parameter bivariance in the worker contract.
+  abortCacheReset(input: LX.DBService.CacheResetLease): Promise<void>
 }
 
 interface CacheManagerOptions {
@@ -88,20 +90,30 @@ export const createCacheManager = ({
     const components: CacheClearComponentResult[] = []
     let reopenResult: LX.DBService.CacheOpenResult | null = null
     try {
-      const artifactResult = inventory.clearOwnedArtifacts()
+      const artifactResult = await inventory.clearOwnedArtifacts()
       components.push(artifactResult.status == 'cleared'
         ? { component: 'cache-db', key: 'cache.db', status: 'cleared' }
         : { component: 'cache-db', key: 'cache.db', status: 'failed', code: artifactResult.code })
+      if (artifactResult.status == 'failed') {
+        try { await worker.abortCacheReset(lease) } catch {}
+        return { status: 'degraded', generation, components }
+      }
       try {
         components.push(...(await sessionRegistry.clearRegisteredCaches()).map(sessionComponent))
       } catch {
         components.push(...failedSessionBarrier())
       }
-    } finally {
       try {
         reopenResult = await worker.finishCacheReset(lease)
       } catch {
         reopenResult = { status: 'unavailable', schemaVersion: null, diagnostic: 'cache_reopen_failed' }
+      }
+    } catch {
+      try { await worker.abortCacheReset(lease) } catch {}
+      return {
+        status: 'degraded',
+        generation,
+        components: [{ component: 'cache-db', key: 'cache.db', status: 'failed', code: 'cache_delete_failed' }],
       }
     }
 

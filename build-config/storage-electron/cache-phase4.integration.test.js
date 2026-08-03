@@ -67,12 +67,21 @@ const initializeSchema6 = async(fixture, profileRoot = fixture.profileRoot) => {
   return startup
 }
 
-const createCacheManagerHarness = fixture => {
+const createCacheManagerHarness = (fixture, { failCategory } = {}) => {
   const calls = []
   const session = {
-    async clearCache() { calls.push(['cache']) },
-    async clearStorageData(options) { calls.push(['cache-storage', structuredClone(options)]) },
-    async clearCodeCaches(options) { calls.push(['code-cache', structuredClone(options)]) },
+    async clearCache() {
+      calls.push(['cache'])
+      if (failCategory == 'cache') throw new Error('injected named HTTP cache failure')
+    },
+    async clearStorageData(options) {
+      calls.push(['cache-storage', structuredClone(options)])
+      if (failCategory == 'cache-storage') throw new Error('injected named CacheStorage failure')
+    },
+    async clearCodeCaches(options) {
+      calls.push(['code-cache', structuredClone(options)])
+      if (failCategory == 'code-cache') throw new Error('injected named code cache failure')
+    },
   }
   const registry = createSessionRegistry()
   const registration = registry.register({ key: 'main', session })
@@ -157,6 +166,27 @@ describe('fixture-only Phase 4 durability acceptance', () => {
     assert.deepEqual(snapshotDurableFixture(fixture, dbService.getAppDB()), before)
   })
 
+  it('publishes a cache generation when reset succeeds and only a named Chromium category fails', async() => {
+    const fixture = createPhase4DurableFixture({ layout: 'installed' })
+    fixtures.push(fixture)
+    await initializeSchema6(fixture)
+    assert.equal((await cacheDb.openCacheDatabase()).status, 'created')
+    const harness = createCacheManagerHarness(fixture, { failCategory: 'code-cache' })
+    await harness.registration.ready
+
+    const cleared = await harness.manager.clearAll()
+
+    assert.equal(cleared.status, 'degraded')
+    assert.equal(cleared.generation, 1)
+    assert.deepEqual(harness.generations, [1])
+    assert.deepEqual(cleared.components.find(component => component.component == 'chromium-code'), {
+      component: 'chromium-code',
+      key: 'main',
+      status: 'failed',
+      code: 'session_cache_clear_failed',
+    })
+  })
+
   it('composes interrupted portable promotion, schema-7 cutover, reset, acknowledgement, relaunch, and later retirement', async() => {
     const fixture = createPhase4DurableFixture({ layout: 'portable' })
     fixtures.push(fixture)
@@ -167,33 +197,28 @@ describe('fixture-only Phase 4 durability acceptance', () => {
     await closeServices()
 
     let interrupted = true
-    let interruptedStage
     const fsApi = {
       ...fs,
-      mkdtempSync(prefix) {
-        interruptedStage = fs.mkdtempSync(prefix)
-        return interruptedStage
-      },
-      cpSync(source, destination, options) {
-        fs.cpSync(source, destination, options)
-        if (interrupted) throw new Error('phase4 injected portable interruption')
-      },
-      rmSync(target, options) {
-        if (interrupted && target == interruptedStage) throw new Error('phase4 retained interrupted stage')
-        return fs.rmSync(target, options)
+      write(descriptor, buffer, offset, length, position, callback) {
+        fs.write(descriptor, buffer, offset, length, position, (error, bytesWritten, writtenBuffer) => {
+          if (error == null && interrupted) {
+            interrupted = false
+            callback(new Error('phase4 injected portable interruption'))
+            return
+          }
+          callback(error, bytesWritten, writtenBuffer)
+        })
       },
     }
-    const first = preparePortableProfile({
+    const first = await preparePortableProfile({
       portableRoot: fixture.portableRoot, runId: 'phase4-startup-1', fsApi, logger: silentLogger,
     })
     assert.equal(first.state, 'failed')
-    assert.equal(fs.existsSync(interruptedStage), true)
-    interrupted = false
-    const promoted = preparePortableProfile({
+    assert.equal(fs.existsSync(first.stagePath), false)
+    const promoted = await preparePortableProfile({
       portableRoot: fixture.portableRoot, runId: 'phase4-startup-1', logger: silentLogger,
     })
     assert.equal(promoted.state, 'promoted')
-    assert.equal(fs.existsSync(interruptedStage), false)
     assert.equal(fs.existsSync(fixture.legacyProfileRoot), true)
     assert.equal(fs.existsSync(path.join(fixture.profileRoot, 'outside.txt')), false)
 
@@ -232,14 +257,14 @@ describe('fixture-only Phase 4 durability acceptance', () => {
     assert.deepEqual(await acknowledgePortableProfileStartup(promoted.token, { logger: silentLogger }), {
       state: 'typed-only-acknowledged',
     })
-    assert.equal(retireAcknowledgedPortableSource({
+    assert.equal((await retireAcknowledgedPortableSource({
       portableRoot: fixture.portableRoot, runId: 'phase4-startup-1', logger: silentLogger,
-    }).state, 'same-startup')
+    })).state, 'same-startup')
     assert.equal(fs.existsSync(fixture.legacyProfileRoot), true)
 
-    assert.equal(retireAcknowledgedPortableSource({
+    assert.equal((await retireAcknowledgedPortableSource({
       portableRoot: fixture.portableRoot, runId: 'phase4-startup-2', logger: silentLogger,
-    }).state, 'retired')
+    })).state, 'retired')
     assert.equal(fs.existsSync(fixture.legacyProfileRoot), false)
     assert.equal(fs.readFileSync(path.join(fixture.portableRoot, 'userData', 'outside.txt'), 'utf8'), 'must-not-copy')
 

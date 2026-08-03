@@ -64,7 +64,12 @@ interface MarkerDocument {
   directoryIdentity: PathIdentity
 }
 
-const reservations = new WeakSet<RunTempReservation>()
+interface ReservationMetadata {
+  tempAncestry: ReadonlyArray<{ path: string, identity: NodeIdentity }>
+  runAncestry: ReadonlyArray<{ path: string, identity: NodeIdentity }>
+}
+
+const reservationMetadata = new WeakMap<RunTempReservation, ReservationMetadata>()
 
 const inspect = async(targetPath: string) => await fs.lstat(targetPath, { bigint: true })
 const identityOf = (stat: Awaited<ReturnType<typeof inspect>>): PathIdentity => ({
@@ -73,6 +78,11 @@ const identityOf = (stat: Awaited<ReturnType<typeof inspect>>): PathIdentity => 
 })
 const sameIdentity = (left: PathIdentity, right: PathIdentity): boolean =>
   left.dev == right.dev && left.ino == right.ino
+const sameAncestry = (
+  left: ReadonlyArray<{ path: string, identity: NodeIdentity }>,
+  right: ReadonlyArray<{ path: string, identity: NodeIdentity }>,
+): boolean => left.length == right.length && left.every((entry, index) =>
+  pathKey(entry.path) == pathKey(right[index].path) && sameIdentity(entry.identity, right[index].identity))
 const markerPath = (runTempRoot: string): string => path.join(runTempRoot, OWNER_MARKER)
 const pathKey = (value: string): string => process.platform == 'win32' ? value.toLowerCase() : value
 
@@ -246,7 +256,10 @@ export const prepareRunTempLifecycle = async(input: {
       markerRaw: ownership.markerRaw,
       runId: ownership.runId,
     })
-    reservations.add(reservation)
+    reservationMetadata.set(reservation, {
+      tempAncestry: tempGuard.ancestry.map(entry => ({ path: entry.path, identity: { ...entry.identity } })),
+      runAncestry: runGuard.ancestry.map(entry => ({ path: entry.path, identity: { ...entry.identity } })),
+    })
     return reservation
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('run_temp_')) throw error
@@ -258,7 +271,23 @@ export const prepareRunTempLifecycle = async(input: {
 }
 
 const assertReservation = async(reservation: RunTempReservation): Promise<RunOwnership> => {
-  if (!reservations.has(reservation)) throw invalidOwner()
+  const metadata = reservationMetadata.get(reservation)
+  if (metadata == null) throw invalidOwner()
+  let tempGuard
+  let runGuard
+  try {
+    tempGuard = validateDirectDirectory(reservation.tempRoot)
+    runGuard = validateDirectDirectory(reservation.runTempRoot)
+    revalidateDirectDirectory(tempGuard)
+    revalidateDirectDirectory(runGuard)
+    if (!sameAncestry(tempGuard.ancestry, metadata.tempAncestry) ||
+      !sameAncestry(runGuard.ancestry, metadata.runAncestry)) throw invalidOwner()
+  } catch {
+    throw invalidOwner()
+  } finally {
+    if (runGuard != null) closeDirectDirectory(runGuard)
+    if (tempGuard != null) closeDirectDirectory(tempGuard)
+  }
   const root: RootOwnership = {
     tempRoot: reservation.tempRoot,
     tempRootIdentity: reservation.tempRootIdentity,

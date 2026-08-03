@@ -20,8 +20,9 @@ const loadManager = (fsPromises = fsp) => loadTsModule(modulePath, {
   '@main/utils/storagePaths': storagePaths,
   'node:fs/promises': fsPromises,
 })
-const loadLifecycle = () => loadTsModule(lifecyclePath, {
+const loadLifecycle = (fsPromises = fsp) => loadTsModule(lifecyclePath, {
   '@main/utils/storagePaths': loadTsModule(path.join(__dirname, '../../src/main/utils/storagePaths.ts')),
+  'node:fs/promises': fsPromises,
 })
 const sha256 = async(targetPath) => crypto.createHash('sha256').update(await fsp.readFile(targetPath)).digest('hex')
 const exists = async(targetPath) => await fsp.lstat(targetPath).then(() => true, () => false)
@@ -61,7 +62,7 @@ const createManager = async(fixture, fsPromises = fsp) => {
   const profileRoot = path.join(fixture.path, 'profile')
   const tempRoot = path.join(fixture.path, 'temp')
   await fsp.mkdir(tempRoot, { recursive: true })
-  const { prepareRunTempLifecycle, createRunTempHandle } = loadLifecycle()
+  const { prepareRunTempLifecycle, createRunTempHandle } = loadLifecycle(fsPromises)
   const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
   const runTempRoot = reservation.runTempRoot
   const runTemp = await createRunTempHandle({ reservation })
@@ -73,6 +74,25 @@ const createManager = async(fixture, fsPromises = fsp) => {
     runTemp,
   }
 }
+
+test('prepares and adopts run temp through the manager injected filesystem', async() => {
+  const fixture = createTestStorageRoot('theme-lifecycle-injected-fs')
+  try {
+    let runDirectoryCreates = 0
+    const injectedFs = {
+      ...fsp,
+      async mkdir(targetPath, options) {
+        if (path.basename(String(targetPath)).startsWith('run-')) runDirectoryCreates++
+        return fsp.mkdir(targetPath, options)
+      },
+    }
+    await createManager(fixture, injectedFs)
+
+    assert.equal(runDirectoryCreates, 1)
+  } finally {
+    fixture.cleanup()
+  }
+})
 
 const promote = async(manager, staged) => manager.promoteThemeImage(staged, async promoted => promoted)
 
@@ -303,7 +323,7 @@ test('pins Linux staging creation to the owned child across a parent swap and re
         if (String(targetPath) == stagingChild && String(flags) == 'r') {
           return trackDirectoryHandle(await fsp.open(targetPath, flags, mode), descriptorState)
         }
-        if (!swapped && String(flags) == 'wx') {
+        if (!swapped && stagingChild != null && String(flags) == 'wx') {
           swapped = true
           await fsp.rename(stagingChild, parkedChild)
           await fsp.symlink(outsideChild, stagingChild, originalPlatform == 'win32' ? 'junction' : 'dir')

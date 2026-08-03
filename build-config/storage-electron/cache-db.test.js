@@ -303,6 +303,31 @@ describe('guarded cache database', () => {
     assert.deepEqual(appFingerprint(appDbPath), before)
   })
 
+  it('does not adopt a cache root replaced by a final pathname lookup', async() => {
+    const { fixture, cacheRoot } = await createAppFixture({ prefix: 'cache-final-root-lookup' })
+    const parked = path.join(fixture.path, 'parked-cache-root')
+    fs.mkdirSync(cacheRoot)
+    let swapped = false
+    const fileSystem = {
+      ...fs,
+      lstatSync(targetPath, options) {
+        const caller = new Error().stack?.split('\n').at(2) ?? ''
+        if (path.resolve(String(targetPath)) == path.resolve(cacheRoot) && caller.includes('prepareCacheRoot')) {
+          swapped = true
+          fs.renameSync(cacheRoot, parked)
+          fs.mkdirSync(cacheRoot)
+        }
+        return fs.lstatSync(targetPath, options)
+      },
+    }
+    const service = createCacheService({ fileSystem })
+
+    assert.deepEqual(await service.openCacheDatabase(), {
+      status: 'created', schemaVersion: 1, diagnostic: null,
+    })
+    assert.equal(swapped, false)
+  })
+
   it('creates schema version 1 with the exact ownership tables, indexes, foreign keys, and ledger', async() => {
     const { cacheRoot, appDbPath } = await createAppFixture()
     const before = appFingerprint(appDbPath)

@@ -21,6 +21,25 @@ const loadLifecycle = (fsPromises = fsp) => loadTsModule(modulePath, {
 
 const exists = async(targetPath) => await fsp.lstat(targetPath).then(() => true, () => false)
 
+test('rejects adoption after the prepared temp ancestry is replaced around the same run node', async() => {
+  const fixture = createTestStorageRoot('temp-reservation-ancestry')
+  try {
+    const container = path.join(fixture.path, 'container')
+    const parked = path.join(fixture.path, 'parked-container')
+    const tempRoot = path.join(container, 'temp')
+    await fsp.mkdir(tempRoot, { recursive: true })
+    const { prepareRunTempLifecycle, createRunTempHandle } = loadLifecycle()
+    const reservation = await prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
+    await fsp.rename(container, parked)
+    await fsp.mkdir(container)
+    await fsp.rename(path.join(parked, 'temp'), tempRoot)
+
+    await assert.rejects(createRunTempHandle({ reservation }), /run_temp_owner_invalid/)
+  } finally {
+    fixture.cleanup()
+  }
+})
+
 test('adopts only the bootstrap-created run directory and owner marker', async() => {
   const fixture = createTestStorageRoot('temp-reservation-adoption')
   try {

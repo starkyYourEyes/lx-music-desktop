@@ -33,21 +33,29 @@ export const bootstrap = async(
   global.runTempReservation = null
   if (portablePaths != null) {
     const startupRunId = crypto.randomUUID()
-    const retirement = retireAcknowledgedPortableSource({
-      portableRoot: portablePaths.appDataPath,
-      runId: startupRunId,
-      logger: console,
-    })
+    let retirement
+    let preparation
+    try {
+      retirement = retireAcknowledgedPortableSource({
+        portableRoot: portablePaths.appDataPath,
+        runId: startupRunId,
+        logger: console,
+      })
+      preparation = preparePortableProfile({
+        portableRoot: portablePaths.appDataPath,
+        runId: startupRunId,
+        logger: console,
+      })
+    } catch (error) {
+      console.error('Portable profile validation failed; startup has been aborted.', error)
+      electronApp.exit(1)
+      return
+    }
     if (retirement.state == 'failed') {
       console.error('Portable profile source retirement failed; startup has been aborted.', retirement.error)
       electronApp.exit(1)
       return
     }
-    const preparation = preparePortableProfile({
-      portableRoot: portablePaths.appDataPath,
-      runId: startupRunId,
-      logger: console,
-    })
     if (preparation.state == 'failed') {
       console.error('Portable profile migration failed; startup has been aborted.', preparation.error)
       electronApp.exit(1)

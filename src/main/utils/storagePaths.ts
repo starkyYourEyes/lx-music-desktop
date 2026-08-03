@@ -4,6 +4,7 @@ import { PROJECT_IDENTITY } from '../../common/projectIdentity'
 import {
   closeDirectDirectory,
   createDirectChildDirectory,
+  revalidateDirectDirectory,
   validateDirectDirectory,
   type DirectDirectoryGuard,
 } from '../storage/directDirectory'
@@ -144,35 +145,49 @@ const ensureDirectDirectory = (directoryPath: string): DirectDirectoryGuard => {
   }
 }
 
-const validateAndCreateRequiredRoots = async(resolved: ResolvedStoragePaths): Promise<void> => {
+const closeGuards = (guards: DirectDirectoryGuard[]): void => {
+  for (const guard of guards.reverse()) closeDirectDirectory(guard)
+}
+
+const validateAndCreateRequiredRoots = async(resolved: ResolvedStoragePaths): Promise<DirectDirectoryGuard[]> => {
   const roots = [resolved.profileRoot, resolved.tempRoot, resolved.runtimeRoot, resolved.sessionDataRoot]
-  for (const root of roots) {
-    const guard = ensureDirectDirectory(root)
-    closeDirectDirectory(guard)
+  const guards: DirectDirectoryGuard[] = []
+  try {
+    for (const root of roots) guards.push(ensureDirectDirectory(root))
+    return guards
+  } catch (error) {
+    closeGuards(guards)
+    throw error
   }
 }
 
-const validateOptionalRootIfPresent = async(rootPath: string): Promise<void> => {
+const validateOptionalRootIfPresent = async(rootPath: string): Promise<DirectDirectoryGuard | null> => {
   try {
     fs.lstatSync(rootPath, { bigint: true })
   } catch (error) {
-    if (isMissing(error)) return
+    if (isMissing(error)) return null
     throw error
   }
-  const guard = validateDirectDirectory(rootPath)
-  closeDirectDirectory(guard)
+  return validateDirectDirectory(rootPath)
 }
 
 export const initializeStoragePaths = async(input: StoragePathResolutionInput): Promise<InitializedStoragePaths> => {
   const resolved = resolveStoragePaths(input)
-  await validateAndCreateRequiredRoots(resolved)
-  await validateOptionalRootIfPresent(resolved.cacheRoot)
-  await validateOptionalRootIfPresent(resolved.backupsRoot)
-  const { prepareRunTempLifecycle, scavengeRunTempRoots } = await import('./tempLifecycle')
-  await scavengeRunTempRoots(resolved.tempRoot)
-  const runTempReservation = await prepareRunTempLifecycle({ tempRoot: resolved.tempRoot })
-  return {
-    paths: Object.freeze({ ...resolved, runTempRoot: runTempReservation.runTempRoot }),
-    runTempReservation,
+  const guards = await validateAndCreateRequiredRoots(resolved)
+  try {
+    const cacheGuard = await validateOptionalRootIfPresent(resolved.cacheRoot)
+    if (cacheGuard != null) guards.push(cacheGuard)
+    const backupsGuard = await validateOptionalRootIfPresent(resolved.backupsRoot)
+    if (backupsGuard != null) guards.push(backupsGuard)
+    const { prepareRunTempLifecycle, scavengeRunTempRoots } = await import('./tempLifecycle')
+    await scavengeRunTempRoots(resolved.tempRoot)
+    const runTempReservation = await prepareRunTempLifecycle({ tempRoot: resolved.tempRoot })
+    for (const guard of guards) revalidateDirectDirectory(guard)
+    return {
+      paths: Object.freeze({ ...resolved, runTempRoot: runTempReservation.runTempRoot }),
+      runTempReservation,
+    }
+  } finally {
+    closeGuards(guards)
   }
 }

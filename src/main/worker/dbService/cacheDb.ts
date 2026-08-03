@@ -100,7 +100,7 @@ export interface CacheDatabaseService extends CacheWorkerLifecycle, CacheReposit
 interface CacheRootOwnership {
   path: string
   realPath: string
-  identity: SqliteFileIdentity
+  identity: { dev: string, ino: string }
 }
 
 interface CacheArtifactSnapshot {
@@ -246,7 +246,7 @@ const prepareCacheRoot = (
     }
     revalidateDirectDirectory(parent)
     revalidateDirectDirectory(root)
-    return { path: resolved, realPath: root.realPath, identity: sqliteFileIdentity(fileSystem.lstatSync(resolved)) }
+    return { path: resolved, realPath: root.realPath, identity: root.identity }
   } catch (error) {
     throw fixedError('cache_target_invalid')
   } finally {
@@ -260,9 +260,9 @@ const validateCacheRoot = (
   fileSystem: typeof fs,
 ): boolean => {
   try {
-    const stats = fileSystem.lstatSync(root.path)
+    const stats = fileSystem.lstatSync(root.path, { bigint: true })
     return !stats.isSymbolicLink() && stats.isDirectory() &&
-      sameSqliteFileIdentity(sqliteFileIdentity(stats), root.identity) &&
+      String(stats.dev) == root.identity.dev && String(stats.ino) == root.identity.ino &&
       fileSystem.realpathSync(root.path) == root.realPath
   } catch {
     return false

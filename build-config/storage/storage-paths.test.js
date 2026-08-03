@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
+const fsp = require('node:fs/promises')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
@@ -141,6 +142,38 @@ describe('storage path contract', () => {
     assert.equal(paths.cacheRoot, originalCacheRoot)
   })
 
+  it('rejects a required root replacement after reservation preparation', async() => {
+    const root = createFixture('storage-path-publication-revalidation')
+    const profileRoot = path.join(root, 'profile')
+    const parkedProfile = path.join(root, 'parked-profile')
+    const applicationCacheRoot = path.join(root, 'application-cache')
+    const tempBase = path.join(root, 'os-temp')
+    fs.mkdirSync(profileRoot)
+    fs.mkdirSync(applicationCacheRoot)
+    fs.mkdirSync(tempBase)
+    const originalMkdir = fsp.mkdir
+    let swapped = false
+    fsp.mkdir = async(targetPath, options) => {
+      const result = await originalMkdir(targetPath, options)
+      if (!swapped && path.basename(String(targetPath)).startsWith('run-')) {
+        swapped = true
+        fs.renameSync(profileRoot, parkedProfile)
+        fs.mkdirSync(profileRoot)
+      }
+      return result
+    }
+    const { initializeStoragePaths } = require(storagePathsModule)
+    try {
+      await assert.rejects(
+        initializeStoragePaths({ profileRoot, applicationCacheRoot, tempBase, portableRoot: null }),
+        /direct_directory_changed/,
+      )
+      assert.equal(swapped, true)
+    } finally {
+      fsp.mkdir = originalMkdir
+    }
+  })
+
   it('rejects a parent identity swap during direct-child creation', () => {
     const root = createFixture('direct-directory-parent-swap')
     const parentPath = path.join(root, 'parent')
@@ -230,6 +263,33 @@ describe('storage path contract', () => {
 })
 
 describe('early Electron bootstrap', () => {
+  it('rejects profile, temp, and portable junction roots before any app.setPath call', async(t) => {
+    for (const linkedRoot of ['profile', 'temp', 'portable']) {
+      await t.test(linkedRoot, async() => {
+        const root = createFixture(`storage-portable-linked-${linkedRoot}`)
+        const portableRoot = path.join(root, 'portable')
+        const outside = createFixture(`storage-portable-linked-${linkedRoot}-outside`)
+        const calls = []
+        if (linkedRoot == 'portable') {
+          fs.symlinkSync(outside, portableRoot, process.platform == 'win32' ? 'junction' : 'dir')
+        } else {
+          fs.mkdirSync(portableRoot)
+          fs.symlinkSync(outside, path.join(portableRoot, linkedRoot), process.platform == 'win32' ? 'junction' : 'dir')
+        }
+        const fakeElectron = {
+          getPath(name) { return { exe: path.join(root, 'app.exe'), temp: path.join(root, 'temp') }[name] },
+          setPath(name) { calls.push(name) },
+          exit(code) { calls.push(`exit:${code}`) },
+        }
+        const { bootstrap } = require(bootstrapModule)
+
+        await bootstrap(fakeElectron, async() => { calls.push('application') }, { platform: 'win32', env: {} })
+
+        assert.deepEqual(calls, ['exit:1'])
+      })
+    }
+  })
+
   it('rejects existing linked portable profile when no legacy source exists', async(t) => {
     const root = createFixture('storage-portable-linked-profile')
     const portableRoot = path.join(root, 'portable')

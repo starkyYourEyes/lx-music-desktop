@@ -61,6 +61,7 @@
     "test:user-api": "node --test build-config/user-api/*.test.js",
     "test:playback-source-setting": "node --test build-config/playback-source-setting.test.js",
     "test:storage": "node --test build-config/storage/*.test.js",
+    "test:storage:portable": "node --test build-config/storage/portable-filesystem.test.js build-config/storage/cache-ownership.test.js",
     "test:storage:electron": "cross-env ELECTRON_RUN_AS_NODE=1 electron --test build-config/storage-electron/*.test.js",
     "test:packaged-app": "node --test build-config/packaged-app.test.js",
     "build:renderer": "cross-env NODE_ENV=production webpack --config build-config/renderer/webpack.config.prod.js --progress",

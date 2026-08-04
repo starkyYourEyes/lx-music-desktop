@@ -347,7 +347,7 @@ const collectAliasBindings = (sourceFile, bindings) => {
         }
         const property = element.propertyName == null
           ? (typescript.isIdentifier(element.name) ? element.name.text : null)
-          : staticString(element.propertyName, bindings)
+          : staticPropertyName(element.propertyName, bindings)
         if (property == null) {
           bind(element.name, { ...binding, initializer: null, descriptors: null, properties: [] })
           continue
@@ -718,6 +718,16 @@ const analyzeOwnershipFiles = files => {
       if (!typescript.isCallExpression(node)) return
       const callee = descriptorsForExpression(node.expression, aliases, bindings)
       const calleeValues = [...callee]
+      if (record.kinds.includes('source') && calleeValues.some(value => [
+        'module:fs.link',
+        'module:fs.linkSync',
+        'module:fs/promises.link',
+        'module:node:fs.link',
+        'module:node:fs.linkSync',
+        'module:node:fs/promises.link',
+      ].includes(value))) {
+        addFinding('production-hard-link', record, node)
+      }
       const pathCall = calleeValues.some(value => value == 'module:path.join' || value == 'module:path.resolve')
       if (calleeValues.some(value => value == 'module:os.tmpdir')) {
         addFinding('migrated-producer-temp-root', record, node)
@@ -784,8 +794,53 @@ const analyzeOwnershipFiles = files => {
 const ownershipAnalysis = analyzeOwnershipFiles(ownershipInventory)
 const isExactTestFixtureOwner = ({ code, file }) => exactTestFixtureOwners.get(code)?.has(file) ?? false
 const ownershipFindings = ownershipAnalysis.filter(finding => !isExactTestFixtureOwner(finding))
+const analyzeProductionHardLinks = projectRoot => analyzeOwnershipFiles(readOwnershipInventory(projectRoot, [
+  { kind: 'source', path: 'src' },
+])).filter(({ code }) => code == 'production-hard-link')
 
 describe('structured ownership analyzer regressions', () => {
+  it('finds direct, computed, destructured, and aliased production hard-link calls but allows test race fixtures', () => {
+    const findings = analyzeOwnershipFiles([
+      {
+        file: 'src/main/direct.ts',
+        kinds: ['source'],
+        text: "import fs from 'node:fs'; fs.link('source', 'target', () => {})",
+      },
+      {
+        file: 'src/main/computed.ts',
+        kinds: ['source'],
+        text: "const fs = require('node:fs'); fs['link' + 'Sync']('source', 'target')",
+      },
+      {
+        file: 'src/main/destructured.ts',
+        kinds: ['source'],
+        text: "const { link: createLink } = require('fs'); createLink('source', 'target', () => {})",
+      },
+      {
+        file: 'src/main/promises.ts',
+        kinds: ['source'],
+        text: "import { link as createLink } from 'node:fs/promises'; createLink('source', 'target')",
+      },
+      {
+        file: 'src/main/aliased.ts',
+        kinds: ['source'],
+        text: "import * as fs from 'node:fs'; const createLink = fs.linkSync; createLink('source', 'target')",
+      },
+      {
+        file: 'build-config/storage/hard-link-race.test.js',
+        kinds: ['test'],
+        text: "const fs = require('node:fs'); fs.linkSync('source', 'target')",
+      },
+    ])
+    assert.deepEqual(findings.filter(({ code }) => code == 'production-hard-link'), [
+      { code: 'production-hard-link', file: 'src/main/aliased.ts', line: 1 },
+      { code: 'production-hard-link', file: 'src/main/computed.ts', line: 1 },
+      { code: 'production-hard-link', file: 'src/main/destructured.ts', line: 1 },
+      { code: 'production-hard-link', file: 'src/main/direct.ts', line: 1 },
+      { code: 'production-hard-link', file: 'src/main/promises.ts', line: 1 },
+    ])
+  })
+
   it('finds prohibited direct, aliased, and computed cache APIs', () => {
     const findings = analyzeOwnershipFiles([{
       file: 'src/main/worker/dbService/modules/index.ts',
@@ -1392,6 +1447,11 @@ describe('structured ownership analyzer regressions', () => {
 })
 
 describe('Phase 4 whole-source ownership gate', () => {
+  it('contains no production hard-link operation under src', () => {
+    const findings = analyzeProductionHardLinks(root)
+    assert.deepEqual(findings, [])
+  })
+
   it('limits executable test path ownership to the exact fixture corpus', () => {
     const declared = [...exactTestFixtureOwners].flatMap(([code, files]) =>
       [...files].map(file => ({ code, file })),

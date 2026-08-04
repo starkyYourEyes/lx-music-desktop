@@ -32,3 +32,20 @@ export type SearchHistoryCommandV1 =
   | { version: 1, action: 'record', term: string, usedAtMs: number }
   | { version: 1, action: 'remove', term: string }
   | { version: 1, action: 'clear' }
+
+export type StorageCatalogPreferenceSetRequest =
+  | { type: 'catalog_preference.set', section: 'leaderboard', value: CatalogPreferencesV1['leaderboard'] }
+  | { type: 'catalog_preference.set', section: 'songList', value: CatalogPreferencesV1['songList'] }
+  | { type: 'catalog_preference.set', section: 'search', value: CatalogPreferencesV1['search'] }
+
+export type StorageStateRequest =
+  | { type: 'catalog_preferences.get' }
+  | StorageCatalogPreferenceSetRequest
+  | { type: 'local_state.get' }
+  | { type: 'local_state.set', update: LocalStateUpdateV1 }
+  | { type: 'playlist_metadata.get' }
+  | { type: 'playlist_metadata.mutate', command: PlaylistMetadataCommandV1 }
+  | { type: 'search_history.get' }
+  | { type: 'search_history.mutate', command: SearchHistoryCommandV1 }
+
+export type StorageStateResponse = CatalogPreferencesV1 | LocalStateSnapshotV1 | LX.List.ListUpdateInfo | string[]

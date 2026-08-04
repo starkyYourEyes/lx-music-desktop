@@ -1,9 +1,5 @@
 import { STORE_NAMES } from '@common/constants'
-import {
-  WIN_MAIN_RENDERER_EVENT_NAME,
-  type StorageStateRequest,
-  type StorageStateResponse,
-} from '@common/ipcNames'
+import { WIN_MAIN_RENDERER_EVENT_NAME } from '@common/ipcNames'
 import { mainHandle } from '@common/mainIpc'
 import type {
   CatalogPreferencesV1,
@@ -11,6 +7,9 @@ import type {
   LocalStateUpdateV1,
   PlaylistMetadataCommandV1,
   SearchHistoryCommandV1,
+  StorageCatalogPreferenceSetRequest,
+  StorageStateRequest,
+  StorageStateResponse,
 } from '@common/storage/stateContracts'
 import {
   parseCatalogPreferences,
@@ -88,8 +87,6 @@ const parseCatalogPreferenceSetRequest = (request: Record<string, unknown>): Sto
   }
   return request as StorageCatalogPreferenceSetRequest
 }
-
-type StorageCatalogPreferenceSetRequest = Extract<StorageStateRequest, { type: 'catalog_preference.set' }>
 
 export const createStorageStateDispatcher = (deps: StorageStateHandlerDependencies) => {
   let catalogWriteQueue = Promise.resolve()

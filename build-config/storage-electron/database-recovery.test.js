@@ -383,6 +383,7 @@ describe('guarded online backup', () => {
     const root = tempDir('lx-recovery-unique-backup-')
     const backupsRoot = path.join(root, 'backups')
     const db = createV2Database(path.join(root, 'source.db'))
+    db.exec('CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)')
     const snapshot = db.serialize()
     assert.equal(snapshot[18], 2)
     assert.equal(snapshot[19], 2)

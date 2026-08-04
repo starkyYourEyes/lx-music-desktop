@@ -102,13 +102,112 @@ git add build-config/main/webpack.config.prod.js build-config/main/webpack-worke
 git commit -m "fix: preserve portable environment in main bundle"
 ```
 
-### Task 2: Rebuild and Prove Real Portable First and Second Launches
+### Task 2: Keep the Renderer Alive During Default Window Shutdown
+
+**Files:**
+- Modify: `src/main/modules/winMain/main.ts`
+- Test: `build-config/storage/session-registry.test.js`
+
+**Interfaces:**
+- Preserves: tray-enabled Close hides the window; `global.lx.isSkipTrayQuit == true` permits the final close.
+- Produces: tray-disabled title-bar Close prevents initial renderer destruction, hides the window, and requests `app.quit()` while renderer IPC is alive.
+
+- [ ] **Step 1: Write the failing main-window lifetime assertions**
+
+Extend the existing `main window construction waits for readiness and releases its matching token on close` test harness:
+
+```js
+let quitCalls = 0
+let closePreventCalls = 0
+let mainWindowCloseCalls = 0
+
+hide() { this.hideCalls = (this.hideCalls ?? 0) + 1 }
+setProgressBar() {}
+emit(name, ...args) { this.listeners.get(name)?.(...args) }
+```
+
+Add `app: { quit() { quitCalls++ } }` to the Electron stub. Add
+`'tray.enable': false` and `isSkipTrayQuit: false` to `global.lx`, and count
+`event_app.main_window_close()` calls. After readiness and ownership assertions,
+add:
+
+```js
+windows[0].emit('close', { preventDefault() { closePreventCalls++ } })
+assert.equal(closePreventCalls, 1)
+assert.equal(windows[0].hideCalls, 1)
+assert.equal(quitCalls, 1)
+assert.equal(mainWindowCloseCalls, 0)
+
+global.lx.isSkipTrayQuit = true
+windows[0].emit('close', { preventDefault() { closePreventCalls++ } })
+assert.equal(closePreventCalls, 1)
+assert.equal(windows[0].hideCalls, 1)
+assert.equal(quitCalls, 1)
+assert.equal(mainWindowCloseCalls, 1)
+```
+
+Retain the existing `closed` event and session-token release assertion.
+
+- [ ] **Step 2: Run the focused test and verify RED**
+
+Run:
+
+```powershell
+$env:LX_TEST_STORAGE_ROOT=(Resolve-Path '.superpowers\t').Path
+node --test --test-name-pattern "main window construction" build-config/storage/session-registry.test.js
+```
+
+Expected: exit 1 because the current tray-disabled close allows renderer
+destruction and never calls `preventDefault()`, `hide()`, or `app.quit()` from
+the window handler.
+
+- [ ] **Step 3: Route the first tray-disabled close through graceful quit**
+
+In `src/main/modules/winMain/main.ts`, import `app` from Electron and place this
+branch first in the main-window `close` listener:
+
+```ts
+if (!global.lx.isSkipTrayQuit && !global.lx.appSetting['tray.enable']) {
+  event.preventDefault()
+  browserWindow!.hide()
+  app.quit()
+  return
+}
+```
+
+Keep the existing final-close notification branch and tray-enabled hide branch
+unchanged. Do not weaken renderer shutdown flusher failures.
+
+- [ ] **Step 4: Run focused and adjacent GREEN verification**
+
+Run:
+
+```powershell
+$env:LX_TEST_STORAGE_ROOT=(Resolve-Path '.superpowers\t').Path
+node --test --test-name-pattern "main window construction" build-config/storage/session-registry.test.js
+node --test build-config/storage/session-registry.test.js build-config/storage/startup-coordinator.test.js build-config/storage/playback-cutover.test.js
+npx eslint --ext .ts,.js -f stylish src/main/modules/winMain/main.ts build-config/storage/session-registry.test.js
+npm run build:main
+git diff --check
+```
+
+Expected: every command exits 0; the focused test proves the first close keeps
+the renderer alive, and adjacent storage shutdown tests retain failure safety.
+
+- [ ] **Step 5: Commit the close-order fix**
+
+```powershell
+git add src/main/modules/winMain/main.ts build-config/storage/session-registry.test.js
+git commit -m "fix: flush storage before closing main window"
+```
+
+### Task 3: Rebuild and Prove Real Portable First and Second Launches
 
 **Files:**
 - Create: `docs/superpowers/reviews/2026-08-05-portable-first-launch-bootstrap.md`
 
 **Interfaces:**
-- Consumes: the reviewed Task 1 production bundle and `pack:win:portable:x64`.
+- Consumes: the reviewed Task 1 production bundle, reviewed Task 2 close order, and `pack:win:portable:x64`.
 - Produces: a new artifact SHA-256, complete source/package evidence, first/second-launch evidence, and a running verified portable application.
 
 - [ ] **Step 1: Run the complete source matrix from the fixed commit**
@@ -131,9 +230,19 @@ git diff --check
 
 Expected: every command exits 0. Record platform-conditional skips as skips. Give full lint and build commands at least 300 seconds before treating them as timed out.
 
-- [ ] **Step 2: Build, inspect, and fingerprint a new x64 portable artifact**
+- [ ] **Step 2: Preserve failed-run evidence, then build and fingerprint a new artifact**
 
-Require `build\portable` and target-app processes to be absent, then run:
+If `build\portable` exists from the blocked clean-shutdown attempt, resolve and
+verify that it is exactly the direct `portable` child of the repository's
+`build` directory. Move it, without deletion, to the initially absent path:
+
+```text
+.superpowers\evidence\2026-08-05-pre-clean-shutdown-fix-portable
+```
+
+Create only the `.superpowers\evidence` parent if needed. Stop if the source or
+destination identity is unexpected. Confirm `build\portable` and target-app
+processes are then absent, and run:
 
 ```powershell
 npm run pack:win:portable:x64
@@ -142,8 +251,13 @@ Get-Item build\starky-lx-music-desktop-v3.0.0-x64-portable.exe
 Get-FileHash build\starky-lx-music-desktop-v3.0.0-x64-portable.exe -Algorithm SHA256
 ```
 
-Expected: packaging exits 0, packaged checks pass 2/2, and the artifact has a new modification time and SHA-256 distinct from the blocked artifact
-`937C05AF1EAA5F6FED1D6B9C208A031FF4ABDF3CE023404BA56CD7DDAA9FF4E3`.
+Expected: packaging exits 0, packaged checks pass 2/2, and the artifact has a
+new modification time and SHA-256 distinct from both blocked artifacts:
+
+```text
+937C05AF1EAA5F6FED1D6B9C208A031FF4ABDF3CE023404BA56CD7DDAA9FF4E3
+11FD8058213BC3558C593CEED9C872D45BC9F16A44B34CAE544ACA9C0BFC0186
+```
 
 - [ ] **Step 3: Freeze the new installed-data baseline**
 
@@ -184,7 +298,12 @@ If any installed sentinel changes, stop without attempting a second launch.
 
 - [ ] **Step 5: Prove clean shutdown and second startup**
 
-Quit through the real application UI or tray exit path. Require portable run-state to record a clean shutdown and the owned run-temp reservation to be reclaimed. Relaunch the same artifact, require the same schema-7 database and cache paths, confirm `backups` remains absent, and inspect the window again for startup errors. Leave this verified second instance running and record its main PID.
+Click the real title-bar Close button with the default tray-disabled setting.
+Require portable run-state to record a clean shutdown and the owned run-temp
+reservation to be reclaimed. Relaunch the same artifact, require the same
+schema-7 database and cache paths, confirm `backups` remains absent, and inspect
+the window again for startup errors. Leave this verified second instance
+running and record its main PID.
 
 - [ ] **Step 6: Write and commit complete verification evidence**
 

@@ -330,11 +330,11 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
         .then(async() => options.musicInfo.source == 'local'
           ? null
           : options.adapter.authorizeMusicUrl({
-              apiId,
-              musicInfo: options.musicInfo,
-              quality: options.requestedQuality,
-              signal: sessionController.signal,
-            }))
+            apiId,
+            musicInfo: options.musicInfo,
+            quality: options.requestedQuality,
+            signal: sessionController.signal,
+          }))
         .then(async key => key == null ? null : options.cache.lookup(key))
         .then(
           hit => options.clock.now() < lookupDeadlineAt ? hit : null,
@@ -519,7 +519,7 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
             url: resolved.url,
             ...(authorizedKey == null
               ? {}
-              : { cacheKey: { ...authorizedKey, quality: resolved.quality } as AuthorizedMusicUrlKeyV1 }),
+              : { cacheKey: { ...authorizedKey, quality: resolved.quality } satisfies AuthorizedMusicUrlKeyV1 }),
             deadlineAt: attempt.deadlineAt,
           })
         } catch (error) {

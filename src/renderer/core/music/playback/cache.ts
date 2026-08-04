@@ -155,7 +155,7 @@ export const createPlaybackUrlCache = (deps: PlaybackUrlCacheDependencies): Play
         return hit(candidateKey, quality, memoryUrl, false)
       }
 
-      const url = await enqueueKeyOperation(keyId, () => deps.read(candidateKey))
+      const url = await enqueueKeyOperation(keyId, async() => deps.read(candidateKey))
       if (startingGeneration != cacheGeneration) return null
       if (tombstones.has(keyId)) continue
       if ((revisions.get(keyId) ?? 0) != revision) {

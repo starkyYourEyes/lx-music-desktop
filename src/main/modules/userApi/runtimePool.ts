@@ -231,7 +231,9 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   // eslint-disable-next-line @typescript-eslint/promise-function-async
   const attemptCreationRetirement = (retirement: RuntimeCreationRetirementState): Promise<void> => {
     if (retirement.promise) {
-      return retirement.promise.then(() => attemptCreationRetirement(retirement))
+      return retirement.promise.then(async() => {
+        await attemptCreationRetirement(retirement)
+      })
     }
     let attempt!: Promise<void>
     attempt = Promise.resolve().then(async() => {
@@ -622,10 +624,9 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     if (recordRetiring) await recordRetiring
     if (creationRetirement) {
       if (creating && creationSettled && creationRetirement.failure != null) {
-        throw creationRetirement.failure
+        return Promise.reject(creationRetirement.failure)
       }
       await attemptCreationRetirement(creationRetirement)
-      return
     }
   }
 

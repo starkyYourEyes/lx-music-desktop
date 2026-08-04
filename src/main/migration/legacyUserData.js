@@ -6,6 +6,7 @@ const {
   closeDirectDirectory,
   createDirectChildDirectory,
   observeDirectChild,
+  revalidateDirectDirectory,
   validateDirectDirectory,
 } = require('../storage/directDirectory')
 const {
@@ -32,6 +33,53 @@ const getPortableUserDataPaths = ({ platform, executablePath, pathExists = fs.ex
   return {
     appDataPath,
     userDataPath: path.win32.join(appDataPath, 'userData'),
+  }
+}
+
+const preparePortableUserDataPaths = ({
+  platform,
+  executablePath,
+  portableExecutableDir,
+  fsApi = fs,
+}) => {
+  if (platform != 'win32') return null
+  if (portableExecutableDir == null) {
+    const paths = getPortableUserDataPaths({
+      platform,
+      executablePath,
+      pathExists: fsApi.existsSync,
+    })
+    if (paths == null) return null
+    const root = validateDirectDirectory(paths.appDataPath, { fsApi, pathApi: path.win32 })
+    try {
+      revalidateDirectDirectory(root)
+      return paths
+    } finally {
+      closeDirectDirectory(root)
+    }
+  }
+  if (typeof portableExecutableDir != 'string' || portableExecutableDir.length == 0 ||
+    !path.win32.isAbsolute(portableExecutableDir)) {
+    throw new Error('portable_executable_directory_invalid')
+  }
+
+  const launcherPath = path.win32.resolve(portableExecutableDir)
+  const launcher = validateDirectDirectory(launcherPath, { fsApi, pathApi: path.win32 })
+  let portable
+  try {
+    portable = createDirectChildDirectory(launcher, 'portable', { mode: 0o700 })
+    revalidateDirectDirectory(launcher)
+    revalidateDirectDirectory(portable)
+    return Object.freeze({
+      appDataPath: portable.path,
+      userDataPath: path.win32.join(portable.path, 'userData'),
+    })
+  } finally {
+    try {
+      if (portable != null) closeDirectDirectory(portable)
+    } finally {
+      closeDirectDirectory(launcher)
+    }
   }
 }
 
@@ -170,4 +218,5 @@ module.exports = {
   MIGRATION_MARKER_FILE,
   getPortableUserDataPaths,
   migrateLegacyUserData,
+  preparePortableUserDataPaths,
 }

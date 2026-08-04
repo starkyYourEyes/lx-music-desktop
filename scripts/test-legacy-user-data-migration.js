@@ -9,6 +9,7 @@ const {
   MIGRATION_MARKER_FILE,
   getPortableUserDataPaths,
   migrateLegacyUserData,
+  preparePortableUserDataPaths,
 } = require('../src/main/migration/legacyUserData')
 
 const fixtureByPath = new Map()
@@ -647,6 +648,65 @@ test('portable mode resolves package-local paths without invoking migration', ()
     executablePath: '/opt/lx/LX Music',
     pathExists: () => true,
   }), null)
+})
+
+test('creates a direct portable root from the wrapper directory on first launch', t => {
+  const launcherRoot = makeRoot()
+  t.after(() => cleanupRoot(launcherRoot))
+  const extractedExecutable = path.join(launcherRoot, 'nsis-temp', 'app.exe')
+
+  const result = preparePortableUserDataPaths({
+    platform: 'win32',
+    executablePath: extractedExecutable,
+    portableExecutableDir: launcherRoot,
+  })
+
+  assert.deepEqual(result, {
+    appDataPath: path.join(launcherRoot, 'portable'),
+    userDataPath: path.join(launcherRoot, 'portable', 'userData'),
+  })
+  const stat = fs.lstatSync(result.appDataPath)
+  assert.equal(stat.isDirectory(), true)
+  assert.equal(stat.isSymbolicLink(), false)
+})
+
+test('rejects invalid portable launcher directories without creating a portable child', t => {
+  const launcherRoot = makeRoot()
+  t.after(() => cleanupRoot(launcherRoot))
+
+  for (const portableExecutableDir of ['', 'relative', 'C:drive-relative']) {
+    assert.throws(() => preparePortableUserDataPaths({
+      platform: 'win32',
+      executablePath: path.join(launcherRoot, 'nsis-temp', 'app.exe'),
+      portableExecutableDir,
+    }), /portable_executable_directory_invalid/)
+    assert.equal(fs.existsSync(path.join(launcherRoot, 'portable')), false)
+  }
+})
+
+test('rejects linked launcher roots and portable children', t => {
+  const launcherRoot = makeRoot()
+  t.after(() => cleanupRoot(launcherRoot))
+  const linkedLauncherTarget = path.join(launcherRoot, 'linked-launcher-target')
+  const linkedLauncher = path.join(launcherRoot, 'linked-launcher')
+  fs.mkdirSync(linkedLauncherTarget)
+  if (!createDirectoryLink(t, linkedLauncherTarget, linkedLauncher)) return
+
+  assert.throws(() => preparePortableUserDataPaths({
+    platform: 'win32',
+    executablePath: path.join(launcherRoot, 'nsis-temp', 'app.exe'),
+    portableExecutableDir: linkedLauncher,
+  }), /direct_directory_invalid/)
+
+  const linkedPortableTarget = path.join(launcherRoot, 'linked-portable-target')
+  fs.mkdirSync(linkedPortableTarget)
+  if (!createDirectoryLink(t, linkedPortableTarget, path.join(launcherRoot, 'portable'))) return
+
+  assert.throws(() => preparePortableUserDataPaths({
+    platform: 'win32',
+    executablePath: path.join(launcherRoot, 'nsis-temp', 'app.exe'),
+    portableExecutableDir: launcherRoot,
+  }), /direct_directory_invalid/)
 })
 
 test('startup migrates legacy data before Electron materializes the default user-data directory', async t => {

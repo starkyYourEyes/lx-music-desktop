@@ -21,6 +21,13 @@ export const getPortableUserDataPaths: (options: {
   pathExists?: (candidate: string) => boolean
 }) => { appDataPath: string, userDataPath: string } | null
 
+export const preparePortableUserDataPaths: (options: {
+  platform: NodeJS.Platform
+  executablePath: string
+  portableExecutableDir?: string
+  fsApi?: typeof fs
+}) => { appDataPath: string, userDataPath: string } | null
+
 export const migrateLegacyUserData: (options: {
   appDataPath: string
   currentDirName?: string

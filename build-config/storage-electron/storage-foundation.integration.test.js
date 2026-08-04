@@ -3,7 +3,6 @@ const crypto = require('node:crypto')
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
 const Module = require('node:module')
-const os = require('node:os')
 const path = require('node:path')
 const { test } = require('node:test')
 const typescript = require('typescript')
@@ -25,7 +24,8 @@ const actualMigrations = require('../../src/main/worker/dbService/migrations/ind
 const actualVerify = require('../../src/main/worker/dbService/verifyDB.ts')
 const tables = require('../../src/main/worker/dbService/tables.ts').default
 const { createAtomicJsonFile } = require('../../src/main/storage/atomicJsonFile.ts')
-const currentSchemaVersion = actualMigrations.migrations.at(-1).version
+const currentSchemaVersion = 6
+const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const MIGRATION_3_CHECKSUM = '9243aa510e8355d2c3d0f687c6736654adf584ec6007b1bcf46f374a9d694e41'
 const FOUNDATION_V3_SCHEMA = [
@@ -237,11 +237,13 @@ const createFaultTracker = () => {
 }
 
 const makeDatabasePaths = async prefix => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), prefix))
+  const fixture = createTestStorageRoot(prefix)
+  const root = fixture.path
   const dataPath = path.join(root, 'profile')
-  const backupDir = path.join(root, 'backups')
+  const cacheRoot = path.join(root, 'cache')
+  const backupsRoot = path.join(root, 'backups')
   await fsp.mkdir(dataPath, { recursive: true })
-  return { root, dataPath, backupDir, databasePath: path.join(dataPath, 'lx.data.db') }
+  return { fixture, root, dataPath, cacheRoot, backupsRoot, databasePath: path.join(dataPath, 'lx.data.db') }
 }
 
 const createV2Database = databasePath => {
@@ -268,7 +270,10 @@ const createCurrentDatabase = databasePath => {
   try {
     db.pragma('foreign_keys = ON')
     db.pragma('journal_mode = WAL')
-    actualMigrate.runMigrations(db, actualMigrations.migrations, { now: () => 1000 })
+    actualMigrate.runMigrations(db, actualMigrations.migrations, {
+      targetSchemaVersion: currentSchemaVersion,
+      now: () => 1000,
+    })
     db.pragma('wal_checkpoint(TRUNCATE)')
   } finally {
     db.close()
@@ -322,9 +327,9 @@ const databaseMetadata = databasePath => {
   }
 }
 
-const backupArtifacts = async backupDir => {
+const backupArtifacts = async backupsRoot => {
   try {
-    return (await fsp.readdir(backupDir)).filter(name => name.endsWith('.backup'))
+    return (await fsp.readdir(backupsRoot)).filter(name => name.endsWith('.backup'))
   } catch (error) {
     if (error.code == 'ENOENT') return []
     throw error
@@ -368,7 +373,7 @@ const databaseBoundaries = (fixtureCase, databasePath, tracker) => {
     case 'before_backup':
       return {
         backupModule: {
-          createOnlineBackup: async() => {
+          reserveOnlineBackup: () => {
             tracker.hit()
             throw new Error('injected before backup')
           },
@@ -377,8 +382,10 @@ const databaseBoundaries = (fixtureCase, databasePath, tracker) => {
     case 'after_backup':
       return {
         backupModule: {
-          createOnlineBackup: async(...args) => {
-            await actualBackup.createOnlineBackup(...args)
+          ...actualBackup,
+          completeOnlineBackup: (...args) => {
+            const guard = actualBackup.completeOnlineBackup(...args)
+            guard.close()
             tracker.hit()
             throw new Error('injected after backup')
           },
@@ -389,14 +396,16 @@ const databaseBoundaries = (fixtureCase, databasePath, tracker) => {
       return {
         migrationsModule: {
           ...actualMigrations,
-          migrations: [{
-            ...migration3,
-            up(db) {
-              migration3.up(db)
-              tracker.hit()
-              throw new Error('injected inside migration 3')
-            },
-          }],
+          migrations: actualMigrations.migrations.map(migration => migration.version == 3
+            ? {
+                ...migration3,
+                up(db) {
+                  migration3.up(db)
+                  tracker.hit()
+                  throw new Error('injected inside migration 3')
+                },
+              }
+            : migration),
         },
       }
     }
@@ -576,8 +585,10 @@ test('database Foundation failure matrix', async t => {
 
         const result = await dbService.init({
           dataPath: paths.dataPath,
-          backupDir: paths.backupDir,
+          cacheRoot: paths.cacheRoot,
+          backupsRoot: paths.backupsRoot,
           previousShutdownWasClean: fixtureCase.previousShutdownWasClean,
+          targetSchemaVersion: 6,
         })
 
         assert.equal(result.status, fixtureCase.status)
@@ -627,14 +638,14 @@ test('database Foundation failure matrix', async t => {
         if (fixtureCase.backup == 'prior') {
           assertPriorBackup(result)
         } else {
-          assert.deepEqual(await backupArtifacts(paths.backupDir), [])
+          assert.deepEqual(await backupArtifacts(paths.backupsRoot), [])
           if (fixtureCase.backup == 'not-started') assert.equal(fs.existsSync(result.backupPath), false)
           else assert.equal(result.backupPath, null)
         }
       } finally {
         dbService?.close()
         clearDbServiceCache()
-        await fsp.rm(paths.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+        paths.fixture.cleanup()
       }
     })
   }
@@ -657,7 +668,8 @@ const readValidCounter = async filePath => {
 test('atomic JSON Foundation failure matrix', async t => {
   for (const fixtureCase of atomicCases) {
     await t.test(fixtureCase.name, async() => {
-      const root = await fsp.mkdtemp(path.join(os.tmpdir(), `lx-foundation-atomic-${fixtureCase.timing}-`))
+      const fixture = createTestStorageRoot(`lx-foundation-atomic-${fixtureCase.timing}`)
+      const root = fixture.path
       const target = path.join(root, 'settings.json')
       const tracker = createFaultTracker()
       try {
@@ -683,7 +695,7 @@ test('atomic JSON Foundation failure matrix', async t => {
         if (fixtureCase.timing == 'before') assert.equal(await sha256File(target), originalSha256)
         else assert.notEqual(await sha256File(target), originalSha256)
       } finally {
-        await fsp.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+        fixture.cleanup()
       }
     })
   }

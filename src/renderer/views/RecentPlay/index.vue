@@ -48,16 +48,22 @@
               </div>
               <div class="list-item-cell auto name">
                 <span class="select name" :aria-label="item.name">{{ item.name }}</span>
-                <span v-if="item.meta?._qualitys?.flac24bit" class="no-select badge badge-theme-primary">{{ $t('tag__lossless_24bit') }}</span>
-                <span v-else-if="item.meta?._qualitys?.ape || item.meta?._qualitys?.flac || item.meta?._qualitys?.wav" class="no-select badge badge-theme-primary">{{ $t('tag__lossless') }}</span>
-                <span v-else-if="item.meta?._qualitys?.['320k']" class="no-select badge badge-theme-secondary">{{ $t('tag__high_quality') }}</span>
+                <span v-if="item.playablePayload?.meta?._qualitys?.flac24bit" class="no-select badge badge-theme-primary">{{ $t('tag__lossless_24bit') }}</span>
+                <span v-else-if="item.playablePayload?.meta?._qualitys?.ape || item.playablePayload?.meta?._qualitys?.flac || item.playablePayload?.meta?._qualitys?.wav" class="no-select badge badge-theme-primary">{{ $t('tag__lossless') }}</span>
+                <span v-else-if="item.playablePayload?.meta?._qualitys?.['320k']" class="no-select badge badge-theme-secondary">{{ $t('tag__high_quality') }}</span>
               </div>
               <div class="list-item-cell" style="flex: 0 0 22%;"><span class="select" :aria-label="item.singer">{{ item.singer || '--/--' }}</span></div>
-              <div class="list-item-cell" style="flex: 0 0 22%;"><span class="select" :aria-label="item.meta?.albumName">{{ item.meta?.albumName || '--/--' }}</span></div>
-              <div class="list-item-cell" style="flex: 0 0 9%;"><span class="no-select">{{ item.interval || '--/--' }}</span></div>
+              <div class="list-item-cell" style="flex: 0 0 22%;"><span class="select" :aria-label="item.playablePayload?.meta?.albumName">{{ item.playablePayload?.meta?.albumName || '--/--' }}</span></div>
+              <div class="list-item-cell" style="flex: 0 0 9%;"><span class="no-select">{{ item.playablePayload?.interval || formatDuration(item.durationMs) }}</span></div>
               <div class="list-item-cell" style="flex: 0 0 8%;"><span class="no-select">{{ getSourceName(item.source) }}</span></div>
               <div class="list-item-cell" style="flex: 0 0 16%; padding-left: 0; padding-right: 0;">
-                <material-list-buttons :index="index" :download-btn="false" @btn-click="handleListBtnClick" />
+                <material-list-buttons
+                  :index="index"
+                  :download-btn="false"
+                  :play-btn="item.playablePayload != null"
+                  :list-add-btn="item.playablePayload != null"
+                  @btn-click="handleListBtnClick"
+                />
               </div>
             </div>
           </template>
@@ -73,6 +79,7 @@
 
 <script setup>
 import { computed, ref } from '@common/utils/vueTools'
+import { formatPlayTime2 } from '@common/utils/common'
 import { useI18n } from '@root/lang'
 import { playMusicByInfo } from '@renderer/core/player'
 import { playMusicInfo } from '@renderer/store/player/state'
@@ -101,7 +108,7 @@ const currentMusicInfo = computed(() => {
 
 const createMusicIdentity = (musicInfo) => {
   if (!musicInfo) return ''
-  return `${musicInfo.source}:${musicInfo.id}`
+  return `${musicInfo.source}:${musicInfo.sourceTrackId ?? musicInfo.id}`
 }
 
 const isCurrentMusic = (musicInfo) => {
@@ -113,8 +120,10 @@ const getSourceName = (source) => {
   return t(key)
 }
 
+const formatDuration = durationMs => durationMs == null ? '--/--' : formatPlayTime2(durationMs / 1000)
+
 const handlePlayMusic = (index) => {
-  const musicInfo = recentPlayItems.value[index]
+  const musicInfo = recentPlayItems.value[index]?.playablePayload
   if (!musicInfo) return
   playMusicByInfo(musicInfo, {
     listId: null,
@@ -143,7 +152,7 @@ const handleListItemClick = (index) => {
 }
 
 const handleShowListAddModal = (index) => {
-  const musicInfo = recentPlayItems.value[index]
+  const musicInfo = recentPlayItems.value[index]?.playablePayload
   if (!musicInfo) return
   selectedAddMusicInfo.value = musicInfo
   isShowListAdd.value = true

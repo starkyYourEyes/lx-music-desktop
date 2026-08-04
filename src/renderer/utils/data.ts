@@ -1,51 +1,88 @@
 /* eslint-disable @typescript-eslint/no-dynamic-delete */
 import {
-  saveListPositionInfo as saveListPositionInfoFromData,
-  getListPositionInfo as getListPositionInfoFromData,
-  saveListPrevSelectId as saveListPrevSelectIdFromData,
-  getListPrevSelectId as getListPrevSelectIdFromData,
-  saveListUpdateInfo as saveListUpdateInfoFromData,
-  getListUpdateInfo as getListUpdateInfoFromData,
-  saveSearchSetting as saveSearchSettingFromData,
-  getSearchSetting as getSearchSettingFromData,
-  saveSongListSetting as saveSongListSettingFromData,
-  getSongListSetting as getSongListSettingFromData,
-  saveLeaderboardSetting as saveLeaderboardSettingFromData,
-  getLeaderboardSetting as getLeaderboardSettingFromData,
-  saveViewPrevState as saveViewPrevStateFromData,
-} from '@renderer/utils/ipc'
-import { throttle } from '@common/utils'
+  getCatalogPreferences,
+  getLocalState,
+  getPlaylistMetadata,
+  mutatePlaylistMetadata,
+  setCatalogPreference,
+  setLocalState,
+} from '@renderer/utils/storageState'
+import { log, throttle } from '@common/utils'
 import { type DEFAULT_SETTING, LIST_IDS } from '@common/constants'
+import type { CatalogPreferencesV1, PlaylistMetadataCommandV1 } from '@common/storage/stateContracts'
 import { dateFormat } from './index'
 import { setUpdateTime } from '@renderer/store/list/action'
 
 let listPosition: LX.List.ListPositionInfo
 let listPrevSelectId: string
 let listUpdateInfo: LX.List.ListUpdateInfo
+let listPositionInitPromise: Promise<void> | null = null
+let playlistMetadataInitPromise: Promise<void> | null = null
+let playlistMetadataMutationQueue: Promise<void> = Promise.resolve()
 
-let searchSetting: typeof DEFAULT_SETTING['search']
-let songListSetting: typeof DEFAULT_SETTING['songList']
-let leaderboardSetting: typeof DEFAULT_SETTING['leaderboard']
+let searchSetting: CatalogPreferencesV1['search']
+let songListSetting: CatalogPreferencesV1['songList']
+let leaderboardSetting: CatalogPreferencesV1['leaderboard']
+let catalogPreferencesInitPromise: Promise<void> | null = null
+
+const reportPersistenceFailure = () => {
+  log.error(new Error('Renderer persistence update failed'))
+}
 
 const saveListPositionThrottle = throttle(() => {
-  saveListPositionInfoFromData(listPosition)
+  void setLocalState({
+    version: 1,
+    key: 'list_scroll_positions',
+    value: listPosition,
+    updatedAtMs: Date.now(),
+  }).catch(reportPersistenceFailure)
 }, 1000)
 const saveSearchSettingThrottle = throttle(() => {
-  saveSearchSettingFromData(searchSetting)
+  void setCatalogPreference('search', searchSetting).catch(reportPersistenceFailure)
 }, 1000)
 const saveSongListSettingThrottle = throttle(() => {
-  saveSongListSettingFromData(songListSetting)
+  void setCatalogPreference('songList', songListSetting).catch(reportPersistenceFailure)
 }, 1000)
 const saveLeaderboardSettingThrottle = throttle(() => {
-  saveLeaderboardSettingFromData(leaderboardSetting)
+  void setCatalogPreference('leaderboard', leaderboardSetting).catch(reportPersistenceFailure)
 }, 1000)
 const saveViewPrevStateThrottle = throttle((state) => {
-  saveViewPrevStateFromData(state)
+  void setLocalState({
+    version: 1,
+    key: 'view_prev_state',
+    value: state,
+    updatedAtMs: Date.now(),
+  }).catch(reportPersistenceFailure)
 }, 1000)
 
+const applyCatalogPreferences = (preferences: Awaited<ReturnType<typeof getCatalogPreferences>>) => {
+  leaderboardSetting = preferences.leaderboard
+  songListSetting = preferences.songList
+  searchSetting = preferences.search
+}
+
+const initCatalogPreferences = async() => {
+  if (leaderboardSetting && songListSetting && searchSetting) return
+  catalogPreferencesInitPromise ??= getCatalogPreferences()
+    .then(applyCatalogPreferences)
+    .catch((error) => {
+      catalogPreferencesInitPromise = null
+      throw error
+    })
+  await catalogPreferencesInitPromise
+}
+
 const initPosition = async() => {
-  // eslint-disable-next-line require-atomic-updates
-  listPosition ??= await getListPositionInfoFromData() ?? {}
+  if (listPosition != null) return
+  listPositionInitPromise ??= getLocalState()
+    .then(state => {
+      listPosition = state.listScrollPosition
+    })
+    .catch((error) => {
+      listPositionInitPromise = null
+      throw error
+    })
+  await listPositionInitPromise
 }
 export const getListPosition = async(id: string): Promise<number> => {
   await initPosition()
@@ -74,11 +111,16 @@ export const overwriteListPosition = async(ids: string[]) => {
 }
 
 const saveListPrevSelectIdThrottle = throttle(() => {
-  saveListPrevSelectIdFromData(listPrevSelectId)
+  void setLocalState({
+    version: 1,
+    key: 'list_prev_select_id',
+    value: listPrevSelectId,
+    updatedAtMs: Date.now(),
+  }).catch(reportPersistenceFailure)
 }, 200)
 export const getListPrevSelectId = async() => {
   // eslint-disable-next-line require-atomic-updates
-  listPrevSelectId ??= await getListPrevSelectIdFromData() ?? LIST_IDS.DEFAULT
+  listPrevSelectId ??= (await getLocalState()).listPrevSelectId ?? LIST_IDS.DEFAULT
   return listPrevSelectId ?? LIST_IDS.DEFAULT
 }
 export const saveListPrevSelectId = (id: string) => {
@@ -86,51 +128,100 @@ export const saveListPrevSelectId = (id: string) => {
   saveListPrevSelectIdThrottle()
 }
 
-const saveListUpdateInfo = throttle(() => {
-  saveListUpdateInfoFromData(listUpdateInfo)
-}, 1000)
-
 const initListUpdateInfo = async() => {
-  if (listUpdateInfo == null) {
-    // eslint-disable-next-line require-atomic-updates
-    listUpdateInfo = await getListUpdateInfoFromData() ?? {}
-    for (const [id, info] of Object.entries(listUpdateInfo)) {
-      setUpdateTime(id, info.updateTime ? dateFormat(info.updateTime) : '')
-    }
-  }
+  if (listUpdateInfo != null) return
+  playlistMetadataInitPromise ??= getPlaylistMetadata()
+    .then(info => {
+      listUpdateInfo = info
+      for (const [id, info] of Object.entries(listUpdateInfo)) {
+        setUpdateTime(id, info.updateTime ? dateFormat(info.updateTime) : '')
+      }
+    })
+    .catch((error) => {
+      playlistMetadataInitPromise = null
+      throw error
+    })
+  await playlistMetadataInitPromise
 }
+
+const queuePlaylistMetadataMutation = async<T>(operation: () => Promise<T>): Promise<T> => {
+  const result = playlistMetadataMutationQueue.then(operation)
+  playlistMetadataMutationQueue = result.then(
+    () => undefined,
+    () => undefined,
+  )
+  return result
+}
+
+const applyPlaylistMetadataMutation = async(command: PlaylistMetadataCommandV1): Promise<void> => {
+  listUpdateInfo = await mutatePlaylistMetadata(command)
+}
+
 export const getListUpdateInfo = async() => {
   await initListUpdateInfo()
   return listUpdateInfo
 }
 export const setListUpdateInfo = async(info: LX.List.ListUpdateInfo) => {
   await initListUpdateInfo()
-  listUpdateInfo = info
-  saveListUpdateInfo()
+  const playlistIds = Object.keys(info)
+  await queuePlaylistMetadataMutation(async() => {
+    for (const [playlistId, value] of Object.entries(info)) {
+      await applyPlaylistMetadataMutation({
+        version: 1,
+        action: 'upsert',
+        playlistId,
+        value,
+        updatedAtMs: Date.now(),
+      })
+    }
+    await applyPlaylistMetadataMutation({ version: 1, action: 'retain', playlistIds })
+  })
 }
 export const setListAutoUpdate = async(id: string, enable: boolean) => {
   await initListUpdateInfo()
-  const targetInfo = listUpdateInfo[id] ?? { updateTime: 0, isAutoUpdate: false }
-  targetInfo.isAutoUpdate = enable
-  listUpdateInfo[id] = targetInfo
-  saveListUpdateInfo()
+  await queuePlaylistMetadataMutation(async() => {
+    const targetInfo = { ...(listUpdateInfo[id] ?? { updateTime: 0, isAutoUpdate: false }), isAutoUpdate: enable }
+    await applyPlaylistMetadataMutation({
+      version: 1,
+      action: 'upsert',
+      playlistId: id,
+      value: targetInfo,
+      updatedAtMs: Date.now(),
+    })
+  })
 }
 export const setListUpdateTime = async(id: string, time: number) => {
   await initListUpdateInfo()
-  const targetInfo = listUpdateInfo[id] ?? { updateTime: 0, isAutoUpdate: false }
-  targetInfo.updateTime = time
-  listUpdateInfo[id] = targetInfo
-  saveListUpdateInfo()
+  await queuePlaylistMetadataMutation(async() => {
+    const targetInfo = { ...(listUpdateInfo[id] ?? { updateTime: 0, isAutoUpdate: false }), updateTime: time }
+    await applyPlaylistMetadataMutation({
+      version: 1,
+      action: 'upsert',
+      playlistId: id,
+      value: targetInfo,
+      updatedAtMs: Date.now(),
+    })
+  })
 }
 export const setUserListProfile = async(id: string, profile: LX.List.UserListProfile) => {
   await initListUpdateInfo()
-  const targetInfo = listUpdateInfo[id] ?? { updateTime: 0, isAutoUpdate: false }
-  targetInfo.profile = {
-    ...targetInfo.profile,
-    ...profile,
-  }
-  listUpdateInfo[id] = targetInfo
-  saveListUpdateInfo()
+  await queuePlaylistMetadataMutation(async() => {
+    const currentInfo = listUpdateInfo[id] ?? { updateTime: 0, isAutoUpdate: false }
+    const targetInfo = {
+      ...currentInfo,
+      profile: {
+        ...currentInfo.profile,
+        ...profile,
+      },
+    }
+    await applyPlaylistMetadataMutation({
+      version: 1,
+      action: 'upsert',
+      playlistId: id,
+      value: targetInfo,
+      updatedAtMs: Date.now(),
+    })
+  })
 }
 // export const setListUpdateInfo = (id, { updateTime, isAutoUpdate }) => {
 //   listUpdateInfo[id] = { updateTime, isAutoUpdate }
@@ -138,25 +229,21 @@ export const setUserListProfile = async(id: string, profile: LX.List.UserListPro
 // }
 export const removeListUpdateInfo = async(id: string) => {
   await initListUpdateInfo()
-  if (listUpdateInfo[id] == null) return
-  delete listUpdateInfo[id]
-  saveListUpdateInfo()
+  await queuePlaylistMetadataMutation(async() => {
+    if (listUpdateInfo[id] == null) return
+    await applyPlaylistMetadataMutation({ version: 1, action: 'remove', playlistId: id })
+  })
 }
 export const overwriteListUpdateInfo = async(ids: string[]) => {
   await initListUpdateInfo()
-  const removedIds = []
-  for (const id of Object.keys(listUpdateInfo)) {
-    if (ids.includes(id)) continue
-    removedIds.push(id)
-  }
-  for (const id of removedIds) delete listUpdateInfo[id]
-  saveListUpdateInfo()
+  await queuePlaylistMetadataMutation(async() => {
+    await applyPlaylistMetadataMutation({ version: 1, action: 'retain', playlistIds: ids })
+  })
 }
 
 
 export const getSearchSetting = async() => {
-  // eslint-disable-next-line require-atomic-updates
-  searchSetting ??= await getSearchSettingFromData()
+  await initCatalogPreferences()
   return { ...searchSetting }
 }
 export const setSearchSetting = async(setting: Partial<typeof DEFAULT_SETTING['search']>) => {
@@ -167,29 +254,27 @@ export const setSearchSetting = async(setting: Partial<typeof DEFAULT_SETTING['s
   if (setting.temp_source && searchSetting.temp_source != setting.temp_source) requiredSave = true
 
   if (!requiredSave) return
-  searchSetting = Object.assign(searchSetting, setting)
+  searchSetting = Object.assign(searchSetting, setting) as CatalogPreferencesV1['search']
   saveSearchSettingThrottle()
 }
 
 export const getSongListSetting = async() => {
-  // eslint-disable-next-line require-atomic-updates
-  songListSetting ??= await getSongListSettingFromData()
+  await initCatalogPreferences()
   return { ...songListSetting }
 }
 export const setSongListSetting = async(setting: Partial<typeof DEFAULT_SETTING['songList']>) => {
   if (!songListSetting) await getSongListSetting()
-  songListSetting = Object.assign(songListSetting, setting)
+  songListSetting = Object.assign(songListSetting, setting) as CatalogPreferencesV1['songList']
   saveSongListSettingThrottle()
 }
 
 export const getLeaderboardSetting = async() => {
-  // eslint-disable-next-line require-atomic-updates
-  leaderboardSetting ??= await getLeaderboardSettingFromData()
+  await initCatalogPreferences()
   return { ...leaderboardSetting }
 }
 export const setLeaderboardSetting = async(setting: Partial<typeof DEFAULT_SETTING['leaderboard']>) => {
   if (!leaderboardSetting) await getLeaderboardSetting()
-  leaderboardSetting = Object.assign(leaderboardSetting, setting)
+  leaderboardSetting = Object.assign(leaderboardSetting, setting) as CatalogPreferencesV1['leaderboard']
   saveLeaderboardSettingThrottle()
 }
 

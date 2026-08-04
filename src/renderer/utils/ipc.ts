@@ -4,14 +4,42 @@
 import { rendererSend, rendererInvoke, rendererOn, rendererOff } from '@common/rendererIpc'
 import { HOTKEY_RENDERER_EVENT_NAME, WIN_MAIN_RENDERER_EVENT_NAME, CMMON_EVENT_NAME } from '@common/ipcNames'
 import { markRaw, toRaw } from '@common/utils/vueTools'
+import { log } from '@common/utils'
 import * as hotKeys from '@common/hotKey'
-import { APP_EVENT_NAMES, DATA_KEYS, DEFAULT_SETTING } from '@common/constants'
+import { APP_EVENT_NAMES, DATA_KEYS } from '@common/constants'
 import type { ListeningTimeStats } from '@common/utils/listeningTime'
 import type { StorageCapabilitiesV1, StorageRequestV1 } from '@common/storage/contracts'
+import {
+  STORAGE_CACHE_GENERATION_EVENT,
+  type AuthorizedMusicUrlDeleteInputV1,
+  type AuthorizedMusicUrlKeyV1,
+  type CacheDiagnosticCodeV1,
+  type CacheReadResultV1,
+  type CacheWriteResultV1,
+  type MusicUrlAuthorizationV1,
+  type PersistentMusicUrlProviderV1,
+  type StorageCacheGenerationV1,
+  type TrackIdentityV1,
+} from '@common/storage/cache'
+import type { LocalStateSnapshotV1 } from '@common/storage/stateContracts'
+import { getLocalState, setLocalState } from './storageState'
+
+export { registerShutdownFlusher } from './shutdown'
 
 type RemoveListener = () => void
 
+export const onStorageCacheGeneration = (
+  listener: LX.IpcRendererEventListenerParams<StorageCacheGenerationV1>,
+): RemoveListener => {
+  rendererOn(STORAGE_CACHE_GENERATION_EVENT, listener)
+  return () => { rendererOff(STORAGE_CACHE_GENERATION_EVENT, listener) }
+}
+
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
+
+const reportPersistenceFailure = () => {
+  log.error(new Error('Renderer persistence update failed'))
+}
 
 // Preserve the direct IPC Promise rather than adding an async adoption wrapper.
 // eslint-disable-next-line @typescript-eslint/promise-function-async
@@ -37,20 +65,25 @@ export const sendInited = () => {
   rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.inited)
 }
 
-export const getOtherSource = async(id: string): Promise<LX.Music.MusicInfoOnline[]> => {
-  return rendererInvoke<string, LX.Music.MusicInfoOnline[]>(WIN_MAIN_RENDERER_EVENT_NAME.get_other_source, id)
+export const getOtherSourcesFromCache = async(identity: TrackIdentityV1): Promise<LX.Music.MusicInfoOnline[]> => {
+  const result = await rendererInvoke<LX.Music.OtherSourcesGetInputV1, CacheReadResultV1<LX.Music.MusicInfoOnline[]>>(
+    WIN_MAIN_RENDERER_EVENT_NAME.other_sources_get,
+    { ...identity, nowMs: Date.now() },
+  )
+  return result.status == 'hit' ? result.value : []
 }
-export const saveOtherSource = async(id: string, sourceInfo: LX.Music.MusicInfoOnline[]) => {
-  await rendererInvoke<LX.Music.MusicInfoOtherSourceSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_other_source, {
-    id,
-    list: sourceInfo,
+export const putOtherSourcesInCache = async(identity: TrackIdentityV1, candidates: LX.Music.MusicInfoOnline[]) => {
+  await rendererInvoke<LX.Music.OtherSourcesPutInputV1>(WIN_MAIN_RENDERER_EVENT_NAME.other_sources_put, {
+    ...identity,
+    candidates: toCloneable(candidates),
+    nowMs: Date.now(),
   })
 }
 export const clearOtherSource = async() => {
-  await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.clear_other_source)
+  await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.other_sources_clear)
 }
 export const getOtherSourceCount = async() => {
-  return rendererInvoke<number>(WIN_MAIN_RENDERER_EVENT_NAME.get_other_source_count)
+  return rendererInvoke<number>(WIN_MAIN_RENDERER_EVENT_NAME.other_sources_count)
 }
 
 // export const updateDislikeInfo = async(dislikeInfo: LX.Dislike.ListItem[]) => {
@@ -149,15 +182,18 @@ export const onUserApiStatus = (listener: LX.IpcRendererEventListenerParams<LX.U
 export const getUserApiList = async() => {
   return rendererInvoke<LX.UserApi.UserApiInfo[]>(WIN_MAIN_RENDERER_EVENT_NAME.get_user_api_list)
 }
-export const sendUserApiRequest = async(
-  params: LX.UserApi.UserApiRequestParams,
-): Promise<LX.UserApi.UserApiRequestResult> => {
-  return rendererInvoke<LX.UserApi.UserApiRequestParams, LX.UserApi.UserApiRequestResult>(
+export function sendUserApiRequest(
+  params: LX.UserApi.SourceUserApiRequestParams,
+): Promise<LX.UserApi.UserApiRequestResult>
+export async function sendUserApiRequest(
+  params: LX.UserApi.SourceUserApiRequestParams,
+): Promise<LX.UserApi.UserApiRequestResult> {
+  return rendererInvoke<LX.UserApi.SourceUserApiRequestParams, LX.UserApi.UserApiRequestResult>(
     WIN_MAIN_RENDERER_EVENT_NAME.request_user_api,
     params,
   )
 }
-export const userApiRequestCancel = (params: LX.UserApi.UserApiRequestCancelParams) => {
+export const userApiRequestCancel = (params: LX.UserApi.SourceUserApiRequestCancelParams) => {
   rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.request_user_api_cancel, params)
 }
 export const ensureUserApi = async(apiId: string): Promise<LX.UserApi.UserApiEnsureResult> => {
@@ -227,88 +263,13 @@ export const getListeningTimeStats = async() => {
   return rendererInvoke<string, ListeningTimeStats | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.listeningTimeStats)
 }
 
-export const saveSearchHistoryList = (list: LX.List.SearchHistoryList) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.searchHistoryList,
-    data: list,
-  })
-}
-// 获取搜索历史列表
-export const getSearchHistoryList = async() => {
-  return rendererInvoke<string, string[] | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.searchHistoryList)
-}
-
-export const saveListPositionInfo = (listPosition: LX.List.ListPositionInfo) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.listScrollPosition,
-    data: listPosition,
-  })
-}
-// 获取搜索历史列表
-export const getListPositionInfo = async() => {
-  return rendererInvoke<string, LX.List.ListPositionInfo | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.listScrollPosition)
-}
-
-export const saveListPrevSelectId = (listPosition: string | null) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.listPrevSelectId,
-    data: listPosition,
-  })
-}
-// 获取上一次选中的列表id
-export const getListPrevSelectId = async() => {
-  return rendererInvoke<string, string | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.listPrevSelectId)
-}
-
-export const saveListUpdateInfo = (listPosition: LX.List.ListUpdateInfo) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.listUpdateInfo,
-    data: listPosition,
-  })
-}
-// 获取列表更新记录
-export const getListUpdateInfo = async() => {
-  return rendererInvoke<string, LX.List.ListUpdateInfo | null>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.listUpdateInfo)
-}
-
-export const saveLeaderboardSetting = (source: typeof DEFAULT_SETTING['leaderboard']) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.leaderboardSetting,
-    data: source,
-  })
-}
-export const getLeaderboardSetting = async() => {
-  return (await rendererInvoke<string, typeof DEFAULT_SETTING['leaderboard']>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.leaderboardSetting)) ?? { ...DEFAULT_SETTING.leaderboard }
-}
-export const saveSongListSetting = (setting: typeof DEFAULT_SETTING['songList']) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.songListSetting,
-    data: setting,
-  })
-}
-export const getSongListSetting = async() => {
-  return (await rendererInvoke<string, typeof DEFAULT_SETTING['songList']>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.songListSetting)) ?? { ...DEFAULT_SETTING.songList }
-}
-export const saveSearchSetting = (setting: typeof DEFAULT_SETTING['search']) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.searchSetting,
-    data: setting,
-  })
-}
-export const getSearchSetting = async() => {
-  return (await rendererInvoke<string, typeof DEFAULT_SETTING['search']>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.searchSetting)) ?? { ...DEFAULT_SETTING.search }
-}
-export const saveViewPrevState = (state: typeof DEFAULT_SETTING['viewPrevState']) => {
-  rendererSend(WIN_MAIN_RENDERER_EVENT_NAME.save_data, {
-    path: DATA_KEYS.viewPrevState,
-    data: state,
-  })
+export const saveViewPrevState = (state: LocalStateSnapshotV1['viewPrevState']) => {
+  void setLocalState({ version: 1, key: 'view_prev_state', value: state, updatedAtMs: Date.now() })
+    .catch(reportPersistenceFailure)
 }
 export const getViewPrevState = async() => {
-  return (await rendererInvoke<string, typeof DEFAULT_SETTING['viewPrevState']>(WIN_MAIN_RENDERER_EVENT_NAME.get_data, DATA_KEYS.viewPrevState)) ?? { ...DEFAULT_SETTING.viewPrevState }
+  return (await getLocalState()).viewPrevState
 }
-
-
 export const getSystemFonts = async() => {
   return rendererInvoke<string[]>(CMMON_EVENT_NAME.get_system_fonts).catch(() => {
     return []
@@ -576,11 +537,15 @@ export const setWindowSize = (width: number, height: number) => {
 
 
 export const getPlayerLyric = async(musicInfo: LX.Music.MusicInfo) => {
-  return rendererInvoke<string, LX.Player.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_palyer_lyric, musicInfo.id)
+  return rendererInvoke<LX.Music.LyricInfoQuery, LX.Player.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_palyer_lyric, {
+    provider: musicInfo.source, sourceTrackId: musicInfo.id, nowMs: Date.now(),
+  })
 }
 
 export const getLyricRaw = async(musicInfo: LX.Music.MusicInfo): Promise<LX.Music.LyricInfo> => {
-  return rendererInvoke<string, LX.Music.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_lyric_raw, musicInfo.id)
+  return rendererInvoke<LX.Music.LyricInfoQuery, LX.Music.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_lyric_raw, {
+    provider: musicInfo.source, sourceTrackId: musicInfo.id, nowMs: Date.now(),
+  })
 }
 
 export const clearLyricRaw = async() => {
@@ -603,12 +568,14 @@ export const saveLyric = async(musicInfo: LX.Music.MusicInfo, lyricInfo: LX.Musi
     const tasks = [
       rendererInvoke<LX.Music.LyricInfoSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_lyric_raw, {
         id: musicInfo.id,
+        provider: musicInfo.source,
         lyrics: rawlrcInfo,
       }),
     ]
     if (info.lyric != rawlrcInfo.lyric) {
       tasks.push(rendererInvoke<LX.Music.LyricInfoSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_lyric_edited, {
         id: musicInfo.id,
+        provider: musicInfo.source,
         lyrics: info,
       }))
     }
@@ -617,6 +584,7 @@ export const saveLyric = async(musicInfo: LX.Music.MusicInfo, lyricInfo: LX.Musi
   } else {
     await rendererInvoke<LX.Music.LyricInfoSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_lyric_raw, {
       id: musicInfo.id,
+      provider: musicInfo.source,
       lyrics: lyricInfo,
     })
   }
@@ -624,6 +592,7 @@ export const saveLyric = async(musicInfo: LX.Music.MusicInfo, lyricInfo: LX.Musi
 export const saveLyricEdited = async(musicInfo: LX.Music.MusicInfo, lyricInfo: LX.Music.LyricInfo) => {
   await rendererInvoke<LX.Music.LyricInfoSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_lyric_edited, {
     id: musicInfo.id,
+    provider: musicInfo.source,
     lyrics: lyricInfo,
   })
 }
@@ -644,56 +613,181 @@ export const getLyricEditedCount = async() => {
 }
 
 
-export const saveTheme = async(theme: LX.Theme) => {
-  return rendererInvoke<LX.Theme>(WIN_MAIN_RENDERER_EVENT_NAME.save_theme, theme)
+export const saveTheme = async(theme: LX.Theme, stagingId?: string) => {
+  return rendererInvoke<LX.ThemeSaveRequest, LX.ThemeSaveResult>(WIN_MAIN_RENDERER_EVENT_NAME.save_theme, { theme, stagingId })
 }
+export const stageThemeImage = async(sourcePath: string) => {
+  return rendererInvoke<{ sourcePath: string }, LX.StagedThemeImage>(WIN_MAIN_RENDERER_EVENT_NAME.stage_theme_image, { sourcePath })
+}
+export const discardThemeImage = async(stagingId: string) => {
+  return rendererInvoke<{ stagingId: string }>(WIN_MAIN_RENDERER_EVENT_NAME.discard_theme_image, { stagingId })
+}
+export const getRunTempRoot = async() => rendererInvoke<LX.RunTempChildOwnership>(WIN_MAIN_RENDERER_EVENT_NAME.get_run_temp_root)
 export const removeTheme = async(id: string) => {
-  return rendererInvoke<string>(WIN_MAIN_RENDERER_EVENT_NAME.remove_theme, id)
+  return rendererInvoke<string, LX.Theme[]>(WIN_MAIN_RENDERER_EVENT_NAME.remove_theme, id)
 }
 export const getThemes = async() => {
   return rendererInvoke<{ themes: LX.Theme[], userThemes: LX.Theme[], dataPath: string }>(WIN_MAIN_RENDERER_EVENT_NAME.get_themes)
 }
 
-/**
- * 从缓存获取歌曲URL
- * @param musicInfo 歌曲信息
- * @param type URL音质
- * @returns
- */
-export const getMusicUrlByKey = async(key: string): Promise<string> => {
-  return rendererInvoke<string, string>(WIN_MAIN_RENDERER_EVENT_NAME.get_music_url, key)
+export const requestMusicUrlAuthorization = async(
+  provider: PersistentMusicUrlProviderV1,
+): Promise<MusicUrlAuthorizationV1 | null> => {
+  return rendererInvoke<LX.Music.MusicUrlAuthorizationRequestV1, MusicUrlAuthorizationV1 | null>(
+    WIN_MAIN_RENDERER_EVENT_NAME.music_url_authorize,
+    { provider },
+  )
 }
-export const getMusicUrl = async(musicInfo: LX.Music.MusicInfo, type: LX.Quality): Promise<string> => (
-  getMusicUrlByKey(`${musicInfo.id}_${type}`)
-)
 
-/**
- * 缓存歌曲URL
- * @param musicInfo 歌曲信息
- * @param type URL音质
- * @param url 歌曲URL
- */
-export const saveMusicUrl = async(musicInfo: LX.Music.MusicInfo, type: LX.Quality, url: string) => {
-  await rendererInvoke<LX.Music.MusicUrlInfo>(WIN_MAIN_RENDERER_EVENT_NAME.save_music_url, {
-    id: `${musicInfo.id}_${type}`,
-    url,
-  })
+const isStaleMusicUrlAuthorization = (error: unknown): boolean => {
+  const value = error as { code?: unknown, message?: unknown }
+  return value?.code == 'music_url_authorization_stale' ||
+    (typeof value?.message == 'string' && value.message.endsWith('music_url_authorization_stale'))
 }
+
+export const getMusicUrl = async(key: AuthorizedMusicUrlKeyV1): Promise<string> => {
+  try {
+    const result = await rendererInvoke<LX.Music.AuthorizedMusicUrlGetInputV1, CacheReadResultV1<string>>(
+      WIN_MAIN_RENDERER_EVENT_NAME.music_url_get,
+      { ...key, nowMs: Date.now() },
+    )
+    return result.status == 'hit' ? result.value : ''
+  } catch (error) {
+    if (isStaleMusicUrlAuthorization(error)) return ''
+    throw error
+  }
+}
+
+const cachePersistenceUnavailable = (code: CacheDiagnosticCodeV1): Error & { code: CacheDiagnosticCodeV1 } =>
+  Object.assign(new Error(code), { code })
+
+const requireCacheStored = (result: CacheWriteResultV1): void => {
+  if (result.status == 'unavailable') throw cachePersistenceUnavailable(result.code)
+}
+
+interface LegacyMusicUrlOwner {
+  provider: PersistentMusicUrlProviderV1
+  sourceTrackId: string
+  quality: LX.Quality
+}
+
+const legacyMusicUrlOwners = new Map<string, LegacyMusicUrlOwner>()
+const legacyMusicUrlQualityPattern = /_(128k|192k|320k|flac24bit|flac|ape|wav)$/
+
+const getLegacyMusicUrlKey = (sourceTrackId: string, quality: LX.Quality): string =>
+  [sourceTrackId, quality].join('_')
+
+const parseLegacyMusicUrlOwner = (key: string): LegacyMusicUrlOwner | null => {
+  const match = legacyMusicUrlQualityPattern.exec(key)
+  if (match == null) return null
+  const sourceTrackId = key.slice(0, -match[0].length)
+  const provider = sourceTrackId.startsWith('wy_')
+    ? 'wy'
+    : sourceTrackId.startsWith('tx_')
+      ? 'tx'
+      : null
+  if (provider == null || sourceTrackId.length <= provider.length + 1) return null
+  return { provider, sourceTrackId, quality: match[1] as LX.Quality }
+}
+
+const authorizeMusicUrlOwner = async(owner: LegacyMusicUrlOwner): Promise<AuthorizedMusicUrlKeyV1 | null> => {
+  const authorization = await requestMusicUrlAuthorization(owner.provider)
+  return authorization == null ? null : {
+    authorization,
+    sourceTrackId: owner.sourceTrackId,
+    quality: owner.quality,
+  }
+}
+
+const getAuthorizedMusicUrlKeyByLegacyKey = async(key: string): Promise<AuthorizedMusicUrlKeyV1 | null> => {
+  const owner = legacyMusicUrlOwners.get(key) ?? parseLegacyMusicUrlOwner(key)
+  return owner == null ? null : authorizeMusicUrlOwner(owner)
+}
+
+const getAuthorizedMusicUrlKey = async(
+  musicInfo: LX.Music.MusicInfo,
+  quality: LX.Quality,
+): Promise<AuthorizedMusicUrlKeyV1 | null> => {
+  if (musicInfo.source != 'wy' && musicInfo.source != 'tx') return null
+  const owner: LegacyMusicUrlOwner = {
+    provider: musicInfo.source,
+    sourceTrackId: musicInfo.id,
+    quality,
+  }
+  legacyMusicUrlOwners.set(getLegacyMusicUrlKey(musicInfo.id, quality), owner)
+  return authorizeMusicUrlOwner(owner)
+}
+
+export const getMusicUrlByKey = async(key: string): Promise<string> => {
+  const authorizedKey = await getAuthorizedMusicUrlKeyByLegacyKey(key)
+  return authorizedKey == null ? '' : getMusicUrl(authorizedKey)
+}
+
+const putMusicUrl = async(key: AuthorizedMusicUrlKeyV1, url: string, providerExpiresAtMs?: number) => {
+  try {
+    const result = await rendererInvoke<LX.Music.AuthorizedMusicUrlPutInputV1, CacheWriteResultV1>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_put, {
+      ...key,
+      url,
+      nowMs: Date.now(),
+      ...(providerExpiresAtMs == null ? {} : { providerExpiresAtMs }),
+    })
+    requireCacheStored(result)
+  } catch (error) {
+    if (!isStaleMusicUrlAuthorization(error)) throw error
+  }
+}
+
+const deleteMusicUrl = async(key: AuthorizedMusicUrlKeyV1): Promise<void> => {
+  try {
+    const result = await rendererInvoke<AuthorizedMusicUrlDeleteInputV1, CacheWriteResultV1>(
+      WIN_MAIN_RENDERER_EVENT_NAME.music_url_delete,
+      key,
+    )
+    requireCacheStored(result)
+  } catch (error) {
+    if (!isStaleMusicUrlAuthorization(error)) throw error
+  }
+}
+
+export function saveMusicUrl(key: AuthorizedMusicUrlKeyV1, url: string, providerExpiresAtMs?: number): Promise<void>
+export function saveMusicUrl(musicInfo: LX.Music.MusicInfo, quality: LX.Quality, url: string): Promise<void>
+export async function saveMusicUrl(
+  keyOrMusicInfo: AuthorizedMusicUrlKeyV1 | LX.Music.MusicInfo,
+  urlOrQuality: string,
+  providerExpiresAtMsOrUrl?: number | string,
+): Promise<void> {
+  if ('authorization' in keyOrMusicInfo) {
+    await putMusicUrl(
+      keyOrMusicInfo,
+      urlOrQuality,
+      typeof providerExpiresAtMsOrUrl == 'number' ? providerExpiresAtMsOrUrl : undefined,
+    )
+    return
+  }
+  if (typeof providerExpiresAtMsOrUrl != 'string') throw new TypeError('Music URL is required')
+  const key = await getAuthorizedMusicUrlKey(keyOrMusicInfo, urlOrQuality as LX.Quality)
+  if (key != null) await putMusicUrl(key, providerExpiresAtMsOrUrl)
+}
+
 export const removeMusicUrlByKey = async(key: string) => {
-  await rendererInvoke<string>(WIN_MAIN_RENDERER_EVENT_NAME.remove_music_url, key)
+  const authorizedKey = await getAuthorizedMusicUrlKeyByLegacyKey(key)
+  if (authorizedKey == null) return
+  await deleteMusicUrl(authorizedKey)
 }
-export const removeMusicUrl = async(musicInfo: LX.Music.MusicInfo, type: LX.Quality) => (
-  removeMusicUrlByKey(`${musicInfo.id}_${type}`)
-)
+
+export const removeMusicUrl = async(key: AuthorizedMusicUrlKeyV1) => {
+  await deleteMusicUrl(key)
+}
+
 /**
  * 清理所有缓存的歌曲URL
  */
 export const clearMusicUrl = async() => {
-  await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.clear_music_url)
+  await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.music_url_clear)
 }
 
 export const getMusicUrlCount = async() => {
-  return rendererInvoke<number>(WIN_MAIN_RENDERER_EVENT_NAME.get_music_url_count)
+  return rendererInvoke<number>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_count)
 }
 
 export const testWebDAV = async(config: LX.Music.WebDAVConfig) => {

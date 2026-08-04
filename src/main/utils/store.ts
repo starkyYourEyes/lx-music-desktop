@@ -26,6 +26,8 @@ class Store {
   private readonly atomicFile: AtomicJsonFile<Record<string, any>>
   private store: Record<string, any>
   private writeError: Error | null = null
+  private revision = 0
+  private durableWriteTail: Promise<void> = Promise.resolve()
 
   private enqueueWrite() {
     let snapshot: Record<string, any>
@@ -86,16 +88,45 @@ class Store {
       writable: true,
       configurable: true,
     })
+    this.revision++
     this.enqueueWrite()
+  }
+
+  async setDurable(key: string, value: any): Promise<void> {
+    const operation = this.durableWriteTail.then(async() => {
+      try {
+        while (true) {
+          const revision = this.revision
+          const snapshot = structuredClone(this.store)
+          Object.defineProperty(snapshot, key, {
+            value,
+            enumerable: true,
+            writable: true,
+            configurable: true,
+          })
+          await this.atomicFile.replace(snapshot)
+          if (revision != this.revision) continue
+          this.store = snapshot
+          this.revision++
+          return
+        }
+      } catch {
+        throw toStorePersistenceError()
+      }
+    })
+    this.durableWriteTail = operation.then(() => undefined, () => undefined)
+    await operation
   }
 
   override(value: Record<string, any>) {
     if (!isStoreRecord(value)) throw new Error('invalid store data')
     this.store = value
+    this.revision++
     this.enqueueWrite()
   }
 
   async flush(): Promise<void> {
+    await this.durableWriteTail
     try {
       await this.atomicFile.flush()
     } catch {

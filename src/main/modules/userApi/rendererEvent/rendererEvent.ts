@@ -27,12 +27,12 @@ export const init = (runtimePool?: UserApiRuntimePool) => {
 }
 
 export const request = async(
-  params: LX.UserApi.UserApiRequestParams,
+  params: LX.UserApi.SourceUserApiRequestParams,
   ownerWebContentsId: number,
 ) => getUserApiRuntimePool().request(params, ownerWebContentsId)
 
 export const cancelRequest = (
-  params: LX.UserApi.UserApiRequestCancelParams,
+  params: LX.UserApi.SourceUserApiRequestCancelParams,
   ownerWebContentsId: number,
 ) => {
   getUserApiRuntimePool().cancel(params, ownerWebContentsId)

@@ -31,11 +31,16 @@ test('production bundle creates the database worker with a valid constructor', a
 
   try {
     await compileMainBundle(outputPath)
-    const mainBundle = fs.readFileSync(path.join(outputPath, 'main.js'), 'utf8')
+    const outputFiles = fs.readdirSync(outputPath)
+    const applicationBundle = outputFiles
+      .filter(filename => filename.endsWith('.js') && filename !== 'dbService.worker.js')
+      .map(filename => fs.readFileSync(path.join(outputPath, filename), 'utf8'))
+      .join('\n')
+    const workerConstructors = applicationBundle.match(/new external_node_worker_threads_\.Worker\(new URL\(/g) ?? []
 
-    assert.doesNotMatch(mainBundle, /Worker__webpack_require__\.wc/)
-    assert.match(mainBundle, /new external_node_worker_threads_\.Worker\(new URL\(/)
-    assert.equal(fs.existsSync(path.join(outputPath, 'dbService.worker.js')), true)
+    assert.doesNotMatch(applicationBundle, /Worker__webpack_require__\.wc/)
+    assert.equal(workerConstructors.length, 1)
+    assert.deepEqual(outputFiles.filter(filename => filename === 'dbService.worker.js'), ['dbService.worker.js'])
   } finally {
     fs.rmSync(outputPath, { recursive: true, force: true })
   }

@@ -40,7 +40,13 @@ const getAccountService = () => {
   if (accountService) return accountService
   const accounts = global.lx.accountRepository
   if (accounts == null) throw new Error('Account repository has not been initialized')
-  accountService = createNeteaseAccountService({ accounts, api: neteaseApi })
+  const musicUrlAuthorization = global.lx.musicUrlAuthorization
+  if (musicUrlAuthorization == null) throw new Error('Music URL authorization has not been initialized')
+  accountService = createNeteaseAccountService({
+    accounts,
+    api: neteaseApi,
+    musicUrlAuthorization,
+  })
   return accountService
 }
 

@@ -1,27 +1,42 @@
 import { WIN_MAIN_RENDERER_EVENT_NAME } from '@common/ipcNames'
 import { mainHandle } from '@common/mainIpc'
+import {
+  parseAuthorizedMusicUrlDeleteInput,
+  parseAuthorizedMusicUrlGetInput,
+  parseAuthorizedMusicUrlPutInput,
+  parseMusicUrlAuthorizationRequest,
+  parseOtherSourcesGetInput,
+  parseOtherSourcesPutInput,
+} from '@common/storage/cacheValidation'
+import type {
+  CacheReadResultV1,
+  CacheWriteResultV1,
+  MusicUrlAuthorizationV1,
+} from '@common/storage/cache'
 
 
 export default () => {
   // =========================歌词=========================
-  mainHandle<string, LX.Player.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_palyer_lyric, async({ params: id }) => {
+  mainHandle<LX.Music.LyricInfoQuery, LX.Player.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_palyer_lyric, async({ params }) => {
     // return (getStore(LRC_EDITED, true, false).get(id) as LX.Music.LyricInfo | undefined) ??
     // getStore(LRC_RAW, true, false).get(id, {}) as LX.Music.LyricInfo
-    return global.lx.worker.dbService.getPlayerLyric(id)
+    return global.lx.worker.dbService.getPlayerLyric(params)
   })
 
   // 原始歌词
-  mainHandle<string, LX.Music.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_lyric_raw, async({ params: id }) => {
-    return global.lx.worker.dbService.getRawLyric(id)
+  mainHandle<LX.Music.LyricInfoQuery, LX.Music.LyricInfo>(WIN_MAIN_RENDERER_EVENT_NAME.get_lyric_raw, async({ params }) => {
+    const result = await global.lx.worker.dbService.getRawLyric(params)
+    return result.status == 'hit' ? result.value : { lyric: '' }
   })
-  mainHandle<LX.Music.LyricInfoSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_lyric_raw, async({ params: { id, lyrics } }) => {
-    await global.lx.worker.dbService.rawLyricAdd(id, lyrics)
+  mainHandle<LX.Music.LyricInfoSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_lyric_raw, async({ params: { id, provider, lyrics } }) => {
+    await global.lx.worker.dbService.rawLyricAdd({ provider, sourceTrackId: id, lyrics, nowMs: Date.now() })
   })
   mainHandle(WIN_MAIN_RENDERER_EVENT_NAME.clear_lyric_raw, async() => {
     await global.lx.worker.dbService.rawLyricClear()
   })
   mainHandle(WIN_MAIN_RENDERER_EVENT_NAME.get_lyric_raw_count, async() => {
-    return global.lx.worker.dbService.rawLyricCount()
+    const result = await global.lx.worker.dbService.rawLyricCount()
+    return result.status == 'hit' ? result.value.rows : 0
   })
 
   // 已编辑的歌词
@@ -43,34 +58,48 @@ export default () => {
 
 
   // =========================歌曲URL=========================
-  mainHandle<string, string>(WIN_MAIN_RENDERER_EVENT_NAME.get_music_url, async({ params: id }) => {
-    return (await global.lx.worker.dbService.getMusicUrl(id)) ?? ''
+  mainHandle<unknown, MusicUrlAuthorizationV1 | null>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_authorize, async({ params }) => {
+    const { provider } = parseMusicUrlAuthorizationRequest(params)
+    const authorization = global.lx.musicUrlAuthorization
+    if (authorization == null) throw new Error('Music URL authorization has not been initialized')
+    return authorization.authorize(provider)
   })
-  mainHandle<LX.Music.MusicUrlInfo>(WIN_MAIN_RENDERER_EVENT_NAME.save_music_url, async({ params: { id, url } }) => {
-    await global.lx.worker.dbService.musicUrlSave([{ id, url }])
+  mainHandle<unknown, CacheReadResultV1<string>>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_get, async({ params }) => {
+    const authorization = global.lx.musicUrlAuthorization
+    if (authorization == null) throw new Error('Music URL authorization has not been initialized')
+    return authorization.read(parseAuthorizedMusicUrlGetInput(params))
   })
-  mainHandle<string>(WIN_MAIN_RENDERER_EVENT_NAME.remove_music_url, async({ params: id }) => {
-    await global.lx.worker.dbService.musicUrlRemove([id])
+  mainHandle<unknown, CacheWriteResultV1>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_put, async({ params }) => {
+    const authorization = global.lx.musicUrlAuthorization
+    if (authorization == null) throw new Error('Music URL authorization has not been initialized')
+    return authorization.write(parseAuthorizedMusicUrlPutInput(params))
   })
-  mainHandle(WIN_MAIN_RENDERER_EVENT_NAME.clear_music_url, async() => {
-    await global.lx.worker.dbService.musicUrlClear()
+  mainHandle<unknown, CacheWriteResultV1>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_delete, async({ params }) => {
+    const authorization = global.lx.musicUrlAuthorization
+    if (authorization == null) throw new Error('Music URL authorization has not been initialized')
+    return authorization.delete(parseAuthorizedMusicUrlDeleteInput(params))
   })
-  mainHandle(WIN_MAIN_RENDERER_EVENT_NAME.get_music_url_count, async() => {
-    return global.lx.worker.dbService.musicUrlCount()
+  mainHandle(WIN_MAIN_RENDERER_EVENT_NAME.music_url_clear, async() => {
+    return global.lx.worker.dbService.musicUrlClear()
+  })
+  mainHandle(WIN_MAIN_RENDERER_EVENT_NAME.music_url_count, async() => {
+    const result = await global.lx.worker.dbService.musicUrlCount()
+    return result.status == 'hit' ? result.value : 0
   })
 
   // =========================换源歌曲=========================
-  mainHandle<string, LX.Music.MusicInfoOnline[]>(WIN_MAIN_RENDERER_EVENT_NAME.get_other_source, async({ params: id }) => {
-    return global.lx.worker.dbService.getMusicInfoOtherSource(id)
+  mainHandle<unknown, CacheReadResultV1<LX.Music.MusicInfoOnline[]>>(WIN_MAIN_RENDERER_EVENT_NAME.other_sources_get, async({ params }) => {
+    return global.lx.worker.dbService.otherSourcesGet(parseOtherSourcesGetInput(params))
   })
-  mainHandle<LX.Music.MusicInfoOtherSourceSave>(WIN_MAIN_RENDERER_EVENT_NAME.save_other_source, async({ params: { id, list } }) => {
-    await global.lx.worker.dbService.musicInfoOtherSourceAdd(id, list)
+  mainHandle<unknown, CacheWriteResultV1>(WIN_MAIN_RENDERER_EVENT_NAME.other_sources_put, async({ params }) => {
+    return global.lx.worker.dbService.otherSourcesPut(parseOtherSourcesPutInput(params))
   })
-  mainHandle(WIN_MAIN_RENDERER_EVENT_NAME.clear_other_source, async() => {
-    await global.lx.worker.dbService.musicInfoOtherSourceClear()
+  mainHandle(WIN_MAIN_RENDERER_EVENT_NAME.other_sources_clear, async() => {
+    return global.lx.worker.dbService.otherSourcesClear()
   })
-  mainHandle(WIN_MAIN_RENDERER_EVENT_NAME.get_other_source_count, async() => {
-    return global.lx.worker.dbService.musicInfoOtherSourceCount()
+  mainHandle(WIN_MAIN_RENDERER_EVENT_NAME.other_sources_count, async() => {
+    const result = await global.lx.worker.dbService.otherSourcesCount()
+    return result.status == 'hit' ? result.value : 0
   })
 
   // mainHandle<string[]>(WIN_MAIN_RENDERER_EVENT_NAME.remove_dislike_music_infos, async({ params: ids }) => {

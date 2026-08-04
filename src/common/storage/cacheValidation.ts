@@ -1,0 +1,224 @@
+import type {
+  AuthorizedMusicUrlDeleteInputV1,
+  AuthorizedMusicUrlGetInputV1,
+  AuthorizedMusicUrlPutInputV1,
+  MusicUrlAuthorizationRequestV1,
+  MusicUrlAuthorizationV1,
+  MusicUrlAccountInvalidationV1,
+  MusicUrlDeleteInputV1,
+  MusicUrlGetInputV1,
+  MusicUrlPutInputV1,
+  MusicUrlSourceInvalidationV1,
+  OtherSourcesGetInputV1,
+  OtherSourcesPutInputV1,
+} from './cache'
+
+type PlainData = Record<string, unknown>
+
+const textBytes = (value: string): number => new TextEncoder().encode(value).byteLength
+// eslint-disable-next-line no-control-regex -- Cache keys must reject all ASCII control characters.
+const controlCharacters = /[\u0000-\u001f\u007f]/
+const musicUrlQualities = new Set(['128k', '320k', 'flac', 'flac24bit', '192k', 'ape', 'wav'])
+
+const fixedError = <C extends string>(code: C): Error & { code: C } => Object.assign(new Error(code), { code })
+const invalidMusicUrl = (): Error & { code: 'music_url_input_invalid' } => fixedError('music_url_input_invalid')
+const invalidOtherSources = (): Error & { code: 'other_sources_input_invalid' } => fixedError('other_sources_input_invalid')
+
+const readPlainData = (value: unknown, required: readonly string[], optional: readonly string[] = []): PlainData | null => {
+  if (value == null || typeof value != 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null
+  const descriptors = Object.getOwnPropertyDescriptors(value) as Record<string, PropertyDescriptor>
+  const keys = Reflect.ownKeys(descriptors)
+  if (keys.some(key => typeof key != 'string') || required.some(key => !Object.hasOwn(descriptors, key)) ||
+    keys.some(key => typeof key == 'string' && !required.includes(key) && !optional.includes(key))) return null
+  const result: PlainData = {}
+  for (const key of keys as string[]) {
+    const descriptor = descriptors[key]
+    if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) return null
+    result[key] = descriptor.value
+  }
+  return result
+}
+
+const validText = (value: unknown, maxBytes = 1024): value is string =>
+  typeof value == 'string' && value.length > 0 && value == value.trim() &&
+  !controlCharacters.test(value) && textBytes(value) <= maxBytes
+
+const validNow = (value: unknown): value is number =>
+  typeof value == 'number' && Number.isSafeInteger(value) && value >= 0
+
+const validGeneration = (value: unknown): value is number =>
+  typeof value == 'number' && Number.isSafeInteger(value) && value > 0
+
+const validProfileUin = (value: unknown): value is string => validText(value, 128)
+
+const validNeteaseAccountScope = (value: unknown): value is string => {
+  if (typeof value != 'string') return false
+  const userId = /^profile-v1:user-id:([1-9]\d*)$/.exec(value)?.[1]
+  return userId != null && Number.isSafeInteger(Number(userId))
+}
+
+const validQQMusicAccountScope = (value: unknown): value is string => {
+  if (typeof value != 'string') return false
+  const uin = value.startsWith('profile-v1:uin:') ? value.slice('profile-v1:uin:'.length) : null
+  return uin != null && validProfileUin(uin)
+}
+
+const validProviderAccountScope = (provider: unknown, accountScope: unknown): provider is 'wy' | 'tx' =>
+  provider == 'wy' ? validNeteaseAccountScope(accountScope)
+    : provider == 'tx' && validQQMusicAccountScope(accountScope)
+
+export const parseMusicUrlAuthorizationRequest = (value: unknown): MusicUrlAuthorizationRequestV1 => {
+  const data = readPlainData(value, ['provider'])
+  if (data == null || (data.provider != 'wy' && data.provider != 'tx')) throw invalidMusicUrl()
+  return { provider: data.provider as 'wy' | 'tx' }
+}
+
+export const parseMusicUrlAuthorization = (value: unknown): MusicUrlAuthorizationV1 => {
+  const data = readPlainData(value, ['version', 'provider', 'accountScope', 'generation'])
+  if (data == null || data.version !== 1 ||
+    !validProviderAccountScope(data.provider, data.accountScope) || !validGeneration(data.generation)) {
+    throw invalidMusicUrl()
+  }
+  return {
+    version: 1,
+    provider: data.provider,
+    accountScope: data.accountScope as string,
+    generation: data.generation,
+  }
+}
+
+const parseAuthorizedMusicUrlKey = (value: PlainData): AuthorizedMusicUrlDeleteInputV1 | null => {
+  let authorization: MusicUrlAuthorizationV1
+  try {
+    authorization = parseMusicUrlAuthorization(value.authorization)
+  } catch {
+    return null
+  }
+  if (!validText(value.sourceTrackId) ||
+    typeof value.quality != 'string' || !musicUrlQualities.has(value.quality)) return null
+  return {
+    authorization,
+    sourceTrackId: value.sourceTrackId,
+    quality: value.quality,
+  }
+}
+
+export const parseAuthorizedMusicUrlDeleteInput = (value: unknown): AuthorizedMusicUrlDeleteInputV1 => {
+  const data = readPlainData(value, ['authorization', 'sourceTrackId', 'quality'])
+  const key = data == null ? null : parseAuthorizedMusicUrlKey(data)
+  if (key == null) throw invalidMusicUrl()
+  return key
+}
+
+export const parseAuthorizedMusicUrlGetInput = (value: unknown): AuthorizedMusicUrlGetInputV1 => {
+  const data = readPlainData(value, ['authorization', 'sourceTrackId', 'quality', 'nowMs'])
+  const key = data == null ? null : parseAuthorizedMusicUrlKey(data)
+  if (data == null || key == null || !validNow(data.nowMs)) throw invalidMusicUrl()
+  return { ...key, nowMs: data.nowMs }
+}
+
+export const parseAuthorizedMusicUrlPutInput = (value: unknown): AuthorizedMusicUrlPutInputV1 => {
+  const data = readPlainData(
+    value,
+    ['authorization', 'sourceTrackId', 'quality', 'url', 'nowMs'],
+    ['providerExpiresAtMs'],
+  )
+  const key = data == null ? null : parseAuthorizedMusicUrlKey(data)
+  if (data == null || key == null || !validNow(data.nowMs) || !validText(data.url, 8192) ||
+    (data.providerExpiresAtMs != null && !validNow(data.providerExpiresAtMs))) throw invalidMusicUrl()
+  return {
+    ...key,
+    url: data.url,
+    nowMs: data.nowMs,
+    ...(data.providerExpiresAtMs == null ? {} : { providerExpiresAtMs: data.providerExpiresAtMs }),
+  }
+}
+
+const parseMusicUrlKey = (value: PlainData): MusicUrlDeleteInputV1 | null => {
+  if (!validProviderAccountScope(value.provider, value.accountScope) ||
+    !validText(value.sourceTrackId) || typeof value.quality != 'string' || !musicUrlQualities.has(value.quality)) return null
+  return {
+    provider: value.provider,
+    accountScope: value.accountScope as string,
+    sourceTrackId: value.sourceTrackId,
+    quality: value.quality,
+  }
+}
+
+export const parseMusicUrlDeleteInput = (value: unknown): MusicUrlDeleteInputV1 => {
+  const data = readPlainData(value, ['provider', 'accountScope', 'sourceTrackId', 'quality'])
+  const key = data == null ? null : parseMusicUrlKey(data)
+  if (key == null) throw invalidMusicUrl()
+  return key
+}
+
+export const parseMusicUrlGetInput = (value: unknown): MusicUrlGetInputV1 => {
+  const data = readPlainData(value, ['provider', 'accountScope', 'sourceTrackId', 'quality', 'nowMs'])
+  const key = data == null ? null : parseMusicUrlKey(data)
+  if (data == null || key == null || !validNow(data.nowMs)) throw invalidMusicUrl()
+  return { ...key, nowMs: data.nowMs }
+}
+
+export const parseMusicUrlPutInput = (value: unknown): MusicUrlPutInputV1 => {
+  const data = readPlainData(
+    value,
+    ['provider', 'accountScope', 'sourceTrackId', 'quality', 'url', 'nowMs'],
+    ['providerExpiresAtMs'],
+  )
+  const key = data == null ? null : parseMusicUrlKey(data)
+  if (data == null || key == null || !validNow(data.nowMs) || typeof data.url != 'string' ||
+    data.url.length == 0 || textBytes(data.url) > 8192 ||
+    (data.providerExpiresAtMs != null && !validNow(data.providerExpiresAtMs))) throw invalidMusicUrl()
+  return {
+    ...key,
+    url: data.url,
+    nowMs: data.nowMs,
+    ...(data.providerExpiresAtMs == null ? {} : { providerExpiresAtMs: data.providerExpiresAtMs }),
+  }
+}
+
+const parseTrackIdentity = (value: PlainData): Omit<OtherSourcesGetInputV1, 'nowMs'> | null => {
+  if (!validText(value.originalProvider, 128) || !validText(value.originalTrackId)) return null
+  return { originalProvider: value.originalProvider, originalTrackId: value.originalTrackId }
+}
+
+export const parseOtherSourcesGetInput = (value: unknown): OtherSourcesGetInputV1 => {
+  const data = readPlainData(value, ['originalProvider', 'originalTrackId', 'nowMs'])
+  const identity = data == null ? null : parseTrackIdentity(data)
+  if (data == null || identity == null || !validNow(data.nowMs)) throw invalidOtherSources()
+  return { ...identity, nowMs: data.nowMs }
+}
+
+export const parseOtherSourcesPutInput = (value: unknown): OtherSourcesPutInputV1 => {
+  const data = readPlainData(value, ['originalProvider', 'originalTrackId', 'candidates', 'nowMs'])
+  const identity = data == null ? null : parseTrackIdentity(data)
+  if (data == null || identity == null || !validNow(data.nowMs) || !Array.isArray(data.candidates) ||
+    Object.getPrototypeOf(data.candidates) !== Array.prototype ||
+    Reflect.ownKeys(Object.getOwnPropertyDescriptors(data.candidates)).length != data.candidates.length + 1) {
+    throw invalidOtherSources()
+  }
+  return { ...identity, candidates: data.candidates as LX.Music.MusicInfoOnline[], nowMs: data.nowMs }
+}
+
+export const parseMusicUrlAccountInvalidation = (value: unknown): MusicUrlAccountInvalidationV1 => {
+  const data = readPlainData(value, ['provider', 'accountScope'])
+  if (data == null || !validProviderAccountScope(data.provider, data.accountScope)) throw invalidMusicUrl()
+  return { provider: data.provider, accountScope: data.accountScope as string }
+}
+
+export const parseMusicUrlSourceInvalidation = (value: unknown): MusicUrlSourceInvalidationV1 => {
+  const data = readPlainData(value, ['provider'])
+  if (data == null || (data.provider != 'wy' && data.provider != 'tx')) throw invalidMusicUrl()
+  return { provider: data.provider as string }
+}
+
+export const neteaseAccountScope = (profile: unknown): string | null => {
+  const data = readPlainData(profile, ['userId'], ['nickname', 'avatarUrl', 'backgroundUrl', 'signature'])
+  if (data == null || typeof data.userId != 'number' || !Number.isSafeInteger(data.userId) || data.userId <= 0) return null
+  return `profile-v1:user-id:${data.userId}`
+}
+
+export const qqMusicAccountScope = (profile: unknown): string | null => {
+  const data = readPlainData(profile, ['uin'], ['nickname'])
+  return data != null && validProfileUin(data.uin) ? `profile-v1:uin:${data.uin}` : null
+}

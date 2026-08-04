@@ -16,6 +16,7 @@ import {
 import { getListMusicsFromCache } from '@renderer/store/list/action'
 import { downloadList } from '@renderer/store/download/state'
 import { setProgress } from './playProgress'
+import type { PlaybackSelectionIntent, PlaybackSelectionOptions } from '@common/storage/playback'
 import { playNext } from '@renderer/core/player'
 import { LIST_IDS } from '@common/constants'
 import { toRaw } from '@common/utils/vueTools'
@@ -185,7 +186,19 @@ const setPlayerMusicInfo = (musicInfo: LX.Music.MusicInfo | LX.Download.ListItem
  * @param musicInfo 歌曲信息
  * @param isTempPlay 是否临时播放
  */
-export const setPlayMusicInfo = (listId: string | null, musicInfo: LX.Download.ListItem | LX.Music.MusicInfo | null, isTempPlay: boolean = false) => {
+export function setPlayMusicInfo(listId: string | null, musicInfo: null, isTempPlay?: boolean): void
+export function setPlayMusicInfo(
+  listId: string | null,
+  musicInfo: LX.Download.ListItem | LX.Music.MusicInfo,
+  isTempPlay: boolean,
+  selectionOptions: PlaybackSelectionOptions,
+): void
+export function setPlayMusicInfo(
+  listId: string | null,
+  musicInfo: LX.Download.ListItem | LX.Music.MusicInfo | null,
+  isTempPlay: boolean = false,
+  selectionOptions?: PlaybackSelectionOptions,
+) {
   musicInfo = toRaw(musicInfo)
 
   playMusicInfo.listId = listId
@@ -201,11 +214,32 @@ export const setPlayMusicInfo = (listId: string | null, musicInfo: LX.Download.L
     playInfo.playerListId = null
     playInfo.playerPlayIndex = -1
   } else {
+    if (selectionOptions == null) throw new Error('Playback selection intent is required')
     const { playIndex, playerPlayIndex } = getPlayIndex(listId, musicInfo, isTempPlay)
 
     playInfo.playIndex = playIndex
     playInfo.playerPlayIndex = playerPlayIndex
-    window.app_event.musicToggled()
+    const playablePayload = 'progress' in musicInfo ? musicInfo.metadata.musicInfo : musicInfo
+    const selectionIntent: PlaybackSelectionIntent = {
+      track: {
+        source: playablePayload.source,
+        sourceTrackId: playablePayload.id,
+        name: playablePayload.name,
+        singer: playablePayload.singer,
+        durationMs: null,
+        playablePayload: JSON.parse(JSON.stringify(toRaw(playablePayload))) as LX.Music.MusicInfo,
+      },
+      context: { type: isTempPlay ? 'temporary' : 'playlist', id: listId },
+      resume: {
+        listId: isTempPlay ? null : listId,
+        indexHint: isTempPlay || playIndex < 0 ? null : playIndex,
+      },
+      startReason: selectionOptions.startReason,
+      startPositionMs: Number.isFinite(selectionOptions.startPositionMs) && selectionOptions.startPositionMs >= 0
+        ? Math.round(selectionOptions.startPositionMs)
+        : 0,
+    }
+    window.app_event.musicToggled(selectionIntent)
   }
 }
 
@@ -248,7 +282,7 @@ export const addTempPlayList = (list: LX.Player.TempPlayListItem[]) => {
   if (topList.length) arrUnshift(tempPlayList, topList.map(({ musicInfo, listId }) => ({ musicInfo, listId, isTempPlay: true })))
   if (bottomList.length) arrPush(tempPlayList, bottomList.map(({ musicInfo, listId }) => ({ musicInfo, listId, isTempPlay: true })))
 
-  if (!playMusicInfo.musicInfo) void playNext()
+  if (!playMusicInfo.musicInfo) void playNext({ automatic: true, reason: 'next', startReason: 'auto' })
 }
 /**
  * 从稍后播放列表移除歌曲

@@ -118,7 +118,16 @@ export const createPlaybackSessionFactories: CreatePlaybackSessionFactories = de
     if (cacheMode == 'bypass' && policy == 'fallback') {
       let invalidation: Promise<void>
       try {
-        invalidation = deps.cache.invalidateQualityRange(musicInfo, requestedQuality)
+        invalidation = Promise.resolve().then(async() => {
+          if (musicInfo.source == 'local') return
+          const key = await deps.adapter.authorizeMusicUrl({
+            apiId: setting.primaryId,
+            musicInfo,
+            quality: requestedQuality,
+            signal: new AbortController().signal,
+          })
+          if (key != null) await deps.cache.invalidateQualityRange(key)
+        })
       } catch (error) {
         invalidation = Promise.reject(error)
       }

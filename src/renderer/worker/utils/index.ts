@@ -8,7 +8,8 @@ export const createMainWorker = () => {
     '../main',
     import.meta.url,
   ))
-  return Comlink.wrap<LX.WorkerMainTypes>(worker)
+  const remote = Comlink.wrap<LX.WorkerMainTypes>(worker)
+  return remote
 }
 
 // export const createWorker = <T>(url: string): Comlink.Remote<T> => {

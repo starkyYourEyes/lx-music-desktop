@@ -1072,29 +1072,24 @@ test('foreground setting edits affect only the next resolution session', async (
   ])
 })
 
-test('force refresh keeps one settings snapshot while cache invalidation is pending', async () => {
+test('custom force refresh keeps one settings snapshot without persistent invalidation', async () => {
   const harness = createIntegrationHarness({
     sourceIds: ['old-primary', 'old-fallback'],
     requestedQuality: 'flac',
-    holdCacheInvalidation: true,
   })
   const playback = harness.play(onlineMusic, { reason: 'forceRefresh' })
-  await harness.waitForCacheInvalidation()
+  const oldPrimary = await harness.waitForRequest({ apiId: 'old-primary', platform: 'wy' })
   await harness.changeSettings({
     primary: 'new-primary', fallbacks: ['new-fallback'], requestedQuality: '128k',
   })
-  harness.releaseCacheInvalidation()
-  const oldPrimary = await harness.waitForRequest({ apiId: 'old-primary', platform: 'wy' })
   harness.succeed(oldPrimary, 'https://old-session', 'flac')
   await harness.waitForBoundForeground('https://old-session')
   harness.emitForegroundCanplay()
   await playback
   assert.deepEqual(harness.sessionSourceSnapshots, [['old-primary', 'old-fallback']])
   assert.deepEqual(harness.sessionQualitySnapshots, ['flac'])
-  assert.deepEqual(harness.invalidatedQualities, ['flac', '320k', '128k'])
-  assert.deepEqual(harness.invalidatedCacheKeys, [
-    'song_flac', 'song_320k', 'song_128k',
-  ])
+  assert.deepEqual(harness.invalidatedQualities, [])
+  assert.deepEqual(harness.invalidatedCacheKeys, [])
 })
 
 test('session cancellation tries no fallback and emits no visible error', async () => {

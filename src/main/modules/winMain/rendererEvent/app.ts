@@ -27,6 +27,8 @@ import { getAllThemes, removeTheme, saveTheme, setPowerSaveBlocker } from '@main
 import { openDirInExplorer } from '@common/utils/electron'
 
 export default () => {
+  const themeAssets = global.lx.themeAssets
+  if (themeAssets == null) throw new Error('theme_asset_manager_unavailable')
   // 设置应用名称
   // mainOn(WIN_MAIN_RENDERER_EVENT_NAME.set_app_name, ({ params: name }) => {
   //   if (name == null) {
@@ -125,11 +127,22 @@ export default () => {
   mainHandle<{ themes: LX.Theme[], userThemes: LX.Theme[] }>(WIN_MAIN_RENDERER_EVENT_NAME.get_themes, async() => {
     return getAllThemes()
   })
-  mainHandle<LX.Theme>(WIN_MAIN_RENDERER_EVENT_NAME.save_theme, async({ params: theme }) => {
-    saveTheme(theme)
+  mainHandle<{ sourcePath: string }, LX.StagedThemeImage>(WIN_MAIN_RENDERER_EVENT_NAME.stage_theme_image, async({ params }) => {
+    return themeAssets.stageThemeImage(params)
   })
-  mainHandle<string>(WIN_MAIN_RENDERER_EVENT_NAME.remove_theme, async({ params: id }) => {
-    removeTheme(id)
+  mainHandle<{ stagingId: string }>(WIN_MAIN_RENDERER_EVENT_NAME.discard_theme_image, async({ params }) => {
+    await themeAssets.discardThemeImage(params)
+  })
+  mainHandle<LX.RunTempChildOwnership>(WIN_MAIN_RENDERER_EVENT_NAME.get_run_temp_root, async() => {
+    const runTemp = global.lx.runTemp
+    if (runTemp == null) throw new Error('run_temp_root_unavailable')
+    return runTemp.getChildOwnership('local-artwork')
+  })
+  mainHandle<LX.ThemeSaveRequest, LX.ThemeSaveResult>(WIN_MAIN_RENDERER_EVENT_NAME.save_theme, async({ params }) => {
+    return saveTheme(params, themeAssets)
+  })
+  mainHandle<string, LX.Theme[]>(WIN_MAIN_RENDERER_EVENT_NAME.remove_theme, async({ params: id }) => {
+    return removeTheme(id)
   })
 }
 

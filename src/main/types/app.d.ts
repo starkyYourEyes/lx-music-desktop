@@ -7,6 +7,13 @@ import { type StorageCoordinator } from '@main/startup/storageCoordinator'
 import { type CredentialVault } from '@main/storage/credentials/credentialVault'
 import { type CredentialMigrationResult } from '@main/migration/credentials/credentialMigration'
 import { type AccountRepository } from '@main/storage/accounts/accountRepository'
+import { type StoragePaths } from '@main/utils/storagePaths'
+import { type PortableProfileStartupToken } from '@main/migration/portableProfile'
+import { type RunTempHandle, type RunTempReservation } from '@main/utils/tempLifecycle'
+import { type ThemeAssetManager } from '@main/services/themeAssetManager'
+import { type SessionRegistry } from '@main/services/sessionRegistry'
+import { type CacheManager } from '@main/services/cacheManager'
+import { type MusicUrlAuthorizationService } from '@main/services/musicUrlAuthorization'
 
 interface Lx {
   inited: boolean
@@ -30,10 +37,15 @@ interface Lx {
   worker: {
     dbService: DBSeriveTypes
   }
+  sessionRegistry: SessionRegistry
+  cacheManager?: CacheManager
   storage: StorageCoordinator | null
+  runTemp: RunTempHandle | null
+  themeAssets: ThemeAssetManager | null
   credentialVault?: CredentialVault
   credentialMigration?: CredentialMigrationResult
   accountRepository?: AccountRepository
+  musicUrlAuthorization?: MusicUrlAuthorizationService
   theme: LX.ThemeSetting
   player_status: LX.Player.Status
 }
@@ -55,6 +67,9 @@ declare global {
   var staticPath: string
   var lxDataPath: string
   var lxOldDataPath: string
+  var storagePaths: Readonly<StoragePaths>
+  var runTempReservation: RunTempReservation | null
+  var portableProfileStartup: { token: PortableProfileStartupToken } | null
   var lx: Lx
   var appWorder: AppWorder
 }

@@ -72,6 +72,12 @@ const createMainRemoveHarness = removeImplementation => {
       },
       '@main/modules/userApi/runtimeError': { normalizeRuntimeFailure: error => error },
       '@main/modules/userApi/runtimePool': { getUserApiRuntimePool: () => runtimePool },
+      '@main/modules/userApi/ipcValidation': {
+        parseUserApiCancellationPayload: value => value,
+        parseUserApiEnsurePayload: value => value,
+        parseUserApiRequestPayload: value => value,
+        parseUserApiRuntimeLeasePayload: value => value,
+      },
       '@main/modules/winMain/main': { sendEvent() {} },
     },
   )
@@ -95,6 +101,7 @@ const createRendererRemoveHarness = rendererInvoke => loadTsModule(
       rendererOn() {},
       rendererOff() {},
     },
+    '@common/storage/cache': { STORAGE_CACHE_GENERATION_EVENT: 'storage_cache_generation_v1' },
     '@common/ipcNames': {
       HOTKEY_RENDERER_EVENT_NAME: emptyEventNames,
       WIN_MAIN_RENDERER_EVENT_NAME: winMainEventNames,
@@ -104,6 +111,7 @@ const createRendererRemoveHarness = rendererInvoke => loadTsModule(
       markRaw: value => value,
       toRaw: value => value,
     },
+    '@common/utils': { log: { error() {} } },
     '@common/hotKey': {
       __esModule: true,
       HOTKEY_PLAYER: hotKeyGroup,
@@ -115,6 +123,8 @@ const createRendererRemoveHarness = rendererInvoke => loadTsModule(
       DATA_KEYS: {},
       DEFAULT_SETTING: {},
     },
+    './storageState': { getLocalState() {}, setLocalState() {} },
+    './shutdown': {},
   },
 )
 
@@ -154,6 +164,12 @@ const createMainEnsureHarness = ensureImplementation => {
       },
       '@main/modules/userApi/runtimeError': runtimeErrors,
       '@main/modules/userApi/runtimePool': { getUserApiRuntimePool: () => runtimePool },
+      '@main/modules/userApi/ipcValidation': {
+        parseUserApiCancellationPayload: value => value,
+        parseUserApiEnsurePayload: value => value,
+        parseUserApiRequestPayload: value => value,
+        parseUserApiRuntimeLeasePayload: value => value,
+      },
       '@main/modules/winMain/main': { sendEvent() {} },
     },
   )
@@ -309,6 +325,18 @@ test('direct delete main handler bounds retained failure fields and excludes arb
     },
   })
   assert.equal(Object.prototype.hasOwnProperty.call(result.error, 'arbitrary'), false)
+})
+
+test('direct delete main handler uses a removal fallback for a retained non-Error object failure', async() => {
+  const failure = Object.freeze({ reason: 'opaque lifecycle failure' })
+  const harness = createMainRemoveHarness(async() => { throw failure })
+  harness.retain(retainedApiList)
+
+  assert.deepEqual(await harness.invoke(['source']), {
+    success: false,
+    apiList: retainedApiList,
+    error: { message: 'User API removal failed' },
+  })
 })
 
 test('direct delete renderer helper returns and publishes the committed success list', async() => {

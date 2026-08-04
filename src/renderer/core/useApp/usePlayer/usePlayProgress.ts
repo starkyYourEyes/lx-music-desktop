@@ -1,17 +1,13 @@
 import { onBeforeUnmount, watch } from '@common/utils/vueTools'
 import { formatPlayTime2, getRandom } from '@common/utils/common'
-import { throttle } from '@common/utils'
-import { savePlayInfo } from '@renderer/utils/ipc'
 import { onTimeupdate, getCurrentTime, getDuration, setCurrentTime, onVisibilityChange } from '@renderer/plugins/player'
 import { playProgress, setNowPlayTime, setMaxplayTime } from '@renderer/store/player/playProgress'
-import { isPlay, musicInfo, playMusicInfo, playInfo } from '@renderer/store/player/state'
+import { musicInfo, playMusicInfo } from '@renderer/store/player/state'
 // import { getList } from '@renderer/store/utils'
 import { appSetting } from '@renderer/store/setting'
 import { playNext } from '@renderer/core/player'
 import { updateListMusics } from '@renderer/store/list/action'
-import { addCurrentListeningTime } from '@renderer/store/listeningTime/action'
-
-const delaySavePlayInfo = throttle(savePlayInfo, 2000)
+import type { PlaybackSeekOrigin } from '@common/storage/playback'
 
 export default () => {
   let restorePlayTime = 0
@@ -40,12 +36,12 @@ export default () => {
         mediaBuffer.playTime = 0
         if (appSetting['player.autoSkipOnError']) {
           console.warn('buffering end')
-          void playNext(true)
+          void playNext({ automatic: true, reason: 'buffer_timeout', startReason: 'auto' })
         }
         return
       }
       startBuffering()
-      setCurrentTime(skipTime)
+      window.app_event.setProgress(skipTime, 'buffer_recovery')
       console.log(mediaBuffer.playTime)
       console.log(currentTime)
     }, 3000)
@@ -58,7 +54,7 @@ export default () => {
     mediaBuffer.playTime = 0
   }
 
-  const setProgress = (time: number, maxTime?: number) => {
+  const setProgress = (time: number, origin: PlaybackSeekOrigin, maxTime?: number) => {
     if (!musicInfo.id) return
     if (maxTime != null) setMaxplayTime(maxTime)
     console.log('setProgress', time, maxTime)
@@ -68,6 +64,9 @@ export default () => {
       mediaBuffer.playTime = time
       startBuffering()
     }
+    const fromMs = Math.round(getCurrentTime() * 1000)
+    const toMs = Math.round(time * 1000)
+    if (fromMs != toMs) window.app_event.playbackSeek({ origin, fromMs, toMs })
     setNowPlayTime(time)
     setCurrentTime(time)
 
@@ -112,9 +111,9 @@ export default () => {
     if (mediaBuffer.playTime) {
       let playTime = mediaBuffer.playTime
       mediaBuffer.playTime = 0
-      setCurrentTime(playTime)
+      window.app_event.setProgress(playTime, 'buffer_recovery')
     } else if (restorePlayTime) {
-      setCurrentTime(restorePlayTime)
+      window.app_event.setProgress(restorePlayTime, 'buffer_recovery')
       restorePlayTime = 0
     }
   }
@@ -132,38 +131,10 @@ export default () => {
     setCurrentTime(restorePlayTime = playProgress.nowPlayTime)
     // setMaxplayTime(playProgress.maxPlayTime)
     handlePause()
-    if (!playMusicInfo.isTempPlay && playMusicInfo.listId) {
-      delaySavePlayInfo({
-        time: playProgress.nowPlayTime,
-        maxTime: playProgress.maxPlayTime,
-        listId: playMusicInfo.listId,
-        index: playInfo.playIndex,
-      })
-    }
   }
 
   watch(() => playProgress.nowPlayTime, (newValue, oldValue) => {
     if (Math.abs(newValue - oldValue) > 2) window.app_event.activePlayProgressTransition()
-    const playDelta = newValue - oldValue
-    if (isPlay.value && playDelta > 0 && playDelta <= 2) addCurrentListeningTime(playDelta)
-    if (appSetting['player.isSavePlayTime'] && !playMusicInfo.isTempPlay) {
-      delaySavePlayInfo({
-        time: newValue,
-        maxTime: playProgress.maxPlayTime,
-        listId: playMusicInfo.listId as string,
-        index: playInfo.playIndex,
-      })
-    }
-  })
-  watch(() => playProgress.maxPlayTime, maxPlayTime => {
-    if (!playMusicInfo.isTempPlay) {
-      delaySavePlayInfo({
-        time: playProgress.nowPlayTime,
-        maxTime: maxPlayTime,
-        listId: playMusicInfo.listId as string,
-        index: playInfo.playIndex,
-      })
-    }
   })
 
   // window.app_event.on('play', handlePlay)

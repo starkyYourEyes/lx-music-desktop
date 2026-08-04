@@ -81,7 +81,7 @@ describe('renderer storage IPC contract', () => {
         }
       }
       if (request.startsWith('@common/')) {
-        const realModule = path.join(commonRoot, `${request.slice('@common/'.length)}.ts`)
+        const realModule = path.join(commonRoot, request.slice('@common/'.length))
         return originalLoad.call(this, realModule, parent, isMain)
       }
       return originalLoad.call(this, request, parent, isMain)

@@ -2,7 +2,6 @@ const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const Module = require('node:module')
-const os = require('node:os')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
@@ -28,6 +27,7 @@ const {
 } = require('../../src/main/worker/dbService/migrate.ts')
 const { migration3 } = require('../../src/main/worker/dbService/migrations/0003_storage_foundation.ts')
 const { migrations } = require('../../src/main/worker/dbService/migrations/index.ts')
+const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const MIGRATION_3_CHECKSUM = '9243aa510e8355d2c3d0f687c6736654adf584ec6007b1bcf46f374a9d694e41'
 const LEGACY_SCHEMA = new Map([
@@ -52,7 +52,7 @@ afterEach(() => {
   for (const db of databases.splice(0)) {
     if (db.open) db.close()
   }
-  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+  for (const fixture of tempDirs.splice(0)) fixture.cleanup()
 })
 
 const hasObject = (db, name) => Boolean(db.prepare('SELECT 1 FROM sqlite_master WHERE name = ?').get(name))
@@ -82,6 +82,8 @@ const createMigration = (version, name, up = () => {}) => ({
 
 const migration4 = createMigration(4, 'test_four', db => db.exec('CREATE TABLE migration_four (id INTEGER PRIMARY KEY)'))
 const migration5 = createMigration(5, 'test_five', db => db.exec('CREATE TABLE migration_five (id INTEGER PRIMARY KEY)'))
+const migration6 = createMigration(6, 'test_six', db => db.exec('CREATE TABLE migration_six (id INTEGER PRIMARY KEY)'))
+const migration7 = createMigration(7, 'test_seven', db => db.exec('CREATE TABLE migration_seven (id INTEGER PRIMARY KEY)'))
 
 const readLegacyVersion = db => db.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value
 const readLedger = db => db.prepare('SELECT version, name, checksum, applied_at_ms FROM schema_migrations ORDER BY version').all()
@@ -164,6 +166,65 @@ describe('database migrations', () => {
     )
     assert.equal(readLegacyVersion(db), '3')
     assert.equal(getSchemaVersion(db), 3)
+  })
+
+  it('samples and freezes one migration timestamp before up and verifies after ledger and mirror writes', () => {
+    const db = createLegacyDatabase('2')
+    const observations = []
+    let sampled = false
+    let upContext
+    const contextualMigration = {
+      version: 3,
+      name: 'contextual_three',
+      checksum: checksum('contextual migration three'),
+      up(database, context) {
+        observations.push('up')
+        assert.equal(sampled, true)
+        assert.equal(Object.isFrozen(context), true)
+        assert.equal(context.appliedAtMs, 4321)
+        assert.equal(hasObject(database, 'contextual_three'), false)
+        upContext = context
+        database.exec('CREATE TABLE contextual_three (id INTEGER PRIMARY KEY)')
+      },
+      verify(database, context) {
+        observations.push('verify')
+        assert.equal(context, upContext)
+        assert.deepEqual(readLedger(database), [{
+          version: 3,
+          name: 'contextual_three',
+          checksum: checksum('contextual migration three'),
+          applied_at_ms: 4321,
+        }])
+        assert.equal(readLegacyVersion(database), '3')
+      },
+    }
+
+    assert.deepEqual(runMigrations(db, [contextualMigration], {
+      now: () => {
+        sampled = true
+        observations.push('timestamp')
+        return 4321
+      },
+    }), { fromVersion: 2, toVersion: 3, applied: [3] })
+    assert.deepEqual(observations, ['timestamp', 'up', 'verify'])
+  })
+
+  it('rolls back migration, ledger, and mirror when post-ledger verification fails', () => {
+    const db = createLegacyDatabase('2')
+    const migration = {
+      version: 3,
+      name: 'verify_failure',
+      checksum: checksum('verify failure'),
+      up(database) { database.exec('CREATE TABLE verify_failure (id INTEGER PRIMARY KEY)') },
+      verify() { throw new Error('injected post-ledger verification failure') },
+    }
+    assert.throws(
+      () => runMigrations(db, [migration], { now: () => 9 }),
+      /injected post-ledger verification failure/,
+    )
+    assert.equal(hasObject(db, 'verify_failure'), false)
+    assert.equal(hasObject(db, 'schema_migrations'), false)
+    assert.equal(readLegacyVersion(db), '2')
   })
 
   it('rolls back bootstrap and every pending migration when a later migration fails', () => {
@@ -274,6 +335,42 @@ describe('database migrations', () => {
     assert.deepEqual(readLedger(db).map(row => row.version), [3, 4, 5])
     assert.equal(hasObject(db, 'migration_five'), true)
     assert.equal(readLegacyVersion(db), '5')
+  })
+
+  it('caps every omitted-target migration entry point at schema 6', () => {
+    const registry = [migration3, migration4, migration5, migration6, migration7]
+    const pendingDb = createLegacyDatabase('2')
+    assert.deepEqual(getPendingMigrations(pendingDb, registry).map(migration => migration.version), [3, 4, 5, 6])
+
+    const runnerDb = createLegacyDatabase('2')
+    assert.deepEqual(runMigrations(runnerDb, registry, { now: () => 1000 }), {
+      fromVersion: 2,
+      toVersion: 6,
+      applied: [3, 4, 5, 6],
+    })
+    assert.equal(hasObject(runnerDb, 'migration_seven'), false)
+
+    const bootstrapDb = new Database(':memory:')
+    databases.push(bootstrapDb)
+    assert.deepEqual(bootstrapDatabaseSchema(bootstrapDb, registry, { now: () => 1000 }), {
+      fromVersion: 2,
+      toVersion: 6,
+      applied: [3, 4, 5, 6],
+    })
+    assert.equal(hasObject(bootstrapDb, 'migration_seven'), false)
+  })
+
+  it('refuses an explicit schema-7 target through the generic migration runner', () => {
+    const db = createLegacyDatabase('2')
+    const registry = [migration3, migration4, migration5, migration6, migration7]
+
+    assert.throws(
+      () => runMigrations(db, registry, { targetSchemaVersion: 7, now: () => 1000 }),
+      /target schema version 7/i,
+    )
+    assert.equal(hasObject(db, 'schema_migrations'), false)
+    assert.equal(hasObject(db, 'migration_seven'), false)
+    assert.equal(readLegacyVersion(db), '2')
   })
 
   it('rejects migration targets outside an inclusive contiguous boundary', () => {
@@ -419,8 +516,9 @@ describe('database migrations', () => {
   })
 
   it('maps an existing app database open error to recovery without a create fallback', async() => {
-    const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-migration-open-error-'))
-    tempDirs.push(profileRoot)
+    const fixture = createTestStorageRoot('lx-migration-open-error')
+    tempDirs.push(fixture)
+    const profileRoot = fixture.path
     fs.writeFileSync(path.join(profileRoot, 'lx.data.db'), '')
     const openError = new Error('injected existing database open failure')
     const fallbackError = new Error('create fallback must not run')
@@ -435,8 +533,10 @@ describe('database migrations', () => {
 
     const result = await dbService.init({
       dataPath: profileRoot,
-      backupDir: path.join(profileRoot, 'backups'),
+      cacheRoot: path.join(profileRoot, 'cache'),
+      backupsRoot: path.join(profileRoot, 'backups'),
       previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
     })
 
     assert.equal(result.status, 'recovery')
@@ -446,8 +546,9 @@ describe('database migrations', () => {
   })
 
   it('maps app database stat errors to recovery without attempting write open or create', async() => {
-    const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-migration-stat-error-'))
-    tempDirs.push(profileRoot)
+    const fixture = createTestStorageRoot('lx-migration-stat-error')
+    tempDirs.push(fixture)
+    const profileRoot = fixture.path
     const databasePath = path.join(profileRoot, 'lx.data.db')
     const statError = Object.assign(new Error('injected database stat failure'), { code: 'EACCES' })
     let openCalls = 0
@@ -468,8 +569,10 @@ describe('database migrations', () => {
 
     const result = await dbService.init({
       dataPath: profileRoot,
-      backupDir: path.join(profileRoot, 'backups'),
+      cacheRoot: path.join(profileRoot, 'cache'),
+      backupsRoot: path.join(profileRoot, 'backups'),
       previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
     })
 
     assert.equal(result.status, 'recovery')
@@ -479,15 +582,22 @@ describe('database migrations', () => {
   })
 
   it('bootstraps a new app database without migration backup metadata', async() => {
-    const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-migration-init-'))
-    tempDirs.push(profileRoot)
+    const fixture = createTestStorageRoot('lx-migration-init')
+    tempDirs.push(fixture)
+    const profileRoot = fixture.path
     const dbService = require('../../src/main/worker/dbService/db.ts')
 
-    const backupDir = path.join(profileRoot, 'backups')
-    const result = await dbService.init({ dataPath: profileRoot, backupDir, previousShutdownWasClean: true })
+    const backupsRoot = path.join(profileRoot, 'backups')
+    const result = await dbService.init({
+      dataPath: profileRoot,
+      cacheRoot: path.join(profileRoot, 'cache'),
+      backupsRoot,
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
     const db = dbService.getAppDB()
     databases.push(db)
-    const latestSchemaVersion = migrations.at(-1).version
+    const targetMigrations = migrations.filter(migration => migration.version <= 6)
 
     assert.equal(result.status, 'ready')
     assert.deepEqual({
@@ -497,19 +607,19 @@ describe('database migrations', () => {
       backupPath: result.backupPath,
     }, {
       existed: false,
-      schemaVersion: latestSchemaVersion,
+      schemaVersion: 6,
       migratedVersions: [],
       backupPath: null,
     })
-    assert.equal(dbService.getDB(), db)
-    assert.equal(getSchemaVersion(db), latestSchemaVersion)
+    assert.equal(dbService.getAppDB(), db)
+    assert.equal(getSchemaVersion(db), 6)
     assert.deepEqual(
       readLedger(db).map(row => [row.version, row.name, row.checksum]),
-      migrations.map(migration => [migration.version, migration.name, migration.checksum]),
+      targetMigrations.map(migration => [migration.version, migration.name, migration.checksum]),
     )
     assert.equal(db.pragma('foreign_keys', { simple: true }), 1)
     assert.equal(db.pragma('journal_mode', { simple: true }), 'wal')
-    assert.equal(fs.existsSync(backupDir), false)
+    assert.equal(fs.existsSync(backupsRoot), false)
     assert.equal(fs.existsSync(path.join(profileRoot, 'lx.data.db')), true)
     assert.equal(fs.existsSync(path.join(profileRoot, 'activity.db')), false)
   })

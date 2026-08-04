@@ -2,323 +2,28 @@ const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 const { PROJECT_IDENTITY } = require('../../common/projectIdentity')
+const {
+  closeDirectDirectory,
+  createDirectChildDirectory,
+  observeDirectChild,
+  validateDirectDirectory,
+} = require('../storage/directDirectory')
+const {
+  DirectorySourceChangedError,
+  assertDirectChild,
+  copyDirectoryWithManifestPromotion,
+  getUsableDirectory,
+  safeLog,
+} = require('./guardedDirectoryMigration')
+const {
+  acquireMigrationLease,
+  releaseMigrationLease,
+} = require('./migrationLease')
 
 const LEGACY_USER_DATA_DIR_NAME = 'lx-music-desktop'
 const MIGRATION_MARKER_FILE = '.legacy-user-data-migration.json'
 const TEMP_SUFFIX = '.migration-tmp'
 const LOCK_SUFFIX = '.migration.lock'
-const LOCK_VERSION = 1
-const LOCK_ACQUIRE_ATTEMPTS = 3
-const HASH_BUFFER_SIZE = 64 * 1024
-
-class LegacyDataChangedError extends Error {}
-class UnsupportedLegacyDataError extends Error {}
-
-const assertDirectChild = (rootPath, candidatePath) => {
-  const root = path.resolve(rootPath)
-  const candidate = path.resolve(candidatePath)
-  if (path.dirname(candidate) != root || candidate == root) {
-    throw new Error(`Migration path must be a direct child of appData: ${candidate}`)
-  }
-}
-
-const safeLog = (logger, method, ...args) => {
-  try {
-    logger[method]?.(...args)
-  } catch {}
-}
-
-const isSameNode = (left, right) => left.dev == right.dev && left.ino == right.ino
-
-const closeDescriptor = (fsApi, fd, logger) => {
-  try {
-    fsApi.closeSync(fd)
-  } catch (error) {
-    safeLog(logger, 'warn', 'Could not close user-data migration file', error)
-  }
-}
-
-const parseLockOwner = raw => {
-  let owner
-  try {
-    owner = JSON.parse(raw)
-  } catch {
-    throw new Error('Migration lock metadata is invalid')
-  }
-  if (
-    owner?.version != LOCK_VERSION ||
-    !Number.isSafeInteger(owner.pid) ||
-    owner.pid <= 0 ||
-    typeof owner.nonce != 'string' ||
-    !/^[a-f0-9]{32}$/.test(owner.nonce) ||
-    typeof owner.createdAt != 'string' ||
-    !Number.isFinite(Date.parse(owner.createdAt))
-  ) {
-    throw new Error('Migration lock metadata is invalid')
-  }
-  return owner
-}
-
-const readLockSnapshot = (fsApi, lockPath) => {
-  const before = fsApi.lstatSync(lockPath)
-  if (before.isSymbolicLink() || !before.isFile()) {
-    throw new Error(`Migration lock must be a regular file: ${lockPath}`)
-  }
-  const raw = fsApi.readFileSync(lockPath, 'utf8')
-  const after = fsApi.lstatSync(lockPath)
-  if (!isSameNode(before, after)) throw new Error('Migration lock changed while it was inspected')
-  return { identity: after, owner: parseLockOwner(raw), raw }
-}
-
-const removeOwnedLockFile = (fsApi, lockPath, expectedIdentity, expectedOwner, logger) => {
-  try {
-    const snapshot = readLockSnapshot(fsApi, lockPath)
-    if (!isSameNode(expectedIdentity, snapshot.identity) || snapshot.owner.nonce != expectedOwner.nonce) return false
-    fsApi.unlinkSync(lockPath)
-    return true
-  } catch (error) {
-    if (error?.code != 'ENOENT') safeLog(logger, 'warn', `Could not remove owned migration file: ${lockPath}`, error)
-    return false
-  }
-}
-
-const removeOwnedCandidate = (fsApi, candidatePath, expectedIdentity, logger) => {
-  try {
-    const identity = fsApi.lstatSync(candidatePath)
-    if (identity.isSymbolicLink() || !identity.isFile() || !isSameNode(expectedIdentity, identity)) return false
-    fsApi.unlinkSync(candidatePath)
-    return true
-  } catch (error) {
-    if (error?.code != 'ENOENT') safeLog(logger, 'warn', `Could not remove owned migration file: ${candidatePath}`, error)
-    return false
-  }
-}
-
-const releaseOwnedLock = (fsApi, lock, logger) => {
-  removeOwnedLockFile(fsApi, lock.lockPath, lock.identity, lock.owner, logger)
-  closeDescriptor(fsApi, lock.fd, logger)
-}
-
-const defaultIsProcessAlive = pid => {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return error?.code != 'ESRCH'
-  }
-}
-
-const reclaimDeadLock = (fsApi, lockPath, isProcessAlive, logger) => {
-  let first
-  try {
-    first = readLockSnapshot(fsApi, lockPath)
-  } catch (error) {
-    return { reclaimed: false, error }
-  }
-
-  try {
-    if (isProcessAlive(first.owner.pid)) {
-      return { reclaimed: false, error: new Error(`User-data migration is active in process ${first.owner.pid}`) }
-    }
-  } catch (error) {
-    return { reclaimed: false, error: new Error(`Could not verify migration lock owner: ${error.message}`) }
-  }
-
-  try {
-    const current = readLockSnapshot(fsApi, lockPath)
-    if (!isSameNode(first.identity, current.identity) || first.raw != current.raw) {
-      return { reclaimed: false, error: new Error('Migration lock changed before stale-lock recovery') }
-    }
-    // This check/unlink is exact for cooperating app processes. Portable Node has
-    // no unlink-by-handle primitive that can exclude arbitrary filesystem writers.
-    fsApi.unlinkSync(lockPath)
-    const candidatePath = `${lockPath}.${first.owner.nonce}.candidate`
-    removeOwnedLockFile(fsApi, candidatePath, first.identity, first.owner, logger)
-    safeLog(logger, 'info', `Recovered stale user-data migration lock from process ${first.owner.pid}`)
-    return { reclaimed: true }
-  } catch (error) {
-    if (error?.code == 'ENOENT') return { reclaimed: true }
-    return { reclaimed: false, error }
-  }
-}
-
-const writeAll = (fsApi, fd, value) => {
-  const data = Buffer.from(value)
-  let offset = 0
-  while (offset < data.length) {
-    const written = fsApi.writeSync(fd, data, offset, data.length - offset)
-    if (written <= 0) throw new Error('Could not write migration lock metadata')
-    offset += written
-  }
-}
-
-const acquireMigrationLock = ({ fsApi, rootPath, lockPath, isProcessAlive, logger }) => {
-  let lastError = new Error('Could not acquire user-data migration lock')
-
-  for (let attempt = 0; attempt < LOCK_ACQUIRE_ATTEMPTS; attempt++) {
-    const owner = {
-      version: LOCK_VERSION,
-      pid: process.pid,
-      nonce: crypto.randomBytes(16).toString('hex'),
-      createdAt: new Date().toISOString(),
-    }
-    const candidatePath = `${lockPath}.${owner.nonce}.candidate`
-    assertDirectChild(rootPath, candidatePath)
-    let fd
-    let identity
-    let metadataWritten = false
-    let linkAttempted = false
-
-    try {
-      fd = fsApi.openSync(candidatePath, 'wx')
-      identity = fsApi.fstatSync(fd)
-      writeAll(fsApi, fd, JSON.stringify(owner))
-      metadataWritten = true
-      fsApi.fsyncSync(fd)
-      linkAttempted = true
-      fsApi.linkSync(candidatePath, lockPath)
-      removeOwnedLockFile(fsApi, candidatePath, identity, owner, logger)
-      return { fd, identity, lockPath, owner }
-    } catch (error) {
-      lastError = error
-      if (identity != null) {
-        if (metadataWritten) removeOwnedLockFile(fsApi, candidatePath, identity, owner, logger)
-        else removeOwnedCandidate(fsApi, candidatePath, identity, logger)
-      }
-      if (fd != null) closeDescriptor(fsApi, fd, logger)
-
-      if (!linkAttempted && error?.code == 'EEXIST') continue
-      if (!linkAttempted || error?.code != 'EEXIST') break
-
-      const recovery = reclaimDeadLock(fsApi, lockPath, isProcessAlive, logger)
-      if (!recovery.reclaimed) return { error: recovery.error ?? error }
-    }
-  }
-
-  return { error: lastError }
-}
-
-const createTempOwnership = (fsApi, rootPath, tempPath) => {
-  assertDirectChild(rootPath, tempPath)
-  const identity = fsApi.lstatSync(tempPath)
-  if (identity.isSymbolicLink() || !identity.isDirectory()) {
-    throw new Error(`Migration temporary path must be a non-link directory: ${tempPath}`)
-  }
-
-  const nonce = crypto.randomBytes(16).toString('hex')
-  const markerPath = path.join(tempPath, `.migration-owner-${nonce}`)
-  fsApi.writeFileSync(markerPath, nonce, { flag: 'wx' })
-  const markerIdentity = fsApi.lstatSync(markerPath)
-  if (markerIdentity.isSymbolicLink() || !markerIdentity.isFile()) {
-    throw new Error(`Migration ownership marker must be a regular file: ${markerPath}`)
-  }
-  return { rootPath, tempPath, identity, markerPath, markerIdentity, nonce }
-}
-
-const removeOwnedTemp = (fsApi, ownership, logger) => {
-  if (ownership == null) return
-  try {
-    assertDirectChild(ownership.rootPath, ownership.tempPath)
-    const identity = fsApi.lstatSync(ownership.tempPath)
-    if (identity.isSymbolicLink() || !identity.isDirectory() || !isSameNode(ownership.identity, identity)) {
-      throw new Error(`Migration temporary directory ownership changed: ${ownership.tempPath}`)
-    }
-
-    const markerBefore = fsApi.lstatSync(ownership.markerPath)
-    if (
-      markerBefore.isSymbolicLink() ||
-      !markerBefore.isFile() ||
-      !isSameNode(ownership.markerIdentity, markerBefore) ||
-      fsApi.readFileSync(ownership.markerPath, 'utf8') != ownership.nonce
-    ) {
-      throw new Error(`Migration temporary directory marker changed: ${ownership.markerPath}`)
-    }
-    const markerAfter = fsApi.lstatSync(ownership.markerPath)
-    if (!isSameNode(markerBefore, markerAfter)) {
-      throw new Error(`Migration temporary directory marker changed while inspected: ${ownership.markerPath}`)
-    }
-
-    fsApi.rmSync(ownership.tempPath, { recursive: true, force: true })
-  } catch (error) {
-    safeLog(logger, 'warn', 'Could not verify owned user-data migration temporary directory', error)
-  }
-}
-
-const getUsableDirectory = (fsApi, directoryPath) => {
-  try {
-    const stats = fsApi.lstatSync(directoryPath)
-    return stats.isDirectory() && !stats.isSymbolicLink()
-  } catch {
-    return false
-  }
-}
-
-const ensureDirectory = (fsApi, directoryPath, logger) => {
-  try {
-    fsApi.mkdirSync(directoryPath)
-  } catch (error) {
-    if (error?.code != 'EEXIST') safeLog(logger, 'error', `Could not create user-data directory: ${directoryPath}`, error)
-  }
-  return getUsableDirectory(fsApi, directoryPath)
-}
-
-const hashFile = (fsApi, filePath) => {
-  const hash = crypto.createHash('sha256')
-  const buffer = Buffer.allocUnsafe(HASH_BUFFER_SIZE)
-  const fd = fsApi.openSync(filePath, 'r')
-  try {
-    let bytesRead
-    while ((bytesRead = fsApi.readSync(fd, buffer, 0, buffer.length, null)) > 0) {
-      hash.update(buffer.subarray(0, bytesRead))
-    }
-    return hash.digest('hex')
-  } finally {
-    fsApi.closeSync(fd)
-  }
-}
-
-const createManifest = (fsApi, rootPath) => {
-  const manifest = []
-
-  const visit = (entryPath, relativePath) => {
-    const stats = fsApi.lstatSync(entryPath)
-    if (stats.isSymbolicLink()) throw new UnsupportedLegacyDataError(`Migration does not support linked data: ${relativePath}`)
-
-    if (stats.isDirectory()) {
-      manifest.push({ path: relativePath, type: 'directory' })
-      for (const entry of fsApi.readdirSync(entryPath).sort()) {
-        visit(path.join(entryPath, entry), relativePath == '.' ? entry : path.join(relativePath, entry))
-      }
-      return
-    }
-    if (stats.isFile()) {
-      manifest.push({ path: relativePath, type: 'file', size: stats.size, hash: hashFile(fsApi, entryPath) })
-      return
-    }
-    throw new UnsupportedLegacyDataError(`Migration does not support this data type: ${relativePath}`)
-  }
-
-  visit(rootPath, '.')
-  return manifest
-}
-
-const createInitialLegacyManifest = (fsApi, legacyPath) => {
-  try {
-    return createManifest(fsApi, legacyPath)
-  } catch (error) {
-    if (error instanceof UnsupportedLegacyDataError) throw error
-    throw new LegacyDataChangedError(`Legacy data changed during initial migration scan: ${error.message}`)
-  }
-}
-
-const manifestsMatch = (left, right) => {
-  if (left.length != right.length) return false
-  return left.every((entry, index) => {
-    const candidate = right[index]
-    return entry.path == candidate.path && entry.type == candidate.type &&
-      entry.size == candidate.size && entry.hash == candidate.hash
-  })
-}
 
 const getPortableUserDataPaths = ({ platform, executablePath, pathExists = fs.existsSync }) => {
   if (platform != 'win32') return null
@@ -330,11 +35,10 @@ const getPortableUserDataPaths = ({ platform, executablePath, pathExists = fs.ex
   }
 }
 
-const migrateLegacyUserData = ({
+const migrateLegacyUserData = async({
   appDataPath,
   currentDirName = PROJECT_IDENTITY.userDataDirName,
   fsApi = fs,
-  isProcessAlive = defaultIsProcessAlive,
   logger = console,
 }) => {
   const rootPath = path.resolve(appDataPath)
@@ -343,7 +47,6 @@ const migrateLegacyUserData = ({
   const tempPrefix = `${userDataPath}${TEMP_SUFFIX}-`
   const lockPath = `${userDataPath}${LOCK_SUFFIX}`
   let tempPath
-  let tempOwnership
 
   assertDirectChild(rootPath, legacyPath)
   assertDirectChild(rootPath, userDataPath)
@@ -354,94 +57,111 @@ const migrateLegacyUserData = ({
     status,
     legacyPath,
     userDataPath,
-    tempPath,
+    ...(tempPath == null ? {} : { tempPath }),
     lockPath,
     userDataPathReady,
     ...(error == null ? {} : { error }),
   })
+
+  const prepareFreshUserDataUnderDirectGuard = lease => {
+    let rootGuard
+    let childGuard
+    try {
+      lease?.assertHeld()
+      rootGuard = validateDirectDirectory(rootPath, { fsApi })
+      lease?.assertHeld()
+      const observation = observeDirectChild(rootGuard, path.basename(userDataPath))
+      lease?.assertHeld()
+      if (observation.status == 'present') {
+        childGuard = observation.guard
+        return true
+      }
+      lease?.assertHeld()
+      childGuard = createDirectChildDirectory(rootGuard, observation.basename)
+      lease?.assertHeld()
+      return true
+    } catch (error) {
+      safeLog(logger, 'error', `Could not create migration directory: ${userDataPath}`, error)
+      return false
+    } finally {
+      if (childGuard != null) {
+        try { closeDirectDirectory(childGuard) } catch (error) {
+          safeLog(logger, 'warn', `Could not close user-data directory guard: ${userDataPath}`, error)
+        }
+      }
+      if (rootGuard != null) {
+        try { closeDirectDirectory(rootGuard) } catch (error) {
+          safeLog(logger, 'warn', `Could not close app-data directory guard: ${rootPath}`, error)
+        }
+      }
+    }
+  }
+
+  const prepareFreshResult = (status, lease) => {
+    const userDataPathReady = prepareFreshUserDataUnderDirectGuard(lease)
+    const error = userDataPathReady ? undefined : new Error(`Could not prepare user-data path: ${userDataPath}`)
+    return createResult(userDataPathReady ? status : 'failed', userDataPathReady, error)
+  }
 
   if (fsApi.existsSync(userDataPath)) {
     if (getUsableDirectory(fsApi, userDataPath)) return createResult('current-exists', true)
     return createResult('failed', false, new Error(`Current user-data path is not a directory: ${userDataPath}`))
   }
 
-  const prepareFreshUserData = () => {
-    const userDataPathReady = ensureDirectory(fsApi, userDataPath, logger)
-    const error = userDataPathReady ? undefined : new Error(`Could not prepare user-data path: ${userDataPath}`)
-    return createResult(userDataPathReady ? 'legacy-missing' : 'failed', userDataPathReady, error)
-  }
+  if (!fsApi.existsSync(legacyPath)) return prepareFreshResult('legacy-missing')
 
-  if (!fsApi.existsSync(legacyPath)) return prepareFreshUserData()
-
-  const lock = acquireMigrationLock({ fsApi, rootPath, lockPath, isProcessAlive, logger })
-  if (lock.error != null) {
-    safeLog(logger, 'error', 'Could not acquire user-data migration lock', lock.error)
-    return createResult('failed', false, lock.error)
+  let lease
+  try {
+    lease = await acquireMigrationLease({ rootPath, lockPath, logger })
+  } catch (error) {
+    safeLog(logger, 'error', 'Could not acquire user-data migration lease', error)
+    return createResult('failed', false, error)
   }
 
   try {
+    lease.assertHeld()
     if (fsApi.existsSync(userDataPath)) {
       if (getUsableDirectory(fsApi, userDataPath)) return createResult('current-exists', true)
       return createResult('failed', false, new Error(`Current user-data path is not a directory: ${userDataPath}`))
     }
-    if (!fsApi.existsSync(legacyPath)) return prepareFreshUserData()
+    lease.assertHeld()
+    if (!fsApi.existsSync(legacyPath)) return prepareFreshResult('legacy-missing', lease)
 
-    try {
-      const legacyManifest = createInitialLegacyManifest(fsApi, legacyPath)
-      const createdTempPath = fsApi.mkdtempSync(tempPrefix)
-      assertDirectChild(rootPath, createdTempPath)
-      if (!path.resolve(createdTempPath).startsWith(path.resolve(tempPrefix))) {
-        throw new Error(`Unexpected migration temporary path: ${createdTempPath}`)
-      }
-      tempPath = createdTempPath
-      tempOwnership = createTempOwnership(fsApi, rootPath, tempPath)
-      const payloadPath = path.join(tempPath, 'payload')
-
-      fsApi.cpSync(legacyPath, payloadPath, {
-        recursive: true,
-        force: false,
-        errorOnExist: true,
-        dereference: true,
-      })
-
-      const copiedManifest = createManifest(fsApi, payloadPath)
-      let finalLegacyManifest
-      try {
-        finalLegacyManifest = createManifest(fsApi, legacyPath)
-      } catch (error) {
-        throw new LegacyDataChangedError(`Legacy data changed during migration: ${error.message}`)
-      }
-      if (!manifestsMatch(legacyManifest, finalLegacyManifest)) {
-        throw new LegacyDataChangedError('Legacy data changed during migration; close other app instances and retry')
-      }
-      if (!manifestsMatch(legacyManifest, copiedManifest)) {
-        throw new Error('Migration verification failed: recursive manifests do not match')
-      }
-
-      fsApi.writeFileSync(path.join(payloadPath, MIGRATION_MARKER_FILE), JSON.stringify({
-        sourceDirectory: LEGACY_USER_DATA_DIR_NAME,
-        completedAt: new Date().toISOString(),
-      }, null, 2), { flag: 'wx' })
-
-      // Electron's single-instance lock and this file lock serialize cooperating
-      // app processes. Node has no portable RENAME_NOREPLACE for arbitrary writers.
-      if (fsApi.existsSync(userDataPath)) {
-        if (getUsableDirectory(fsApi, userDataPath)) return createResult('current-exists', true)
-        throw new Error(`Current user-data path is not a directory: ${userDataPath}`)
-      }
-      fsApi.renameSync(payloadPath, userDataPath)
+    const migration = await copyDirectoryWithManifestPromotion({
+      fsApi,
+      rootPath,
+      sourcePath: legacyPath,
+      destinationPath: userDataPath,
+      stagePrefix: tempPrefix,
+      runId: crypto.randomUUID(),
+      lease,
+      logger,
+      writePayloadMarker({ payloadPath }) {
+        fsApi.writeFileSync(path.join(payloadPath, MIGRATION_MARKER_FILE), JSON.stringify({
+          sourceDirectory: LEGACY_USER_DATA_DIR_NAME,
+          completedAt: new Date().toISOString(),
+        }, null, 2), { flag: 'wx' })
+      },
+    })
+    tempPath = migration.stagePath
+    if (migration.status == 'promoted') {
       safeLog(logger, 'info', `Migrated user data to ${userDataPath}`)
       return createResult('migrated', true)
-    } catch (error) {
-      safeLog(logger, 'error', 'Legacy user-data migration failed', error)
-      if (error instanceof LegacyDataChangedError) return createResult('failed', false, error)
-      const userDataPathReady = ensureDirectory(fsApi, userDataPath, logger)
-      return createResult('failed', userDataPathReady, error)
-    } finally {
-      removeOwnedTemp(fsApi, tempOwnership, logger)
     }
+    if (migration.status == 'destination-exists') {
+      return getUsableDirectory(fsApi, userDataPath)
+        ? createResult('current-exists', true)
+        : createResult('failed', false, new Error(`Current user-data path is not a directory: ${userDataPath}`))
+    }
+    safeLog(logger, 'error', 'Legacy user-data migration failed', migration.error)
+    if (migration.error instanceof DirectorySourceChangedError) {
+      return createResult('failed', false, migration.error)
+    }
+    lease.assertHeld()
+    const userDataPathReady = prepareFreshUserDataUnderDirectGuard(lease)
+    return createResult('failed', userDataPathReady, migration.error)
   } finally {
-    releaseOwnedLock(fsApi, lock, logger)
+    await releaseMigrationLease(lease)
   }
 }
 

@@ -36,7 +36,7 @@ declare namespace LX {
       platform?: LX.OnlineSource
       quality: LX.Quality
       url: string
-      cacheKey: string
+      cacheKey?: LX.Music.AuthorizedMusicUrlKeyV1
       deadlineAt: number
     }
 
@@ -74,6 +74,13 @@ declare namespace LX {
       elapsedMs: number
       scope: SourceFailureScope
       kind: SourceFailureKind
+    }
+
+    interface MusicUrlResult {
+      type: LX.Quality
+      url: string
+      source: LX.Source
+      persistentCache: boolean
     }
   }
 }

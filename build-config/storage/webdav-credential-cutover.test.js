@@ -23,6 +23,20 @@ const originalLoad = Module._load
 let requestImpl
 let serverRequestListener
 const settingWrites = []
+let settingsDocument
+
+const settingsStore = {
+  get(key) {
+    return settingsDocument[key]
+  },
+  has(key) {
+    return Object.hasOwn(settingsDocument, key)
+  },
+  override(value) {
+    settingsDocument = structuredClone(value)
+    settingWrites.push(structuredClone(value))
+  },
+}
 
 class TestHttpServer extends EventEmitter {
   constructor(listener) {
@@ -91,11 +105,7 @@ Module._load = function(request, parent, isMain) {
     }
   }
   if (request == '@main/utils/store') {
-    return () => ({
-      override(value) {
-        settingWrites.push(value)
-      },
-    })
+    return () => settingsStore
   }
   return originalLoad.call(this, request, parent, isMain)
 }
@@ -249,6 +259,20 @@ const createWebDAVMusic = (overrides = {}) => ({
 describe('WebDAV credential cutover', () => {
   beforeEach(() => {
     settingWrites.length = 0
+    settingsDocument = {
+      storageSchemaVersion: 1,
+      version: '2.1.0',
+      setting: {
+        version: '2.1.0',
+        'webdav.url': 'https://settings.example.test/dav',
+      },
+      catalogPreferences: {
+        version: 1,
+        leaderboard: { source: 'kw', boardId: 'kw__16' },
+        songList: { source: 'kw', sortId: 'new', tagId: '' },
+        search: { temp_source: 'kw', source: 'all', type: 'music' },
+      },
+    }
     requestImpl = async() => emptyPropfindResponse()
     global.envParams = { cmdParams: {} }
     global.lx = {

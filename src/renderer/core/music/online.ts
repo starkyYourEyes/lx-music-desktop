@@ -11,31 +11,8 @@ import {
   handleGetOnlineMusicUrl,
   handleGetOnlinePicUrl,
   getCachedLyricInfo,
+  getMusicUrlCacheKey,
 } from './utils'
-
-/* export const setMusicUrl = ({ musicInfo, type, url }: {
-  musicInfo: LX.Music.MusicInfo
-  type: LX.Quality
-  url: string
-}) => {
-  saveMusicUrl(musicInfo, type, url)
-}
-
-export const setPic = (datas: {
-  listId: string
-  musicInfo: LX.Music.MusicInfo
-  url: string
-}) => {
-  datas.musicInfo.img = datas.url
-  updateMusicInfo({
-    listId: datas.listId,
-    id: datas.musicInfo.songmid,
-    data: { img: datas.url },
-    musicInfo: datas.musicInfo,
-  })
-}
- */
-
 
 export const getPrimaryMusicUrl = async({ musicInfo, quality, isRefresh, allowToggleSource = false, onToggleSource = () => {} }: {
   musicInfo: LX.Music.MusicInfoOnline
@@ -51,11 +28,19 @@ export const getPrimaryMusicUrl = async({ musicInfo, quality, isRefresh, allowTo
   //   // return Promise.reject(new Error('该歌曲没有可播放的音频'))
   // }
   const targetQuality = quality ?? getPlayQuality(appSetting['player.playQuality'], musicInfo)
-  const cachedUrl = await getStoreMusicUrl(musicInfo, targetQuality)
+  const cacheKey = await getMusicUrlCacheKey(musicInfo, targetQuality)
+  const cachedUrl = cacheKey == null ? '' : await getStoreMusicUrl(cacheKey)
   if (cachedUrl && !isRefresh) return { url: cachedUrl, quality: targetQuality, musicInfo }
 
-  return handleGetOnlineMusicUrl({ musicInfo, quality, onToggleSource, isRefresh, allowToggleSource }).then(({ url, quality: targetQuality, musicInfo: targetMusicInfo, isFromCache }) => {
-    return { url, quality: targetQuality, musicInfo: targetMusicInfo }
+  return handleGetOnlineMusicUrl({
+    musicInfo,
+    quality,
+    onToggleSource,
+    isRefresh,
+    allowToggleSource,
+    cacheKey,
+  }).then(({ url, quality: resolvedQuality, musicInfo: resolvedMusicInfo }) => {
+    return { url, quality: resolvedQuality, musicInfo: resolvedMusicInfo }
   })
 }
 

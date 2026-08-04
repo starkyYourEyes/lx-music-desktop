@@ -142,6 +142,7 @@ export default () => {
         isTempPlay: true,
         clearTempList: true,
         startTime: remoteProgress,
+        startReason: 'remote',
       })
     }
 
@@ -150,13 +151,13 @@ export default () => {
     setLyricPlaybackRate(room.playback.rate)
 
     if (shouldSeek) {
-      window.app_event.setProgress(remoteProgress, remoteDuration)
+      window.app_event.setProgress(remoteProgress, 'party', remoteDuration)
       setCurrentTime(remoteProgress)
     }
 
     if (!shouldReplaceMusic) {
-      if (room.playback.playing) play()
-      else if (isPlay.value) pause()
+      if (room.playback.playing) play('remote')
+      else if (isPlay.value) pause('remote')
     }
   }
 

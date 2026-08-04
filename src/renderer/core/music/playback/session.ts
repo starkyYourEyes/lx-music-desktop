@@ -1,4 +1,5 @@
 import { createPlaybackSourceError, isPlaybackSourceError } from '@common/utils/playbackSourceError'
+import type { AuthorizedMusicUrlKeyV1 } from '@common/storage/cache'
 import type { PlaybackSourceAdapter } from './sourceAdapter'
 import {
   observePlaybackCachePersistence,
@@ -213,7 +214,7 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
   let activeAttempt: SourceAttempt | null = null
   let activeCandidate: PlaybackUrlCandidate | null = null
   let resolving: Promise<PlaybackUrlCandidate> | null = null
-  let cacheChecked = options.cacheMode == 'bypass'
+  const cacheCheckedSourceIds = new Set<string>()
   let state: 'active' | 'accepted' | 'cancelled' | 'failed' = 'active'
   let terminalFailure: LX.Playback.SourceError | null = null
   let released = false
@@ -279,8 +280,9 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
   }
   const expireActiveCandidate = (candidate: PlaybackUrlCandidate): CandidateSettlement => {
     activeCandidate = null
-    if (candidate.origin == 'cache') {
-      observeDelete(async() => options.cache.tombstoneKey(candidate.cacheKey))
+    const cacheKey = candidate.cacheKey
+    if (candidate.origin == 'cache' && cacheKey) {
+      observeDelete(async() => options.cache.tombstoneKey(cacheKey))
       return 'expired'
     }
     const attempt = activeAttempt
@@ -312,9 +314,9 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
     ...value,
   })
 
-  const offerCache = async(): Promise<PlaybackUrlCandidate | null> => {
-    if (cacheChecked) return null
-    cacheChecked = true
+  const offerCache = async(apiId: string): Promise<PlaybackUrlCandidate | null> => {
+    if (cacheCheckedSourceIds.has(apiId)) return null
+    cacheCheckedSourceIds.add(apiId)
     const lookupDeadlineAt = options.clock.now() + SOURCE_TIMEOUT
     let timer: ReturnType<typeof setTimeout> | null = null
     const cancellation = createSessionCancellationWait(sessionController.signal)
@@ -325,7 +327,15 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
         }, SOURCE_TIMEOUT)
       })
       const lookup = Promise.resolve()
-        .then(async() => options.cache.lookup(options.musicInfo, options.requestedQuality))
+        .then(async() => options.musicInfo.source == 'local'
+          ? null
+          : options.adapter.authorizeMusicUrl({
+              apiId,
+              musicInfo: options.musicInfo,
+              quality: options.requestedQuality,
+              signal: sessionController.signal,
+            }))
+        .then(async key => key == null ? null : options.cache.lookup(key))
         .then(
           hit => options.clock.now() < lookupDeadlineAt ? hit : null,
           () => null,
@@ -450,7 +460,6 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
               apiId: attempt.apiId,
               quality: resolved.quality,
               url: resolved.url,
-              cacheKey: `${options.musicInfo.id}_${resolved.quality}`,
               deadlineAt: attempt.deadlineAt,
             })
           } catch (error) {
@@ -478,6 +487,17 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
         attempt.activeMusicInfo = musicInfo
         attempt.resolvedQuality = quality
         try {
+          const authorizedKey = await awaitWithinAttempt(
+            attempt,
+            async signal => options.adapter.authorizeMusicUrl({
+              apiId: attempt.apiId,
+              musicInfo,
+              quality,
+              signal,
+            }),
+            options.clock,
+            sessionController.signal,
+          )
           const resolved = await awaitWithinAttempt(
             attempt,
             async signal => options.adapter.getMusicUrl({
@@ -497,7 +517,9 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
             platform: musicInfo.source,
             quality: resolved.quality,
             url: resolved.url,
-            cacheKey: `${options.musicInfo.id}_${resolved.quality}`,
+            ...(authorizedKey == null
+              ? {}
+              : { cacheKey: { ...authorizedKey, quality: resolved.quality } as AuthorizedMusicUrlKeyV1 }),
             deadlineAt: attempt.deadlineAt,
           })
         } catch (error) {
@@ -524,16 +546,16 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
 
   const resolveNext = async(): Promise<PlaybackUrlCandidate> => {
     if (state != 'active') throw terminalFailure ?? createSessionCancellation('stop')
-    if (!cacheChecked) {
-      const cached = await offerCache()
-      if (state != 'active') throw terminalFailure ?? createSessionCancellation('stop')
-      if (cached) {
-        activeCandidate = cached
-        return cached
-      }
-    }
     while (sourceRank < sourceIds.length) {
       if (state != 'active') throw terminalFailure ?? createSessionCancellation('stop')
+      if (options.cacheMode == 'lookup' && !cacheCheckedSourceIds.has(sourceIds[sourceRank])) {
+        const cached = await offerCache(sourceIds[sourceRank])
+        if (state != 'active') throw terminalFailure ?? createSessionCancellation('stop')
+        if (cached) {
+          activeCandidate = cached
+          return cached
+        }
+      }
       const attempt = activeAttempt ?? new SourceAttempt(
         sourceIds[sourceRank],
         sourceRank,
@@ -587,9 +609,10 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
         kind: 'cancelled',
       })
       abortAttempts(accepted)
+      if (!candidate.cacheKey) return 'accepted'
       let committing: Promise<void>
       try {
-        committing = options.cache.commit(options.musicInfo, candidate.quality, candidate.url)
+        committing = options.cache.commit(candidate.cacheKey, candidate.url)
       } catch (error) {
         committing = Promise.reject(error)
       }
@@ -611,10 +634,9 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
       if (!candidate) return 'stale'
       if (options.clock.now() >= candidate.deadlineAt) return expireActiveCandidate(candidate)
       activeCandidate = null
-      if (candidate.origin == 'cache') {
-        observeDelete(async() => options.cache.tombstoneKey(candidate.cacheKey))
-        return 'resumed'
-      }
+      const cacheKey = candidate.cacheKey
+      if (cacheKey) observeDelete(async() => options.cache.tombstoneKey(cacheKey))
+      if (candidate.origin == 'cache') return 'resumed'
       const attempt = activeAttempt
       if (attempt) {
         const suppliedMessage = typeof failureData?.message == 'string'

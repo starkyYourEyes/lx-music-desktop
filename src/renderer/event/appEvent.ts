@@ -1,4 +1,12 @@
 import Event from './Event'
+import type {
+  PlaybackErrorIntent,
+  PlaybackPauseReason,
+  PlaybackSeekIntent,
+  PlaybackSeekOrigin,
+  PlaybackSelectionIntent,
+  PlaybackSkipReason,
+} from '@common/storage/playback'
 
 
 // {
@@ -30,16 +38,40 @@ export class AppEvent extends Event {
   /**
    * 音乐信息切换
    */
-  musicToggled() {
-    this.emit('musicToggled')
+  musicToggled(intent: PlaybackSelectionIntent) {
+    this.emit('musicToggled', intent)
+  }
+
+  playbackAdvance(options: { automatic: boolean, reason: PlaybackSkipReason | 'natural_end' }) {
+    this.emit('playbackAdvance', options)
+  }
+
+  playbackSeek(intent: PlaybackSeekIntent) {
+    this.emit('playbackSeek', intent)
+  }
+
+  playbackError(error: PlaybackErrorIntent) {
+    this.emit('playbackError', error)
+  }
+
+  playbackNewAttempt() {
+    this.emit('playbackNewAttempt')
+  }
+
+  playbackPauseRequested(reason: PlaybackPauseReason) {
+    this.emit('playbackPauseRequested', reason)
+  }
+
+  playbackResumeRequested(reason: PlaybackPauseReason) {
+    this.emit('playbackResumeRequested', reason)
   }
 
   /**
    * 手动改变进度
    * @param progress 进度
    */
-  setProgress(progress: number, maxPlayTime?: number) {
-    this.emit('setProgress', progress, maxPlayTime)
+  setProgress(progress: number, origin: PlaybackSeekOrigin, maxPlayTime?: number) {
+    this.emit('setProgress', progress, origin, maxPlayTime)
   }
 
   /**
@@ -122,6 +154,18 @@ export class AppEvent extends Event {
 
   playerWaiting() {
     this.emit('playerWaiting')
+  }
+
+  playerSeeking() {
+    this.emit('playerSeeking')
+  }
+
+  playerSeeked() {
+    this.emit('playerSeeked')
+  }
+
+  playerRatechange() {
+    this.emit('playerRatechange')
   }
 
   playerDeviceChanged() {

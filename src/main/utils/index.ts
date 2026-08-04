@@ -4,12 +4,20 @@ import getStore from '@main/utils/store'
 import { STORE_NAMES, URL_SCHEME_RXP } from '@common/constants'
 import defaultSetting from '@common/defaultSetting'
 import defaultHotKey from '@common/defaultHotKey'
-import { migrateDataJson, migrateHotKey, migrateUserApi, parseDataFile } from './migrate'
+import { migrateHotKey, migrateUserApi, parseDataFile } from './migrate'
 import { nativeTheme, powerSaveBlocker } from 'electron'
 import { joinPath } from '@common/utils/nodejs'
 import themes from '@common/theme/index.json'
 import { normalizeWebDAVRootUrl } from '@common/utils/webdavUrl'
+import { type CatalogPreferencesV1 } from '@common/storage/stateContracts'
+import {
+  parseSettingsDocument,
+  replaceCatalogPreferences,
+  replaceOrdinarySettings,
+  type SettingsDocumentV1,
+} from '@main/storage/settings/document'
 import { normalizePlaybackSourceSetting } from '@common/utils/playbackSourceSetting'
+import type { ThemeAssetManager } from '@main/services/themeAssetManager'
 
 export const parseEnvParams = (argv = process.argv): { cmdParams: LX.CmdParams, deeplink: string | null } => {
   const cmdParams: LX.CmdParams = {}
@@ -159,13 +167,45 @@ const applyInitSetting = (setting: LX.AppSetting) => {
   }
 }
 
-export const updateSetting = (setting?: Partial<LX.AppSetting>, isInit: boolean = false) => {
-  const electronStore_config = getStore(STORE_NAMES.APP_SETTINGS)
+type SettingsStore = ReturnType<typeof getStore>
+
+const createDefaultSettingsDocument = (): SettingsDocumentV1 => parseSettingsDocument({
+  version: defaultSetting.version,
+  setting: defaultSetting,
+})
+
+const readSettingsDocument = (store: SettingsStore): SettingsDocumentV1 => {
+  if (!store.has('setting')) return createDefaultSettingsDocument()
+
+  const value: Record<string, unknown> = {
+    version: store.get('version'),
+    setting: store.get('setting'),
+  }
+  if (store.has('storageSchemaVersion')) value.storageSchemaVersion = store.get('storageSchemaVersion')
+  if (store.has('catalogPreferences')) value.catalogPreferences = store.get('catalogPreferences')
+  return parseSettingsDocument(value)
+}
+
+const writeSettingsDocument = (store: SettingsStore, document: SettingsDocumentV1): void => {
+  store.override({
+    storageSchemaVersion: document.storageSchemaVersion,
+    version: document.version,
+    setting: document.setting,
+    catalogPreferences: document.catalogPreferences,
+  })
+}
+
+const updateSettingWithStore = (
+  electronStore_config: SettingsStore,
+  setting?: Partial<LX.AppSetting>,
+  isInit: boolean = false,
+) => {
+  const currentDocument = readSettingsDocument(electronStore_config)
 
   let originSetting: LX.AppSetting
   if (isInit) {
     setting &&= migrateSetting(setting)
-    setting = sanitizeSettingUpdate(setting)
+    setting = sanitizeSettingUpdate(setting) ?? {}
     applyInitSetting(setting as LX.AppSetting)
     originSetting = { ...defaultSetting }
   } else {
@@ -182,9 +222,20 @@ export const updateSetting = (setting?: Partial<LX.AppSetting>, isInit: boolean 
 
   result.setting.version = defaultSetting.version
 
-  const persistedSetting = sanitizeSettingUpdate(result.setting) as LX.AppSetting
-  electronStore_config.override({ version: result.setting.version, setting: persistedSetting })
+  const nextDocument = replaceOrdinarySettings(currentDocument, result.setting)
+  writeSettingsDocument(electronStore_config, nextDocument)
   return result
+}
+
+export const updateSetting = (setting?: Partial<LX.AppSetting>, isInit: boolean = false) => {
+  return updateSettingWithStore(getStore(STORE_NAMES.APP_SETTINGS), setting, isInit)
+}
+
+export const updateCatalogPreferences = (preferences: CatalogPreferencesV1): SettingsDocumentV1 => {
+  const electronStore_config = getStore(STORE_NAMES.APP_SETTINGS)
+  const nextDocument = replaceCatalogPreferences(readSettingsDocument(electronStore_config), preferences)
+  writeSettingsDocument(electronStore_config, nextDocument)
+  return nextDocument
 }
 
 /**
@@ -200,11 +251,10 @@ export const initSetting = async() => {
     const config = await parseDataFile<{ setting?: any }>('config.json')
     if (config?.setting) setting = config.setting as LX.AppSetting
     await migrateUserApi()
-    await migrateDataJson()
   }
 
   // console.log(setting)
-  return updateSetting(setting, true)
+  return updateSettingWithStore(electronStore_config, setting, true)
 }
 
 /**
@@ -265,27 +315,25 @@ export const openDevTools = (webContents: Electron.WebContents) => {
 
 
 let userThemes: LX.Theme[]
-export const getAllThemes = () => {
+let themeWriteTail: Promise<void> = Promise.resolve()
+
+const getUserThemes = (): LX.Theme[] => {
   userThemes ??= getStore(STORE_NAMES.THEME).get('themes') as (LX.Theme[] | null) ?? []
+  return userThemes
+}
+
+export const getAllThemes = () => {
   return {
     themes,
-    userThemes,
-    dataPath: joinPath(global.lxDataPath, 'theme_images'),
+    userThemes: getUserThemes(),
+    dataPath: joinPath(global.storagePaths.profileRoot, 'assets', 'theme-images'),
   }
 }
 
-export const saveTheme = (theme: LX.Theme) => {
-  const targetTheme = userThemes.find(t => t.id === theme.id)
-  if (targetTheme) Object.assign(targetTheme, theme)
-  else userThemes.push(theme)
-  getStore(STORE_NAMES.THEME).set('themes', userThemes)
-}
-
-export const removeTheme = (id: string) => {
-  const index = userThemes.findIndex(t => t.id === id)
-  if (index < 0) return
-  userThemes.splice(index, 1)
-  getStore(STORE_NAMES.THEME).set('themes', userThemes)
+const serializeThemeWrite = async<T>(operation: () => Promise<T>): Promise<T> => {
+  const result = themeWriteTail.then(operation)
+  themeWriteTail = result.then(() => undefined, () => undefined)
+  return result
 }
 
 const copyTheme = (theme: LX.Theme): LX.Theme => {
@@ -298,6 +346,40 @@ const copyTheme = (theme: LX.Theme): LX.Theme => {
     },
   }
 }
+
+const persistTheme = async(theme: LX.Theme): Promise<LX.ThemeSaveResult> => {
+  const canonicalTheme = copyTheme(theme)
+  const nextThemes = getUserThemes().map(copyTheme)
+  const index = nextThemes.findIndex(item => item.id == canonicalTheme.id)
+  if (index < 0) nextThemes.push(canonicalTheme)
+  else nextThemes.splice(index, 1, canonicalTheme)
+  await getStore(STORE_NAMES.THEME).setDurable('themes', nextThemes)
+  userThemes = nextThemes
+  return { theme: canonicalTheme, userThemes: nextThemes }
+}
+
+export const saveTheme = async(
+  input: LX.ThemeSaveRequest,
+  themeAssets: ThemeAssetManager,
+): Promise<LX.ThemeSaveResult> => serializeThemeWrite(async() => {
+  const theme = copyTheme(input.theme)
+  if (input.stagingId == null) return persistTheme(theme)
+  return themeAssets.promoteThemeImage({ stagingId: input.stagingId }, async promoted => {
+    theme.config.extInfo['--background-image'] = promoted.fileName
+    return persistTheme(theme)
+  })
+})
+
+export const removeTheme = async(id: string): Promise<LX.Theme[]> => serializeThemeWrite(async() => {
+  const currentThemes = getUserThemes()
+  const index = currentThemes.findIndex(theme => theme.id == id)
+  if (index < 0) return currentThemes
+  const nextThemes = currentThemes.map(copyTheme)
+  nextThemes.splice(index, 1)
+  await getStore(STORE_NAMES.THEME).setDurable('themes', nextThemes)
+  userThemes = nextThemes
+  return nextThemes
+})
 export const getTheme = () => {
   // fs.promises.readdir()
   const shouldUseDarkColors = nativeTheme.shouldUseDarkColors
@@ -319,7 +401,7 @@ export const getTheme = () => {
         theme.config.extInfo['--background-image'] =
           isUrl(theme.config.extInfo['--background-image'])
             ? `url(${theme.config.extInfo['--background-image']})`
-            : `url(file:///${encodePath(joinPath(global.lxDataPath, 'theme_images', theme.config.extInfo['--background-image']))})`
+            : `url(file:///${encodePath(joinPath(global.storagePaths.profileRoot, 'assets', 'theme-images', theme.config.extInfo['--background-image']))})`
       }
     } else {
       themeId = global.lx.appSetting['theme.id'] == 'auto' && shouldUseDarkColors ? 'black' : 'green'

@@ -1,4 +1,5 @@
 import { QUALITYS } from '@common/constants'
+import type { AuthorizedMusicUrlKeyV1 } from '@common/storage/cache'
 import { createPlaybackSourceError, isPlaybackSourceError, toPlaybackSourceError } from '@common/utils/playbackSourceError'
 import {
   acquireUserApiRuntime,
@@ -9,11 +10,18 @@ import {
 } from '@renderer/utils/ipc'
 import { requestMsg } from '@renderer/utils/message'
 import { getApiById, supportQuality } from '@renderer/utils/musicSdk/api-source'
+import { getMusicUrlCacheKey } from '../utils'
 
 export interface PlaybackSourceAdapter {
   retainSources: (apiIds: readonly string[], sessionId: string) => void
   releaseSources: (apiIds: readonly string[], sessionId: string) => void
   getCapabilities: (apiId: string, signal: AbortSignal) => Promise<LX.Playback.SourceCapabilities>
+  authorizeMusicUrl: (request: {
+    apiId: string
+    musicInfo: LX.Music.MusicInfoOnline
+    quality: LX.Quality
+    signal: AbortSignal
+  }) => Promise<AuthorizedMusicUrlKeyV1 | null>
   getMusicUrl: (request: {
     apiId: string
     requestId: string
@@ -40,6 +48,11 @@ export interface PlaybackSourceAdapterDependencies {
   getBuiltinApi: (apiId: string, platform: LX.OnlineSource) => {
     getMusicUrl: (info: LX.Music.MusicInfo, quality: LX.Quality | null) => unknown
   }
+  getMusicUrlCacheKey: (
+    musicInfo: LX.Music.MusicInfo,
+    quality: LX.Quality,
+    persistentCache: boolean,
+  ) => Promise<AuthorizedMusicUrlKeyV1 | null>
   tooManyRequestsMessage?: string
   serverBusyMessages: ReadonlySet<string>
 }
@@ -230,6 +243,11 @@ export const createPlaybackSourceAdapter = (
       }
       return { sources }
     },
+    async authorizeMusicUrl(request) {
+      if (request.signal.aborted) throw failureFromAbort(request.apiId, request.signal)
+      if (deps.isCustomApi(request.apiId)) return null
+      return deps.getMusicUrlCacheKey(request.musicInfo, request.quality, true)
+    },
     async getMusicUrl(request) {
       if (!deps.isCustomApi(request.apiId)) return builtInRequest(request)
       const result = await customRequest(request, request.quality)
@@ -261,6 +279,7 @@ export const playbackSourceAdapter = createPlaybackSourceAdapter({
   releaseRuntime: releaseUserApiRuntime,
   getBuiltinCapabilities,
   getBuiltinApi: getApiById,
+  getMusicUrlCacheKey,
   tooManyRequestsMessage: requestMsg.tooManyRequests,
   serverBusyMessages: new Set(['Server busy', '服务器繁忙']),
 })

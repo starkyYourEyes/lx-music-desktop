@@ -2,11 +2,11 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
 const Module = require('node:module')
-const os = require('node:os')
 const path = require('node:path')
 const { after, afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
 const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+const { createTestStorageRoot } = require('./helpers/test-storage-root.js')
 
 // eslint-disable-next-line n/no-deprecated-api
 require.extensions['.ts'] = (module, filename) => {
@@ -54,9 +54,9 @@ const writeJson = async(filePath, value) => {
 }
 
 const makeRoot = async() => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lx-credential-profile-scan-'))
-  temporaryRoots.push(root)
-  return root
+  const fixture = createTestStorageRoot('credential-profile-scan')
+  temporaryRoots.push(fixture)
+  return fixture.path
 }
 
 const readProfileJsonText = async(root, vaultFile) => {
@@ -225,7 +225,7 @@ const createCoordinatorDependencies = (checkCredentials, runMigrationHooks = asy
     },
     initDatabase: async() => {
       calls.push('database:init')
-      return { status: 'ready', existed: true, schemaVersion: 4, migratedVersions: [], backupPath: null }
+      return { status: 'ready', existed: true, schemaVersion: 4, migratedVersions: [], backupPath: null, preparedCutoverPending: false }
     },
     closeDatabase: async() => { calls.push('database:close') },
     runMigrationHooks: async result => {
@@ -236,6 +236,16 @@ const createCoordinatorDependencies = (checkCredentials, runMigrationHooks = asy
       calls.push('credentials:check')
       return await checkCredentials()
     },
+    now: () => 1,
+    interruptStalePlaybackSessions: async() => 0,
+    runPlaybackTypedSmoke: async() => ({ version: 1, writerEvidenceSha256: 'd'.repeat(64), readerEvidenceSha256: 'e'.repeat(64) }),
+    getPhase3AttestationPrerequisites: async() => ({
+      version: 1,
+      accountProfile: { markerName: 'legacy_data_v1.account_profiles', state: 'not-applicable', evidenceSha256: 'a'.repeat(64) },
+      phase2: { markerName: 'legacy_data_v1.phase2_complete', state: 'not-applicable', evidenceSha256: 'b'.repeat(64) },
+      playbackActivity: { markerName: 'legacy_data_v1.playback_activity', state: 'not-applicable', evidenceSha256: 'c'.repeat(64) },
+    }),
+    completePhase3Attestation: async() => {},
     initSettings: async() => { calls.push('settings:init') },
     registerModules: () => { calls.push('modules:register') },
     appInited: () => { calls.push('app:inited') },
@@ -320,7 +330,7 @@ afterEach(async() => {
   for (const request of [coordinatorPath, migrationPath, vaultPath]) {
     try { delete require.cache[require.resolve(request)] } catch {}
   }
-  await Promise.all(temporaryRoots.splice(0).map(root => fsp.rm(root, { recursive: true, force: true })))
+  for (const fixture of temporaryRoots.splice(0)) fixture.cleanup()
 })
 
 after(() => {
@@ -721,9 +731,10 @@ describe('credential startup gate', () => {
 
     assert.equal(await runMigrationHooks({ existed: true }), undefined)
     assert.equal(repositoryOptions.profileRoot, root)
-    assert.deepEqual([...registrations.keys()], ['credential-vault', 'account-repository'])
+    assert.deepEqual([...registrations.keys()], ['credential-vault', 'account-repository', 'music-url-authorization'])
     await registrations.get('credential-vault')()
     await registrations.get('account-repository')()
+    await registrations.get('music-url-authorization')()
     assert.deepEqual(calls, ['account:hydrate', 'vault:flush', 'account:flush'])
   })
 
@@ -794,7 +805,7 @@ describe('credential startup gate', () => {
     }), runMigrationHooks)
     deps.initDatabase = async() => {
       calls.push('database:init')
-      return { status: 'ready', existed: false, schemaVersion: 4, migratedVersions: [], backupPath: null }
+      return { status: 'ready', existed: false, schemaVersion: 4, migratedVersions: [], backupPath: null, preparedCutoverPending: false }
     }
 
     assert.deepEqual(await createStorageCoordinator(deps).start(), {
@@ -866,5 +877,82 @@ describe('credential startup gate', () => {
     assert.equal(outcome.status, 'recovery')
     assert.equal(outcome.target.affectedPath, recoveryPath)
     assert.deepEqual(outcome.target.diagnostics, ['credentials.source_scan_failed'])
+  })
+
+  it('does not acknowledge a portable profile when Phase 4 is absent or fails', async() => {
+    const { createStorageCoordinator } = require(coordinatorPath)
+    const token = Object.freeze({
+      version: 1,
+      portableRoot: 'C:\\portable-fixture',
+      promotionRunId: 'promotion-run',
+      startupRunId: 'startup-run',
+      destinationIdentity: Object.freeze({ dev: '1', ino: '2' }),
+    })
+    for (const phase4 of ['absent', 'failed']) {
+      const acknowledgements = []
+      const { deps } = createCoordinatorDependencies(async() => ({
+        vaultReadable: true,
+        profileRepositoryReadable: true,
+        activePlaintextSources: [],
+      }))
+      deps.acknowledgePortableProfileStartup = async token => { acknowledgements.push(token) }
+      deps.portableProfileToken = token
+      if (phase4 == 'failed') {
+        deps.getCachePhasePrerequisite = async() => ({
+          version: 1,
+          markerName: 'legacy_data_v1.cross_artifact_complete',
+          sourceSha256: 'f'.repeat(64),
+          completedAtMs: 1,
+        })
+        deps.initializePhase4 = async() => { throw new Error('PHASE_4_FAILURE_SENTINEL') }
+      }
+
+      const outcome = await createStorageCoordinator(deps).start()
+
+      assert.deepEqual(acknowledgements, [], phase4)
+      assert.equal(outcome.status, phase4 == 'absent' ? 'ready' : 'fatal', phase4)
+    }
+  })
+
+  it('acknowledges exactly the matching portable token after successful Phase 4 and clean shutdown', async() => {
+    const { createStorageCoordinator } = require(coordinatorPath)
+    const token = Object.freeze({
+      version: 1,
+      portableRoot: 'C:\\portable-fixture',
+      promotionRunId: 'promotion-run',
+      startupRunId: 'startup-run',
+      destinationIdentity: Object.freeze({ dev: '1', ino: '2' }),
+    })
+    const { calls, deps } = createCoordinatorDependencies(async() => ({
+      vaultReadable: true,
+      profileRepositoryReadable: true,
+      activePlaintextSources: [],
+    }))
+    deps.getCachePhasePrerequisite = async() => ({
+      version: 1,
+      markerName: 'legacy_data_v1.cross_artifact_complete',
+      sourceSha256: 'f'.repeat(64),
+      completedAtMs: 1,
+    })
+    deps.initializePhase4 = async() => {
+      calls.push('phase4:initialize')
+      return { schemaVersion: 7, typedOwnershipVerified: true }
+    }
+    deps.acknowledgePortableProfileStartup = async actualToken => {
+      assert.strictEqual(actualToken, token)
+      calls.push('portable:acknowledge')
+    }
+    deps.portableProfileToken = token
+
+    const coordinator = createStorageCoordinator(deps)
+    const outcome = await coordinator.start()
+
+    assert.deepEqual(outcome, { status: 'ready', schemaVersion: 7 })
+    assert.equal(calls.includes('portable:acknowledge'), false)
+    await coordinator.shutdown()
+    assert.ok(calls.indexOf('phase4:initialize') < calls.indexOf('database:close'))
+    assert.ok(calls.indexOf('database:close') < calls.indexOf('run-state:clean'))
+    assert.ok(calls.indexOf('run-state:clean') < calls.indexOf('portable:acknowledge'))
+    assert.equal(calls.filter(call => call == 'portable:acknowledge').length, 1)
   })
 })

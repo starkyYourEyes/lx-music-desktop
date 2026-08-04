@@ -1,3 +1,28 @@
+import type {
+  CatalogPreferencesV1,
+  LocalStateSnapshotV1,
+  LocalStateUpdateV1,
+  PlaylistMetadataCommandV1,
+  SearchHistoryCommandV1,
+} from './storage/stateContracts'
+
+export type StorageCatalogPreferenceSetRequest =
+  | { type: 'catalog_preference.set', section: 'leaderboard', value: CatalogPreferencesV1['leaderboard'] }
+  | { type: 'catalog_preference.set', section: 'songList', value: CatalogPreferencesV1['songList'] }
+  | { type: 'catalog_preference.set', section: 'search', value: CatalogPreferencesV1['search'] }
+
+export type StorageStateRequest =
+  | { type: 'catalog_preferences.get' }
+  | StorageCatalogPreferenceSetRequest
+  | { type: 'local_state.get' }
+  | { type: 'local_state.set', update: LocalStateUpdateV1 }
+  | { type: 'playlist_metadata.get' }
+  | { type: 'playlist_metadata.mutate', command: PlaylistMetadataCommandV1 }
+  | { type: 'search_history.get' }
+  | { type: 'search_history.mutate', command: SearchHistoryCommandV1 }
+
+export type StorageStateResponse = CatalogPreferencesV1 | LocalStateSnapshotV1 | LX.List.ListUpdateInfo | string[]
+
 const modules = {
   common: {
     get_env_params: 'get_env_params',
@@ -84,13 +109,30 @@ const modules = {
     min_toggle: 'min_toggle',
     hide_toggle: 'hide_toggle',
 
-    get_other_source: 'get_other_source',
-    save_other_source: 'save_other_source',
-    clear_other_source: 'clear_other_source',
-    get_other_source_count: 'get_other_source_count',
+    other_sources_get: 'other_sources_get',
+    other_sources_put: 'other_sources_put',
+    other_sources_clear: 'other_sources_clear',
+    other_sources_count: 'other_sources_count',
     get_data: 'get_data',
     save_data: 'save_data',
     storage_capabilities_get: 'storage_capabilities_get',
+    storage_catalog_preferences_get: 'storage_catalog_preferences_get',
+    storage_catalog_preference_set: 'storage_catalog_preference_set',
+    storage_local_state_get: 'storage_local_state_get',
+    storage_local_state_set: 'storage_local_state_set',
+    storage_playlist_metadata_get: 'storage_playlist_metadata_get',
+    storage_playlist_metadata_mutate: 'storage_playlist_metadata_mutate',
+    storage_search_history_get: 'storage_search_history_get',
+    storage_search_history_mutate: 'storage_search_history_mutate',
+    playback_start: 'playback_start',
+    playback_commit: 'playback_commit',
+    playback_resume_update: 'playback_resume_update',
+    playback_preplay_failure: 'playback_preplay_failure',
+    playback_recent_get: 'playback_recent_get',
+    playback_listening_get: 'playback_listening_get',
+    playback_resume_get: 'playback_resume_get',
+    storage_shutdown_flush_request: 'storage_shutdown_flush_request',
+    storage_shutdown_flush_ack: 'storage_shutdown_flush_ack',
     get_sound_effect_eq_preset: 'get_sound_effect_eq_preset',
     save_sound_effect_eq_preset: 'save_sound_effect_eq_preset',
     get_sound_effect_convolution_preset: 'get_sound_effect_convolution_preset',
@@ -126,11 +168,12 @@ const modules = {
     remove_lyric_edited: 'remove_lyric_edited',
     clear_lyric_edited: 'clear_lyric_edited',
     get_lyric_edited_count: 'get_lyric_edited_count',
-    get_music_url: 'get_music_url',
-    save_music_url: 'save_music_url',
-    remove_music_url: 'remove_music_url',
-    clear_music_url: 'clear_music_url',
-    get_music_url_count: 'get_music_url_count',
+    music_url_authorize: 'music_url_authorize',
+    music_url_get: 'music_url_get',
+    music_url_put: 'music_url_put',
+    music_url_delete: 'music_url_delete',
+    music_url_clear: 'music_url_clear',
+    music_url_count: 'music_url_count',
 
     open_api_action: 'open_api_action',
     sync_action: 'sync_action',
@@ -148,6 +191,9 @@ const modules = {
     get_themes: 'get_themes',
     save_theme: 'save_theme',
     remove_theme: 'remove_theme',
+    stage_theme_image: 'stage_theme_image',
+    discard_theme_image: 'discard_theme_image',
+    get_run_temp_root: 'get_run_temp_root',
 
     download_list_get: 'download_list_get',
     download_list_add: 'download_list_add',

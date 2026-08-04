@@ -3,6 +3,7 @@ const assert = require('node:assert/strict')
 const {
   createCacheHarness,
   createIntegrationHarness,
+  createSessionHarness,
   createCoordinatorHarness,
   createPlaybackPreloadAudioHarness,
   createPlayerHarness,
@@ -17,6 +18,8 @@ const {
   song,
   songA,
   songB,
+  musicUrlAuthorization,
+  musicUrlKey,
   toPlaybackCachePersistenceFailure,
   observePlaybackCachePersistence,
 } = require('./test-utils/playback-fallback-harness')
@@ -26,6 +29,98 @@ test('preload validation audio mirrors the real player CORS mode', () => {
   assert.equal(audio.muted, true)
   assert.equal(audio.preload, 'auto')
   assert.equal(audio.crossOrigin, 'anonymous')
+})
+
+test('custom URL canplay never authorizes, persists, or reuses account-scoped cache', async() => {
+  const harness = createIntegrationHarness({ sourceIds: ['user_api_primary'] })
+  const firstPlayback = harness.play()
+  const firstRequest = await harness.waitForRequest({ apiId: 'user_api_primary', platform: 'wy' })
+  harness.succeed(firstRequest, 'https://custom/no-cache', '128k')
+  const firstBinding = await harness.waitForBoundForeground('https://custom/no-cache', 1)
+  harness.emitForegroundCanplay()
+  await firstPlayback
+
+  const secondPlayback = harness.play()
+  await harness.flush()
+  const reusedCache = harness.adapterRequestOrder.length == 1
+  if (!reusedCache) {
+    const secondRequest = await harness.waitForRequest({
+      apiId: 'user_api_primary', platform: 'wy', occurrence: 2,
+    })
+    harness.succeed(secondRequest, 'https://custom/no-cache', '128k')
+  }
+  const secondBinding = await harness.waitForBoundForeground('https://custom/no-cache', 2)
+  harness.emitForegroundCanplay()
+  await secondPlayback
+
+  assert.equal(firstBinding.origin, 'source')
+  assert.equal(secondBinding.origin, 'source')
+  assert.equal(reusedCache, false)
+  assert.equal(harness.authorizationCallCount, 0)
+  assert.equal(harness.persistentReadCount, 0)
+  assert.equal(harness.persistentWriteCount, 0)
+})
+
+test('matched tx fallback persists only the matched track captured authorization', async() => {
+  const txAuthorization = musicUrlAuthorization('tx', 'profile-v1:uin:10001', 4)
+  const session = createSessionHarness({
+    sourceIds: ['builtin'],
+    requestedQuality: '320k',
+    matched: [matchedTx],
+    authorizeMusicUrl: async({ musicInfo, quality }) => musicUrlKey(
+      musicInfo,
+      quality,
+      musicInfo.source == 'tx'
+        ? txAuthorization
+        : musicUrlAuthorization('wy', 'profile-v1:user-id:7', 2),
+    ),
+    request: async({ musicInfo }) => {
+      if (musicInfo.source == 'wy') throw new Error('original unavailable')
+      return { url: 'https://matched/tx', quality: '128k' }
+    },
+  })
+
+  const candidate = await session.nextCandidate()
+  assert.equal(candidate.platform, 'tx')
+  assert.deepEqual(candidate.cacheKey, musicUrlKey(matchedTx, '128k', txAuthorization))
+  assert.equal(session.accept(candidate.candidateId), 'accepted')
+  await session.flush()
+  assert.deepEqual(session.cacheSaveCalls, [{
+    key: musicUrlKey(matchedTx, '128k', txAuthorization),
+    url: 'https://matched/tx',
+  }])
+})
+
+test('built-in cache and network operations are preceded by authorization and only quality is rewritten', async() => {
+  const events = []
+  const authorization = musicUrlAuthorization('wy', 'profile-v1:user-id:7', 8)
+  const session = createSessionHarness({
+    sourceIds: ['builtin'],
+    requestedQuality: '320k',
+    cacheMode: 'lookup',
+    authorizeMusicUrl: async({ musicInfo, quality }) => {
+      events.push(`authorize:${musicInfo.source}:${musicInfo.id}:${quality}`)
+      return musicUrlKey(musicInfo, quality, authorization)
+    },
+    cacheRead: async key => {
+      events.push(`read:${key.authorization.generation}:${key.sourceTrackId}:${key.quality}`)
+      return null
+    },
+    request: async({ musicInfo, quality }) => {
+      events.push(`network:${musicInfo.source}:${musicInfo.id}:${quality}`)
+      return { url: 'https://builtin/lower', quality: '128k' }
+    },
+  })
+
+  const candidate = await session.nextCandidate()
+  assert.deepEqual(events, [
+    'authorize:wy:song:320k',
+    'read:8:song:320k',
+    'read:8:song:128k',
+    'authorize:wy:song:320k',
+    'network:wy:song:320k',
+  ])
+  assert.deepEqual(candidate.cacheKey, musicUrlKey(onlineMusic, '128k', authorization))
 })
 
 test('candidate validation consumes error without legacy refresh skip or duplicate error', async() => {
@@ -39,7 +134,7 @@ test('candidate validation consumes error without legacy refresh skip or duplica
   assert.equal(harness.loadingWatchdogCount, 0)
 })
 
-test('matched fallback commit and post-commit error use the literal original-song actual-quality key', async() => {
+test('matched fallback commit and post-commit error keep the exact matched authorization key', async() => {
   const harness = createPlayerHarness({
     primary: 'primary',
     fallbacks: ['fallback'],
@@ -50,14 +145,15 @@ test('matched fallback commit and post-commit error use the literal original-son
   const bound = await harness.start()
   assert.equal(bound.platform, 'tx')
   assert.equal(bound.quality, '128k')
-  assert.equal(bound.cacheKey, 'song_128k')
+  const expectedKey = musicUrlKey(matchedTx, '128k')
+  assert.deepEqual(bound.cacheKey, expectedKey)
   harness.emitCanplay(bound)
   assert.equal(harness.cacheCommitCount, 1)
-  assert.deepEqual(harness.committedCacheKeys, ['song_128k'])
+  assert.deepEqual(harness.committedCacheKeys, [expectedKey])
   assert.equal(harness.isValidating(), false)
   await harness.emitError(bound, 3)
   assert.deepEqual(harness.dispatchedResourceKinds, ['candidate', 'validated'])
-  assert.deepEqual(harness.tombstonedKeys, ['song_128k'])
+  assert.deepEqual(harness.tombstonedKeys, [expectedKey])
   assert.deepEqual(harness.refreshRequests, [{ reason: 'postCommitError' }])
   assert.deepEqual(harness.refreshedApiIds, ['primary'])
   assert.deepEqual(harness.postCommitCacheHits, [])
@@ -68,7 +164,9 @@ test('explicit force refresh clears lower cache and starts full fallback from pr
   await harness.forceRefresh()
   assert.deepEqual(harness.invalidatedQualities, ['flac', '320k', '128k'])
   assert.deepEqual(harness.invalidatedCacheKeys, [
-    'song_flac', 'song_320k', 'song_128k',
+    musicUrlKey(onlineMusic, 'flac'),
+    musicUrlKey(onlineMusic, '320k'),
+    musicUrlKey(onlineMusic, '128k'),
   ])
   assert.deepEqual(harness.refreshRequests[0], { reason: 'forceRefresh' })
   assert.equal(harness.refreshedApiIds[0], 'primary')
@@ -100,7 +198,9 @@ test('player reasons flow through production playback session factories', async(
   ])
   assert.deepEqual(harness.invalidatedQualities, ['flac', '320k', '128k'])
   assert.deepEqual(harness.invalidatedCacheKeys, [
-    'song_flac', 'song_320k', 'song_128k',
+    musicUrlKey(onlineMusic, 'flac'),
+    musicUrlKey(onlineMusic, '320k'),
+    musicUrlKey(onlineMusic, '128k'),
   ])
 })
 
@@ -737,17 +837,18 @@ test('playback cache looks from requested quality downward', async () => {
     rows: new Map([['song_flac', 'https://cached/flac']]),
   })
   assert.deepEqual(cache.getPlaybackQualityOrder('flac24bit'), ['flac24bit', 'flac', '320k', '128k'])
-  assert.deepEqual(await cache.lookup(onlineMusic, 'flac24bit'), {
-    key: 'song_flac', quality: 'flac', url: 'https://cached/flac', provisional: true,
+  assert.deepEqual(await cache.lookup(musicUrlKey(onlineMusic, 'flac24bit')), {
+    key: musicUrlKey(onlineMusic, 'flac'), quality: 'flac', url: 'https://cached/flac', provisional: true,
   })
 })
 
 test('bad provisional cache is tombstoned before asynchronous deletion', async () => {
   const gate = deferred()
   const cache = createCacheHarness({ rows: new Map([['song_320k', 'https://bad']]), remove: () => gate.promise })
-  const hit = await cache.lookup(onlineMusic, '320k')
-  const deleting = cache.tombstone(onlineMusic, hit.quality)
-  assert.equal(await cache.lookup(onlineMusic, '320k'), null)
+  const key = musicUrlKey(onlineMusic, '320k')
+  const hit = await cache.lookup(key)
+  const deleting = cache.tombstoneKey(hit.key)
+  assert.equal(await cache.lookup(key), null)
   gate.resolve()
   await deleting
 })
@@ -755,8 +856,9 @@ test('bad provisional cache is tombstoned before asynchronous deletion', async (
 test('an exact committed key can be tombstoned before post-commit recovery', async () => {
   const gate = deferred()
   const cache = createCacheHarness({ rows: new Map([['song_320k', 'https://fallback']]), remove: () => gate.promise })
-  const deleting = cache.tombstoneKey('song_320k')
-  assert.equal(await cache.lookup(onlineMusic, '320k'), null)
+  const key = musicUrlKey(onlineMusic, '320k')
+  const deleting = cache.tombstoneKey(key)
+  assert.equal(await cache.lookup(key), null)
   gate.resolve()
   await deleting
 })
@@ -766,14 +868,15 @@ test('a tombstone created while an exact database read is pending suppresses the
   const readGate = deferred()
   const cache = createCacheHarness({
     read: async key => {
-      readStarted.resolve(key)
+      readStarted.resolve(structuredClone(key))
       await readGate.promise
-      return key == 'song_320k' ? 'https://stale' : null
+      return key.quality == '320k' ? 'https://stale' : null
     },
   })
-  const lookup = cache.lookup(onlineMusic, '320k')
-  assert.equal(await readStarted.promise, 'song_320k')
-  const deleting = cache.tombstoneKey('song_320k')
+  const key = musicUrlKey(onlineMusic, '320k')
+  const lookup = cache.lookup(key)
+  assert.deepEqual(await readStarted.promise, key)
+  const deleting = cache.tombstoneKey(key)
   readGate.resolve()
   assert.equal(await lookup, null)
   await deleting
@@ -782,9 +885,10 @@ test('a tombstone created while an exact database read is pending suppresses the
 test('commit publishes memory before database persistence settles', async () => {
   const gate = deferred()
   const cache = createCacheHarness({ save: () => gate.promise })
-  const writing = cache.commit(onlineMusic, '320k', 'https://valid')
-  assert.deepEqual(await cache.lookup(onlineMusic, '320k'), {
-    key: 'song_320k', quality: '320k', url: 'https://valid', provisional: false,
+  const key = musicUrlKey(onlineMusic, '320k')
+  const writing = cache.commit(key, 'https://valid')
+  assert.deepEqual(await cache.lookup(key), {
+    key, quality: '320k', url: 'https://valid', provisional: false,
   })
   gate.resolve()
   await writing
@@ -792,8 +896,9 @@ test('commit publishes memory before database persistence settles', async () => 
 
 test('persistence failure does not revoke an already published commit', async () => {
   const cache = createCacheHarness({ save: async() => { throw new Error('db down') } })
-  await assert.rejects(cache.commit(onlineMusic, '320k', 'https://valid'), /db down/)
-  assert.equal((await cache.lookup(onlineMusic, '320k')).url, 'https://valid')
+  const key = musicUrlKey(onlineMusic, '320k')
+  await assert.rejects(cache.commit(key, 'https://valid'), /db down/)
+  assert.equal((await cache.lookup(key)).url, 'https://valid')
 })
 
 test('persistence failure diagnostics contain only bounded identifiers', () => {
@@ -814,6 +919,13 @@ test('persistence failure diagnostics contain only bounded identifiers', () => {
     operation: 'delete', errorName: 'UnknownError',
   })
   assert.equal(JSON.stringify(tokenShapedFields).includes('sk_live'), false)
+
+  assert.deepEqual(toPlaybackCachePersistenceFailure('delete', Object.assign(
+    new Error('cache_open_failed'),
+    { code: 'cache_open_failed' },
+  )), {
+    operation: 'delete', errorName: 'Error', errorCode: 'cache_open_failed',
+  })
 })
 
 test('persistence observer absorbs both persistence and reporter rejection', async () => {
@@ -835,18 +947,19 @@ test('per-key persistence cannot resurrect an old URL or delete a newer commit',
   let saveCount = 0
   const cache = createCacheHarness({
     rows: durableRows,
-    save: async(musicInfo, quality, url) => {
+    save: async(key, url) => {
       saveCount++
       if (saveCount == 1) await firstSave.promise
-      durableRows.set(`${musicInfo.id}_${quality}`, url)
+      durableRows.set(`${key.sourceTrackId}_${key.quality}`, url)
     },
-    remove: async key => { durableRows.delete(key) },
+    remove: async key => { durableRows.delete(`${key.sourceTrackId}_${key.quality}`) },
   })
-  const oldWrite = cache.commit(onlineMusic, '320k', 'https://fallback')
+  const key = musicUrlKey(onlineMusic, '320k')
+  const oldWrite = cache.commit(key, 'https://fallback')
   await Promise.resolve()
-  const deleting = cache.tombstoneKey('song_320k')
-  const newWrite = cache.commit(onlineMusic, '320k', 'https://primary')
-  assert.equal((await cache.lookup(onlineMusic, '320k')).url, 'https://primary')
+  const deleting = cache.tombstoneKey(key)
+  const newWrite = cache.commit(key, 'https://primary')
+  assert.equal((await cache.lookup(key)).url, 'https://primary')
   assert.equal(saveCount, 1)
   firstSave.resolve()
   await Promise.all([oldWrite, deleting, newWrite])
@@ -862,34 +975,211 @@ test('force refresh invalidates requested and lower qualities only', async () =>
   const cache = createCacheHarness({ rows: new Map([
     ['song_flac24bit', 'a'], ['song_flac', 'b'], ['song_320k', 'c'], ['song_128k', 'd'],
   ]) })
-  await cache.invalidateQualityRange(onlineMusic, 'flac')
-  assert.deepEqual(cache.removed, ['song_flac', 'song_320k', 'song_128k'])
+  await cache.invalidateQualityRange(musicUrlKey(onlineMusic, 'flac'))
+  assert.deepEqual(cache.removed, [
+    musicUrlKey(onlineMusic, 'flac'),
+    musicUrlKey(onlineMusic, '320k'),
+    musicUrlKey(onlineMusic, '128k'),
+  ])
 })
 
-test('validated lower-quality fallback URL is reused for a later higher-quality replay', async () => {
-  const harness = createIntegrationHarness({
-    sourceIds: ['primary', 'fallback'], requestedQuality: 'flac',
+test('validated memory cannot replay after account authorization changes generation', async() => {
+  const accountA = musicUrlAuthorization('wy', 'profile-v1:user-id:7', 1)
+  const accountB = musicUrlAuthorization('wy', 'profile-v1:user-id:8', 2)
+  const cache = createCacheHarness({
+    read: async() => null,
+    save: async() => {},
   })
-  const first = harness.play()
-  const primary = await harness.waitForRequest({ apiId: 'primary', platform: 'wy' })
-  harness.fail(primary, new Error('primary failed'))
-  const fallback = await harness.waitForRequest({ apiId: 'fallback', platform: 'wy' })
-  harness.succeed(fallback, 'https://fallback-128', '128k')
-  const firstBinding = await harness.waitForBoundForeground('https://fallback-128', 1)
-  assert.equal(firstBinding.origin, 'source')
-  assert.equal(firstBinding.quality, '128k')
-  assert.equal(firstBinding.cacheKey, 'song_128k')
-  harness.emitForegroundCanplay()
-  await first
+  await cache.commit(musicUrlKey(onlineMusic, '320k', accountA), 'https://account-a')
+  assert.equal(await cache.lookup(musicUrlKey(onlineMusic, '320k', accountB)), null)
+})
 
-  const replay = harness.play()
-  const cachedBinding = await harness.waitForBoundForeground('https://fallback-128', 2)
-  assert.equal(cachedBinding.origin, 'cache')
-  assert.equal(cachedBinding.quality, '128k')
-  assert.equal(cachedBinding.cacheKey, 'song_128k')
-  harness.emitForegroundCanplay()
-  await replay
-  assert.deepEqual(harness.adapterRequestOrder, ['primary:wy', 'fallback:wy'])
+test('adopting a newer cache generation revokes a validated URL before its lookup is delivered', async() => {
+  const cache = createCacheHarness({ read: async() => null })
+  const key = musicUrlKey(onlineMusic, '320k')
+  await cache.commit(key, 'https://validated/pre-generation')
+
+  const lookup = cache.lookup(key)
+  cache.durableRows.clear()
+  cache.adoptCacheGeneration?.(1)
+
+  assert.equal(await lookup, null)
+  assert.equal(await cache.lookup(key), null)
+})
+
+test('adopting a newer cache generation suppresses an already in-flight durable lookup', async() => {
+  const readStarted = deferred()
+  const readGate = deferred()
+  const cache = createCacheHarness({
+    read: async() => {
+      readStarted.resolve()
+      return readGate.promise
+    },
+  })
+  const key = musicUrlKey(onlineMusic, '320k')
+  const lookup = cache.lookup(key)
+  await readStarted.promise
+
+  cache.adoptCacheGeneration?.(1)
+  readGate.resolve('https://durable/pre-generation')
+
+  assert.equal(await lookup, null)
+})
+
+test('a post-adoption lookup waits for stale same-key save cleanup before reading durability', async() => {
+  const saveVisible = deferred()
+  const saveMayReturn = deferred()
+  const durableRows = new Map()
+  const events = []
+  const key = musicUrlKey(onlineMusic, '320k')
+  const cache = createCacheHarness({
+    rows: durableRows,
+    read: async readKey => {
+      const url = durableRows.get(`${readKey.sourceTrackId}_${readKey.quality}`) ?? null
+      events.push(`read:${url ?? 'miss'}`)
+      return url
+    },
+    save: async(saveKey, url) => {
+      durableRows.set(`${saveKey.sourceTrackId}_${saveKey.quality}`, url)
+      events.push(`save:${url}`)
+      saveVisible.resolve()
+      await saveMayReturn.promise
+    },
+    remove: async removeKey => {
+      events.push('remove')
+      durableRows.delete(`${removeKey.sourceTrackId}_${removeKey.quality}`)
+    },
+  })
+  const staleUrl = 'https://commit/pre-generation'
+  const staleCommit = cache.commit(key, staleUrl)
+  await saveVisible.promise
+
+  cache.adoptCacheGeneration?.(1)
+  const lookup = cache.lookup(key)
+  queueMicrotask(() => {
+    events.push('release')
+    saveMayReturn.resolve()
+  })
+
+  const observed = await lookup
+  await staleCommit
+  assert.equal(observed, null)
+  assert.deepEqual(events, [
+    `save:${staleUrl}`,
+    'release',
+    'remove',
+    'read:miss',
+    'read:miss',
+  ])
+})
+
+test('stale in-flight commit cleanup cannot delete a newer current-generation commit', async() => {
+  const saveStarted = deferred()
+  const saveGate = deferred()
+  const durableRows = new Map()
+  let saveCount = 0
+  const cache = createCacheHarness({
+    rows: durableRows,
+    save: async(key, url) => {
+      saveCount++
+      if (saveCount == 1) {
+        saveStarted.resolve()
+        await saveGate.promise
+      }
+      durableRows.set(`${key.sourceTrackId}_${key.quality}`, url)
+    },
+  })
+  const key = musicUrlKey(onlineMusic, '320k')
+  const staleCommit = cache.commit(key, 'https://commit/pre-generation')
+  await saveStarted.promise
+
+  cache.adoptCacheGeneration?.(1)
+  const currentUrl = 'https://commit/current-generation'
+  const currentCommit = cache.commit(key, currentUrl)
+  saveGate.resolve()
+  await Promise.all([staleCommit, currentCommit])
+
+  assert.deepEqual(await cache.lookup(key), {
+    key,
+    quality: '320k',
+    url: currentUrl,
+    provisional: false,
+  })
+  assert.equal(durableRows.get('song_320k'), currentUrl)
+  assert.deepEqual(cache.persistenceMutations, [
+    'save:song_320k:https://commit/pre-generation',
+    'remove:song_320k',
+    'save:song_320k:https://commit/current-generation',
+  ])
+})
+
+test('cached media rejection tombstones the exact captured account key', async() => {
+  const accountA = musicUrlAuthorization('wy', 'profile-v1:user-id:7', 1)
+  const accountB = musicUrlAuthorization('wy', 'profile-v1:user-id:8', 2)
+  let currentAuthorization = accountA
+  const session = createSessionHarness({
+    sourceIds: ['builtin'],
+    requestedQuality: '320k',
+    cacheMode: 'lookup',
+    authorizeMusicUrl: async({ musicInfo, quality }) => (
+      musicUrlKey(musicInfo, quality, currentAuthorization)
+    ),
+    urls: { builtin: 'https://network' },
+    cacheRead: async key => typeof key == 'string' || key.authorization.accountScope == accountA.accountScope
+      ? 'https://account-a/cached'
+      : null,
+  })
+  const candidate = await session.nextCandidate()
+  assert.deepEqual(candidate.cacheKey, musicUrlKey(onlineMusic, '320k', accountA))
+
+  currentAuthorization = accountB
+  assert.equal(session.rejectMedia(candidate.candidateId), 'resumed')
+  await session.flush()
+  assert.deepEqual(session.cacheRemoved, [musicUrlKey(onlineMusic, '320k', accountA)])
+})
+
+test('source media rejection tombstones its captured key before resuming under current authorization', async() => {
+  const accountA = musicUrlAuthorization('wy', 'profile-v1:user-id:7', 1)
+  const accountB = musicUrlAuthorization('wy', 'profile-v1:user-id:8', 2)
+  let currentAuthorization = accountA
+  const session = createSessionHarness({
+    sourceIds: ['builtin'],
+    requestedQuality: '320k',
+    cacheMode: 'bypass',
+    authorizeMusicUrl: async({ musicInfo, quality }) => (
+      musicUrlKey(musicInfo, quality, currentAuthorization)
+    ),
+    urls: { builtin: 'https://network' },
+    matched: [matchedTx],
+  })
+  const rejected = await session.nextCandidate()
+  assert.equal(rejected.origin, 'source')
+  assert.deepEqual(rejected.cacheKey, musicUrlKey(onlineMusic, '320k', accountA))
+
+  currentAuthorization = accountB
+  assert.equal(session.rejectMedia(rejected.candidateId), 'resumed')
+  await session.flush()
+  assert.deepEqual(session.cacheRemoved, [musicUrlKey(onlineMusic, '320k', accountA)])
+
+  const resumed = await session.nextCandidate()
+  assert.equal(resumed.platform, 'tx')
+  assert.deepEqual(resumed.cacheKey, musicUrlKey(matchedTx, '320k', accountB))
+  assert.deepEqual(session.cacheRemoved, [musicUrlKey(onlineMusic, '320k', accountA)])
+})
+
+test('validated lower-quality memory is reused only for the current authorization', async() => {
+  const authorization = musicUrlAuthorization('wy', 'profile-v1:user-id:7', 3)
+  const cache = createCacheHarness({
+    read: async() => null,
+    save: async() => {},
+  })
+  await cache.commit(musicUrlKey(onlineMusic, '128k', authorization), 'https://validated/lower')
+  assert.deepEqual(await cache.lookup(musicUrlKey(onlineMusic, 'flac', authorization)), {
+    key: musicUrlKey(onlineMusic, '128k', authorization),
+    quality: '128k',
+    url: 'https://validated/lower',
+    provisional: false,
+  })
 })
 
 test('media rejection advances platform inside the source before fallback source', async () => {

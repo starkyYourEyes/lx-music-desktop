@@ -1,6 +1,5 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
-const os = require('node:os')
 const path = require('node:path')
 const { afterEach, describe, it } = require('node:test')
 const typescript = require('typescript')
@@ -17,6 +16,7 @@ require.extensions['.ts'] = (module, filename) => {
 const dbService = require('../../src/main/worker/dbService/db.ts')
 const { getSchemaVersion } = require('../../src/main/worker/dbService/migrate.ts')
 const repo = require('../../src/main/worker/dbService/modules/account_profile/index.ts')
+const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const tempDirs = []
 
@@ -24,23 +24,26 @@ afterEach(() => {
   try {
     dbService.close()
   } catch {}
-  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+  for (const fixture of tempDirs.splice(0)) fixture.cleanup()
 })
 
 describe('account profile storage', () => {
-  it('bootstraps schema 4 and accepts only public provider profiles', async() => {
-    const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-account-profile-'))
-    tempDirs.push(profileRoot)
+  it('bootstraps schema 6 and accepts only public provider profiles', async() => {
+    const fixture = createTestStorageRoot('lx-account-profile')
+    tempDirs.push(fixture)
+    const profileRoot = fixture.path
     const result = await dbService.init({
       dataPath: profileRoot,
-      backupDir: path.join(profileRoot, 'backups'),
+      cacheRoot: path.join(profileRoot, 'cache'),
+      backupsRoot: path.join(profileRoot, 'backups'),
       previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
     })
 
     assert.equal(result.status, 'ready')
-    assert.equal(result.schemaVersion, 4)
+    assert.equal(result.schemaVersion, 6)
     assert.deepEqual(result.migratedVersions, [])
-    assert.equal(getSchemaVersion(dbService.getDB()), 4)
+    assert.equal(getSchemaVersion(dbService.getAppDB()), 6)
 
     repo.upsertAccountProfile({
       provider: 'qq_music',
@@ -65,7 +68,7 @@ describe('account profile storage', () => {
       /public account profile/i,
     )
 
-    const directInsert = dbService.getDB().prepare(`
+    const directInsert = dbService.getAppDB().prepare(`
       INSERT INTO account_profiles (provider, profile_json, updated_at_ms)
       VALUES (?, ?, ?)
     `)
@@ -85,12 +88,15 @@ describe('account profile storage', () => {
   })
 
   it('commits legacy profiles and their marker atomically and skips a committed replay', async() => {
-    const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-account-profile-migration-'))
-    tempDirs.push(profileRoot)
+    const fixture = createTestStorageRoot('lx-account-profile-migration')
+    tempDirs.push(fixture)
+    const profileRoot = fixture.path
     await dbService.init({
       dataPath: profileRoot,
-      backupDir: path.join(profileRoot, 'backups'),
+      cacheRoot: path.join(profileRoot, 'cache'),
+      backupsRoot: path.join(profileRoot, 'backups'),
       previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
     })
     const marker = {
       name: 'legacy_data_v1.account_profiles',
@@ -106,7 +112,7 @@ describe('account profile storage', () => {
 
     repo.migrateLegacyAccountProfiles({ rows: [legacyRow], marker })
     assert.deepEqual(repo.getAccountProfile('netease'), legacyRow)
-    assert.equal(dbService.getDB().prepare('SELECT COUNT(*) AS count FROM migration_markers WHERE name = ?').get(marker.name).count, 1)
+    assert.equal(dbService.getAppDB().prepare('SELECT COUNT(*) AS count FROM migration_markers WHERE name = ?').get(marker.name).count, 1)
 
     const refreshedRow = {
       provider: 'netease',

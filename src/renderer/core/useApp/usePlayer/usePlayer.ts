@@ -9,6 +9,7 @@ import {
 } from '@renderer/plugins/player'
 
 import useMediaSessionInfo from './useMediaSessionInfo'
+import usePlaybackRecorder from './usePlaybackRecorder'
 import usePlayProgress from './usePlayProgress'
 import usePlayEvent from './usePlayEvent'
 
@@ -26,8 +27,8 @@ import {
   clearPlayedList,
   // resetPlayerMusicInfo,
 } from '@renderer/store/player/action'
-import { addRecentPlayMusic, initRecentPlayList } from '@renderer/store/recentPlay/action'
-import { initListeningTimeStats, saveListeningTimeStatsNow } from '@renderer/store/listeningTime/action'
+import { initRecentPlayList } from '@renderer/store/recentPlay/action'
+import { initListeningTimeStats } from '@renderer/store/listeningTime/action'
 
 import { appSetting } from '@renderer/store/setting'
 
@@ -96,6 +97,7 @@ const isPlaybackOwnershipCurrent = (snapshot: PlaybackOwnershipSnapshot) => {
 export default () => {
   const t = useI18n()
 
+  usePlaybackRecorder()
   usePlayProgress()
   useMediaSessionInfo()
   usePlayEvent()
@@ -130,7 +132,6 @@ export default () => {
     setPlay(false)
     if (window.lx.isPlayedStop) pause()
     removePowerSaveBlocker()
-    saveListeningTimeStatsNow()
   }
 
   const ensureContinuousNextSongs = async() => {
@@ -160,10 +161,6 @@ export default () => {
     syncQQGuessLikeModeWithPlayer(getQQMusicAccountKey())
     syncQQBrushModeWithPlayer(getQQMusicAccountKey())
     setTitle(musicInfo.id ? `${musicInfo.name} - ${musicInfo.singer}` : null)
-    if (playMusicInfo.musicInfo) {
-      const currentMusicInfo = 'progress' in playMusicInfo.musicInfo ? playMusicInfo.musicInfo.metadata.musicInfo : playMusicInfo.musicInfo
-      addRecentPlayMusic(currentMusicInfo)
-    }
     void ensureContinuousNextSongs()
   }
 
@@ -185,13 +182,13 @@ export default () => {
     void (async() => {
       await ensureContinuousNextSongs()
       if (!isPlaybackOwnershipCurrent(ownership)) return
-      await playNext(true)
+      await playNext({ automatic: true, reason: 'natural_end', startReason: 'auto' })
     })()
     // })
   }
 
   const setProgress = (time: number) => {
-    window.app_event.setProgress(time)
+    window.app_event.setProgress(time, 'hotkey')
   }
   const handleSeekforward = () => {
     const seekOffset = 5
@@ -214,7 +211,6 @@ export default () => {
     setAllStatus('')
     setStop()
     removePowerSaveBlocker()
-    saveListeningTimeStatsNow()
   }
 
   watch(() => appSetting['player.togglePlayMethod'], newValue => {

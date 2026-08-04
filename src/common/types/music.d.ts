@@ -1,14 +1,17 @@
-declare namespace LX {
-  namespace Music {
-    interface MusicQualityType { // {"type": "128k", size: "3.56M"}
-      type: LX.Quality
-      size: string | null
-    }
-    interface MusicQualityTypeKg { // {"type": "128k", size: "3.56M"}
-      type: LX.Quality
-      size: string | null
-      hash: string
-    }
+import type * as CacheTypes from '../storage/cache'
+
+declare global {
+  namespace LX {
+    namespace Music {
+      interface MusicQualityType { // {"type": "128k", size: "3.56M"}
+        type: LX.Quality
+        size: string | null
+      }
+      interface MusicQualityTypeKg { // {"type": "128k", size: "3.56M"}
+        type: LX.Quality
+        size: string | null
+        hash: string
+      }
     type _MusicQualityType = Partial<Record<Quality, {
       size: string | null
     }>>
@@ -172,7 +175,14 @@ declare namespace LX {
 
     interface LyricInfoSave {
       id: string
+      provider: string
       lyrics: LyricInfo
+    }
+
+    interface LyricInfoQuery {
+      provider: string
+      sourceTrackId: string
+      nowMs: number
     }
 
     interface MusicFileMeta {
@@ -183,15 +193,17 @@ declare namespace LX {
       lyrics: string | null
     }
 
-    interface MusicUrlInfo {
-      id: string
-      url: string
-    }
+    type PersistentMusicUrlProviderV1 = CacheTypes.PersistentMusicUrlProviderV1
+    type MusicUrlAuthorizationRequestV1 = CacheTypes.MusicUrlAuthorizationRequestV1
+    type MusicUrlAuthorizationV1 = CacheTypes.MusicUrlAuthorizationV1
+    type AuthorizedMusicUrlKeyV1 = CacheTypes.AuthorizedMusicUrlKeyV1
+    type AuthorizedMusicUrlGetInputV1 = CacheTypes.AuthorizedMusicUrlGetInputV1
+    type AuthorizedMusicUrlPutInputV1 = CacheTypes.AuthorizedMusicUrlPutInputV1
+    type AuthorizedMusicUrlDeleteInputV1 = CacheTypes.AuthorizedMusicUrlDeleteInputV1
+    type TrackIdentityV1 = CacheTypes.TrackIdentityV1
+    type OtherSourcesGetInputV1 = CacheTypes.OtherSourcesGetInputV1
+    type OtherSourcesPutInputV1 = CacheTypes.OtherSourcesPutInputV1
 
-    interface MusicInfoOtherSourceSave {
-      id: string
-      list: MusicInfoOnline[]
     }
-
   }
 }

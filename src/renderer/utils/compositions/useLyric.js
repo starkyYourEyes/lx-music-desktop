@@ -31,7 +31,7 @@ export default ({ isPlay, lyric, playProgress, isShowLyricProgressSetting, offse
     if (time == -1) return
     handleSkipMouseLeave()
     isStopScroll.value = false
-    window.app_event.setProgress(time)
+    window.app_event.setProgress(time, 'lyric')
     if (!isPlay.value) play()
   }
   const handleSkipMouseEnter = () => {

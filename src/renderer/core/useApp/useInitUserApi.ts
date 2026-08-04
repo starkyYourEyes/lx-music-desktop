@@ -91,6 +91,9 @@ export default () => {
     userApi.runtimeStates[runtime.apiId] = runtime
     if (runtime.status && runtime.apiInfo?.sources) {
       userApi.capabilities[runtime.apiId] = { sources: runtime.apiInfo.sources }
+    } else if (!runtime.status) {
+      primarySourceCapabilityController.invalidate(runtime.apiId)
+      Reflect.deleteProperty(userApi.capabilities, runtime.apiId)
     }
     if (runtime.apiId != appSetting['common.apiSource']) return
 

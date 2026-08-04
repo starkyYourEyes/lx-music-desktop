@@ -1,5 +1,4 @@
 import path from 'node:path'
-import { existsSync, mkdirSync } from 'fs'
 import { app, shell, screen, nativeTheme } from 'electron'
 import { URL_SCHEME_RXP } from '@common/constants'
 import { getProxy, getTheme, initHotKey, initSetting, parseEnvParams } from './utils'
@@ -12,13 +11,27 @@ import createWorkers from './worker'
 import { migrateDBData } from './utils/migrate'
 import { initializeCredentialVault } from './storage/credentials'
 import { createAccountRepository } from './storage/accounts/accountRepository'
+import { createMusicUrlAuthorizationService } from './services/musicUrlAuthorization'
 import { migrateLegacyCredentials } from './migration/credentials/credentialMigration'
+import { withSelectedLegacyDataSource } from './migration/credentials/legacySources'
 import { isCredentialMigrationRecoveryError } from './migration/credentials/recoveryError'
+import { migrateLegacyNonActivity } from './migration/legacyData/nonActivity'
+import { migrateLegacyPlaybackActivity } from './migration/legacyData/activity'
+import type { LegacyDataSourceResult } from './migration/legacyData/source'
+import { createAtomicJsonFile } from './storage/atomicJsonFile'
+import { parseSettingsDocument, type SettingsDocumentV1 } from './storage/settings/document'
 import { setProxyByHost } from '@common/utils/request'
 import { getWebContentsNavigationDecision } from '@main/utils/webContentsNavigationGuard'
-import { getPortableUserDataPaths, migrateLegacyUserData } from './migration/legacyUserData'
 import { PROJECT_IDENTITY } from '@common/projectIdentity'
 import type { StorageStartupOutcome } from './startup/storageCoordinator'
+import {
+  createPhase3AttestationCommand,
+  type Phase3ActivityEvidence,
+  type Phase3CredentialHealth,
+  type Phase3PlaybackSmokeEvidence,
+} from './startup/phase3Attestation'
+import type { Phase3AttestationPrerequisitesV1 } from '../common/storage/phase3'
+import { createSessionRegistry } from './services/sessionRegistry'
 
 export const initGlobalData = () => {
   const envParams = parseEnvParams()
@@ -37,7 +50,10 @@ export const initGlobalData = () => {
     event_dislike: createDislikeEvent(),
     appSetting: defaultSetting,
     worker: createWorkers(),
+    sessionRegistry: createSessionRegistry(),
     storage: null,
+    runTemp: null,
+    themeAssets: null,
     hotKey: {
       enable: true,
       config: {
@@ -130,31 +146,6 @@ export const applyElectronEnvParams = () => {
     app.commandLine.appendSwitch('proxy-server', global.envParams.cmdParams['proxy-server'])
     app.commandLine.appendSwitch('proxy-bypass-list', global.envParams.cmdParams['proxy-bypass-list'] ?? '<local>')
   }
-}
-
-export const setUserDataPath = (): { ready: true } | { ready: false, error: unknown } => {
-  const portablePaths = getPortableUserDataPaths({
-    platform: process.platform,
-    executablePath: app.getPath('exe'),
-  })
-
-  if (portablePaths) {
-    app.setPath('appData', portablePaths.appDataPath)
-    if (!existsSync(portablePaths.userDataPath)) mkdirSync(portablePaths.userDataPath, { recursive: true })
-    app.setPath('userData', portablePaths.userDataPath)
-  } else {
-    const migration = migrateLegacyUserData({ appDataPath: app.getPath('appData'), logger: console })
-    if (!migration.userDataPathReady) {
-      return { ready: false, error: migration.error ?? new Error('User-data migration did not produce a usable path') }
-    }
-    app.setPath('userData', migration.userDataPath)
-  }
-
-  const userDataPath = app.getPath('userData')
-  global.lxOldDataPath = userDataPath
-  global.lxDataPath = path.join(userDataPath, 'LxDatas')
-  if (!existsSync(global.lxDataPath)) mkdirSync(global.lxDataPath, { recursive: true })
-  return { ready: true }
 }
 
 export const registerDeeplink = (startApp: () => void) => {
@@ -333,7 +324,10 @@ const credentialVaultReadable = (vault: Awaited<ReturnType<typeof initializeCred
   }
 }
 
-export const runStorageMigrationHooks = async(result: { existed: boolean }): Promise<CredentialRecoveryOutcome | undefined> => {
+export const runStorageMigrationHooks = async(
+  result: { existed: boolean },
+  legacyData: LegacyDataSourceResult = { status: 'absent' },
+): Promise<CredentialRecoveryOutcome | undefined> => {
   if (!result.existed) await migrateDBData()
   let vault: Awaited<ReturnType<typeof initializeCredentialVault>>
   try {
@@ -344,13 +338,16 @@ export const runStorageMigrationHooks = async(result: { existed: boolean }): Pro
     return credentialMigrationRecovery('credentials.vault_unreadable')
   }
   try {
-    global.lx.credentialMigration = await migrateLegacyCredentials({
+    const migrateCredentials = async() => migrateLegacyCredentials({
       dataRoot: global.lxDataPath,
       vault,
       profiles: {
         migrateLegacyAccountProfiles: input => global.lx.worker.dbService.migrateLegacyAccountProfiles(input),
       },
     })
+    global.lx.credentialMigration = legacyData.status == 'available'
+      ? await withSelectedLegacyDataSource(legacyData.snapshot, migrateCredentials)
+      : await migrateCredentials()
     if (global.lx.credentialMigration.status == 'secure-storage-unavailable' &&
       global.lx.credentialMigration.volatileEntries == 0) {
       return credentialMigrationRecovery('credentials.memory_only_entries_unavailable')
@@ -369,11 +366,113 @@ export const runStorageMigrationHooks = async(result: { existed: boolean }): Pro
     })
     await accountRepository.hydrate()
     global.lx.accountRepository = accountRepository
+    const musicUrlAuthorization = createMusicUrlAuthorizationService({
+      accounts: accountRepository,
+      worker: global.lx.worker.dbService,
+    })
+    global.lx.musicUrlAuthorization = musicUrlAuthorization
     global.lx.storage?.registerShutdownFlusher('account-repository', async() => { await accountRepository.flush() })
+    global.lx.storage?.registerShutdownFlusher('music-url-authorization', async() => { await musicUrlAuthorization.flush() })
   } catch {
     return credentialMigrationRecovery('credentials.profile_repository_unreadable')
   }
+  if (legacyData.status == 'absent') return undefined
+
+  const settingsPath = path.join(global.lxDataPath, 'config_v2.json')
+  const settingsFile = createAtomicJsonFile<SettingsDocumentV1>({
+    filePath: settingsPath,
+    validate: (value): value is SettingsDocumentV1 => {
+      try {
+        parseSettingsDocument(value)
+        return true
+      } catch {
+        return false
+      }
+    },
+  })
+  const storedSettings = await settingsFile.read()
+  const settingsDocument = storedSettings == null
+    ? parseSettingsDocument({ version: defaultSetting.version, setting: defaultSetting })
+    : parseSettingsDocument(storedSettings)
+  await migrateLegacyNonActivity({
+    source: legacyData.status == 'available' ? legacyData.snapshot : null,
+    settingsPath,
+    settingsDocument,
+    settingsFile,
+    repository: {
+      importLegacyNonActivity: input => global.lx.worker.dbService.importLegacyNonActivity(input),
+      getLocalState: () => global.lx.worker.dbService.getLocalState(),
+      getPlaylistMetadata: () => global.lx.worker.dbService.getPlaylistMetadata(),
+      getSearchHistory: () => global.lx.worker.dbService.getSearchHistory(),
+      getNonActivityMigrationMarker: name => global.lx.worker.dbService.getNonActivityMigrationMarker(name),
+      completeNonActivityMigrationMarker: input => global.lx.worker.dbService.completeNonActivityMigrationMarker(input),
+    },
+  })
   return undefined
+}
+
+export const runPlaybackActivityMigration = async(
+  _result: { existed: boolean },
+  legacyData: Exclude<LegacyDataSourceResult, { status: 'recovery' }>,
+): Promise<Phase3ActivityEvidence> => {
+  const vault = global.lx.credentialVault
+  if (vault == null) throw new Error('Playback activity quarantine vault is unavailable')
+  const result = await migrateLegacyPlaybackActivity({
+    source: legacyData.status == 'available' ? legacyData.snapshot : null,
+    vault,
+    repository: {
+      importLegacyPlaybackActivity: input => global.lx.worker.dbService.importLegacyPlaybackActivity(input),
+      getPlaybackActivityMigrationMarker: () => global.lx.worker.dbService.getPlaybackActivityMigrationMarker(),
+    },
+  })
+  return result.phase3
+}
+
+export const completePhase3StartupAttestation = async(input: {
+  completedAtMs: number
+  legacySourceState: Phase3ActivityEvidence['sourceState']
+  credentialHealth: Phase3CredentialHealth
+  activity: Phase3ActivityEvidence | null
+  prerequisites: Phase3AttestationPrerequisitesV1
+  smoke: Phase3PlaybackSmokeEvidence
+}): Promise<void> => {
+  const vault = global.lx.credentialVault
+  const migration = global.lx.credentialMigration
+  if (vault == null || migration == null || input.activity == null) {
+    throw Object.assign(new Error('Phase 3 migration evidence is unavailable'), { code: 'phase3_attestation_inputs_invalid' })
+  }
+  if (migration.status == 'secure-storage-unavailable' ||
+    vault.getMigrationMarker('legacy_data_v1.credentials.memory-only') != null) {
+    throw Object.assign(new Error('Phase 3 credential evidence is unavailable'), { code: 'phase3_attestation_inputs_invalid' })
+  }
+  const credentialState = vault.getMigrationMarker('legacy_data_v1.credentials') == null
+    ? 'not-applicable' as const
+    : 'complete' as const
+  if (migration.encryptedEntries > 0 && credentialState != 'complete') {
+    throw Object.assign(new Error('Phase 3 credential marker is unavailable'), { code: 'phase3_attestation_inputs_invalid' })
+  }
+  if (migration.profiles > 0 && input.prerequisites.accountProfile.state != 'complete') {
+    throw Object.assign(new Error('Phase 3 account profile marker is unavailable'), { code: 'phase3_attestation_inputs_invalid' })
+  }
+  if (input.activity.sourceState != input.legacySourceState) {
+    throw Object.assign(new Error('Phase 3 legacy source state is inconsistent'), { code: 'phase3_attestation_inputs_invalid' })
+  }
+  if (input.legacySourceState == 'complete' &&
+    (input.prerequisites.phase2.state != 'complete' || input.prerequisites.playbackActivity.state != 'complete')) {
+    throw Object.assign(new Error('Phase 3 legacy marker evidence is unavailable'), { code: 'phase3_attestation_inputs_invalid' })
+  }
+  const command = createPhase3AttestationCommand({
+    completedAtMs: input.completedAtMs,
+    credential: {
+      state: credentialState,
+      encrypted: vault.mode == 'encrypted',
+      health: input.credentialHealth,
+    },
+    prerequisites: input.prerequisites,
+    activity: input.activity,
+    smoke: input.smoke,
+  })
+  await global.lx.worker.dbService.completePhase3Attestation(command)
 }
 
 export const initAppSetting = async(): Promise<void> => {

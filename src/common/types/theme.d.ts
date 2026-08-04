@@ -294,6 +294,19 @@ declare namespace LX {
     dataPath: string
   }
 
+  interface StagedThemeImage {
+    stagingId: string
+    previewPath: string
+  }
+  interface ThemeSaveRequest {
+    theme: Theme
+    stagingId?: string
+  }
+  interface ThemeSaveResult {
+    theme: Theme
+    userThemes: Theme[]
+  }
+
   interface ThemeSetting {
     shouldUseDarkColors: boolean
     theme: {

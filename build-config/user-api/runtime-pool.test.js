@@ -28,7 +28,7 @@ test('disposing one runtime clears only its own session', async() => {
 
   await harness.dispose(first, { clearSession: true })
 
-  assert.deepEqual(first.session.cleanupCalls, ['auth', 'storage', 'cache'])
+  assert.deepEqual(first.session.cleanupCalls, ['cache', 'storage:cachestorage', 'code'])
   assert.deepEqual(second.session.cleanupCalls, [])
   assert.equal(second.window.destroyed, false)
 })
@@ -55,7 +55,19 @@ test('a destroy failure leaves the runtime owned and retryable', async() => {
 
   await harness.dispose(runtime, { clearSession: true })
   assert.equal(runtime.window.destroyed, true)
-  assert.deepEqual(runtime.session.cleanupCalls, ['auth', 'storage', 'cache'])
+  assert.deepEqual(runtime.session.cleanupCalls, ['cache', 'storage:cachestorage', 'code'])
+})
+
+test('a failed destroy is retried before a same-source runtime is replaced', async() => {
+  const harness = createRuntimeWindowHarness({ destroyFailures: 1 })
+  const original = await harness.create({ id: 'user_api/a' }, 1)
+
+  await assert.rejects(harness.dispose(original, { clearSession: true }), /simulated destroy failure/)
+  const replacement = await harness.create({ id: 'user_api/a' }, 2)
+
+  assert.equal(original.window.destroyed, true)
+  assert.equal(harness.windows.length, 2)
+  assert.equal(replacement.window.destroyed, false)
 })
 
 test('an HTML read failure constructs no window and permits retry', async() => {
@@ -127,6 +139,7 @@ test('initialization times out after ten seconds, retires the generation, and pe
   const clock = createFakeClock(0)
   const harness = createPoolHarness({ autoInit: false, initialConfiguredIds: ['a'], clock })
   const first = harness.pool.ensure('a')
+  const requesting = harness.pool.request({ apiId: 'a', requestId: 'waiting', data: {} }, 11)
   const firstOutcome = first.then(
     () => ({ status: 'resolved' }),
     error => ({ status: 'rejected', error }),
@@ -151,6 +164,11 @@ test('initialization times out after ten seconds, retires the generation, and pe
     message: 'User API initialization timed out',
     apiInfo: { id: 'a', name: 'A', description: '', allowShowUpdateAlert: false, sources: {} },
   })
+  const requestResult = await requesting
+  assert.equal(requestResult.ok, false)
+  assert.equal(requestResult.error.kind, 'timeout')
+  assert.equal(requestResult.error.message, 'User API initialization timed out')
+  assert.equal(clock.pendingTimerCount, 0)
 
   const second = harness.pool.ensure('a')
   await harness.waitForInitializeCall('a', 2)
@@ -235,6 +253,618 @@ test('the ten-second initialization deadline includes initialization dispatch', 
   assert.equal(harness.disposedGenerations.filter(generation => generation == 1).length, 1)
   assert.equal(harness.pool.getStatus('a').status, true)
   assert.equal(harness.statusEvents.at(-1).status, true)
+})
+
+test('dispose during blocked creation settles at the original deadline and owns the late window', async() => {
+  const clock = createFakeClock(0)
+  const createGate = deferred()
+  const harness = createPoolHarness({
+    autoInit: false,
+    initialConfiguredIds: ['a'],
+    clock,
+    createGate: createGate.promise,
+  })
+  const ensuring = harness.pool.ensure('a')
+  const ensureOutcome = ensuring.then(
+    () => ({ status: 'resolved' }),
+    error => ({ status: 'rejected', error }),
+  )
+  await harness.waitForCreateCall('a')
+  const deleting = harness.pool.dispose('a', { clearSession: false })
+  const deleteOutcome = deleting.then(
+    () => ({ status: 'resolved' }),
+    error => ({ status: 'rejected', error }),
+  )
+
+  clock.advance(9_999)
+  await clock.flush()
+  assert.equal(await Promise.race([deleteOutcome, Promise.resolve('pending')]), 'pending')
+
+  clock.advance(1)
+  await clock.flush()
+  const atDeadline = await Promise.race([deleteOutcome, Promise.resolve('pending')])
+  if (atDeadline == 'pending') createGate.resolve()
+  assert.deepEqual(atDeadline, { status: 'resolved' })
+  const rejectedEnsure = await ensureOutcome
+  assert.equal(rejectedEnsure.status, 'rejected')
+  assert.equal(rejectedEnsure.error.kind, 'sourceChanged')
+
+  createGate.resolve()
+  await harness.waitForDisposed('a', 1)
+  await clock.flush()
+  assert.equal(harness.disposedGenerations.filter(generation => generation == 1).length, 1)
+  assert.equal(harness.lifecycle.includes('send-init:a:1'), false)
+})
+
+test('disposeAll during blocked creation settles at the deadline and unsubscribes once', async() => {
+  const clock = createFakeClock(0)
+  const createGate = deferred()
+  const harness = createPoolHarness({
+    autoInit: false,
+    initialConfiguredIds: ['a'],
+    clock,
+    createGate: createGate.promise,
+  })
+  const ensuring = harness.pool.ensure('a')
+  const ensureOutcome = ensuring.then(
+    () => ({ status: 'resolved' }),
+    error => ({ status: 'rejected', error }),
+  )
+  await harness.waitForCreateCall('a')
+  const disposing = harness.pool.disposeAll()
+  const disposeOutcome = disposing.then(
+    () => ({ status: 'resolved' }),
+    error => ({ status: 'rejected', error }),
+  )
+
+  clock.advance(10_000)
+  await clock.flush()
+  const atDeadline = await Promise.race([disposeOutcome, Promise.resolve('pending')])
+  if (atDeadline == 'pending') createGate.resolve()
+  assert.deepEqual(atDeadline, { status: 'resolved' })
+  assert.equal(harness.proxyUnsubscribeCount, 1)
+  assert.equal((await ensureOutcome).status, 'rejected')
+
+  createGate.resolve()
+  await harness.waitForDisposed('a', 1)
+  await clock.flush()
+  assert.equal(harness.disposedGenerations.filter(generation => generation == 1).length, 1)
+  assert.equal(harness.lifecycle.includes('send-init:a:1'), false)
+  assert.equal(harness.proxyUnsubscribeCount, 1)
+})
+
+test('clearSession disposal during blocked creation clears after late destruction', async() => {
+  const clock = createFakeClock(0)
+  const createGate = deferred()
+  const clearSessionGate = deferred()
+  const harness = createPoolHarness({
+    autoInit: false,
+    initialConfiguredIds: ['a'],
+    clock,
+    createGate: createGate.promise,
+    clearSessionGate: clearSessionGate.promise,
+  })
+  const ensuring = harness.pool.ensure('a')
+  const ensureOutcome = ensuring.then(
+    () => ({ status: 'resolved' }),
+    error => ({ status: 'rejected', error }),
+  )
+  await harness.waitForCreateCall('a')
+  const deleting = harness.pool.dispose('a', { clearSession: true })
+  const deleteOutcome = deleting.then(
+    () => ({ status: 'resolved' }),
+    error => ({ status: 'rejected', error }),
+  )
+
+  clock.advance(10_000)
+  await clock.flush()
+  const atDeadline = await Promise.race([deleteOutcome, Promise.resolve('pending')])
+  if (atDeadline == 'pending') createGate.resolve()
+  assert.deepEqual(atDeadline, { status: 'resolved' })
+  assert.equal((await ensureOutcome).status, 'rejected')
+  assert.deepEqual(harness.lifecycle, ['create:a:1'])
+
+  createGate.resolve()
+  await harness.waitForSessionClearCall('a')
+  assert.deepEqual(harness.lifecycle, ['create:a:1', 'dispose:a:1', 'clearSession:a'])
+  assert.deepEqual(harness.clearedSessionIds, [])
+  clearSessionGate.resolve()
+  await harness.waitForSessionCleared('a')
+  assert.deepEqual(harness.clearedSessionIds, ['a'])
+})
+
+test('deletion after the creation deadline still waits to clear until the late window is destroyed', async() => {
+  const clock = createFakeClock(0)
+  const createGate = deferred()
+  const harness = createPoolHarness({
+    autoInit: false,
+    initialConfiguredIds: ['a'],
+    clock,
+    createGate: createGate.promise,
+  })
+  const ensuring = harness.pool.ensure('a')
+  await harness.waitForCreateCall('a')
+
+  clock.advance(10_000)
+  await clock.flush()
+  await assert.rejects(ensuring, error => error.kind == 'timeout')
+  await harness.pool.dispose('a', { clearSession: true })
+  const beforeLateCreation = [...harness.lifecycle]
+
+  createGate.resolve()
+  await harness.waitForSessionClearCall('a')
+  assert.deepEqual(beforeLateCreation, ['create:a:1'])
+  assert.deepEqual(harness.lifecycle, ['create:a:1', 'dispose:a:1', 'clearSession:a'])
+  assert.deepEqual(harness.disposedGenerations, [1])
+  assert.deepEqual(harness.clearedSessionIds, ['a'])
+})
+
+test('failed late-window destruction remains owned for a later destroy-and-clear retry', async() => {
+  const clock = createFakeClock(0)
+  const createGate = deferred()
+  const harness = createPoolHarness({
+    autoInit: false,
+    initialConfiguredIds: ['a'],
+    clock,
+    createGate: createGate.promise,
+    disposeFailures: new Map([['a', 1]]),
+  })
+  const ensuring = harness.pool.ensure('a')
+  const ensureOutcome = ensuring.then(
+    () => ({ status: 'resolved' }),
+    error => ({ status: 'rejected', error }),
+  )
+  await harness.waitForCreateCall('a')
+  const deleting = harness.pool.dispose('a', { clearSession: true })
+
+  clock.advance(10_000)
+  await clock.flush()
+  await deleting
+  assert.equal((await ensureOutcome).status, 'rejected')
+
+  createGate.resolve()
+  await harness.waitForDisposePromiseSettled('a', 1)
+  await clock.flush()
+  const beforeRetry = [...harness.lifecycle]
+
+  await harness.pool.dispose('a', { clearSession: true })
+  assert.deepEqual(beforeRetry, ['create:a:1', 'dispose:a:1'])
+  assert.deepEqual(harness.lifecycle, ['create:a:1', 'dispose:a:1', 'dispose:a:1', 'clearSession:a'])
+  assert.deepEqual(harness.disposedGenerations, [1, 1])
+  assert.deepEqual(harness.clearedSessionIds, ['a'])
+})
+
+test('deletion retires a replacement record before clearing behind an older late creation', async() => {
+  const clock = createFakeClock(0)
+  const firstCreate = deferred()
+  const harness = createPoolHarness({
+    autoInit: false,
+    initialConfiguredIds: ['a'],
+    clock,
+    createGate: (_apiId, generation) => generation == 1 ? firstCreate.promise : undefined,
+  })
+  const first = harness.pool.ensure('a')
+  await harness.waitForCreateCall('a', 1)
+  clock.advance(10_000)
+  await clock.flush()
+  await assert.rejects(first, error => error.kind == 'timeout')
+
+  const second = harness.pool.ensure('a')
+  await harness.waitForInitializeCall('a', 2)
+  await harness.init('a', { sources: {} })
+  await second
+
+  await harness.pool.dispose('a', { clearSession: true })
+  const beforeLateCreation = [...harness.lifecycle]
+  firstCreate.resolve()
+  await harness.waitForSessionClearCall('a')
+
+  assert.equal(beforeLateCreation.includes('dispose:a:2'), true)
+  assert.equal(beforeLateCreation.includes('clearSession:a'), false)
+  assert.deepEqual(
+    harness.lifecycle.filter(event => event.startsWith('dispose:') || event.startsWith('clearSession:')),
+    ['dispose:a:2', 'dispose:a:1', 'clearSession:a'],
+  )
+  assert.deepEqual(harness.clearedSessionIds, ['a'])
+})
+
+test('late cleanup joins a blocked replacement creation before clearing the partition', async() => {
+  const clock = createFakeClock(0)
+  const firstCreate = deferred()
+  const secondCreate = deferred()
+  const harness = createPoolHarness({
+    autoInit: true,
+    initialConfiguredIds: ['a'],
+    clock,
+    createGate: (_apiId, generation) => generation == 1 ? firstCreate.promise : secondCreate.promise,
+  })
+  const first = harness.pool.ensure('a')
+  await harness.waitForCreateCall('a', 1)
+  clock.advance(10_000)
+  await clock.flush()
+  await assert.rejects(first, error => error.kind == 'timeout')
+  await harness.pool.dispose('a', { clearSession: true })
+
+  const second = harness.pool.ensure('a')
+  const secondOutcome = second.then(
+    () => ({ status: 'resolved' }),
+    error => ({ status: 'rejected', error }),
+  )
+  await harness.waitForCreateCall('a', 2)
+  firstCreate.resolve()
+  await harness.waitForDisposePromiseSettled('a', 1)
+  await clock.flush()
+  const beforeSecondSettles = [...harness.lifecycle]
+
+  secondCreate.resolve()
+  await clock.flush()
+  const finalSecondOutcome = await Promise.race([secondOutcome, Promise.resolve('pending')])
+  assert.equal(beforeSecondSettles.includes('clearSession:a'), false)
+  assert.equal(finalSecondOutcome.status, 'rejected')
+  assert.deepEqual(
+    harness.lifecycle.filter(event => event.startsWith('dispose:') || event.startsWith('clearSession:')),
+    ['dispose:a:1', 'dispose:a:2', 'clearSession:a'],
+  )
+  assert.deepEqual(harness.clearedSessionIds, ['a'])
+})
+
+test('normal replacement retirement resumes a retained late-creation clear', async() => {
+  const clock = createFakeClock(0)
+  const firstCreate = deferred()
+  const harness = createPoolHarness({
+    autoInit: true,
+    initialConfiguredIds: ['a'],
+    clock,
+    createGate: (_apiId, generation) => generation == 1 ? firstCreate.promise : undefined,
+  })
+  const first = harness.pool.ensure('a')
+  await harness.waitForCreateCall('a', 1)
+  clock.advance(10_000)
+  await clock.flush()
+  await assert.rejects(first, error => error.kind == 'timeout')
+  await harness.pool.dispose('a', { clearSession: true })
+
+  await harness.pool.ensure('a')
+  firstCreate.resolve()
+  await harness.waitForDisposePromiseSettled('a', 1)
+  await clock.flush()
+  assert.equal(harness.lifecycle.includes('clearSession:a'), false)
+
+  harness.crash('a', 2)
+  await harness.waitForDisposePromiseSettled('a', 2)
+  await clock.flush()
+  assert.deepEqual(
+    harness.lifecycle.filter(event => event.startsWith('dispose:') || event.startsWith('clearSession:')),
+    ['dispose:a:1', 'dispose:a:2', 'clearSession:a'],
+  )
+  assert.deepEqual(harness.clearedSessionIds, ['a'])
+})
+
+test('replacement creation starting during late destruction joins the closing aggregate', async() => {
+  const clock = createFakeClock(0)
+  const firstCreate = deferred()
+  const secondCreate = deferred()
+  const firstDispose = deferred()
+  const harness = createPoolHarness({
+    autoInit: true,
+    initialConfiguredIds: ['a'],
+    clock,
+    createGate: (_apiId, generation) => generation == 1 ? firstCreate.promise : secondCreate.promise,
+    disposeGate: (_apiId, generation) => generation == 1 ? firstDispose.promise : undefined,
+  })
+  const first = harness.pool.ensure('a')
+  await harness.waitForCreateCall('a', 1)
+  clock.advance(10_000)
+  await clock.flush()
+  await assert.rejects(first, error => error.kind == 'timeout')
+  await harness.pool.dispose('a', { clearSession: true })
+
+  firstCreate.resolve()
+  await harness.waitForDisposed('a', 1)
+  const second = harness.pool.ensure('a')
+  const secondOutcome = second.then(
+    () => ({ status: 'resolved' }),
+    error => ({ status: 'rejected', error }),
+  )
+  await harness.waitForCreateCall('a', 2)
+
+  firstDispose.resolve()
+  await harness.waitForDisposePromiseSettled('a', 1)
+  await clock.flush()
+  const beforeSecondSettles = [...harness.lifecycle]
+  secondCreate.resolve()
+  await clock.flush()
+  const finalSecondOutcome = await Promise.race([secondOutcome, Promise.resolve('pending')])
+
+  assert.equal(beforeSecondSettles.includes('clearSession:a'), false)
+  assert.equal(finalSecondOutcome.status, 'rejected')
+  assert.deepEqual(
+    harness.lifecycle.filter(event => event.startsWith('dispose:') || event.startsWith('clearSession:')),
+    ['dispose:a:1', 'dispose:a:2', 'clearSession:a'],
+  )
+  assert.deepEqual(harness.clearedSessionIds, ['a'])
+})
+
+test('same-turn replacement admission is published before late cleanup closes the barrier', async() => {
+  const clock = createFakeClock(0)
+  const firstCreate = deferred()
+  const secondCreate = deferred()
+  const firstDispose = deferred()
+  const harness = createPoolHarness({
+    autoInit: true,
+    initialConfiguredIds: ['a'],
+    clock,
+    createGate: (_apiId, generation) => generation == 1 ? firstCreate.promise : secondCreate.promise,
+    disposeGate: (_apiId, generation) => generation == 1 ? firstDispose.promise : undefined,
+  })
+  const first = harness.pool.ensure('a')
+  await harness.waitForCreateCall('a', 1)
+  clock.advance(10_000)
+  await clock.flush()
+  await assert.rejects(first, error => error.kind == 'timeout')
+  await harness.pool.dispose('a', { clearSession: true })
+
+  firstCreate.resolve()
+  await harness.waitForDisposed('a', 1)
+  const firstBoundaryEvent = Promise.race([
+    harness.waitForCreateCall('a', 2).then(() => 'create'),
+    harness.waitForSessionClearCall('a').then(() => 'clear'),
+  ])
+  let second
+  const startSecond = firstDispose.promise.then(() => {
+    second = harness.pool.ensure('a')
+  })
+
+  firstDispose.resolve()
+  await startSecond
+  const boundaryEvent = await firstBoundaryEvent
+  secondCreate.resolve()
+  const secondOutcome = await second.then(
+    () => ({ status: 'resolved' }),
+    error => ({ status: 'rejected', error }),
+  )
+  await clock.flush()
+
+  assert.equal(boundaryEvent, 'create')
+  assert.equal(secondOutcome.status, 'rejected')
+  assert.equal(secondOutcome.error.kind, 'sourceChanged')
+  assert.deepEqual(
+    harness.lifecycle.filter(event => event.startsWith('create:') ||
+      event.startsWith('dispose:') || event.startsWith('clearSession:')),
+    ['create:a:1', 'dispose:a:1', 'create:a:2', 'dispose:a:2', 'clearSession:a'],
+  )
+  assert.deepEqual(harness.disposedGenerations, [1, 2])
+  assert.deepEqual(harness.clearedSessionIds, ['a'])
+})
+
+test('replacement record installed during older destruction is retired before session clear', async() => {
+  const clock = createFakeClock(0)
+  const firstCreate = deferred()
+  const firstDispose = deferred()
+  const harness = createPoolHarness({
+    autoInit: true,
+    initialConfiguredIds: ['a'],
+    clock,
+    createGate: (_apiId, generation) => generation == 1 ? firstCreate.promise : undefined,
+    disposeGate: (_apiId, generation) => generation == 1 ? firstDispose.promise : undefined,
+  })
+  const first = harness.pool.ensure('a')
+  await harness.waitForCreateCall('a', 1)
+  clock.advance(10_000)
+  await clock.flush()
+  await assert.rejects(first, error => error.kind == 'timeout')
+  await harness.pool.dispose('a', { clearSession: true })
+
+  firstCreate.resolve()
+  await harness.waitForDisposed('a', 1)
+  await harness.pool.ensure('a')
+  const beforeOlderDestroyCompletes = [...harness.lifecycle]
+
+  firstDispose.resolve()
+  await harness.waitForDisposePromiseSettled('a', 1)
+  await clock.flush()
+
+  assert.equal(beforeOlderDestroyCompletes.includes('send-init:a:2'), true)
+  assert.equal(beforeOlderDestroyCompletes.includes('dispose:a:2'), false)
+  assert.equal(beforeOlderDestroyCompletes.includes('clearSession:a'), false)
+  assert.deepEqual(
+    harness.lifecycle.filter(event => event.startsWith('dispose:') || event.startsWith('clearSession:')),
+    ['dispose:a:1', 'dispose:a:2', 'clearSession:a'],
+  )
+  assert.deepEqual(harness.disposedGenerations, [1, 2])
+  assert.deepEqual(harness.clearedSessionIds, ['a'])
+})
+
+test('replacement creation waits behind an in-flight session clear and retries once after success', async() => {
+  const clock = createFakeClock(0)
+  const firstCreate = deferred()
+  const clearSessionGate = deferred()
+  const harness = createPoolHarness({
+    autoInit: true,
+    initialConfiguredIds: ['a', 'b'],
+    clock,
+    createGate: (_apiId, generation) => generation == 1 ? firstCreate.promise : undefined,
+    clearSessionGate: clearSessionGate.promise,
+  })
+  const first = harness.pool.ensure('a')
+  await harness.waitForCreateCall('a', 1)
+  clock.advance(10_000)
+  await clock.flush()
+  await assert.rejects(first, error => error.kind == 'timeout')
+  await harness.pool.dispose('a', { clearSession: true })
+
+  firstCreate.resolve()
+  await harness.waitForSessionClearCall('a')
+  const replacements = [harness.pool.ensure('a'), harness.pool.ensure('a')]
+  await harness.pool.ensure('b')
+  await clock.flush()
+  const beforeClearCompletes = [...harness.lifecycle]
+
+  clearSessionGate.resolve()
+  const outcomes = await Promise.allSettled(replacements)
+
+  assert.equal(beforeClearCompletes.includes('create:a:2'), false)
+  assert.equal(beforeClearCompletes.includes('create:b:1'), true)
+  assert.deepEqual(outcomes.map(result => result.status), ['fulfilled', 'fulfilled'])
+  assert.deepEqual(harness.createdGenerations('a'), [1, 2])
+  assert.deepEqual(
+    harness.lifecycle.filter(event => event.startsWith('dispose:') ||
+      event.startsWith('clearSession:') || event.startsWith('create:')),
+    ['create:a:1', 'dispose:a:1', 'clearSession:a', 'create:b:1', 'create:a:2'],
+  )
+})
+
+test('failed session clear retains the barrier until explicit cleanup retry succeeds', async() => {
+  const clock = createFakeClock(0)
+  const firstCreate = deferred()
+  const firstClear = deferred()
+  const harness = createPoolHarness({
+    autoInit: true,
+    initialConfiguredIds: ['a'],
+    clock,
+    createGate: (_apiId, generation) => generation == 1 ? firstCreate.promise : undefined,
+    clearSessionGate: firstClear.promise,
+    clearSessionFailures: new Map([['a', 1]]),
+  })
+  const first = harness.pool.ensure('a')
+  await harness.waitForCreateCall('a', 1)
+  clock.advance(10_000)
+  await clock.flush()
+  await assert.rejects(first, error => error.kind == 'timeout')
+  await harness.pool.dispose('a', { clearSession: true })
+
+  firstCreate.resolve()
+  await harness.waitForSessionClearCall('a')
+  const waitingEnsure = harness.pool.ensure('a')
+  await clock.flush()
+  const beforeFailure = [...harness.lifecycle]
+
+  firstClear.resolve()
+  await assert.rejects(waitingEnsure, /clear session a failed/)
+  await clock.flush()
+  await assert.rejects(harness.pool.ensure('a'), /clear session a failed/)
+  assert.equal(beforeFailure.includes('create:a:2'), false)
+  assert.deepEqual(
+    harness.lifecycle.filter(event => event == 'clearSession:a'),
+    ['clearSession:a'],
+  )
+  assert.deepEqual(harness.createdGenerations('a'), [1])
+  assert.equal(
+    harness.loggedErrors.filter(entry =>
+      entry.message.includes('retire User API runtime creation a failed')).length,
+    1,
+  )
+
+  await harness.pool.dispose('a', { clearSession: true })
+  await harness.pool.ensure('a')
+
+  assert.deepEqual(
+    harness.lifecycle.filter(event => event == 'clearSession:a'),
+    ['clearSession:a', 'clearSession:a'],
+  )
+  assert.deepEqual(harness.clearedSessionIds, ['a'])
+  assert.deepEqual(harness.createdGenerations('a'), [1, 2])
+})
+
+test('successful init and explicit lifecycle exits clear the initialization deadline', async() => {
+  let clock = createFakeClock()
+  let harness = createPoolHarness({ autoInit: false, clock, initialConfiguredIds: ['a'] })
+  let ensuring = harness.pool.ensure('a')
+  await harness.waitForInitializeCall('a', 1)
+  await harness.init('a', { sources: {} })
+  await ensuring
+  assert.equal(clock.pendingTimerCount, 0)
+
+  for (const exit of ['invalidate', 'crash', 'dispose']) {
+    clock = createFakeClock()
+    harness = createPoolHarness({ autoInit: false, clock, initialConfiguredIds: ['a'] })
+    ensuring = harness.pool.ensure('a')
+    await harness.waitForInitializeCall('a', 1)
+    if (exit == 'invalidate') await harness.pool.invalidate('a', 'sourceChanged')
+    if (exit == 'crash') harness.crash('a')
+    if (exit == 'dispose') await harness.pool.dispose('a', { clearSession: false })
+    await assert.rejects(ensuring)
+    await clock.flush()
+    assert.equal(clock.pendingTimerCount, 0, exit)
+  }
+})
+
+test('failed retirement blocks recreation until explicit disposal retries cleanup', async() => {
+  const harness = createPoolHarness({
+    autoInit: true,
+    initialConfiguredIds: ['a'],
+    disposeFailures: new Map([['a', 1]]),
+  })
+  await harness.pool.ensure('a')
+
+  await assert.rejects(harness.pool.dispose('a', { clearSession: false }), /dispose a failed/)
+  await assert.rejects(harness.pool.ensure('a'), /dispose a failed/)
+  assert.deepEqual(harness.createdGenerations('a'), [1])
+
+  await harness.pool.dispose('a', { clearSession: false })
+  await harness.pool.ensure('a')
+  assert.deepEqual(harness.disposedGenerations, [1, 1])
+  assert.deepEqual(harness.createdGenerations('a'), [1, 2])
+})
+
+test('disposeAll retries every retained retirement and propagates repeated cleanup failure', async() => {
+  const harness = createPoolHarness({
+    autoInit: true,
+    initialConfiguredIds: ['a'],
+    disposeRejectIds: ['a'],
+  })
+  await harness.pool.ensure('a')
+
+  await assert.rejects(harness.pool.dispose('a', { clearSession: false }), /dispose a failed/)
+  await assert.rejects(harness.pool.disposeAll(), /dispose a failed/)
+  await assert.rejects(harness.pool.disposeAll(), /dispose a failed/)
+  assert.deepEqual(harness.disposedGenerations, [1, 1, 1])
+  await assert.rejects(harness.pool.ensure('a'), /dispose a failed/)
+  assert.deepEqual(harness.createdGenerations('a'), [1])
+})
+
+test('deletion upgrades a blocked crash retirement to post-disposal session cleanup', async() => {
+  const disposeGate = deferred()
+  const harness = createPoolHarness({
+    autoInit: true,
+    initialConfiguredIds: ['a'],
+    disposeGate: disposeGate.promise,
+  })
+  await harness.pool.ensure('a')
+
+  harness.crash('a')
+  await harness.waitForDisposed('a', 1)
+  const deleting = harness.pool.dispose('a', { clearSession: true })
+  const deleteOutcome = deleting.then(
+    () => 'resolved',
+    () => 'rejected',
+  )
+  assert.equal(await Promise.race([deleteOutcome, Promise.resolve('pending')]), 'pending')
+
+  disposeGate.resolve()
+  await deleting
+  assert.deepEqual(
+    harness.lifecycle.filter(event => event.startsWith('dispose:') || event.startsWith('clearSession:')),
+    ['dispose:a:1', 'clearSession:a'],
+  )
+  assert.deepEqual(harness.disposedGenerations, [1])
+  assert.deepEqual(harness.clearedSessionIds, ['a'])
+})
+
+test('deletion after the lower disposal promise settles clears the session once', async() => {
+  const harness = createPoolHarness({ autoInit: true, initialConfiguredIds: ['a'] })
+  await harness.pool.ensure('a')
+
+  harness.crash('a')
+  await harness.waitForDisposePromiseSettled('a', 1)
+  await harness.pool.dispose('a', { clearSession: true })
+
+  assert.deepEqual(
+    harness.lifecycle.filter(event => event.startsWith('dispose:') || event.startsWith('clearSession:')),
+    ['dispose:a:1', 'clearSession:a'],
+  )
+  assert.deepEqual(harness.disposedGenerations, [1])
+  assert.deepEqual(harness.clearedSessionIds, ['a'])
 })
 
 test('invalidation after initialize starts cannot publish the old generation', async() => {
@@ -451,9 +1081,11 @@ test('invalidation during async window creation cannot install a stale record', 
   const harness = createPoolHarness({ autoInit: false, createGate: gate.promise })
   const oldEnsure = harness.pool.ensure('a')
   await harness.waitForCreateCall('a')
-  await harness.pool.invalidate('a', 'sourceChanged')
+  const invalidating = harness.pool.invalidate('a', 'sourceChanged')
   gate.resolve()
-  await assert.rejects(oldEnsure)
+  await assert.rejects(oldEnsure, error => error.kind == 'sourceChanged')
+  await assert.doesNotReject(invalidating)
+  assert.deepEqual(harness.statusEvents, [])
   const currentEnsure = harness.pool.ensure('a')
   await harness.waitForRuntimeCreated('a', 2)
   await harness.init('a', { sources: {} })
@@ -601,11 +1233,12 @@ test('source invalidation during idle creation cannot be cancelled by reconfigur
   const first = harness.pool.ensure('a')
   await harness.waitForCreateCall('a')
   await harness.pool.markConfigured(new Set())
-  await harness.pool.invalidate('a', 'sourceChanged')
+  const invalidating = harness.pool.invalidate('a', 'sourceChanged')
   await harness.pool.markConfigured(new Set(['a']))
   gate.resolve()
 
   await assert.rejects(first, error => error.kind == 'sourceChanged')
+  await invalidating
   await harness.waitForDisposed('a', 1)
   assert.deepEqual(harness.statusEvents, [])
 
@@ -683,6 +1316,91 @@ test('deleting a never-opened source clears its isolated partition', async() => 
   assert.equal(harness.created.length, 0)
 })
 
+test('source replacement publishes its false runtime status before retiring the known API', async() => {
+  const harness = createPoolHarness({ autoInit: true })
+  await harness.pool.ensure('a')
+
+  const invalidating = harness.pool.invalidate('a', 'sourceChanged')
+
+  assert.deepEqual(harness.statusEvents.at(-1), {
+    apiId: 'a',
+    status: false,
+    message: 'User API source changed',
+    apiInfo: { id: 'a', name: 'A', description: '', allowShowUpdateAlert: false, sources: {} },
+  })
+  assert.equal(harness.lifecycle.includes('dispose:a:1'), false)
+
+  await invalidating
+  assert.equal(harness.lifecycle.includes('dispose:a:1'), true)
+})
+
+test('never-opened source creation waits behind its in-flight clear while another source remains independent', async() => {
+  const clearSessionGate = deferred()
+  const harness = createPoolHarness({
+    autoInit: true,
+    initialConfiguredIds: ['a', 'b'],
+    clearSessionGate: clearSessionGate.promise,
+  })
+  const deleting = harness.pool.dispose('a', { clearSession: true })
+  await harness.waitForSessionClearCall('a')
+
+  const waitingEnsure = harness.pool.ensure('a')
+  await harness.pool.ensure('b')
+  const beforeClearCompletes = [...harness.lifecycle]
+
+  clearSessionGate.resolve()
+  await Promise.all([deleting, waitingEnsure])
+
+  assert.equal(beforeClearCompletes.includes('create:a:1'), false)
+  assert.equal(beforeClearCompletes.includes('create:b:1'), true)
+  assert.deepEqual(harness.createdGenerations('a'), [1])
+  assert.deepEqual(
+    harness.lifecycle.filter(event => event.startsWith('clearSession:') || event.startsWith('create:')),
+    ['clearSession:a', 'create:b:1', 'create:a:1'],
+  )
+})
+
+test('failed never-opened source clear retains creation barrier until explicit retry succeeds', async() => {
+  const firstClear = deferred()
+  const harness = createPoolHarness({
+    autoInit: true,
+    initialConfiguredIds: ['a'],
+    clearSessionGate: firstClear.promise,
+    clearSessionFailures: new Map([['a', 1]]),
+  })
+  const deleting = harness.pool.dispose('a', { clearSession: true })
+  await harness.waitForSessionClearCall('a')
+  const waitingEnsure = harness.pool.ensure('a')
+  const beforeFailure = [...harness.lifecycle]
+
+  firstClear.resolve()
+  const outcomes = await Promise.allSettled([deleting, waitingEnsure])
+  await assert.rejects(harness.pool.ensure('a'), /clear session a failed/)
+
+  assert.deepEqual(outcomes.map(result => result.status), ['rejected', 'rejected'])
+  assert.equal(beforeFailure.includes('create:a:1'), false)
+  assert.deepEqual(harness.createdGenerations('a'), [])
+  assert.deepEqual(
+    harness.lifecycle.filter(event => event == 'clearSession:a'),
+    ['clearSession:a'],
+  )
+  assert.equal(
+    harness.loggedErrors.filter(entry =>
+      entry.message.includes('retire User API runtime creation a failed')).length,
+    1,
+  )
+
+  await harness.pool.dispose('a', { clearSession: true })
+  await harness.pool.ensure('a')
+
+  assert.deepEqual(
+    harness.lifecycle.filter(event => event == 'clearSession:a'),
+    ['clearSession:a', 'clearSession:a'],
+  )
+  assert.deepEqual(harness.clearedSessionIds, ['a'])
+  assert.deepEqual(harness.createdGenerations('a'), [1])
+})
+
 test('cancellation during lazy initialization prevents the script request', async() => {
   const harness = createPoolHarness({ autoInit: false })
   const pending = harness.pool.request({ apiId: 'a', requestId: 'r', data: {} }, 11)
@@ -716,7 +1434,7 @@ test('disposeAll destroys every live runtime', async() => {
   assert.equal(harness.proxyUnsubscribeCount, 1)
 })
 
-test('custom-source initialization failure advances to fallback', async () => {
+test('custom-source initialization failure advances to fallback', async() => {
   const harness = createIntegrationHarness({
     sourceIds: ['primary', 'fallback'],
     autoInitialize: false,
@@ -735,7 +1453,7 @@ test('custom-source initialization failure advances to fallback', async () => {
   assert.equal(harness.visibleErrorCount, 0)
 })
 
-test('foreground and preload requests cannot consume each other responses', async () => {
+test('foreground and preload requests cannot consume each other responses', async() => {
   const harness = createIntegrationHarness()
   const foreground = harness.play(songA)
   const preload = harness.preload(songB)
@@ -758,7 +1476,7 @@ test('foreground and preload requests cannot consume each other responses', asyn
   assert.deepEqual(harness.preloadBoundUrls, ['https://b'])
 })
 
-test('source deletion during resolution advances without mutating session snapshot', async () => {
+test('source deletion during resolution advances without mutating session snapshot', async() => {
   const harness = createIntegrationHarness({ sourceIds: ['primary', 'deleted', 'last'] })
   const playback = harness.play()
   const primary = await harness.waitForRequest({ apiId: 'primary', platform: 'wy' })
@@ -774,7 +1492,7 @@ test('source deletion during resolution advances without mutating session snapsh
   assert.deepEqual(harness.persistedFallbackIds, ['last'])
 })
 
-test('runtime crash advances the affected playback session to its next source', async () => {
+test('runtime crash advances the affected playback session to its next source', async() => {
   const harness = createIntegrationHarness({ sourceIds: ['primary', 'fallback'] })
   const playback = harness.play()
   await harness.waitForRequest({ apiId: 'primary', platform: 'wy' })

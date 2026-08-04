@@ -28,6 +28,8 @@ type PlayEventTranslationKey =
   | 'player__refresh_url'
   | 'player__error'
 
+type PlaybackAutoAdvanceReason = 'load_timeout' | 'error'
+
 export type CreateValidationAwarePlayEventHandlers = (deps: {
   coordinator: Pick<PlaybackResolutionCoordinator, 'isForegroundValidating'>
   isPlayedStop: () => boolean
@@ -38,7 +40,13 @@ export type CreateValidationAwarePlayEventHandlers = (deps: {
   isPlayerEmpty: () => boolean
   setStop: () => void
   setMusicUrl: (info: NonNullable<LX.Player.PlayMusicInfo['musicInfo']>, options: SetMusicUrlOptions) => void
-  playNext: () => Promise<void>
+  playNext: (reason: PlaybackAutoAdvanceReason) => Promise<void>
+  reportPlaybackError?: (error: {
+    stage: 'load' | 'decode'
+    code: number | null
+    recoverable: boolean
+    attempt: number
+  }) => void
   setAllStatus: (value: string) => void
   translate: (key: PlayEventTranslationKey) => string
   clock: PlaybackClock
@@ -59,7 +67,7 @@ export const createValidationAwarePlayEventHandlers: CreateValidationAwarePlayEv
   }
   const scheduleNext = () => {
     clearNext()
-    nextTimer = deps.clock.setTimeout(() => { void deps.playNext() }, 5_000)
+    nextTimer = deps.clock.setTimeout(() => { void deps.playNext('error') }, 5_000)
   }
   const startWatchdog = () => {
     clearLoading()
@@ -67,9 +75,13 @@ export const createValidationAwarePlayEventHandlers: CreateValidationAwarePlayEv
     loadingTimer = deps.clock.setTimeout(() => {
       if (deps.isPlayedStop()) return
       const info = deps.currentMusicInfo()
-      if (previousTimeoutMusicId == id) void deps.playNext()
-      else if (info) {
+      if (previousTimeoutMusicId == id) {
+        deps.reportPlaybackError?.({ stage: 'load', code: null, recoverable: false, attempt: 2 })
+        previousTimeoutMusicId = null
+        void deps.playNext('load_timeout')
+      } else if (info) {
         previousTimeoutMusicId = id
+        deps.reportPlaybackError?.({ stage: 'load', code: null, recoverable: true, attempt: 1 })
         deps.setMusicUrl(info, { reason: 'postCommitError' })
       }
     }, 25_000)
@@ -100,14 +112,21 @@ export const createValidationAwarePlayEventHandlers: CreateValidationAwarePlayEv
       if (deps.isPlayedStop()) return
       if (!deps.isPlayerEmpty()) deps.setStop()
       const info = deps.currentMusicInfo()
-      if (info && code !== 1 && retryNum < 2) {
+      const recoverable = info != null && code !== 1 && retryNum < 2
+      deps.reportPlaybackError?.({
+        stage: code == 3 ? 'decode' : 'load',
+        code: code ?? null,
+        recoverable,
+        attempt: retryNum + 1,
+      })
+      if (recoverable && info) {
         retryNum++
         deps.setMusicUrl(info, { reason: 'postCommitError' })
         deps.setAllStatus(deps.translate('player__refresh_url'))
         return
       }
       if (!deps.autoSkipOnError()) return
-      if (deps.isDocumentHidden()) void deps.playNext()
+      if (deps.isDocumentHidden()) void deps.playNext('error')
       else {
         deps.setAllStatus(deps.translate('player__error'))
         scheduleNext()
@@ -138,7 +157,8 @@ export default () => {
     isPlayerEmpty: isEmpty,
     setStop,
     setMusicUrl,
-    playNext: () => playNext(true),
+    playNext: reason => playNext({ automatic: true, reason, startReason: 'auto' }),
+    reportPlaybackError: error => window.app_event.playbackError(error),
     setAllStatus,
     translate: key => t(key),
     clock: {

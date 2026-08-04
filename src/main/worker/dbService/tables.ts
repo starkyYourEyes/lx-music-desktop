@@ -228,5 +228,11 @@ tables.set('dislike_list', `
 
 export default tables
 
-export const DB_VERSION = '3'
+export const SCHEMA7_REMOVED_OBJECTS = [
+  'index_music_info_other_source',
+  'music_info_other_source',
+  'music_url',
+] as const
+
+export const DB_VERSION = '7'
 export const LEGACY_DB_VERSION = '2'

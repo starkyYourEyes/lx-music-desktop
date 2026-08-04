@@ -81,16 +81,18 @@ declare namespace LX {
       updateUrl?: string
     }
 
-    interface UserApiRequestParams {
+    interface SourceUserApiRequestParams {
       apiId: string
       requestId: string
       data: any
     }
-    interface UserApiRequestCancelParams {
+    type UserApiRequestParams = SourceUserApiRequestParams
+    interface SourceUserApiRequestCancelParams {
       apiId: string
       requestId: string
       reason?: 'cancelled' | 'timeout'
     }
+    type UserApiRequestCancelParams = SourceUserApiRequestCancelParams
     interface UserApiRuntimeIdentity {
       apiId: string
       generation: number
@@ -104,6 +106,12 @@ declare namespace LX {
     type UserApiRequestResult<T = any> =
       | { ok: true, value: T }
       | { ok: false, error: LX.Playback.SourceFailureData }
+    interface MusicUrlResponseData {
+      source: LX.Source
+      type: LX.Quality
+      url: string
+      persistentCache: false
+    }
     type UserApiEnsureResult =
       | { ok: true, value: UserApiStatus }
       | { ok: false, error: LX.Playback.SourceFailureData }

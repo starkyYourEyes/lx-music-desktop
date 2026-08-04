@@ -33,14 +33,37 @@ interface RuntimeRecord {
   initTimeout: ReturnType<typeof setTimeout> | null
 }
 
+interface RuntimeRetirementState {
+  record: RuntimeRecord
+  clearSession: boolean
+  disposeComplete: boolean
+  clearSessionComplete: boolean
+  version: number
+  promise: Promise<void> | null
+  failure: unknown
+}
+
+interface RuntimeCreationRetirementState {
+  apiId: string
+  creations: Set<RuntimeCreationState>
+  clearSession: boolean
+  clearSessionComplete: boolean
+  closing: boolean
+  version: number
+  promise: Promise<void> | null
+  failure: unknown
+}
+
 interface RuntimeCreationState {
   apiId: string
   generation: number
   promise: Promise<RuntimeRecord>
   disposeWhenIdle: boolean
   disposeReason: 'idle' | 'invalidate' | 'explicit' | 'timeout' | null
-  clearSession: boolean
-  clearSessionPromise: Promise<void> | null
+  runtime: UserApiRuntimeWindow | null
+  creationSettled: boolean
+  disposeComplete: boolean
+  retirement: RuntimeCreationRetirementState | null
   timeoutPromise: Promise<never>
   initTimeout: ReturnType<typeof setTimeout> | null
 }
@@ -65,8 +88,8 @@ export interface UserApiRuntimePoolDependencies {
 
 export interface UserApiRuntimePool {
   ensure(apiId: string): Promise<LX.UserApi.UserApiInfo>
-  request(params: LX.UserApi.UserApiRequestParams, ownerWebContentsId: number): Promise<LX.UserApi.UserApiRequestResult>
-  cancel(params: LX.UserApi.UserApiRequestCancelParams, ownerWebContentsId: number): void
+  request(params: LX.UserApi.SourceUserApiRequestParams, ownerWebContentsId: number): Promise<LX.UserApi.UserApiRequestResult>
+  cancel(params: LX.UserApi.SourceUserApiRequestCancelParams, ownerWebContentsId: number): void
   acquireLease(params: LX.UserApi.UserApiRuntimeLeaseParams, ownerWebContentsId: number): void
   releaseLease(params: LX.UserApi.UserApiRuntimeLeaseParams, ownerWebContentsId: number): Promise<void>
   releaseOwner(ownerWebContentsId: number): Promise<void>
@@ -101,7 +124,8 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   const configuredApiIds = new Set(deps.initialConfiguredApiIds)
   const pendingByApiId = new Map<string, Map<string, PendingRequest>>()
   const creatingByApiId = new Map<string, RuntimeCreationState>()
-  const retiringByApiId = new Map<string, Promise<void>>()
+  const retiringCreationsByApiId = new Map<string, RuntimeCreationRetirementState>()
+  const retiringByApiId = new Map<string, RuntimeRetirementState>()
   const nextGenerationByApiId = new Map<string, number>()
 
   const hasLeases = (apiId: string) => {
@@ -115,13 +139,6 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     void promise.catch(reason => {
       deps.logError(label, reason)
     })
-  }
-
-  // Preserve one exact cleanup promise across concurrent disposal paths.
-  // eslint-disable-next-line @typescript-eslint/promise-function-async
-  const clearCreatingSession = (state: RuntimeCreationState): Promise<void> => {
-    if (!state.clearSession) return Promise.resolve()
-    return state.clearSessionPromise ??= deps.clearRuntimeSession(state.apiId)
   }
 
   const getBoundRecord = (
@@ -183,22 +200,173 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     }
   }
 
+  const retainCreation = (state: RuntimeCreationState) => {
+    if (state.retirement) return state.retirement
+    let retirement = retiringCreationsByApiId.get(state.apiId)
+    if (!retirement) {
+      retirement = {
+        apiId: state.apiId,
+        creations: new Set(),
+        clearSession: false,
+        clearSessionComplete: false,
+        closing: false,
+        version: 0,
+        promise: null,
+        failure: null,
+      }
+      retiringCreationsByApiId.set(state.apiId, retirement)
+    }
+    retirement.creations.add(state)
+    retirement.version++
+    state.retirement = retirement
+    return retirement
+  }
+
+  const upgradeCreationRetirement = (retirement: RuntimeCreationRetirementState, clearSession: boolean) => {
+    if (!clearSession || retirement.clearSession) return
+    retirement.clearSession = true
+    retirement.version++
+  }
+
+  // eslint-disable-next-line @typescript-eslint/promise-function-async
+  const attemptCreationRetirement = (retirement: RuntimeCreationRetirementState): Promise<void> => {
+    if (retirement.promise) {
+      return retirement.promise.then(() => attemptCreationRetirement(retirement))
+    }
+    let attempt!: Promise<void>
+    attempt = Promise.resolve().then(async() => {
+      while (true) {
+        const recordBeforeDestruction = recordsByApiId.get(retirement.apiId)
+        const version = retirement.version
+        for (const state of retirement.creations) {
+          if (!state.creationSettled || state.runtime == null || state.disposeComplete) continue
+          await deps.disposeRuntimeWindow(state.runtime, { clearSession: false })
+          state.disposeComplete = true
+        }
+        const replacement = creatingByApiId.get(retirement.apiId)
+        if (retirement.clearSession && replacement && replacement.retirement != retirement) {
+          replacement.disposeReason = 'explicit'
+          retainCreation(replacement)
+        }
+        const allDestroyed = [...retirement.creations].every(state =>
+          state.creationSettled && (state.runtime == null || state.disposeComplete),
+        )
+        if (!allDestroyed) {
+          retirement.failure = null
+          return
+        }
+        if (retirement.clearSession && !retirement.clearSessionComplete) {
+          const replacementRecord = recordsByApiId.get(retirement.apiId)
+          if (replacementRecord && replacementRecord != recordBeforeDestruction) {
+            const failure = messageFailure(retirement.apiId, 'sourceChanged', 'User API source changed')
+            settleSource(retirement.apiId, failure)
+            const retiringRecord = retireRecord(replacementRecord, { clearSession: false, failure })
+            // Record retirement resumes this aggregate; awaiting it here would make that handoff circular.
+            observeLifecycle(`retire replacement User API runtime ${retirement.apiId} failed`, retiringRecord)
+            retirement.failure = null
+            return
+          }
+          const recordRetirement = retiringByApiId.get(retirement.apiId)
+          if (recordsByApiId.has(retirement.apiId) || (recordRetirement && !recordRetirement.disposeComplete)) {
+            retirement.failure = null
+            return
+          }
+          if (!retirement.closing) {
+            retirement.closing = true
+            retirement.version++
+          }
+          await deps.clearRuntimeSession(retirement.apiId)
+          retirement.clearSessionComplete = true
+        }
+        if (version != retirement.version) continue
+        retirement.failure = null
+        if (retiringCreationsByApiId.get(retirement.apiId) == retirement) {
+          retiringCreationsByApiId.delete(retirement.apiId)
+        }
+        for (const state of retirement.creations) state.retirement = null
+        return
+      }
+    }).catch(reason => {
+      retirement.failure = reason
+      throw reason
+    }).finally(() => {
+      if (retirement.promise == attempt) retirement.promise = null
+    })
+    retirement.promise = attempt
+    observeLifecycle(`retire User API runtime creation ${retirement.apiId} failed`, attempt)
+    return attempt
+  }
+
+  const upgradeRetirement = (retirement: RuntimeRetirementState, clearSession: boolean) => {
+    if (!clearSession || retirement.clearSession) return
+    retirement.clearSession = true
+    retirement.version++
+  }
+
+  // Preserve the exact in-flight promise so concurrent cleanup callers share one attempt.
+  // eslint-disable-next-line @typescript-eslint/promise-function-async
+  const attemptRetirement = (retirement: RuntimeRetirementState): Promise<void> => {
+    if (retirement.promise) return retirement.promise
+    let attempt!: Promise<void>
+    attempt = Promise.resolve()
+      .then(async() => {
+        while (true) {
+          const version = retirement.version
+          if (!retirement.disposeComplete) {
+            const clearSession = retirement.clearSession
+            await deps.disposeRuntimeWindow(retirement.record.runtime, { clearSession })
+            retirement.disposeComplete = true
+            retirement.clearSessionComplete ||= clearSession
+          }
+          if (retirement.clearSession && !retirement.clearSessionComplete) {
+            await deps.clearRuntimeSession(retirement.record.apiId)
+            retirement.clearSessionComplete = true
+          }
+          if (version != retirement.version) continue
+          retirement.failure = null
+          if (retiringByApiId.get(retirement.record.apiId) == retirement) {
+            retiringByApiId.delete(retirement.record.apiId)
+          }
+          const creationRetirement = retiringCreationsByApiId.get(retirement.record.apiId)
+          if (creationRetirement) await attemptCreationRetirement(creationRetirement)
+          return
+        }
+      })
+      .catch(reason => {
+        retirement.failure = reason
+        throw reason
+      })
+      .finally(() => {
+        if (retirement.promise == attempt) retirement.promise = null
+      })
+    retirement.promise = attempt
+    return attempt
+  }
+
   const retireRecord = async(
     record: RuntimeRecord,
     options: { clearSession: boolean, failure?: LX.Playback.SourceFailureData },
   ): Promise<void> => {
     const existing = retiringByApiId.get(record.apiId)
-    if (record.disposing) return existing ?? Promise.resolve()
+    if (record.disposing) {
+      if (existing) upgradeRetirement(existing, options.clearSession)
+      if (existing?.promise) return existing.promise
+      return existing?.failure == null ? Promise.resolve() : Promise.reject(existing.failure)
+    }
     record.disposing = true
     removeRecord(record)
     if (options.failure) rejectInit(record, options.failure)
-    let retiring!: Promise<void>
-    retiring = deps.disposeRuntimeWindow(record.runtime, { clearSession: options.clearSession })
-      .finally(() => {
-        if (retiringByApiId.get(record.apiId) == retiring) retiringByApiId.delete(record.apiId)
-      })
-    retiringByApiId.set(record.apiId, retiring)
-    return retiring
+    const retirement: RuntimeRetirementState = {
+      record,
+      clearSession: options.clearSession,
+      disposeComplete: false,
+      clearSessionComplete: false,
+      version: 0,
+      promise: null,
+      failure: null,
+    }
+    retiringByApiId.set(record.apiId, retirement)
+    return attemptRetirement(retirement)
   }
 
   const failInitialization = (
@@ -217,9 +385,16 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   }
 
   const ensureRecord = async(apiId: string): Promise<RuntimeRecord> => {
+    const retiringCreation = retiringCreationsByApiId.get(apiId)
+    if (retiringCreation?.failure != null) return Promise.reject(retiringCreation.failure)
+    if (retiringCreation?.closing) {
+      await attemptCreationRetirement(retiringCreation)
+      return ensureRecord(apiId)
+    }
     const retiring = retiringByApiId.get(apiId)
     if (retiring) {
-      await retiring
+      if (retiring.promise) await retiring.promise
+      else if (retiring.failure != null) return Promise.reject(retiring.failure)
       return ensureRecord(apiId)
     }
     const record = recordsByApiId.get(apiId)
@@ -245,8 +420,10 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
       promise: null as unknown as Promise<RuntimeRecord>,
       disposeWhenIdle: !configuredApiIds.has(apiId),
       disposeReason: null,
-      clearSession: false,
-      clearSessionPromise: null,
+      runtime: null,
+      creationSettled: false,
+      disposeComplete: false,
+      retirement: null,
       timeoutPromise: null as unknown as Promise<never>,
       initTimeout: null,
     }
@@ -262,6 +439,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
         failInitialization(record, failure, 'timeout')
       } else {
         if (creatingByApiId.get(apiId) != state) return
+        retainCreation(state)
         creatingByApiId.delete(apiId)
         if (state.disposeReason == 'invalidate' || state.disposeReason == 'explicit') {
           rejectTimeout(messageFailure(apiId, 'sourceChanged', 'User API source changed'))
@@ -273,8 +451,12 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
       }
       rejectTimeout(failure)
     }, USER_API_INITIALIZATION_TIMEOUT)
-    state.promise = Promise.resolve().then(async() => {
-      const runtime = await deps.createRuntimeWindow({
+    const initTimeout = state.initTimeout as { unref?: () => void }
+    initTimeout.unref?.()
+    creatingByApiId.set(apiId, state)
+    let rawCreation: Promise<UserApiRuntimeWindow>
+    try {
+      rawCreation = Promise.resolve(deps.createRuntimeWindow({
         apiInfo,
         generation,
         hooks: {
@@ -287,7 +469,15 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
             observeLifecycle(`crashed user API runtime ${apiId}`, invalidate(apiId, 'runtimeCrash'))
           },
         },
-      })
+      }))
+    } catch (error) {
+      rawCreation = Promise.reject(error)
+    }
+
+    state.promise = rawCreation.then(async runtime => {
+      state.runtime = runtime
+      state.creationSettled = true
+      if (state.retirement) state.retirement.version++
 
       if (state.disposeReason == 'idle' &&
         (configuredApiIds.has(apiId) || hasLeases(apiId) || (pendingByApiId.get(apiId)?.size ?? 0) > 0)) {
@@ -295,8 +485,8 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
         state.disposeWhenIdle = !configuredApiIds.has(apiId)
       }
       if (creatingByApiId.get(apiId) != state || state.disposeReason != null) {
-        await deps.disposeRuntimeWindow(runtime, { clearSession: false })
-        await clearCreatingSession(state)
+        const retirement = retainCreation(state)
+        await attemptCreationRetirement(retirement)
         const failure = state.disposeReason == 'timeout'
           ? messageFailure(apiId, 'timeout', 'User API initialization timed out')
           : messageFailure(apiId, 'sourceChanged', 'User API source changed')
@@ -336,13 +526,19 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
       }
       await disposeIfIdle(apiId)
       return nextRecord
+    }, async error => {
+      state.creationSettled = true
+      if (state.retirement) {
+        state.retirement.version++
+        await attemptCreationRetirement(state.retirement)
+      }
+      throw error
     }).catch(error => {
       clearCreationTimeout(state)
       throw error
     }).finally(() => {
       if (creatingByApiId.get(apiId) == state) creatingByApiId.delete(apiId)
     })
-    creatingByApiId.set(apiId, state)
     return Promise.race([state.promise, state.timeoutPromise])
   }
 
@@ -367,7 +563,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
       settleSource(apiId, failure)
       return
     }
-    if (kind == 'runtimeCrash') {
+    if (kind == 'runtimeCrash' || kind == 'sourceChanged') {
       const apiInfo = deps.getApiInfo(apiId)
       record.status = { apiId, status: false, message: failure.message, ...(apiInfo ? { apiInfo } : {}) }
       deps.publishStatus({ ...record.status })
@@ -381,25 +577,56 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     leasesByApiId.delete(apiId)
     const failure = messageFailure(apiId, 'sourceChanged', 'User API source changed')
     const creating = creatingByApiId.get(apiId)
+    let creationRetirement = retiringCreationsByApiId.get(apiId)
     if (creating) {
       creating.disposeReason = 'explicit'
-      creating.clearSession ||= options.clearSession
-      settleSource(apiId, failure)
-      try { await creating.promise } catch (_) {}
-      await clearCreatingSession(creating)
-      return
+      creationRetirement = retainCreation(creating)
+      upgradeCreationRetirement(creationRetirement, options.clearSession)
+    } else if (creationRetirement) {
+      upgradeCreationRetirement(creationRetirement, options.clearSession)
     }
+
     const record = recordsByApiId.get(apiId)
+    const existingRetirement = retiringByApiId.get(apiId)
+    let recordRetiring: Promise<void> | null = null
     if (record) {
-      const retiring = retireRecord(record, { clearSession: options.clearSession, failure })
-      settleSource(apiId, failure)
-      await retiring
+      recordRetiring = retireRecord(record, {
+        clearSession: options.clearSession && creationRetirement == null,
+        failure,
+      })
+    } else if (existingRetirement) {
+      upgradeRetirement(existingRetirement, options.clearSession && creationRetirement == null)
+      recordRetiring = attemptRetirement(existingRetirement)
+    } else if (options.clearSession && creationRetirement == null) {
+      creationRetirement = {
+        apiId,
+        creations: new Set(),
+        clearSession: true,
+        clearSessionComplete: false,
+        closing: false,
+        version: 0,
+        promise: null,
+        failure: null,
+      }
+      retiringCreationsByApiId.set(apiId, creationRetirement)
+    }
+
+    settleSource(apiId, failure)
+    let creationSettled = false
+    if (creating) {
+      creationSettled = await Promise.race([
+        creating.promise.then(() => true, () => true),
+        creating.timeoutPromise.then(() => false, () => false),
+      ])
+    }
+    if (recordRetiring) await recordRetiring
+    if (creationRetirement) {
+      if (creating && creationSettled && creationRetirement.failure != null) {
+        throw creationRetirement.failure
+      }
+      await attemptCreationRetirement(creationRetirement)
       return
     }
-    settleSource(apiId, failure)
-    const retiring = retiringByApiId.get(apiId)
-    if (retiring) await retiring
-    if (options.clearSession) await deps.clearRuntimeSession(apiId)
   }
 
   disposeIfIdle = async(apiId: string) => {
@@ -426,7 +653,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
       }
       settlePending(apiId, requestId, {
         ok: false,
-        error: normalizeRuntimeFailure(new Error('User API request replaced'), { apiId, cancelled: true }),
+        error: normalizeRuntimeFailure(new Error('User API request ID is already pending'), { apiId, cancelled: true }),
       })
     }
     return new Promise(resolve => {
@@ -622,11 +849,10 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
       const ids = new Set([
         ...recordsByApiId.keys(),
         ...creatingByApiId.keys(),
+        ...retiringCreationsByApiId.keys(),
         ...retiringByApiId.keys(),
       ])
       const results = await Promise.allSettled([...ids].map(async apiId => {
-        const retiring = retiringByApiId.get(apiId)
-        if (retiring) return retiring
         return dispose(apiId, { clearSession: false })
       }))
       const failed = results.find((result): result is PromiseRejectedResult => result.status == 'rejected')

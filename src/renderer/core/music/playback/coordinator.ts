@@ -5,6 +5,7 @@ import type {
   PlaybackResolveSession,
   PreloadCancelReason,
 } from './session'
+import type { AuthorizedMusicUrlKeyV1 } from '@common/storage/cache'
 
 export const getPlaybackSongIdentity = (
   musicInfo: LX.Music.MusicInfo | LX.Download.ListItem,
@@ -29,7 +30,7 @@ export interface CandidatePlaybackResource {
   apiId?: string
   platform?: LX.OnlineSource
   quality: LX.Quality
-  cacheKey: string
+  cacheKey?: AuthorizedMusicUrlKeyV1
   deadlineAt: number
 }
 
@@ -41,7 +42,7 @@ export interface ValidatedPlaybackResource {
   apiId?: string
   platform?: LX.OnlineSource
   quality?: LX.Quality
-  cacheKey?: string
+  cacheKey?: AuthorizedMusicUrlKeyV1
 }
 
 export type PlaybackRequestResult =

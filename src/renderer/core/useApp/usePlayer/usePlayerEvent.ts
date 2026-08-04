@@ -1,6 +1,9 @@
 import { log } from '@common/utils'
 import { onBeforeUnmount } from '@common/utils/vueTools'
 import {
+  onSeeking,
+  onSeeked,
+  onRatechange,
   getErrorCode,
   onEmptied,
   onEnded,
@@ -114,6 +117,9 @@ export default () => {
     }),
     onEnded(() => window.app_event.playerEnded()),
     onEmptied(() => window.app_event.playerEmptied()),
+    onSeeking(() => window.app_event.playerSeeking()),
+    onSeeked(() => window.app_event.playerSeeked()),
+    onRatechange(() => window.app_event.playerRatechange()),
   ]
 
   onBeforeUnmount(() => {

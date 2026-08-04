@@ -20,10 +20,13 @@
 - Stage, flush, parse, validate, atomically replace, and hash `config_v2.json` before writing its external marker.
 - Do not claim the SQLite transaction covers the settings-file replacement.
 - Preserve legacy list order and exact case-sensitive search-term identity; do not invent timestamps.
+- Represent an unavailable legacy `updated_at_ms` as the explicit sentinel `0` (`unknown`); never substitute migration time. Runtime timestamps and stored playlist/profile times must be non-negative safe integers.
 - Search history retains at most 15 terms.
 - `listUpdateInfo` is durable playlist metadata, not resettable UI state.
 - Typed IPC accepts registered operations and bounded values only; the renderer never selects a raw key or sends unbounded `any`.
+- Until Phase 3 removes generic data IPC, its main-process handler must allow only `playInfo`, `recentPlayList`, and `listeningTimeStats`.
 - Keep account profiles owned by the credential plan; do not create a second account table.
+- Run the selected legacy-source preflight before credential migration. If fallback selects `<legacyRoot>/data.json`, credential inventory and redaction must cover that exact selected file before any Phase 2 target write; a corrupt selected source enters legacy JSON recovery first.
 - Preserve every unrelated user change listed in the roadmap and any later concurrent edit; stage only files named by each task.
 
 ## File Structure
@@ -128,7 +131,7 @@ export type SearchHistoryCommandV1 =
   | { version: 1; action: 'clear' }
 ```
 
-Limits are fixed: IDs 1-256 characters; URLs 1-4096; view query JSON 32 KiB; playlist profile JSON 32 KiB; search terms 1-200; scroll maps 10,000 entries with finite non-negative positions; retain lists 10,000 IDs. Parsers reject extra properties and use field names only in errors.
+Limits are fixed: IDs 1-256 characters, except `songList.tagId` which allows 0-256 characters because `''` is the existing "all categories" sentinel; URLs 1-4096; view query JSON 32 KiB; playlist profile JSON 32 KiB; search terms 1-200; scroll maps 10,000 entries with finite non-negative positions; retain lists 10,000 IDs. `updatedAtMs`, `usedAtMs`, playlist `updateTime`, and optional profile `createdAt` are non-negative safe integers. Parsers reject extra properties and use field names only in errors.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -155,7 +158,9 @@ git commit -m "feat: define non-activity storage contracts"
 - Create: `src/main/worker/dbService/modules/app_state/index.ts`
 - Modify: `src/main/worker/dbService/modules/index.ts`
 - Modify: `src/main/worker/dbService/index.ts`
+- Modify: `src/main/worker/dbService/schemaContract.ts`
 - Create: `build-config/storage-electron/non-activity-repository.test.js`
+- Modify: `build-config/storage-electron/account-profile.test.js`
 
 **Interfaces:**
 - Consumes: Task 1 commands and `getAppDB()`.
@@ -228,9 +233,13 @@ applyPlaylistMetadata(command: PlaylistMetadataCommandV1): LX.List.ListUpdateInf
 getSearchHistory(): string[]
 applySearchHistory(command: SearchHistoryCommandV1): string[]
 importLegacyNonActivity(input: LegacyNonActivityImportV1): LegacyNonActivityImportResultV1
+getNonActivityMigrationMarker(name: NonActivityMarkerNameV1): MigrationMarker | null
+completeNonActivityMigrationMarker(input: NonActivityMarkerCommandV1): void
 ```
 
-Search `record` allocates `MAX(recency_seq)+1`, increments use count, removes an existing exact-case row before reinsertion, and deletes rows below the newest 15 in the same transaction. Import keeps the first occurrence from the source list, assigns descending recency while preserving source order, and never sets a time.
+The marker methods accept only the four Phase 2 target names and `legacy_data_v1.phase2_complete`; they are main-process worker RPCs and are never exposed as arbitrary marker operations to the renderer. Update the structural schema contract for all three new tables and cover structural-damage recovery in the new repository test.
+
+Search `record` allocates `MAX(recency_seq)+1`, increments use count, removes an existing exact-case row before reinsertion, and deletes rows below the newest 15 in the same transaction. Import keeps the first occurrence from the source list, assigns descending recency while preserving source order, and never sets a time. Imported local-state and playlist-metadata rows use `updated_at_ms = 0`, whose defined meaning is `unknown`.
 
 - [ ] **Step 4: Verify GREEN and schema health**
 
@@ -244,7 +253,7 @@ Expected: PASS; structural and foreign-key checks remain clean.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add src/main/worker/dbService/migrations/0005_non_activity_state.ts src/main/worker/dbService/migrations/index.ts src/main/worker/dbService/modules/app_state src/main/worker/dbService/modules/index.ts src/main/worker/dbService/index.ts build-config/storage-electron/non-activity-repository.test.js
+git add src/main/worker/dbService/migrations/0005_non_activity_state.ts src/main/worker/dbService/migrations/index.ts src/main/worker/dbService/modules/app_state src/main/worker/dbService/modules/index.ts src/main/worker/dbService/index.ts src/main/worker/dbService/schemaContract.ts build-config/storage-electron/non-activity-repository.test.js build-config/storage-electron/account-profile.test.js
 git commit -m "feat: add typed application state repository"
 ```
 
@@ -254,6 +263,7 @@ git commit -m "feat: add typed application state repository"
 - Create: `src/main/storage/settings/document.ts`
 - Modify: `src/main/utils/index.ts`
 - Create: `build-config/storage/settings-document.test.js`
+- Modify: `build-config/storage/webdav-credential-cutover.test.js`
 
 **Interfaces:**
 - Consumes: old `{version, setting}` and new `SettingsDocumentV1`.
@@ -280,6 +290,15 @@ it('never accepts non-empty WebDAV credential settings', () => {
     'webdav.password': 'PASS_SENTINEL',
   }))
 })
+
+it('never persists either WebDAV credential field while upgrading', () => {
+  const result = parseSettingsDocument({
+    version: '2.11.0',
+    setting: { ...ordinarySetting, 'webdav.username': 'USER_SENTINEL', 'webdav.password': 'PASS_SENTINEL' },
+  })
+  assert.equal(Object.hasOwn(result.setting, 'webdav.username'), false)
+  assert.equal(Object.hasOwn(result.setting, 'webdav.password'), false)
+})
 ```
 
 - [ ] **Step 2: Run and verify RED**
@@ -296,7 +315,7 @@ Expected: FAIL because the document wrapper does not exist.
 export interface SettingsDocumentV1 {
   storageSchemaVersion: 1
   version: string
-  setting: LX.AppSetting
+  setting: PersistedAppSettingV1
   catalogPreferences: CatalogPreferencesV1
 }
 
@@ -311,7 +330,9 @@ export function replaceCatalogPreferences(
 ): SettingsDocumentV1
 ```
 
-Modify `updateSetting()` so it loads the complete validated document and calls `Store.override()` with all four fields. Remove the assumption that only `{version, setting}` exists. `initSetting()` must not call the old `migrateDataJson()` helper; Task 4 owns that compatibility source.
+`PersistedAppSettingV1` is the ordinary settings shape with `webdav.username` and `webdav.password` forbidden. The in-memory compatibility setting may still project both keys as empty strings, but parsing, upgrading, replacing, and serializing the document must never reintroduce either field. Test both fields, including an old document that still contains plaintext values.
+
+Modify `updateSetting()` so it loads the complete validated document and calls the existing single `Store.override()` writer with all four fields. Remove the assumption that only `{version, setting}` exists. Runtime catalog updates must use the same Store-backed document service so an older cached snapshot cannot overwrite catalog preferences. The Task 4 direct staged replacement occurs before that Store is constructed. `initSetting()` must not call the old `migrateDataJson()` helper; Task 4 owns that compatibility source.
 
 - [ ] **Step 4: Verify GREEN and settings initialization**
 
@@ -325,7 +346,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add src/main/storage/settings/document.ts src/main/utils/index.ts build-config/storage/settings-document.test.js
+git add src/main/storage/settings/document.ts src/main/utils/index.ts build-config/storage/settings-document.test.js build-config/storage/webdav-credential-cutover.test.js
 git commit -m "feat: version the settings document"
 ```
 
@@ -336,6 +357,9 @@ git commit -m "feat: version the settings document"
 - Create: `src/main/migration/legacyData/nonActivity.ts`
 - Modify: `src/main/utils/migrate.ts`
 - Modify: `src/main/startup/storageCoordinator.ts`
+- Modify: `src/main/migration/credentials/legacySources.ts`
+- Modify: `src/main/app.ts`
+- Modify: `src/main/index.ts`
 - Create: `build-config/storage/non-activity-source.test.js`
 - Create: `build-config/storage-electron/non-activity-retry.test.js`
 
@@ -445,7 +469,9 @@ export async function migrateLegacyNonActivity(
 }>
 ```
 
-Select `<profileRoot>/data.json` when it exists; only when it is absent may the reader select `<legacyRoot>/data.json`. Read the selected file once, hash its exact bytes, parse it, require a plain-object root, and retain the immutable snapshot for this startup. A selected corrupt source returns `status:'recovery'`; do not try the other root, rename/delete the source, import defaults, stage settings, or write a marker. Inspect an exact sibling `.previous` only as a validated recovery candidate and expose its path to the existing recovery dialog; restoration requires an explicit recovery action outside this migration. Normalize the four allowlisted domains with defaults and validators only after a valid root exists. The worker imports the three DB domains, reads back normalized values, compares hashes/counts, and writes three markers in one explicit transaction.
+Select `<profileRoot>/data.json` when it exists; only when it is absent may the reader select `<legacyRoot>/data.json`. Read the selected file once, hash its exact bytes, parse it, require a plain-object root, and retain the immutable snapshot for this startup. This read-only source preflight runs before credential migration so corrupt JSON is classified as legacy JSON recovery without writing any target. A selected corrupt source returns `status:'recovery'`; do not try the other root, rename/delete the source, import defaults, stage settings, or write a marker. Inspect an exact sibling `.previous` only as a validated recovery candidate and expose its path to the existing recovery dialog; restoration requires an explicit recovery action outside this migration.
+
+Pass the exact selected source path/snapshot into credential inventory. When the fallback root is selected, credential migration and redaction must process that selected document before any Phase 2 target write; preserve the existing sync-metadata fail-closed preflight and credential startup check. Normalize only the four Phase 2 allowlisted domains from the immutable snapshot after a valid root exists. The worker imports the three DB domains, reads back normalized values, compares hashes/counts, and writes three markers in one explicit transaction.
 
 For settings, call `stage(document, 'next')` to create `config_v2.json.next`, flush, parse, compare catalog preferences, and call `commit(stage)` to atomically replace the destination and return the complete resulting file SHA-256. Then write `legacy_data_v1.catalog_preferences`. If a retry sees matching normalized preferences already active but no marker, it validates the full current document and writes only the missing marker.
 
@@ -464,7 +490,7 @@ Expected: PASS for invalid JSON/non-object roots and every injected point before
 - [ ] **Step 6: Commit**
 
 ```powershell
-git add src/main/migration/legacyData src/main/utils/migrate.ts src/main/startup/storageCoordinator.ts build-config/storage/non-activity-source.test.js build-config/storage-electron/non-activity-retry.test.js
+git add src/main/migration/legacyData src/main/migration/credentials/legacySources.ts src/main/utils/migrate.ts src/main/startup/storageCoordinator.ts src/main/app.ts src/main/index.ts build-config/storage/non-activity-source.test.js build-config/storage-electron/non-activity-retry.test.js
 git commit -m "feat: migrate non-activity legacy data"
 ```
 
@@ -475,6 +501,7 @@ git commit -m "feat: migrate non-activity legacy data"
 - Create: `src/renderer/utils/storageState.ts`
 - Modify: `src/common/ipcNames.ts`
 - Modify: `src/main/modules/winMain/rendererEvent/index.ts`
+- Modify: `src/main/modules/winMain/rendererEvent/data.ts`
 - Modify: `src/renderer/utils/data.ts`
 - Modify: `src/renderer/store/search/action.ts`
 - Modify: `src/renderer/utils/ipc.ts`
@@ -528,6 +555,8 @@ storage_search_history_mutate
 
 `set_catalog_preference` accepts `{section:'leaderboard'|'songList'|'search', value}` and rewrites the full validated settings document atomically. Local/playlist/search handlers parse the Task 1 discriminated unions, invoke worker RPC, and return the authoritative post-write result. No handler accepts a path or arbitrary key.
 
+Restrict the existing main-process generic data handler to an explicit allowlist containing only `playInfo`, `recentPlayList`, and `listeningTimeStats`. Reject every account, Phase 2, unknown, or malformed key before Store access. Phase 3 removes the remaining allowlisted endpoints.
+
 Keep public functions such as `getListPosition`, `setListAutoUpdate`, and `getSearchSetting`, but replace their internal imports with `src/renderer/utils/storageState.ts`. Change `clearHistoryList(id: string)` to `clearHistoryList()` and make search mutations update the renderer list from the returned authoritative order.
 
 - [ ] **Step 4: Verify GREEN and builds**
@@ -543,7 +572,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add src/main/modules/winMain/rendererEvent/storageState.ts src/renderer/utils/storageState.ts src/common/ipcNames.ts src/main/modules/winMain/rendererEvent/index.ts src/renderer/utils/data.ts src/renderer/store/search/action.ts src/renderer/utils/ipc.ts build-config/storage/non-activity-ipc.test.js build-config/storage/non-activity-callsite.test.js
+git add src/main/modules/winMain/rendererEvent/storageState.ts src/renderer/utils/storageState.ts src/common/ipcNames.ts src/main/modules/winMain/rendererEvent/index.ts src/main/modules/winMain/rendererEvent/data.ts src/renderer/utils/data.ts src/renderer/store/search/action.ts src/renderer/utils/ipc.ts build-config/storage/non-activity-ipc.test.js build-config/storage/non-activity-callsite.test.js
 git commit -m "refactor: cut non-activity state over to typed storage"
 ```
 
@@ -585,7 +614,7 @@ Expected: FAIL until the coordinator has a Phase 2 gate.
 
 - [ ] **Step 3: Implement and verify the gate**
 
-Smoke-read each migrated target and perform reversible typed writes in an isolated test transaction/temporary settings document. Production startup verifies validators and repository availability without changing user values. Return a fatal migration error rather than falling back to legacy readers for a domain whose completion marker exists.
+Smoke-read each migrated target and perform reversible typed writes in an isolated test transaction/temporary settings document. Production startup verifies validators and repository availability without changing user values. Preserve the existing credential check and sync-metadata fail-closed behavior; run the Phase 2 write/smoke gate after credential success and before settings initialization, module registration, or window creation. Return a fatal migration error rather than falling back to legacy readers for a domain whose completion marker exists.
 
 Run:
 

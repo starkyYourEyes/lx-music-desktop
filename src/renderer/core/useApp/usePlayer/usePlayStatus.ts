@@ -112,7 +112,7 @@ export default () => {
         let progress = data as number
         if (progress < 0) progress = 0
         else if (progress > playProgress.maxPlayTime) progress = playProgress.maxPlayTime
-        window.app_event.setProgress(progress)
+        window.app_event.setProgress(progress, 'media_session')
         break
       }
       case 'mute':

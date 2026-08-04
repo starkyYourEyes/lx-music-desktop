@@ -1,7 +1,7 @@
 const deferred = () => {
   let resolve
   let reject
-  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+  const promise = new Promise((_resolve, _reject) => { resolve = _resolve; reject = _reject })
   return { promise, resolve, reject }
 }
 
@@ -10,7 +10,11 @@ const playbackError = (scope, kind, apiId) => Object.assign(new Error(kind), {
 })
 
 const onlineMusic = {
-  id: 'song', source: 'wy', name: 'Song', singer: 'Artist', interval: '03:00',
+  id: 'song',
+  source: 'wy',
+  name: 'Song',
+  singer: 'Artist',
+  interval: '03:00',
   meta: { albumName: 'Album', _qualitys: { '128k': {}, '320k': {}, flac: {} } },
 }
 const matchedTx = { ...onlineMusic, id: 'song-tx', source: 'tx' }
@@ -18,7 +22,11 @@ const matchedKg = { ...onlineMusic, id: 'song-kg', source: 'kg' }
 const flacMusic = onlineMusic
 const no128Music = { ...onlineMusic, id: 'no-128', meta: { ...onlineMusic.meta, _qualitys: { flac: {} } } }
 const localMusic = {
-  id: 'local-song', source: 'local', name: 'Song', singer: 'Artist', interval: '03:00',
+  id: 'local-song',
+  source: 'local',
+  name: 'Song',
+  singer: 'Artist',
+  interval: '03:00',
   meta: { albumName: 'Album', filePath: 'C:\\Music\\Song.mp3', _qualitys: {} },
 }
 const webdavMusic = {
@@ -26,12 +34,35 @@ const webdavMusic = {
   meta: { albumName: 'Album', filePath: '/Song.mp3', picPath: '/cover.jpg', _qualitys: {} },
 }
 const downloadItem = {
-  id: 'download-song', progress: 0, status: 'run',
+  id: 'download-song',
+  progress: 0,
+  status: 'run',
   metadata: { musicInfo: onlineMusic, quality: '320k' },
 }
 const song = onlineMusic
 const songA = onlineMusic
 const songB = { ...onlineMusic, id: 'song-b' }
+
+const musicUrlAuthorization = (provider = 'wy', accountScope = `test:${provider}`, generation = 1) => ({
+  version: 1,
+  provider,
+  accountScope,
+  generation,
+})
+
+const musicUrlKey = (
+  musicInfo = onlineMusic,
+  quality = '320k',
+  authorization = musicUrlAuthorization(musicInfo.source),
+) => ({
+  authorization: structuredClone(authorization),
+  sourceTrackId: musicInfo.id,
+  quality,
+})
+
+const musicUrlKeyLabel = key => typeof key == 'string'
+  ? key
+  : `${key.sourceTrackId}_${key.quality}`
 
 const createRuntimeWindowHarness = ({
   destroyFailures = 0,
@@ -56,8 +87,11 @@ const createRuntimeWindowHarness = ({
     runtimeSession = {
       cleanupCalls: [],
       clearAuthCache() { this.cleanupCalls.push('auth') },
-      clearStorageData() { this.cleanupCalls.push('storage') },
+      clearStorageData(options) {
+        this.cleanupCalls.push(options ? `storage:${options.storages.join(',')}` : 'storage')
+      },
       clearCache() { this.cleanupCalls.push('cache') },
+      clearCodeCaches() { this.cleanupCalls.push('code') },
       setPermissionRequestHandler(handler) { this.permissionHandler = handler },
     }
     sessions.set(partition, runtimeSession)
@@ -156,6 +190,9 @@ const createRuntimeWindowHarness = ({
       return !runtime.window.isDestroyed()
     },
     logError() {},
+    sessionRegistry: {
+      register() { return { ready: Promise.resolve(), unregister() {} } },
+    },
   }
   if (!useDefaultReadRuntimeHtml) deps.readRuntimeHtml = async() => '<html></html>'
   const hooks = {
@@ -170,6 +207,8 @@ const createRuntimeWindowHarness = ({
     initEnvelopes,
     sessions,
     windows,
+    runtimeWindow,
+    deps,
   }
 }
 
@@ -203,6 +242,7 @@ const createFakeClock = (start = 0) => {
     async flush() {
       for (let index = 0; index < 20; index++) await Promise.resolve()
     },
+    get pendingTimerCount() { return timers.size },
   }
   return clock
 }
@@ -266,6 +306,7 @@ const createPoolHarness = (options = {}) => {
           '@main/modules/userApi': {},
           '@main/modules/userApi/runtimeError': { normalizeRuntimeFailure() {} },
           '@main/modules/userApi/runtimePool': poolMock,
+          '@main/modules/userApi/ipcValidation': {},
           '@main/modules/winMain/main': { sendEvent: inert },
         })
       }
@@ -292,6 +333,8 @@ const createPoolHarness = (options = {}) => {
     const devToolsIds = []
     const statusEvents = []
     const loggedErrors = []
+    const remainingDisposeFailures = new Map(options.disposeFailures ?? [])
+    const remainingClearSessionFailures = new Map(options.clearSessionFailures ?? [])
     const runtimes = new Map()
     const proxyListeners = new Set()
     const createWaiters = new Map()
@@ -299,6 +342,10 @@ const createPoolHarness = (options = {}) => {
     const initializeWaiters = new Map()
     const pendingWaiters = new Map()
     const disposeWaiters = new Map()
+    const disposeCompleteWaiters = new Map()
+    const disposePromiseSettledWaiters = new Map()
+    const clearSessionWaiters = new Map()
+    const clearSessionCompleteWaiters = new Map()
     const seenByMap = new Map()
     const logWaiters = []
     const queuedInit = new Map()
@@ -395,20 +442,50 @@ const createPoolHarness = (options = {}) => {
         }
         return true
       },
-      async disposeRuntimeWindow(runtime, { clearSession }) {
-        lifecycle.push(`dispose:${runtime.identity.apiId}:${runtime.identity.generation}`)
-        disposedIds.push(runtime.identity.apiId)
-        disposedGenerations.push(runtime.identity.generation)
-        notify(disposeWaiters, runtime.identity.apiId, runtime.identity.generation)
-        if (options.disposeRejectIds?.includes(runtime.identity.apiId)) throw new Error(`dispose ${runtime.identity.apiId} failed`)
-        if (clearSession) {
-          lifecycle.push(`clearSession:${runtime.identity.apiId}`)
-          clearedSessionIds.push(runtime.identity.apiId)
-        }
+      disposeRuntimeWindow(runtime, { clearSession }) {
+        const disposal = (async() => {
+          lifecycle.push(`dispose:${runtime.identity.apiId}:${runtime.identity.generation}`)
+          disposedIds.push(runtime.identity.apiId)
+          disposedGenerations.push(runtime.identity.generation)
+          notify(disposeWaiters, runtime.identity.apiId, runtime.identity.generation)
+          const disposeGate = typeof options.disposeGate == 'function'
+            ? options.disposeGate(runtime.identity.apiId, runtime.identity.generation)
+            : options.disposeGate
+          if (disposeGate) await disposeGate
+          const remainingFailures = remainingDisposeFailures.get(runtime.identity.apiId) ?? 0
+          if (remainingFailures > 0) {
+            remainingDisposeFailures.set(runtime.identity.apiId, remainingFailures - 1)
+            throw new Error(`dispose ${runtime.identity.apiId} failed`)
+          }
+          const disposeError = options.disposeErrors?.get(runtime.identity.apiId)
+          if (disposeError) throw disposeError
+          if (options.disposeRejectIds?.includes(runtime.identity.apiId)) throw new Error(`dispose ${runtime.identity.apiId} failed`)
+          if (clearSession) {
+            lifecycle.push(`clearSession:${runtime.identity.apiId}`)
+            clearedSessionIds.push(runtime.identity.apiId)
+          }
+          notify(disposeCompleteWaiters, runtime.identity.apiId, runtime.identity.generation)
+        })()
+        void disposal.then(
+          () => notify(disposePromiseSettledWaiters, runtime.identity.apiId, runtime.identity.generation),
+          () => notify(disposePromiseSettledWaiters, runtime.identity.apiId, runtime.identity.generation),
+        )
+        return disposal
       },
       async clearRuntimeSession(apiId) {
         lifecycle.push(`clearSession:${apiId}`)
+        notify(clearSessionWaiters, apiId)
+        const clearSessionGate = typeof options.clearSessionGate == 'function'
+          ? options.clearSessionGate(apiId)
+          : options.clearSessionGate
+        if (clearSessionGate) await clearSessionGate
+        const remainingFailures = remainingClearSessionFailures.get(apiId) ?? 0
+        if (remainingFailures > 0) {
+          remainingClearSessionFailures.set(apiId, remainingFailures - 1)
+          throw new Error(`clear session ${apiId} failed`)
+        }
         clearedSessionIds.push(apiId)
+        notify(clearSessionCompleteWaiters, apiId)
       },
       getApiInfo: apiId => registry.get(apiId),
       send(runtime, name, payload) {
@@ -498,11 +575,15 @@ const createPoolHarness = (options = {}) => {
       sendUpdateAlert: (senderId, envelope) => pool.handleShowUpdateAlert(senderId, envelope),
       openDevTools: (senderId, envelope) => pool.handleOpenDevTools(senderId, envelope),
       getProxy: (senderId, envelope) => pool.handleGetProxy(senderId, envelope),
-      waitForCreateCall: apiId => wait(createWaiters, apiId),
+      waitForCreateCall: (apiId, generation) => wait(createWaiters, apiId, generation),
       waitForRuntimeCreated: (apiId, generation) => wait(runtimeWaiters, apiId, generation),
       waitForInitializeCall: (apiId, generation) => wait(initializeWaiters, apiId, generation),
       waitForPending: (apiId, requestId) => wait(pendingWaiters, apiId, requestId),
       waitForDisposed: (apiId, generation) => wait(disposeWaiters, apiId, generation),
+      waitForDisposeCompleted: (apiId, generation) => wait(disposeCompleteWaiters, apiId, generation),
+      waitForDisposePromiseSettled: (apiId, generation) => wait(disposePromiseSettledWaiters, apiId, generation),
+      waitForSessionClearCall: apiId => wait(clearSessionWaiters, apiId),
+      waitForSessionCleared: apiId => wait(clearSessionCompleteWaiters, apiId),
       waitForLog(text) {
         if (loggedErrors.some(entry => entry.message.includes(text))) return Promise.resolve()
         const item = deferred()
@@ -618,6 +699,11 @@ const createAdapterHarness = (options = {}) => {
       '@renderer/utils/ipc': {},
       '@renderer/utils/message': { requestMsg: {} },
       '@renderer/utils/musicSdk/api-source': {},
+      '../utils': {
+        getMusicUrlCacheKey: options.getMusicUrlCacheKey ?? (
+          async(musicInfo, quality) => musicUrlKey(musicInfo, quality)
+        ),
+      },
     },
   )
   const adapter = module.createPlaybackSourceAdapter({
@@ -646,6 +732,9 @@ const createAdapterHarness = (options = {}) => {
         })),
       }
     },
+    getMusicUrlCacheKey: options.getMusicUrlCacheKey ?? (
+      async(musicInfo, quality) => musicUrlKey(musicInfo, quality)
+    ),
     tooManyRequestsMessage: options.tooManyRequestsMessage,
     serverBusyMessages: options.serverBusyMessages ?? new Set(),
   })
@@ -816,7 +905,15 @@ const createColdPrimaryMusicEntryHarness = () => {
   try {
     global.window = { dt: false }
     loadTsModule(path.join(__dirname, '../../src/renderer/core/globalData.ts'), {
-      '@renderer/worker': () => ({}),
+      '@renderer/worker': () => ({ main: { configureRunTempRoot: async() => {} } }),
+      '@renderer/utils/ipc': {
+        getRunTempRoot: () => ({
+          then(resolve) {
+            resolve(null)
+            return { catch() {} }
+          },
+        }),
+      },
     })
     const primaryModule = loadTsModule(
       path.join(__dirname, '../../src/renderer/core/music/primarySource.ts'),
@@ -866,7 +963,9 @@ const createColdPrimaryMusicEntryHarness = () => {
       },
     )
     const musicModule = loadTsModule(path.join(__dirname, '../../src/renderer/core/music/utils.ts'), {
-      '@renderer/store': { qualityList: { value: {} } },
+      '@renderer/store': { apiSource: { value: 'user_api_a' }, qualityList: { value: {} } },
+      '@renderer/store/netease': { isLoggedIn: { value: false } },
+      '@renderer/store/qqMusic': { isLoggedIn: { value: false } },
       '@renderer/store/utils': { assertApiSupport: () => true },
       '@renderer/utils/musicSdk': { findMusic: async() => [] },
       '@renderer/utils/ipc': {
@@ -878,6 +977,7 @@ const createColdPrimaryMusicEntryHarness = () => {
       '@renderer/utils/message': { requestMsg: {} },
       '@renderer/utils/musicSdk/api-source': { apis: () => compatibilityApi },
       './playback/candidates': candidateModule,
+      './playback/cache': { playbackUrlCache: { adoptCacheGeneration() {} } },
     })
     const globalDataKeys = Object.keys(global.window.lx)
     return {
@@ -936,6 +1036,7 @@ const loadPlaybackSourceAdapter = () => {
       '@renderer/utils/ipc': {},
       '@renderer/utils/message': { requestMsg: {} },
       '@renderer/utils/musicSdk/api-source': {},
+      '../utils': { getMusicUrlCacheKey: async(musicInfo, quality) => musicUrlKey(musicInfo, quality) },
     },
   )
 }
@@ -1027,6 +1128,9 @@ const createResolveSessionHarness = (options, musicInfo, candidateProvider) => {
       releaseRuntime: ({ apiIds }) => apiIds.forEach(apiId => leaseEvents.push(`release:${apiId}`)),
       getBuiltinCapabilities: () => undefined,
       getBuiltinApi: () => { throw new Error('unexpected built-in playback source') },
+      getMusicUrlCacheKey: options.authorizeMusicUrl ?? (
+        async(musicInfo, quality) => musicUrlKey(musicInfo, quality)
+      ),
       serverBusyMessages: new Set(),
     })
     adapter = {
@@ -1047,6 +1151,10 @@ const createResolveSessionHarness = (options, musicInfo, candidateProvider) => {
       async getCapabilities(apiId) {
         markSourceStarted(apiId)
         return capabilities
+      },
+      authorizeMusicUrl(request) {
+        if (options.authorizeMusicUrl) return options.authorizeMusicUrl(request)
+        return Promise.resolve(musicUrlKey(request.musicInfo, request.quality))
       },
       getMusicUrl: options.requestOnline
         ? request => {
@@ -1078,9 +1186,9 @@ const createResolveSessionHarness = (options, musicInfo, candidateProvider) => {
   })
   const observedCache = {
     ...cache,
-    commit(originalMusic, quality, url) {
-      cacheCommits.push({ musicInfo: originalMusic, quality, url })
-      return cache.commit(originalMusic, quality, url)
+    commit(...args) {
+      cacheCommits.push(structuredClone(args))
+      return cache.commit(...args)
     },
   }
   const reportPersistenceFailure = value => {
@@ -1114,6 +1222,8 @@ const createResolveSessionHarness = (options, musicInfo, candidateProvider) => {
     sourceStarts,
     diagnostics,
     cacheCommits,
+    cacheRemoved: cache.removed,
+    cacheSaveCalls: cache.saveCalls,
     leaseEvents,
     persistenceFailures,
     waitForSource(apiId) {
@@ -1234,6 +1344,7 @@ const createMusicFacadeHarness = (options = {}) => {
     retainSources() {},
     releaseSources() {},
     async getCapabilities() { return { sources: {} } },
+    async authorizeMusicUrl({ musicInfo, quality }) { return musicUrlKey(musicInfo, quality) },
     async getMusicUrl() { throw new Error('not used') },
     async getLocalMusicUrl() { throw new Error('not used') },
   }
@@ -1334,8 +1445,8 @@ const createMusicFacadeHarness = (options = {}) => {
       '@renderer/store/setting': { appSetting: { 'player.playQuality': requestedQuality } },
       '@renderer/utils/ipc': {
         saveLyric() {},
-        async getMusicUrl(musicInfo, quality) {
-          cacheLookups.push(`${musicInfo.id}_${quality}`)
+        async getMusicUrl(key) {
+          cacheLookups.push(`${key.sourceTrackId}_${key.quality}`)
           return null
         },
       },
@@ -1343,6 +1454,16 @@ const createMusicFacadeHarness = (options = {}) => {
         buildLyricInfo: value => value,
         getPlayQuality: quality => quality,
         getCachedLyricInfo: async() => null,
+        getMusicUrlCacheKey: async(musicInfo, quality) => ({
+          authorization: {
+            version: 1,
+            provider: musicInfo.source,
+            accountScope: `test:${musicInfo.source}`,
+            generation: 1,
+          },
+          sourceTrackId: musicInfo.id,
+          quality,
+        }),
         async handleGetOnlineMusicUrl({ musicInfo, quality, allowToggleSource }) {
           requestedApiIds.push(primary)
           downloadRequestCount++
@@ -2258,8 +2379,8 @@ const createPlayerHarness = (options = {}) => {
       }
     },
     async remove(key) {
-      invalidatedCacheKeys.push(key)
-      invalidatedQualities.push(key.slice(key.lastIndexOf('_') + 1))
+      invalidatedCacheKeys.push(structuredClone(key))
+      invalidatedQualities.push(key.quality)
       if (options.rejectCacheDelete) {
         throw Object.assign(new Error('delete failed'), { code: 'SQLITE_BUSY' })
       }
@@ -2267,10 +2388,10 @@ const createPlayerHarness = (options = {}) => {
   })
   const playerCache = {
     ...realPlayerCache,
-    commit(musicInfo, quality, url) {
+    commit(key, url) {
       cacheCommitCount++
-      committedCacheKeys.push(`${musicInfo.id}_${quality}`)
-      return realPlayerCache.commit(musicInfo, quality, url)
+      committedCacheKeys.push(structuredClone(key))
+      return realPlayerCache.commit(key, url)
     },
     tombstoneKey(key) {
       tombstonedKeys.push(key)
@@ -2308,7 +2429,7 @@ const createPlayerHarness = (options = {}) => {
         if (state != 'active') throw playbackError('session', 'cancelled')
         if (!cacheLookupDone) {
           cacheLookupDone = true
-          await input.cache.lookup(input.musicInfo, input.requestedQuality)
+          await input.cache.lookup(musicUrlKey(input.musicInfo, input.requestedQuality))
         }
         if (options.allSourcesFail || options.allPreloadSourcesFail) {
           state = 'failed'
@@ -2321,6 +2442,9 @@ const createPlayerHarness = (options = {}) => {
         const url = urls[index] ?? `https://fallback-${id}-${index}`
         const quality = options.winnerQuality ?? '128k'
         const apiId = options.winner ?? input.sourceIds[Math.min(index, input.sourceIds.length - 1)]
+        const candidateMusicInfo = options.winnerMusicInfo ?? (
+          options.winnerPlatform == 'tx' ? matchedTx : input.musicInfo
+        )
         activeCandidate = {
           sessionId: id,
           candidateId: `${id}:candidate:${++candidateOrdinal}`,
@@ -2330,7 +2454,7 @@ const createPlayerHarness = (options = {}) => {
           ...(options.winnerPlatform ? { platform: options.winnerPlatform } : {}),
           quality,
           url,
-          cacheKey: `${input.musicInfo.id}_${quality}`,
+          cacheKey: musicUrlKey(candidateMusicInfo, quality),
           deadlineAt: clock.now() + 10_000,
         }
         candidateMetadata.set(url, activeCandidate)
@@ -2342,7 +2466,7 @@ const createPlayerHarness = (options = {}) => {
         state = 'accepted'
         let committing
         try {
-          committing = input.cache.commit(input.musicInfo, activeCandidate.quality, activeCandidate.url)
+          committing = input.cache.commit(activeCandidate.cacheKey, activeCandidate.url)
         } catch (error) {
           committing = Promise.reject(error)
         }
@@ -2380,6 +2504,7 @@ const createPlayerHarness = (options = {}) => {
       retainSources() {},
       releaseSources() {},
       async getCapabilities() { return { sources: {} } },
+      async authorizeMusicUrl({ musicInfo, quality }) { return musicUrlKey(musicInfo, quality) },
       async getMusicUrl() { throw new Error('not used') },
       async getLocalMusicUrl() { throw new Error('not used') },
     },
@@ -2799,6 +2924,9 @@ const createIntegrationHarness = (options = {}) => {
   const runtimeSessions = new Map()
   const proxyListeners = new Set()
   const durableCache = new Map()
+  let authorizationCallCount = 0
+  let persistentReadCount = 0
+  let persistentWriteCount = 0
   const cacheInvalidationGate = deferred()
   let pool
   let currentMusicInfo = onlineMusic
@@ -2863,6 +2991,7 @@ const createIntegrationHarness = (options = {}) => {
       async clearAuthCache() {},
       async clearStorageData() {},
       async clearCache() {},
+      async clearCodeCaches() {},
       setPermissionRequestHandler(handler) { this.permissionHandler = handler },
     }
     runtimeSessions.set(partition, session)
@@ -2913,6 +3042,9 @@ const createIntegrationHarness = (options = {}) => {
       return true
     },
     logError() {},
+    sessionRegistry: {
+      register() { return { ready: Promise.resolve(), unregister() {} } },
+    },
   }
   const poolDeps = {
     async createRuntimeWindow(input) {
@@ -2960,11 +3092,21 @@ const createIntegrationHarness = (options = {}) => {
     releaseRuntime: params => { void pool.releaseLease(params, 1) },
     getBuiltinCapabilities: () => undefined,
     getBuiltinApi() { throw new Error('integration sources are custom') },
+    getMusicUrlCacheKey: async() => {
+      authorizationCallCount++
+      throw new Error('custom playback must not request provider authorization')
+    },
     serverBusyMessages: new Set(),
   })
   const cache = factories.player.cache.createPlaybackUrlCache({
-    read: async key => durableCache.get(key) ?? null,
-    save: async(musicInfo, quality, url) => { durableCache.set(`${musicInfo.id}_${quality}`, url) },
+    read: async key => {
+      persistentReadCount++
+      return durableCache.get(musicUrlKeyLabel(key)) ?? null
+    },
+    save: async(key, url) => {
+      persistentWriteCount++
+      durableCache.set(musicUrlKeyLabel(key), url)
+    },
     remove: async key => {
       invalidatedCacheKeys.push(key)
       invalidatedQualities.push(key.slice(key.lastIndexOf('_') + 1))
@@ -3127,6 +3269,7 @@ const createIntegrationHarness = (options = {}) => {
   return {
     play,
     playAnother: play,
+    flush,
     preload: info => preloadController.start(info),
     waitForRequest(input) {
       return requestObserver.wait(request => (
@@ -3219,6 +3362,9 @@ const createIntegrationHarness = (options = {}) => {
     get sessionCreateCount() { return sessionCreateCount },
     get visibleErrorCount() { return visibleErrorCount },
     get autoSkipCalls() { return autoSkipCalls },
+    get authorizationCallCount() { return authorizationCallCount },
+    get persistentReadCount() { return persistentReadCount },
+    get persistentWriteCount() { return persistentWriteCount },
   }
 }
 
@@ -3235,36 +3381,33 @@ const createCacheHarness = ({ rows = new Map(), read, save, remove } = {}) => {
     path.join(__dirname, '../../src/renderer/core/music/playback/cache.ts'),
     {
       '@renderer/utils/ipc': {
-        getMusicUrl: async(musicInfo, quality) => durableRows.get(`${musicInfo.id}_${quality}`) ?? '',
-        saveMusicUrl: async(musicInfo, quality, url) => {
-          durableRows.set(`${musicInfo.id}_${quality}`, url)
-        },
-        removeMusicUrlByKey: async key => {
-          durableRows.delete(key)
-        },
+        getMusicUrl: async key => durableRows.get(musicUrlKeyLabel(key)) ?? '',
+        saveMusicUrl: async(key, url) => { durableRows.set(musicUrlKeyLabel(key), url) },
+        removeMusicUrl: async key => { durableRows.delete(musicUrlKeyLabel(key)) },
       },
     },
   )
   const cache = cacheModule.createPlaybackUrlCache({
-    read: async key => read ? read(key) : durableRows.get(key) ?? '',
-    save: async(musicInfo, quality, url) => {
-      const key = `${musicInfo.id}_${quality}`
-      saveCalls.push({ key, url })
-      persistenceMutations.push(`save:${key}:${url}`)
+    read: async key => read ? read(key) : durableRows.get(musicUrlKeyLabel(key)) ?? '',
+    save: async(key, url) => {
+      const label = musicUrlKeyLabel(key)
+      saveCalls.push({ key: structuredClone(key), url })
+      persistenceMutations.push(`save:${label}:${url}`)
       try {
-        if (save) return await save(musicInfo, quality, url)
-        durableRows.set(key, url)
+        if (save) return await save(key, url)
+        durableRows.set(label, url)
       } catch (error) {
         persistenceErrors.push(error)
         throw error
       }
     },
     remove: async key => {
-      removed.push(key)
-      persistenceMutations.push(`remove:${key}`)
+      const label = musicUrlKeyLabel(key)
+      removed.push(structuredClone(key))
+      persistenceMutations.push(`remove:${label}`)
       try {
         if (remove) return await remove(key)
-        durableRows.delete(key)
+        durableRows.delete(label)
       } catch (error) {
         persistenceErrors.push(error)
         throw error
@@ -3273,7 +3416,31 @@ const createCacheHarness = ({ rows = new Map(), read, save, remove } = {}) => {
     memory: memoryRows,
   })
 
-  return Object.assign(cache, {
+  const legacyCacheApi = cache.commit.length >= 3
+  const keyMusicInfo = key => ({
+    id: key.sourceTrackId,
+    source: key.authorization.provider,
+  })
+  const cacheApi = legacyCacheApi
+    ? {
+        ...cache,
+        lookup(keyOrMusicInfo, quality) {
+          return keyOrMusicInfo?.authorization
+            ? cache.lookup(keyMusicInfo(keyOrMusicInfo), keyOrMusicInfo.quality)
+            : cache.lookup(keyOrMusicInfo, quality)
+        },
+        commit(keyOrMusicInfo, qualityOrUrl, url) {
+          return keyOrMusicInfo?.authorization
+            ? cache.commit(keyMusicInfo(keyOrMusicInfo), keyOrMusicInfo.quality, qualityOrUrl)
+            : cache.commit(keyOrMusicInfo, qualityOrUrl, url)
+        },
+        tombstoneKey(key) {
+          return cache.tombstoneKey(musicUrlKeyLabel(key))
+        },
+      }
+    : cache
+
+  return Object.assign(cacheApi, {
     memoryRows,
     durableRows,
     removed,
@@ -3298,6 +3465,8 @@ module.exports = {
   song,
   songA,
   songB,
+  musicUrlAuthorization,
+  musicUrlKey,
   createRuntimeWindowHarness,
   createPoolHarness,
   createRuntimePreloadFailureHarness,

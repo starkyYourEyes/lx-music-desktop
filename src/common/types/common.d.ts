@@ -58,6 +58,18 @@ declare namespace LX {
     screenSize?: Electron.Size
   }
 
+  interface PathIdentity {
+    dev: string
+    ino: string
+  }
+
+  interface RunTempChildOwnership {
+    runTempRoot: string
+    runTempIdentity: PathIdentity
+    childPath: string
+    childIdentity: PathIdentity
+  }
+
   interface HotKey {
     name: string
     action: string

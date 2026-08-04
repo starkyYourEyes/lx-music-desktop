@@ -26,10 +26,14 @@ profile instead of creating launcher-local storage.
   mode, while an absent sibling selects installed mode.
 - A fresh portable database reaches schema 7, creates no backup artifact or
   `backups` directory, and stores cache data only under `portable/cache`.
+- The production main-process bundle must retain Node's runtime environment so
+  `PORTABLE_EXECUTABLE_DIR` reaches bootstrap unchanged while `NODE_ENV` remains
+  compiled as `production`.
 
 ## Non-Goals
 
 - Changing electron-builder's NSIS template or portable artifact format.
+- Changing renderer or lyric-renderer environment substitution.
 - Treating launcher environment variables as cryptographic proof of provenance.
 - Changing installed-profile paths, legacy portable migration semantics, or the
   existing storage directory layout.
@@ -101,6 +105,21 @@ For a valid portable launch, the existing order remains:
 6. Start storage coordination, fresh database bootstrap, cache ownership, and
    renderer/window creation.
 
+### Production bundle environment boundary
+
+The main-process production webpack configuration must define only
+`process.env.NODE_ENV`, not the complete `process.env` object. Replacing the
+complete object erases environment variables supplied by the NSIS parent before
+the extracted Electron child starts. The production bundle must therefore keep
+bootstrap's default runtime as the real `process.env` object while folding
+`process.env.NODE_ENV` checks to the literal `production` value.
+
+This change is limited to `build-config/main/webpack.config.prod.js`. It does
+not expose new data to a sandboxed renderer: the target remains Electron's main
+process, where Node already provides the runtime environment. It also avoids a
+bootstrap-only bypass that would leave other main-process runtime variables
+subject to the same compile-time erasure.
+
 ## Failure Handling
 
 - A present but invalid launcher variable is fatal and cannot select installed
@@ -110,6 +129,8 @@ For a valid portable launch, the existing order remains:
 - Existing portable migration failures retain their journals, receipts, stages,
   sources, and backups exactly as before.
 - Fresh database startup retains the existing rule that `backups` is not created.
+- A production bundle that no longer exposes the live runtime environment is a
+  build failure and must be rejected before packaging.
 
 ## Verification
 
@@ -124,6 +145,9 @@ Automated RED/GREEN coverage must prove:
 - The existing adjacent-directory compatibility behavior remains unchanged.
 - Bootstrap creates `profile`, `runtime`, `runtime/session-data`, and `temp`, but
   not `cache` or `backups`, before application storage coordination.
+- The compiled main bundle retains `process.env` for bootstrap's runtime input,
+  still embeds the production `NODE_ENV` branch, and does not substitute an
+  object containing only `NODE_ENV`.
 
 Release verification must then:
 

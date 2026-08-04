@@ -29,6 +29,8 @@ profile instead of creating launcher-local storage.
 - The production main-process bundle must retain Node's runtime environment so
   `PORTABLE_EXECUTABLE_DIR` reaches bootstrap unchanged while `NODE_ENV` remains
   compiled as `production`.
+- Closing the main window with the default tray-disabled setting must keep the
+  renderer alive until shutdown flushers complete and the run-state is clean.
 
 ## Non-Goals
 
@@ -120,6 +122,23 @@ process, where Node already provides the runtime environment. It also avoids a
 bootstrap-only bypass that would leave other main-process runtime variables
 subject to the same compile-time erasure.
 
+### Graceful default-window close
+
+The default setting disables the tray, so the title-bar Close button is the
+normal user exit path. The main-window `close` handler must intercept that first
+close while `global.lx.isSkipTrayQuit` is false: prevent destruction, hide the
+window to prevent repeated input, and call `app.quit()`. The existing
+`before-quit` coordinator can then request playback flushing while the renderer
+and its IPC bridge are still alive, flush stores, close the database, mark the
+run clean, and invoke the final `app.quit()`.
+
+When tray support is enabled, Close continues to hide the window without
+quitting. When `global.lx.isSkipTrayQuit` is already true during the final quit,
+the handler permits the window to close and preserves the existing
+`main_window_close` notifications. The renderer-unavailable flusher failure
+must not be downgraded to success because doing so could mark an unflushed run
+clean.
+
 ## Failure Handling
 
 - A present but invalid launcher variable is fatal and cannot select installed
@@ -131,6 +150,9 @@ subject to the same compile-time erasure.
 - Fresh database startup retains the existing rule that `backups` is not created.
 - A production bundle that no longer exposes the live runtime environment is a
   build failure and must be rejected before packaging.
+- A title-bar close must never destroy the renderer before the shutdown
+  coordinator has had the opportunity to flush it. A genuine flusher failure
+  still leaves the run-state unclean.
 
 ## Verification
 
@@ -148,6 +170,9 @@ Automated RED/GREEN coverage must prove:
 - The compiled main bundle retains `process.env` for bootstrap's runtime input,
   still embeds the production `NODE_ENV` branch, and does not substitute an
   object containing only `NODE_ENV`.
+- With tray disabled, the first main-window close is prevented, the window is
+  hidden, and `app.quit()` is requested while the renderer remains alive; the
+  final quit is allowed to close the window.
 
 Release verification must then:
 
@@ -159,6 +184,7 @@ Release verification must then:
    prove the sentinels did not change.
 5. Confirm the portable profile reaches schema 7, `cache/cache.db` exists,
    `data.json` and `backups` are absent, and the main window has no startup error.
-6. Quit cleanly, confirm the run-state is clean, relaunch the same artifact, and
-   prove the same database/cache are reused without creating backups.
+6. Close through the default title-bar Close button, confirm the run-state is
+   clean, relaunch the same artifact, and prove the same database/cache are
+   reused without creating backups.
 7. Leave the verified portable application running for user testing.

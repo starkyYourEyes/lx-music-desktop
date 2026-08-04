@@ -1,6 +1,5 @@
 import type { AccountRepository } from '@main/storage/accounts/accountRepository'
-import { qqMusicAccountScope } from '@common/storage/cacheValidation'
-import type { MusicUrlAccountInvalidationV1 } from '@common/storage/cache'
+import type { MusicUrlAuthorizationService } from '@main/services/musicUrlAuthorization'
 import {
   createQQMusicLoginService,
   isQQMusicLoginRequestId,
@@ -139,7 +138,7 @@ export const createQQMusicAccountService = ({
   schedule = setTimeout,
   cancelSchedule = clearTimeout,
   retryDelayMs = 60 * 60 * 1000,
-  invalidateMusicUrls = async() => 0,
+  musicUrlAuthorization,
 }: {
   accounts: AccountRepository
   loginService: LoginService
@@ -154,7 +153,7 @@ export const createQQMusicAccountService = ({
   schedule?: typeof setTimeout
   cancelSchedule?: typeof clearTimeout
   retryDelayMs?: number
-  invalidateMusicUrls?: (input: MusicUrlAccountInvalidationV1) => Promise<number>
+  musicUrlAuthorization: Pick<MusicUrlAuthorizationService, 'transition'>
 }) => {
   let loginGeneration = 0
   let refreshTimer: ReturnType<typeof setTimeout> | undefined
@@ -265,25 +264,18 @@ export const createQQMusicAccountService = ({
     }
   }
 
-  const clearAccount = async() => {
-    cancelRefreshTimer()
-    refreshRetry = undefined
-    lastSuccessfulRefresh = undefined
-    await accounts.clear('qq_music')
-  }
-
-  const invalidateClearedAccount = async(account: QQMusicAccountData, generation: number) => {
-    const accountScope = qqMusicAccountScope(account.profile)
-    if (accountScope == null || generation != loginGeneration || getAccountData(accounts).cookie) return
-    await invalidateMusicUrls({ provider: 'tx', accountScope })
-  }
-
   const clearMatchingAccount = async(account: QQMusicAccountData, generation: number) => {
-    const current = getAccountData(accounts)
-    if (!isSameAccount(current, account)) return false
-    await clearAccount()
-    await invalidateClearedAccount(account, generation)
-    return true
+    return musicUrlAuthorization.transition('tx', async() => {
+      const current = getAccountData(accounts)
+      if (generation != loginGeneration || !isSameAccount(current, account)) {
+        return { status: 'unchanged', value: false }
+      }
+      cancelRefreshTimer()
+      refreshRetry = undefined
+      lastSuccessfulRefresh = undefined
+      await accounts.clear('qq_music')
+      return { status: 'changed', value: true }
+    })
   }
 
   async function performRefresh(
@@ -307,15 +299,25 @@ export const createQQMusicAccountService = ({
         profile: toRepositoryProfile(account.profile),
         updatedAt: getNextUpdatedAt(current.updatedAt),
       }
-      if (refreshRetry && isSameAccount(refreshRetry.account, account)) {
-        refreshRetry = undefined
-      }
-      await accounts.save('qq_music', {
-        cookie: refreshed.cookie,
-        profile: toRepositoryProfile(refreshed.profile!),
-        updatedAtMs: refreshed.updatedAt,
+      const committed = await musicUrlAuthorization.transition('tx', async() => {
+        if (!isSameAccount(getAccountData(accounts), account)) {
+          return { status: 'unchanged', value: false }
+        }
+        if (refreshRetry && isSameAccount(refreshRetry.account, account)) {
+          refreshRetry = undefined
+        }
+        await accounts.save('qq_music', {
+          cookie: refreshed.cookie,
+          profile: toRepositoryProfile(refreshed.profile!),
+          updatedAtMs: refreshed.updatedAt,
+        })
+        lastSuccessfulRefresh = { source: account, refreshed }
+        return { status: 'changed', value: true }
       })
-      lastSuccessfulRefresh = { source: account, refreshed }
+      if (!committed) {
+        emitRefreshDiagnostic({ trigger, outcome: 'stale' })
+        return { status: 'stale' }
+      }
       emitRefreshDiagnostic({ trigger, outcome: 'success' })
       return { status: 'success', account: refreshed }
     } catch (error) {
@@ -416,12 +418,16 @@ export const createQQMusicAccountService = ({
       profile,
       updatedAt: getNextUpdatedAt(current.updatedAt),
     } satisfies QQMusicAccountData
-    await accounts.save('qq_music', {
-      cookie: account.cookie,
-      profile: toRepositoryProfile(account.profile),
-      updatedAtMs: account.updatedAt,
+    const committed = await musicUrlAuthorization.transition('tx', async() => {
+      if (generation != loginGeneration) return { status: 'unchanged', value: false }
+      await accounts.save('qq_music', {
+        cookie: account.cookie,
+        profile: toRepositoryProfile(account.profile),
+        updatedAtMs: account.updatedAt,
+      })
+      return { status: 'changed', value: true }
     })
-    if (generation != loginGeneration) return getExpiredLoginCheck()
+    if (!committed || generation != loginGeneration) return getExpiredLoginCheck()
     scheduleAccountRefresh(account)
     return {
       state: result.state,
@@ -552,6 +558,8 @@ const getAccountService = () => {
   if (accountService) return accountService
   const accounts = global.lx.accountRepository
   if (accounts == null) throw new Error('Account repository has not been initialized')
+  const musicUrlAuthorization = global.lx.musicUrlAuthorization
+  if (musicUrlAuthorization == null) throw new Error('Music URL authorization has not been initialized')
   const loginService = createQQMusicLoginService()
   const credentialService = createQQMusicCredentialService()
   const getCookie = () => accounts.getCookie('qq_music') ?? ''
@@ -569,7 +577,7 @@ const getAccountService = () => {
     playlistDetailService,
     feedbackService,
     credentialService,
-    invalidateMusicUrls: input => global.lx.worker.dbService.musicUrlInvalidateAccount(input),
+    musicUrlAuthorization,
   })
   return accountService
 }

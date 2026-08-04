@@ -1,12 +1,17 @@
 import { WIN_MAIN_RENDERER_EVENT_NAME } from '@common/ipcNames'
 import { mainHandle } from '@common/mainIpc'
 import {
-  parseMusicUrlGetInput,
-  parseMusicUrlPutInput,
+  parseAuthorizedMusicUrlGetInput,
+  parseAuthorizedMusicUrlPutInput,
+  parseMusicUrlAuthorizationRequest,
   parseOtherSourcesGetInput,
   parseOtherSourcesPutInput,
 } from '@common/storage/cacheValidation'
-import type { CacheReadResultV1, CacheWriteResultV1 } from '@common/storage/cache'
+import type {
+  CacheReadResultV1,
+  CacheWriteResultV1,
+  MusicUrlAuthorizationV1,
+} from '@common/storage/cache'
 
 
 export default () => {
@@ -52,11 +57,21 @@ export default () => {
 
 
   // =========================歌曲URL=========================
+  mainHandle<unknown, MusicUrlAuthorizationV1 | null>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_authorize, async({ params }) => {
+    const { provider } = parseMusicUrlAuthorizationRequest(params)
+    const authorization = global.lx.musicUrlAuthorization
+    if (authorization == null) throw new Error('Music URL authorization has not been initialized')
+    return authorization.authorize(provider)
+  })
   mainHandle<unknown, CacheReadResultV1<string>>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_get, async({ params }) => {
-    return global.lx.worker.dbService.musicUrlGet(parseMusicUrlGetInput(params))
+    const authorization = global.lx.musicUrlAuthorization
+    if (authorization == null) throw new Error('Music URL authorization has not been initialized')
+    return authorization.read(parseAuthorizedMusicUrlGetInput(params))
   })
   mainHandle<unknown, CacheWriteResultV1>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_put, async({ params }) => {
-    return global.lx.worker.dbService.musicUrlPut(parseMusicUrlPutInput(params))
+    const authorization = global.lx.musicUrlAuthorization
+    if (authorization == null) throw new Error('Music URL authorization has not been initialized')
+    return authorization.write(parseAuthorizedMusicUrlPutInput(params))
   })
   mainHandle(WIN_MAIN_RENDERER_EVENT_NAME.music_url_clear, async() => {
     return global.lx.worker.dbService.musicUrlClear()

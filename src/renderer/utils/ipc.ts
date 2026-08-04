@@ -8,8 +8,10 @@ import type { ListeningTimeStats } from '@common/utils/listeningTime'
 import type { StorageCapabilitiesV1, StorageRequestV1 } from '@common/storage/contracts'
 import {
   STORAGE_CACHE_GENERATION_EVENT,
+  type AuthorizedMusicUrlKeyV1,
   type CacheReadResultV1,
-  type MusicUrlKeyV1,
+  type MusicUrlAuthorizationV1,
+  type PersistentMusicUrlProviderV1,
   type StorageCacheGenerationV1,
   type TrackIdentityV1,
 } from '@common/storage/cache'
@@ -628,12 +630,32 @@ export const getThemes = async() => {
  * @param type URL音质
  * @returns
  */
-export const getMusicUrl = async(key: MusicUrlKeyV1): Promise<string> => {
-  const result = await rendererInvoke<LX.Music.MusicUrlGetInputV1, CacheReadResultV1<string>>(
-    WIN_MAIN_RENDERER_EVENT_NAME.music_url_get,
-    { ...key, nowMs: Date.now() },
+export const requestMusicUrlAuthorization = async(
+  provider: PersistentMusicUrlProviderV1,
+): Promise<MusicUrlAuthorizationV1 | null> => {
+  return rendererInvoke<LX.Music.MusicUrlAuthorizationRequestV1, MusicUrlAuthorizationV1 | null>(
+    WIN_MAIN_RENDERER_EVENT_NAME.music_url_authorize,
+    { provider },
   )
-  return result.status == 'hit' ? result.value : ''
+}
+
+const isStaleMusicUrlAuthorization = (error: unknown): boolean => {
+  const value = error as { code?: unknown, message?: unknown }
+  return value?.code == 'music_url_authorization_stale' ||
+    (typeof value?.message == 'string' && value.message.endsWith('music_url_authorization_stale'))
+}
+
+export const getMusicUrl = async(key: AuthorizedMusicUrlKeyV1): Promise<string> => {
+  try {
+    const result = await rendererInvoke<LX.Music.AuthorizedMusicUrlGetInputV1, CacheReadResultV1<string>>(
+      WIN_MAIN_RENDERER_EVENT_NAME.music_url_get,
+      { ...key, nowMs: Date.now() },
+    )
+    return result.status == 'hit' ? result.value : ''
+  } catch (error) {
+    if (isStaleMusicUrlAuthorization(error)) return ''
+    throw error
+  }
 }
 
 /**
@@ -642,13 +664,17 @@ export const getMusicUrl = async(key: MusicUrlKeyV1): Promise<string> => {
  * @param type URL音质
  * @param url 歌曲URL
  */
-export const saveMusicUrl = async(key: MusicUrlKeyV1, url: string, providerExpiresAtMs?: number) => {
-  await rendererInvoke<LX.Music.MusicUrlPutInputV1>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_put, {
-    ...key,
-    url,
-    nowMs: Date.now(),
-    ...(providerExpiresAtMs == null ? {} : { providerExpiresAtMs }),
-  })
+export const saveMusicUrl = async(key: AuthorizedMusicUrlKeyV1, url: string, providerExpiresAtMs?: number) => {
+  try {
+    await rendererInvoke<LX.Music.AuthorizedMusicUrlPutInputV1>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_put, {
+      ...key,
+      url,
+      nowMs: Date.now(),
+      ...(providerExpiresAtMs == null ? {} : { providerExpiresAtMs }),
+    })
+  } catch (error) {
+    if (!isStaleMusicUrlAuthorization(error)) throw error
+  }
 }
 /**
  * 清理所有缓存的歌曲URL

@@ -42,14 +42,26 @@ const createUrlRaceHarness = ({
   findMusic = async() => [],
   getOtherSourcesFromCache = async() => [],
   getCachedMusicUrl = async() => '',
+  localMusicApi = {},
+  onAuthorize = () => {},
 }) => {
   const saves = []
+  const requestEvents = []
   const neteaseProfile = { value: { userId: 1, nickname: '', avatarUrl: '' } }
   const qqMusicProfile = { value: { uin: '10001', nickname: '' } }
   const neteaseLoggedIn = { value: true }
   const qqMusicLoggedIn = { value: true }
+  const apiSource = { value: 'official' }
   const cacheValidation = loadTsModule(path.join(root, 'src/common/storage/cacheValidation.ts'))
   const ipc = {
+    requestMusicUrlAuthorization: async(provider) => {
+      requestEvents.push(`authorize:${provider}`)
+      onAuthorize(provider)
+      const accountScope = provider == 'wy'
+        ? cacheValidation.neteaseAccountScope(neteaseProfile.value)
+        : cacheValidation.qqMusicAccountScope(qqMusicProfile.value)
+      return accountScope == null ? null : { version: 1, provider, accountScope, generation: 1 }
+    },
     getMusicUrl: getCachedMusicUrl,
     saveMusicUrl: async(key, url) => { saves.push({ key: structuredClone(key), url }) },
     getOtherSourcesFromCache,
@@ -59,7 +71,7 @@ const createUrlRaceHarness = ({
   }
   const appSetting = { 'player.playQuality': '320k', 'player.isS2t': false }
   const utils = loadTsModule(path.join(root, 'src/renderer/core/music/utils.ts'), {
-    '@renderer/store': { apiSource: { value: 'official' }, qualityList: { value: {} } },
+    '@renderer/store': { apiSource, qualityList: { value: {} } },
     '@renderer/store/netease': { profile: neteaseProfile, isLoggedIn: neteaseLoggedIn },
     '@renderer/store/qqMusic': { profile: qqMusicProfile, isLoggedIn: qqMusicLoggedIn },
     '@common/storage/cacheValidation': cacheValidation,
@@ -69,7 +81,7 @@ const createUrlRaceHarness = ({
     '@renderer/store/setting': { appSetting },
     '@renderer/utils': { langS2T: async value => value, toNewMusicInfo: value => value, toOldMusicInfo: value => value },
     '@renderer/utils/message': { requestMsg: { tooManyRequests: 'too many requests' } },
-    '@renderer/utils/musicSdk/api-source': { apis: () => ({}) },
+    '@renderer/utils/musicSdk/api-source': { apis: () => localMusicApi },
   })
   const online = loadTsModule(path.join(root, 'src/renderer/core/music/online.ts'), {
     '@renderer/store/list/action': { updateListMusics: async() => {} },
@@ -77,7 +89,7 @@ const createUrlRaceHarness = ({
     '@renderer/utils/ipc': ipc,
     './utils': utils,
   })
-  return { neteaseProfile, online, qqMusicProfile, saves, utils }
+  return { apiSource, neteaseProfile, online, qqMusicProfile, requestEvents, saves, utils }
 }
 
 describe('scoped cache ownership callsites', () => {
@@ -91,7 +103,7 @@ describe('scoped cache ownership callsites', () => {
       read('src/main/types/db_service.d.ts'),
       read('src/main/types/worker.d.ts'),
     ].join('\n')
-    assert.match(contracts, /interface\s+MusicUrlKeyV1[\s\S]*provider[\s\S]*accountScope[\s\S]*sourceTrackId[\s\S]*quality/)
+    assert.match(contracts, /interface\s+AuthorizedMusicUrlKeyV1[\s\S]*authorization[\s\S]*sourceTrackId[\s\S]*quality/)
     assert.match(contracts, /interface\s+TrackIdentityV1[\s\S]*originalProvider[\s\S]*originalTrackId/)
     for (const name of ['musicUrlGet', 'musicUrlPut', 'musicUrlInvalidateAccount', 'musicUrlInvalidateSource', 'otherSourcesGet', 'otherSourcesPut']) {
       assert.match(worker, new RegExp(`\\b${name}\\b`), `${name} is not exported across the worker boundary`)
@@ -105,13 +117,16 @@ describe('scoped cache ownership callsites', () => {
     const main = read('src/main/modules/winMain/rendererEvent/music.ts')
     assert.match(names, /music_url_get/)
     assert.match(names, /music_url_put/)
+    assert.match(names, /music_url_authorize/)
     assert.match(names, /other_sources_get/)
     assert.match(names, /other_sources_put/)
-    assert.match(ipc, /MusicUrlKeyV1/)
+    assert.match(ipc, /AuthorizedMusicUrlKeyV1/)
+    assert.match(ipc, /requestMusicUrlAuthorization/)
     assert.match(ipc, /TrackIdentityV1/)
     assert.doesNotMatch(ipc, /`\$\{musicInfo\.id\}_\$\{type\}`/)
-    assert.match(main, /parseMusicUrlGetInput/)
-    assert.match(main, /parseMusicUrlPutInput/)
+    assert.match(main, /parseAuthorizedMusicUrlGetInput/)
+    assert.match(main, /parseAuthorizedMusicUrlPutInput/)
+    assert.match(main, /parseMusicUrlAuthorizationRequest/)
     assert.match(main, /parseOtherSourcesGetInput/)
     assert.match(main, /parseOtherSourcesPutInput/)
   })
@@ -121,11 +136,13 @@ describe('scoped cache ownership callsites', () => {
     const dispatched = []
     const previousLx = global.lx
     global.lx = {
-      worker: {
-        dbService: {
-          musicUrlPut: async input => { dispatched.push(structuredClone(input)); return { status: 'stored' } },
-        },
+      musicUrlAuthorization: {
+        authorize: async provider => ({
+          version: 1, provider, accountScope: 'profile-v1:uin:10001', generation: 1,
+        }),
+        write: async input => { dispatched.push(structuredClone(input)); return { status: 'stored' } },
       },
+      worker: { dbService: {} },
     }
     try {
       const names = new Proxy({}, { get: (_target, key) => String(key) })
@@ -137,22 +154,40 @@ describe('scoped cache ownership callsites', () => {
       })
       rendererEvent.default()
       const put = handlers.get('music_url_put')
+      const authorize = handlers.get('music_url_authorize')
       for (const params of [
         { provider: 'kw', accountScope: 'profile-v1:uin:10001', quality: '320k' },
         { provider: 'wy', accountScope: 'profile-v1:uin:10001', quality: '320k' },
         { provider: 'tx', accountScope: 'profile-v1:user-id:7', quality: '320k' },
         { provider: 'tx', accountScope: 'profile-v1:uin:10001', quality: 'hires' },
       ]) {
-        await assert.rejects(put({ params: {
-          ...params, sourceTrackId: 'track', url: 'https://media.invalid/rejected', nowMs: 1,
-        } }), error => error?.code == 'music_url_input_invalid')
+        await assert.rejects(put({
+          params: {
+            ...params, sourceTrackId: 'track', url: 'https://media.invalid/rejected', nowMs: 1,
+          },
+        }), error => error?.code == 'music_url_input_invalid')
       }
       assert.equal(dispatched.length, 0)
-      await put({ params: {
-        provider: 'tx', accountScope: 'profile-v1:uin:10001', sourceTrackId: 'track',
-        quality: 'wav', url: 'https://media.invalid/accepted', nowMs: 1,
-      } })
+      await put({
+        params: {
+          authorization: {
+            version: 1,
+            provider: 'tx',
+            accountScope: 'profile-v1:uin:10001',
+            generation: 1,
+          },
+          sourceTrackId: 'track',
+          quality: 'wav',
+          url: 'https://media.invalid/accepted',
+          nowMs: 1,
+        },
+      })
       assert.equal(dispatched.length, 1)
+      assert.deepEqual(await authorize({ params: { provider: 'tx' } }), {
+        version: 1, provider: 'tx', accountScope: 'profile-v1:uin:10001', generation: 1,
+      })
+      await assert.rejects(authorize({ params: { provider: 'tx', accountScope: 'forged' } }),
+        error => error?.code == 'music_url_input_invalid')
     } finally {
       global.lx = previousLx
     }
@@ -164,11 +199,11 @@ describe('scoped cache ownership callsites', () => {
     const local = read('src/renderer/core/music/local.ts')
     const utils = read('src/renderer/core/music/utils.ts')
     const identity = [ipc, utils, read('src/common/storage/cacheValidation.ts')].join('\n')
-    assert.match(identity, /neteaseAccountScope/)
-    assert.match(identity, /qqMusicAccountScope/)
+    assert.doesNotMatch(utils, /neteaseAccountScope|qqMusicAccountScope/)
+    assert.match(ipc, /requestMusicUrlAuthorization/)
     assert.match(utils, /isNeteaseLoggedIn\.value/)
     assert.match(utils, /isQQMusicLoggedIn\.value/)
-    assert.match(identity, /profile-v1:/)
+    assert.match(identity, /MusicUrlAuthorizationV1/)
     assert.match([online, local, utils].join('\n'), /persistentCache/)
     assert.doesNotMatch([ipc, online, local, utils].join('\n'), /accountScope\s*:\s*['"](?:guest|anonymous|public)['"]/i)
     assert.doesNotMatch([ipc, online, local, utils].join('\n'), /(?:cookie|token|authorization).*accountScope|accountScope.*(?:cookie|token|authorization)/i)
@@ -199,13 +234,81 @@ describe('scoped cache ownership callsites', () => {
       assert.equal(await result, 'https://media.invalid/account-a')
       assert.deepEqual(harness.saves, [{
         key: {
-          provider: 'wy',
-          accountScope: 'profile-v1:user-id:1',
+          authorization: {
+            version: 1,
+            provider: 'wy',
+            accountScope: 'profile-v1:user-id:1',
+            generation: 1,
+          },
           sourceTrackId: 'wy-track',
           quality: '320k',
         },
         url: 'https://media.invalid/account-a',
       }])
+    } finally {
+      global.window = previousWindow
+    }
+  })
+
+  it('obtains authorization before each direct and fallback provider network request', async() => {
+    const previousWindow = global.window
+    const previousConsoleLog = console.log
+    const events = []
+    global.window = { lx: { apiInitPromise: [Promise.resolve(true)] }, i18n: { t: value => value } }
+    console.log = () => {}
+    try {
+      const harness = createUrlRaceHarness({
+        onAuthorize: provider => { events.push(`authorize:${provider}`) },
+        musicSdk: {
+          wy: {
+            getMusicUrl() {
+              events.push('network:wy')
+              return { promise: Promise.reject(new Error('primary failed')) }
+            },
+          },
+          tx: {
+            getMusicUrl() {
+              events.push('network:tx')
+              return { promise: Promise.resolve({ type: '320k', url: 'https://media.invalid/fallback' }) }
+            },
+          },
+        },
+        findMusic: async() => [music('tx-target', 'tx')],
+      })
+      assert.equal(await harness.online.getMusicUrl({
+        musicInfo: music('wy-original', 'wy'), quality: '320k', isRefresh: false,
+      }), 'https://media.invalid/fallback')
+      assert.deepEqual(events, ['authorize:wy', 'network:wy', 'authorize:tx', 'network:tx'])
+    } finally {
+      global.window = previousWindow
+      console.log = previousConsoleLog
+    }
+  })
+
+  it('never requests authorization or persistence for User API and local User API URLs', async() => {
+    const previousWindow = global.window
+    global.window = { lx: { apiInitPromise: [Promise.resolve(true)] }, i18n: { t: value => value } }
+    try {
+      const harness = createUrlRaceHarness({
+        musicSdk: {
+          wy: { getMusicUrl: () => ({ promise: Promise.resolve({ type: '320k', url: 'https://media.invalid/user-api' }) }) },
+        },
+        localMusicApi: {
+          getMusicUrl: () => ({ promise: Promise.resolve({ url: 'https://media.invalid/local-user-api', persistentCache: false }) }),
+        },
+      })
+      harness.apiSource.value = 'user_api:test'
+      assert.equal(await harness.online.getMusicUrl({
+        musicInfo: music('wy-user-api', 'wy'), quality: '320k', isRefresh: false,
+      }), 'https://media.invalid/user-api')
+      assert.equal((await harness.utils.getOnlineOtherSourceMusicUrlByLocal({
+        ...music('local-track', 'local'),
+        meta: {
+          songId: 'local-track', albumName: 'local', filePath: 'C:\\music\\local.mp3', ext: 'mp3',
+        },
+      }, false)).url, 'https://media.invalid/local-user-api')
+      assert.deepEqual(harness.requestEvents, [])
+      assert.deepEqual(harness.saves, [])
     } finally {
       global.window = previousWindow
     }
@@ -229,8 +332,12 @@ describe('scoped cache ownership callsites', () => {
       }), 'https://media.invalid/direct-returned-quality')
       assert.deepEqual(harness.saves, [{
         key: {
-          provider: 'wy',
-          accountScope: 'profile-v1:user-id:1',
+          authorization: {
+            version: 1,
+            provider: 'wy',
+            accountScope: 'profile-v1:user-id:1',
+            generation: 1,
+          },
           sourceTrackId: 'wy-quality-track',
           quality: '128k',
         },
@@ -271,8 +378,12 @@ describe('scoped cache ownership callsites', () => {
       assert.equal(await result, 'https://media.invalid/qq-account-a')
       assert.deepEqual(harness.saves, [{
         key: {
-          provider: 'tx',
-          accountScope: 'profile-v1:uin:10001',
+          authorization: {
+            version: 1,
+            provider: 'tx',
+            accountScope: 'profile-v1:uin:10001',
+            generation: 1,
+          },
           sourceTrackId: 'tx-target',
           quality: '320k',
         },
@@ -306,8 +417,12 @@ describe('scoped cache ownership callsites', () => {
       }), 'https://media.invalid/fallback-returned-quality')
       assert.deepEqual(harness.saves, [{
         key: {
-          provider: 'tx',
-          accountScope: 'profile-v1:uin:10001',
+          authorization: {
+            version: 1,
+            provider: 'tx',
+            accountScope: 'profile-v1:uin:10001',
+            generation: 1,
+          },
           sourceTrackId: 'tx-quality-target',
           quality: '128k',
         },
@@ -319,7 +434,7 @@ describe('scoped cache ownership callsites', () => {
     }
   })
 
-  it('captures fallback URL ownership after its cache read and immediately before the provider request', async() => {
+  it('carries one fallback authorization from cache read through the provider request', async() => {
     const previousWindow = global.window
     const cacheRead = deferred()
     const cacheReadStarted = deferred()
@@ -350,11 +465,16 @@ describe('scoped cache ownership callsites', () => {
       await started.promise
       request.resolve({ type: '320k', url: 'https://media.invalid/qq-account-b' })
       assert.deepEqual((await result).cacheKey, {
-        provider: 'tx',
-        accountScope: 'profile-v1:uin:20002',
+        authorization: {
+          version: 1,
+          provider: 'tx',
+          accountScope: 'profile-v1:uin:10001',
+          generation: 1,
+        },
         sourceTrackId: 'tx-target',
         quality: '320k',
       })
+      assert.deepEqual(harness.requestEvents, ['authorize:tx'])
     } finally {
       global.window = previousWindow
     }

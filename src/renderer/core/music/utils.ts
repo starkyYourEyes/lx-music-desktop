@@ -1,8 +1,7 @@
 import { apiSource, qualityList } from '@renderer/store'
-import { isLoggedIn as isNeteaseLoggedIn, profile as neteaseProfile } from '@renderer/store/netease'
-import { isLoggedIn as isQQMusicLoggedIn, profile as qqMusicProfile } from '@renderer/store/qqMusic'
-import { neteaseAccountScope, qqMusicAccountScope } from '@common/storage/cacheValidation'
-import type { MusicUrlKeyV1, TrackIdentityV1 } from '@common/storage/cache'
+import { isLoggedIn as isNeteaseLoggedIn } from '@renderer/store/netease'
+import { isLoggedIn as isQQMusicLoggedIn } from '@renderer/store/qqMusic'
+import type { AuthorizedMusicUrlKeyV1, TrackIdentityV1 } from '@common/storage/cache'
 import { assertApiSupport } from '@renderer/store/utils'
 import musicSdk from '@renderer/utils/musicSdk'
 import {
@@ -10,6 +9,7 @@ import {
   putOtherSourcesInCache,
   getMusicUrl as getStoreMusicUrl,
   getPlayerLyric as getStoreLyric,
+  requestMusicUrlAuthorization,
 } from '@renderer/utils/ipc'
 import { appSetting } from '@renderer/store/setting'
 import { langS2T, toNewMusicInfo, toOldMusicInfo } from '@renderer/utils'
@@ -35,23 +35,23 @@ const getTrackIdentity = (musicInfo: LX.Music.MusicInfo | LX.Download.ListItem):
 const getTrackIdentityKey = (identity: TrackIdentityV1): string =>
   JSON.stringify([identity.originalProvider, identity.originalTrackId])
 
-export const getMusicUrlCacheKey = (
+export const getMusicUrlCacheKey = async(
   musicInfo: LX.Music.MusicInfo,
   quality: LX.Quality,
   persistentCache = true,
-): MusicUrlKeyV1 | null => {
+): Promise<AuthorizedMusicUrlKeyV1 | null> => {
   if (!persistentCache || /^user_api/.test(apiSource.value ?? '')) return null
-  const accountScope = musicInfo.source == 'wy' && isNeteaseLoggedIn.value
-    ? neteaseAccountScope(neteaseProfile.value)
-    : musicInfo.source == 'tx' && isQQMusicLoggedIn.value
-      ? qqMusicAccountScope(qqMusicProfile.value)
-      : null
-  return accountScope == null ? null : {
-    provider: musicInfo.source,
-    accountScope,
+  const provider = musicInfo.source == 'wy' || musicInfo.source == 'tx'
+    ? musicInfo.source
+    : null
+  if (provider == null ||
+    (provider == 'wy' && !isNeteaseLoggedIn.value) ||
+    (provider == 'tx' && !isQQMusicLoggedIn.value)) return null
+  return requestMusicUrlAuthorization(provider).then(authorization => authorization == null ? null : {
+    authorization,
     sourceTrackId: musicInfo.id,
     quality,
-  }
+  })
 }
 
 export const getOtherSource = async(musicInfo: LX.Music.MusicInfo | LX.Download.ListItem, isRefresh = false): Promise<LX.Music.MusicInfoOnline[]> => {
@@ -200,13 +200,13 @@ export const getOnlineOtherSourceMusicUrlByLocal = async(musicInfo: LX.Music.Mus
   quality: LX.Quality
   isFromCache: boolean
   persistentCache: boolean
-  cacheKey: MusicUrlKeyV1 | null
+  cacheKey: AuthorizedMusicUrlKeyV1 | null
 }> => {
   if (!await window.lx.apiInitPromise[0]) throw new Error('source init failed')
 
   const quality = '128k'
 
-  const cacheKey = getMusicUrlCacheKey(musicInfo, quality)
+  const cacheKey = await getMusicUrlCacheKey(musicInfo, quality)
   const cachedUrl = cacheKey == null ? '' : await getStoreMusicUrl(cacheKey)
   if (cachedUrl && !isRefresh) return { url: cachedUrl, quality, isFromCache: true, persistentCache: true, cacheKey }
 
@@ -288,7 +288,7 @@ export const getOnlineOtherSourceMusicUrl = async({ musicInfos, quality, onToggl
   quality: LX.Quality
   isFromCache: boolean
   persistentCache: boolean
-  cacheKey: MusicUrlKeyV1 | null
+  cacheKey: AuthorizedMusicUrlKeyV1 | null
 }> => {
   if (!await window.lx.apiInitPromise[0]) throw new Error('source init failed')
 
@@ -308,13 +308,12 @@ export const getOnlineOtherSourceMusicUrl = async({ musicInfos, quality, onToggl
   }
   if (!musicInfo || !itemQuality) throw new Error(window.i18n.t('toggle_source_failed'))
 
-  const cacheKey = getMusicUrlCacheKey(musicInfo, itemQuality)
+  const cacheKey = await getMusicUrlCacheKey(musicInfo, itemQuality)
   const cachedUrl = cacheKey == null ? '' : await getStoreMusicUrl(cacheKey)
   if (cachedUrl && !isRefresh) {
     return { url: cachedUrl, musicInfo, quality: itemQuality, isFromCache: true, persistentCache: true, cacheKey }
   }
 
-  const requestCacheKey = getMusicUrlCacheKey(musicInfo, itemQuality)
   let reqPromise
   try {
     reqPromise = musicSdk[musicInfo.source].getMusicUrl(toOldMusicInfo(musicInfo), itemQuality).promise
@@ -324,8 +323,8 @@ export const getOnlineOtherSourceMusicUrl = async({ musicInfos, quality, onToggl
   // retryedSource.includes(musicInfo.source)
   // eslint-disable-next-line @typescript-eslint/promise-function-async
   return reqPromise.then(({ url, type, persistentCache = true }: LX.Playback.MusicUrlResult) => {
-    const cacheKey = persistentCache && requestCacheKey != null ? { ...requestCacheKey, quality: type } : null
-    return { musicInfo, url, quality: type, isFromCache: false, persistentCache, cacheKey }
+    const responseCacheKey = persistentCache && cacheKey != null ? { ...cacheKey, quality: type } : null
+    return { musicInfo, url, quality: type, isFromCache: false, persistentCache, cacheKey: responseCacheKey }
     // eslint-disable-next-line @typescript-eslint/promise-function-async
   }).catch((err: any) => {
     if (err.message == requestMsg.tooManyRequests) throw err
@@ -337,25 +336,24 @@ export const getOnlineOtherSourceMusicUrl = async({ musicInfos, quality, onToggl
 /**
  * 获取在线音乐URL
  */
-export const handleGetOnlineMusicUrl = async({ musicInfo, quality, onToggleSource, isRefresh, allowToggleSource }: {
+export const handleGetOnlineMusicUrl = async({ musicInfo, quality, onToggleSource, isRefresh, allowToggleSource, cacheKey }: {
   musicInfo: LX.Music.MusicInfoOnline
   quality?: LX.Quality
   isRefresh: boolean
   allowToggleSource: boolean
   onToggleSource: (musicInfo?: LX.Music.MusicInfoOnline) => void
+  cacheKey: AuthorizedMusicUrlKeyV1 | null
 }): Promise<{
   url: string
   musicInfo: LX.Music.MusicInfoOnline
   quality: LX.Quality
   isFromCache: boolean
   persistentCache: boolean
-  cacheKey: MusicUrlKeyV1 | null
+  cacheKey: AuthorizedMusicUrlKeyV1 | null
 }> => {
   if (!await window.lx.apiInitPromise[0]) throw new Error('source init failed')
   // console.log(musicInfo.source)
   const targetQuality = quality ?? getPlayQuality(appSetting['player.playQuality'], musicInfo)
-  const cacheKey = getMusicUrlCacheKey(musicInfo, targetQuality)
-
   let reqPromise
   try {
     reqPromise = musicSdk[musicInfo.source].getMusicUrl(toOldMusicInfo(musicInfo), targetQuality).promise

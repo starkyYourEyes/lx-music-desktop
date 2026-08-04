@@ -1,6 +1,5 @@
 import type { AccountRepository } from '@main/storage/accounts/accountRepository'
-import { neteaseAccountScope } from '@common/storage/cacheValidation'
-import type { MusicUrlAccountInvalidationV1 } from '@common/storage/cache'
+import type { MusicUrlAuthorizationService } from '@main/services/musicUrlAuthorization'
 
 interface NeteaseAccountApi {
   login_qr_key: (params?: Record<string, unknown>) => Promise<any>
@@ -39,12 +38,12 @@ export const createNeteaseAccountService = ({
   accounts,
   api,
   now = Date.now,
-  invalidateMusicUrls = async() => 0,
+  musicUrlAuthorization,
 }: {
   accounts: AccountRepository
   api: NeteaseAccountApi
   now?: () => number
-  invalidateMusicUrls?: (input: MusicUrlAccountInvalidationV1) => Promise<number>
+  musicUrlAuthorization: Pick<MusicUrlAuthorizationService, 'transition'>
 }) => {
   let accountGeneration = 0
 
@@ -74,7 +73,6 @@ export const createNeteaseAccountService = ({
     sourceCookie: string,
     generation: number,
     canReplaceSourceAccount = false,
-    sourceProfile: LX.Netease.Profile | null = null,
   ): Promise<LX.Netease.AccountStatus> => {
     if (!cookie) return { isLoggedIn: false, profile: null }
 
@@ -89,21 +87,24 @@ export const createNeteaseAccountService = ({
     if (!isCurrentRefresh()) return getLoggedOutStatus()
     const profile = normalizeProfile(result.body?.data?.profile ?? result.body?.profile)
     if (profile == null) {
-      if (!isCurrentRefresh()) return getLoggedOutStatus()
-      await accounts.clear('netease')
-      const accountScope = neteaseAccountScope(sourceProfile)
-      if (accountScope != null && isCurrentGeneration(generation) && !accounts.getCookie('netease')) {
-        await invalidateMusicUrls({ provider: 'wy', accountScope })
-      }
+      await musicUrlAuthorization.transition('wy', async() => {
+        if (!isCurrentRefresh()) return { status: 'unchanged', value: undefined }
+        await accounts.clear('netease')
+        return { status: 'changed', value: undefined }
+      })
       return { isLoggedIn: false, profile: null }
     }
     const mergedCookie = normalizeCookie(result.body?.cookie || result.cookie) || cookie
-    if (!isCurrentRefresh()) return getLoggedOutStatus()
-    await accounts.save('netease', {
-      cookie: mergedCookie,
-      profile: toRepositoryProfile(profile),
-      updatedAtMs: now(),
+    const saved = await musicUrlAuthorization.transition('wy', async() => {
+      if (!isCurrentRefresh()) return { status: 'unchanged', value: false }
+      await accounts.save('netease', {
+        cookie: mergedCookie,
+        profile: toRepositoryProfile(profile),
+        updatedAtMs: now(),
+      })
+      return { status: 'changed', value: true }
     })
+    if (!saved) return getLoggedOutStatus()
 
     return isCurrentGeneration(generation) && accounts.getCookie('netease') == mergedCookie
       ? { isLoggedIn: true, profile }
@@ -120,7 +121,7 @@ export const createNeteaseAccountService = ({
       return { isLoggedIn: true, profile: account.profile }
     }
     const generation = accountGeneration
-    return refreshLoginStatus(account.cookie, account.cookie, generation, false, account.profile).catch(() => ({
+    return refreshLoginStatus(account.cookie, account.cookie, generation).catch(() => ({
       isLoggedIn: !!account.profile,
       profile: account.profile,
     }))
@@ -149,7 +150,6 @@ export const createNeteaseAccountService = ({
       sourceAccount.cookie,
       generation,
       true,
-      sourceAccount.profile,
     )
     return { code, message, ...status }
   }
@@ -158,12 +158,13 @@ export const createNeteaseAccountService = ({
     const account = getAccountData()
     const generation = ++accountGeneration
     if (account.cookie) await api.logout({ cookie: account.cookie }).catch(() => null)
-    if (!isCurrentGeneration(generation)) return
-    await accounts.clear('netease')
-    const accountScope = neteaseAccountScope(account.profile)
-    if (accountScope != null && isCurrentGeneration(generation) && !accounts.getCookie('netease')) {
-      await invalidateMusicUrls({ provider: 'wy', accountScope })
-    }
+    await musicUrlAuthorization.transition('wy', async() => {
+      if (!isCurrentGeneration(generation)) {
+        return { status: 'unchanged', value: undefined }
+      }
+      await accounts.clear('netease')
+      return { status: 'changed', value: undefined }
+    })
   }
 
   return {

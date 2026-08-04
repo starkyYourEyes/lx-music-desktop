@@ -2,6 +2,34 @@ export const STORAGE_CACHE_GENERATION_EVENT = 'storage_cache_generation_v1' as c
 
 export type StorageCacheGenerationV1 = number
 
+export type PersistentMusicUrlProviderV1 = 'wy' | 'tx'
+
+export interface MusicUrlAuthorizationRequestV1 {
+  provider: PersistentMusicUrlProviderV1
+}
+
+export interface MusicUrlAuthorizationV1 {
+  version: 1
+  provider: PersistentMusicUrlProviderV1
+  accountScope: string
+  generation: number
+}
+
+export interface AuthorizedMusicUrlKeyV1 {
+  authorization: MusicUrlAuthorizationV1
+  sourceTrackId: string
+  quality: string
+}
+
+export interface AuthorizedMusicUrlGetInputV1 extends AuthorizedMusicUrlKeyV1 {
+  nowMs: number
+}
+
+export interface AuthorizedMusicUrlPutInputV1 extends AuthorizedMusicUrlGetInputV1 {
+  url: string
+  providerExpiresAtMs?: number
+}
+
 export interface MusicUrlKeyV1 {
   provider: string
   accountScope: string
@@ -98,6 +126,10 @@ export type CacheDiagnosticCodeV1 =
   | 'cache_delete_failed'
   | 'cache_reopen_failed'
   | 'cache_capacity_unavailable'
+
+export type MusicUrlInvalidationResultV1 =
+  | { status: 'completed', deletedRows: number }
+  | { status: 'unavailable', code: CacheDiagnosticCodeV1 }
 
 export type CacheReadResultV1<T> =
   | { status: 'hit', value: T }

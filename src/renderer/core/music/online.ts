@@ -29,11 +29,11 @@ export const getMusicUrl = async({ musicInfo, quality, isRefresh, allowToggleSou
   //   // return Promise.reject(new Error('该歌曲没有可播放的音频'))
   // }
   const targetQuality = quality ?? getPlayQuality(appSetting['player.playQuality'], musicInfo)
-  const cacheKey = getMusicUrlCacheKey(musicInfo, targetQuality)
+  const cacheKey = await getMusicUrlCacheKey(musicInfo, targetQuality)
   const cachedUrl = cacheKey == null ? '' : await getStoreMusicUrl(cacheKey)
   if (cachedUrl && !isRefresh) return cachedUrl
 
-  return handleGetOnlineMusicUrl({ musicInfo, quality, onToggleSource, isRefresh, allowToggleSource }).then(({ url, isFromCache, cacheKey }) => {
+  return handleGetOnlineMusicUrl({ musicInfo, quality, onToggleSource, isRefresh, allowToggleSource, cacheKey }).then(({ url, isFromCache, cacheKey }) => {
     if (!isFromCache && cacheKey != null) void saveMusicUrl(cacheKey, url).catch(() => {})
     return url
   })

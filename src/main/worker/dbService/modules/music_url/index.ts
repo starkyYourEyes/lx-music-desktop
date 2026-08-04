@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3'
 import type {
   MusicUrlAccountInvalidationV1,
   MusicUrlGetInputV1,
+  MusicUrlInvalidationResultV1,
   MusicUrlPutInputV1,
   MusicUrlSourceInvalidationV1,
 } from '../../../../../common/storage/cache'
@@ -78,12 +79,14 @@ export const musicUrlPut = async(input: MusicUrlPutInputV1): Promise<CacheWriteR
   return result
 }
 
-export const musicUrlInvalidateAccount = async(input: MusicUrlAccountInvalidationV1): Promise<number> => {
+export const musicUrlInvalidateAccount = async(input: MusicUrlAccountInvalidationV1): Promise<MusicUrlInvalidationResultV1> => {
   const parsed = parseMusicUrlAccountInvalidation(input)
   const result = await runCacheImmediate(db => db.prepare(`
     DELETE FROM music_urls WHERE provider = ? AND account_scope = ?
   `).run(parsed.provider, parsed.accountScope).changes)
-  return result.status == 'completed' ? result.value : 0
+  return result.status == 'completed'
+    ? { status: 'completed', deletedRows: result.value }
+    : result
 }
 
 export const musicUrlInvalidateSource = async(input: MusicUrlSourceInvalidationV1): Promise<number> => {

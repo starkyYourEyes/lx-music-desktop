@@ -181,9 +181,12 @@ declare global {
       lyrics: string | null
     }
 
-    type MusicUrlKeyV1 = CacheTypes.MusicUrlKeyV1
-    type MusicUrlGetInputV1 = CacheTypes.MusicUrlGetInputV1
-    type MusicUrlPutInputV1 = CacheTypes.MusicUrlPutInputV1
+    type PersistentMusicUrlProviderV1 = CacheTypes.PersistentMusicUrlProviderV1
+    type MusicUrlAuthorizationRequestV1 = CacheTypes.MusicUrlAuthorizationRequestV1
+    type MusicUrlAuthorizationV1 = CacheTypes.MusicUrlAuthorizationV1
+    type AuthorizedMusicUrlKeyV1 = CacheTypes.AuthorizedMusicUrlKeyV1
+    type AuthorizedMusicUrlGetInputV1 = CacheTypes.AuthorizedMusicUrlGetInputV1
+    type AuthorizedMusicUrlPutInputV1 = CacheTypes.AuthorizedMusicUrlPutInputV1
     type TrackIdentityV1 = CacheTypes.TrackIdentityV1
     type OtherSourcesGetInputV1 = CacheTypes.OtherSourcesGetInputV1
     type OtherSourcesPutInputV1 = CacheTypes.OtherSourcesPutInputV1

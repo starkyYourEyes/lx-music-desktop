@@ -11,6 +11,7 @@ import createWorkers from './worker'
 import { migrateDBData } from './utils/migrate'
 import { initializeCredentialVault } from './storage/credentials'
 import { createAccountRepository } from './storage/accounts/accountRepository'
+import { createMusicUrlAuthorizationService } from './services/musicUrlAuthorization'
 import { migrateLegacyCredentials } from './migration/credentials/credentialMigration'
 import { withSelectedLegacyDataSource } from './migration/credentials/legacySources'
 import { isCredentialMigrationRecoveryError } from './migration/credentials/recoveryError'
@@ -365,7 +366,13 @@ export const runStorageMigrationHooks = async(
     })
     await accountRepository.hydrate()
     global.lx.accountRepository = accountRepository
+    const musicUrlAuthorization = createMusicUrlAuthorizationService({
+      accounts: accountRepository,
+      worker: global.lx.worker.dbService,
+    })
+    global.lx.musicUrlAuthorization = musicUrlAuthorization
     global.lx.storage?.registerShutdownFlusher('account-repository', async() => { await accountRepository.flush() })
+    global.lx.storage?.registerShutdownFlusher('music-url-authorization', async() => { await musicUrlAuthorization.flush() })
   } catch {
     return credentialMigrationRecovery('credentials.profile_repository_unreadable')
   }

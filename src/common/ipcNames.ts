@@ -168,6 +168,7 @@ const modules = {
     remove_lyric_edited: 'remove_lyric_edited',
     clear_lyric_edited: 'clear_lyric_edited',
     get_lyric_edited_count: 'get_lyric_edited_count',
+    music_url_authorize: 'music_url_authorize',
     music_url_get: 'music_url_get',
     music_url_put: 'music_url_put',
     music_url_clear: 'music_url_clear',

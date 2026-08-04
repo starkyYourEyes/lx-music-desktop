@@ -731,9 +731,10 @@ describe('credential startup gate', () => {
 
     assert.equal(await runMigrationHooks({ existed: true }), undefined)
     assert.equal(repositoryOptions.profileRoot, root)
-    assert.deepEqual([...registrations.keys()], ['credential-vault', 'account-repository'])
+    assert.deepEqual([...registrations.keys()], ['credential-vault', 'account-repository', 'music-url-authorization'])
     await registrations.get('credential-vault')()
     await registrations.get('account-repository')()
+    await registrations.get('music-url-authorization')()
     assert.deepEqual(calls, ['account:hydrate', 'vault:flush', 'account:flush'])
   })
 

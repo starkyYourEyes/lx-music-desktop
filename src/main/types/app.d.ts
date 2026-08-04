@@ -14,6 +14,7 @@ import { type RunTempReservation } from '@main/utils/tempLifecycle'
 import { type ThemeAssetManager } from '@main/services/themeAssetManager'
 import { type SessionRegistry } from '@main/services/sessionRegistry'
 import { type CacheManager } from '@main/services/cacheManager'
+import { type MusicUrlAuthorizationService } from '@main/services/musicUrlAuthorization'
 
 interface Lx {
   inited: boolean
@@ -45,6 +46,7 @@ interface Lx {
   credentialVault?: CredentialVault
   credentialMigration?: CredentialMigrationResult
   accountRepository?: AccountRepository
+  musicUrlAuthorization?: MusicUrlAuthorizationService
   theme: LX.ThemeSetting
   player_status: LX.Player.Status
 }

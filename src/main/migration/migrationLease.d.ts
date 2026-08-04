@@ -5,7 +5,7 @@ export interface MigrationLease {
   rootIdentity: NodeIdentity
   lockPath: string
   lockIdentity: NodeIdentity
-  assertHeld(): void
+  assertHeld: () => void
 }
 
 export function acquireMigrationLease(input: {

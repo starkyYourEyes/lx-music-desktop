@@ -1,3 +1,6 @@
+import type fs from 'node:fs'
+import type path from 'node:path'
+
 export interface NodeIdentity {
   dev: string
   ino: string
@@ -17,7 +20,7 @@ export type DirectDirectoryObservation =
 
 export function validateDirectDirectory(
   directoryPath: string,
-  options?: { fsApi?: typeof import('node:fs'), pathApi?: typeof import('node:path') },
+  options?: { fsApi?: typeof fs, pathApi?: typeof path },
 ): DirectDirectoryGuard
 
 export function observeDirectChild(parent: DirectDirectoryGuard, basename: string): DirectDirectoryObservation

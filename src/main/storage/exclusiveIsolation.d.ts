@@ -52,7 +52,4 @@ export function isolateOwnedPath(input: {
 export function reclaimIsolatedPayload(input: {
   guard: IsolatedPayloadGuard
   verifyPayload?: (payloadPath: string) => Promise<void>
-}): Promise<
-  { state: 'reclaimed' } |
-  { state: 'retained', error: Error }
->
+}): Promise<{ state: 'reclaimed' } | { state: 'retained', error: Error }>

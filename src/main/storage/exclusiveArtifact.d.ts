@@ -8,7 +8,7 @@ export type ArtifactKind =
 
 export interface BoundedByteSource {
   byteLength: number
-  read(offset: number, maximumBytes: number): Buffer
+  read: (offset: number, maximumBytes: number) => Buffer
 }
 
 export interface ExclusiveArtifactReservation {

@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 import path from 'node:path'
 import { app } from 'electron'
-import { getPortableUserDataPaths, migrateLegacyUserData } from './migration/legacyUserData'
+import { migrateLegacyUserData, preparePortableUserDataPaths } from './migration/legacyUserData'
 import { preparePortableProfile, retireAcknowledgedPortableSource } from './migration/portableProfile'
 import { initializeStoragePaths, resolveApplicationCacheRoot } from './utils/storagePaths'
 
@@ -21,10 +21,18 @@ export const bootstrap = async(
   runtime: BootstrapRuntime = { platform: process.platform, env: process.env },
 ): Promise<void> => {
   const executablePath = electronApp.getPath('exe')
-  const portablePaths = getPortableUserDataPaths({
-    platform: runtime.platform,
-    executablePath,
-  })
+  let portablePaths
+  try {
+    portablePaths = preparePortableUserDataPaths({
+      platform: runtime.platform,
+      executablePath,
+      portableExecutableDir: runtime.env.PORTABLE_EXECUTABLE_DIR,
+    })
+  } catch (error) {
+    console.error('Portable root validation failed; startup has been aborted.', error)
+    electronApp.exit(1)
+    return
+  }
 
   let profileRoot: string
   let legacyRoot: string

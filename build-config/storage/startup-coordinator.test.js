@@ -283,7 +283,7 @@ describe('portable bootstrap sequencing', () => {
       const { bootstrap } = loadTsModule(path.join(__dirname, bootstrapPath), {
         electron: { app: {} },
         './migration/legacyUserData': {
-          getPortableUserDataPaths: () => ({ appDataPath: 'C:\\portable', userDataPath: 'C:\\portable\\userData' }),
+          preparePortableUserDataPaths: () => ({ appDataPath: 'C:\\portable', userDataPath: 'C:\\portable\\userData' }),
           migrateLegacyUserData: async() => { throw new Error('unexpected legacy migration') },
         },
         './migration/portableProfile': {

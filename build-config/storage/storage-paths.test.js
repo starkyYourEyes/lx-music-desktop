@@ -263,6 +263,69 @@ describe('storage path contract', () => {
 })
 
 describe('early Electron bootstrap', () => {
+  it('creates launcher-local storage on a true portable first launch without consulting AppData', async() => {
+    const root = createFixture('portable-wrapper-first-launch')
+    const launcherRoot = path.join(root, 'launcher')
+    const extractedRoot = path.join(root, 'nsis-temp')
+    fs.mkdirSync(launcherRoot)
+    fs.mkdirSync(extractedRoot)
+    const calls = []
+    const fakeElectron = {
+      getPath(name) {
+        calls.push(`getPath:${name}`)
+        if (name == 'exe') return path.join(extractedRoot, 'app.exe')
+        if (name == 'temp') return path.join(root, 'os-temp')
+        throw new Error(`installed path consulted: ${name}`)
+      },
+      setPath(name, value) { calls.push(`setPath:${name}:${value}`) },
+      exit(code) { calls.push(`exit:${code}`) },
+    }
+    const { bootstrap } = require(bootstrapModule)
+
+    await bootstrap(fakeElectron, async() => { calls.push('application') }, {
+      platform: 'win32',
+      env: { PORTABLE_EXECUTABLE_DIR: launcherRoot },
+    })
+
+    const portableRoot = path.join(launcherRoot, 'portable')
+    assert.equal(global.storagePaths.portableRoot, portableRoot)
+    assert.equal(global.storagePaths.profileRoot, path.join(portableRoot, 'profile'))
+    assert.equal(fs.statSync(global.storagePaths.sessionDataRoot).isDirectory(), true)
+    assert.equal(fs.existsSync(global.storagePaths.cacheRoot), false)
+    assert.equal(fs.existsSync(global.storagePaths.backupsRoot), false)
+    assert.equal(calls.some(call => call == 'getPath:appData' || call == 'getPath:home'), false)
+    assert.equal(calls.at(-1), 'application')
+  })
+
+  it('exits before installed startup for invalid portable launcher values', async() => {
+    for (const portableExecutableDir of ['', 'relative-launcher']) {
+      const calls = []
+      const fakeElectron = {
+        getPath(name) {
+          calls.push(`getPath:${name}`)
+          if (name == 'exe') return 'D:\\portable-wrapper\\app.exe'
+          throw new Error(`installed path consulted: ${name}`)
+        },
+        setPath(name) { calls.push(`setPath:${name}`) },
+        exit(code) { calls.push(`exit:${code}`) },
+      }
+      const { bootstrap } = require(bootstrapModule)
+
+      const originalConsoleError = console.error
+      try {
+        console.error = () => {}
+        await bootstrap(fakeElectron, async() => { calls.push('application') }, {
+          platform: 'win32',
+          env: { PORTABLE_EXECUTABLE_DIR: portableExecutableDir },
+        })
+      } finally {
+        console.error = originalConsoleError
+      }
+
+      assert.deepEqual(calls, ['getPath:exe', 'exit:1'])
+    }
+  })
+
   it('rejects profile, temp, and portable junction roots before any app.setPath call', async(t) => {
     for (const linkedRoot of ['profile', 'temp', 'portable']) {
       await t.test(linkedRoot, async() => {

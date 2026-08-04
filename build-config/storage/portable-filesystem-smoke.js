@@ -2,6 +2,7 @@ const assert = require('node:assert/strict')
 const childProcess = require('node:child_process')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
+const Module = require('node:module')
 const path = require('node:path')
 const loadTsModule = require('../../scripts/test-utils/load-ts-module.js')
 const {
@@ -9,15 +10,6 @@ const {
   revalidateDirectDirectory,
   validateDirectDirectory,
 } = require('../../src/main/storage/directDirectory.js')
-const {
-  isolateOwnedPath,
-  reclaimIsolatedPayload,
-} = require('../../src/main/storage/exclusiveIsolation.js')
-const {
-  acquireMigrationLease,
-  releaseMigrationLease,
-} = require('../../src/main/migration/migrationLease.js')
-
 const EXPECTED_FILESYSTEMS = new Set(['ntfs', 'fat32', 'exfat'])
 const DISPOSABLE_ROOT_NAME = /^lx-portable-fs-smoke-[a-z0-9_-]+$/
 const RUN_ROOT_NAME = /^lx-portable-smoke-run-[a-f0-9]{32}$/
@@ -26,6 +18,7 @@ const projectRoot = path.resolve(__dirname, '../..')
 const directDirectoryPath = require.resolve('../../src/main/storage/directDirectory.js')
 const exclusiveArtifactPath = require.resolve('../../src/main/storage/exclusiveArtifact.js')
 const exclusiveIsolationPath = require.resolve('../../src/main/storage/exclusiveIsolation.js')
+const migrationLeasePath = require.resolve('../../src/main/migration/migrationLease.js')
 const databaseBackupPath = path.resolve(__dirname, '../../src/main/worker/dbService/databaseBackup.ts')
 const storagePathsPath = path.resolve(__dirname, '../../src/main/utils/storagePaths.ts')
 const tempLifecyclePath = path.resolve(__dirname, '../../src/main/utils/tempLifecycle.ts')
@@ -56,14 +49,50 @@ const verifyDirectFile = (filePath, expectedIdentity, expectedBytes) => {
   assert.deepEqual(fs.readFileSync(filePath), expectedBytes)
 }
 
-const runLeaseFlow = async runRoot => {
+const withFilesystemAdapter = (fsApi, action) => {
+  const originalLoad = Module._load
+  Module._load = function(request, parent, isMain) {
+    if (request == 'node:fs' || request == 'fs') return fsApi
+    if (request == 'node:fs/promises' || request == 'fs/promises') return fsApi.promises
+    return originalLoad.call(this, request, parent, isMain)
+  }
+  try {
+    return action()
+  } finally {
+    Module._load = originalLoad
+  }
+}
+
+const filesystemMocks = fsApi => ({
+  fs: fsApi,
+  'node:fs': fsApi,
+  'fs/promises': fsApi.promises,
+  'node:fs/promises': fsApi.promises,
+})
+
+const loadLeaseProductionModule = fsApi => {
+  delete require.cache[migrationLeasePath]
+  delete require.cache[directDirectoryPath]
+  return withFilesystemAdapter(fsApi, () => require(migrationLeasePath))
+}
+
+const loadIsolationProductionModules = fsApi => {
+  delete require.cache[exclusiveIsolationPath]
+  delete require.cache[directDirectoryPath]
+  return withFilesystemAdapter(fsApi, () => ({
+    direct: require(directDirectoryPath),
+    isolation: require(exclusiveIsolationPath),
+  }))
+}
+
+const runLeaseFlow = async(runRoot, leaseModule) => {
   const leaseRoot = path.join(runRoot, 'lease-root')
   fs.mkdirSync(leaseRoot)
   const rootIdentity = identityOf(fs.lstatSync(leaseRoot, { bigint: true }))
   const lockPath = path.join(leaseRoot, '.portable-profile-migration.lock')
   let lease
   try {
-    lease = await acquireMigrationLease({
+    lease = await leaseModule.acquireMigrationLease({
       rootPath: leaseRoot,
       lockPath,
       logger: { info() {}, warn() {}, error() {} },
@@ -76,7 +105,7 @@ const runLeaseFlow = async runRoot => {
     assert.deepEqual(fs.readdirSync(lockPath), [])
     assert.deepEqual(identityOf(lockStat), lease.lockIdentity)
   } finally {
-    if (lease != null) await releaseMigrationLease(lease)
+    if (lease != null) await leaseModule.releaseMigrationLease(lease)
   }
   assert.deepEqual(identityOf(fs.lstatSync(leaseRoot, { bigint: true })), rootIdentity)
   assert.equal(fs.existsSync(lockPath), false)
@@ -94,7 +123,7 @@ const runProductionBackupFlow = (runRoot, fsApi) => {
   // The nested loader hook can inject the adapter only when these CommonJS dependencies are reloaded.
   delete require.cache[exclusiveArtifactPath]
   delete require.cache[directDirectoryPath]
-  const backupModule = loadTsModule(databaseBackupPath, { 'node:fs': fsApi })
+  const backupModule = withFilesystemAdapter(fsApi, () => loadTsModule(databaseBackupPath, filesystemMocks(fsApi)))
 
   const source = new Database(path.toNamespacedPath(sourcePath))
   let guard
@@ -157,29 +186,34 @@ const runProductionBackupFlow = (runRoot, fsApi) => {
   }
 }
 
-const loadThemeProductionModules = () => {
+const loadThemeProductionModules = fsApi => {
   delete require.cache[exclusiveIsolationPath]
   delete require.cache[exclusiveArtifactPath]
   delete require.cache[directDirectoryPath]
-  const storagePaths = loadTsModule(storagePathsPath)
-  return {
-    lifecycle: loadTsModule(tempLifecyclePath, {
-      '@main/utils/storagePaths': storagePaths,
-    }),
-    theme: loadTsModule(themeManagerPath, {
-      '@main/utils/storagePaths': storagePaths,
-    }),
-  }
+  return withFilesystemAdapter(fsApi, () => {
+    const mocks = filesystemMocks(fsApi)
+    const storagePaths = loadTsModule(storagePathsPath, mocks)
+    return {
+      lifecycle: loadTsModule(tempLifecyclePath, {
+        ...mocks,
+        '@main/utils/storagePaths': storagePaths,
+      }),
+      theme: loadTsModule(themeManagerPath, {
+        ...mocks,
+        '@main/utils/storagePaths': storagePaths,
+      }),
+    }
+  })
 }
 
-const runSyntheticThemeFlow = async runRoot => {
+const runSyntheticThemeFlow = async(runRoot, fsApi) => {
   const profileRoot = path.join(runRoot, 'theme-profile')
   const tempRoot = path.join(runRoot, 'theme-temp')
   const sourcePath = path.join(runRoot, 'theme-source.png')
   fs.mkdirSync(profileRoot)
   fs.mkdirSync(tempRoot)
   fs.writeFileSync(sourcePath, pngBytes, { flag: 'wx' })
-  const { lifecycle, theme } = loadThemeProductionModules()
+  const { lifecycle, theme } = loadThemeProductionModules(fsApi)
   const reservation = await lifecycle.prepareRunTempLifecycle({ tempRoot, runId: crypto.randomUUID() })
   const runTemp = await lifecycle.createRunTempHandle({ reservation })
   try {
@@ -199,37 +233,37 @@ const runSyntheticThemeFlow = async runRoot => {
   }
 }
 
-const runFileIsolationFlow = async runRoot => {
-  const root = validateDirectDirectory(runRoot)
+const runFileIsolationFlow = async(runRoot, modules) => {
+  const root = modules.direct.validateDirectDirectory(runRoot)
   try {
     const basename = 'portable-file-isolation'
     const sourcePath = path.join(root.path, basename)
     const expectedBytes = Buffer.from('portable file isolation bytes')
     fs.writeFileSync(sourcePath, expectedBytes, { flag: 'wx' })
     const identity = identityOf(fs.lstatSync(sourcePath, { bigint: true }))
-    const result = await isolateOwnedPath({
+    const result = await modules.isolation.isolateOwnedPath({
       source: { root, path: sourcePath, basename, identity, kind: 'file' },
       prefix: '.portable-file-isolation-',
       verifySource: async payloadPath => verifyDirectFile(payloadPath, identity, expectedBytes),
     })
     assert.equal(result.state, 'isolated')
     verifyDirectFile(result.guard.payloadPath, identity, expectedBytes)
-    const reclaimed = await reclaimIsolatedPayload({
+    const reclaimed = await modules.isolation.reclaimIsolatedPayload({
       guard: result.guard,
       verifyPayload: async payloadPath => verifyDirectFile(payloadPath, identity, expectedBytes),
     })
     assert.equal(reclaimed.state, 'reclaimed')
     assert.equal(fs.existsSync(sourcePath), false)
     assert.equal(fs.existsSync(result.guard.isolationPath), false)
-    revalidateDirectDirectory(root)
+    modules.direct.revalidateDirectDirectory(root)
     return 'passed'
   } finally {
-    closeDirectDirectory(root)
+    modules.direct.closeDirectDirectory(root)
   }
 }
 
-const runDirectoryIsolationFlow = async runRoot => {
-  const root = validateDirectDirectory(runRoot)
+const runDirectoryIsolationFlow = async(runRoot, modules) => {
+  const root = modules.direct.validateDirectDirectory(runRoot)
   try {
     const basename = 'portable-directory-isolation'
     const sourcePath = path.join(root.path, basename)
@@ -245,21 +279,21 @@ const runDirectoryIsolationFlow = async runRoot => {
       assert.deepEqual(fs.readdirSync(payloadPath), ['marker'])
       assert.deepEqual(fs.readFileSync(path.join(payloadPath, 'marker')), markerBytes)
     }
-    const result = await isolateOwnedPath({
+    const result = await modules.isolation.isolateOwnedPath({
       source: { root, path: sourcePath, basename, identity, kind: 'directory' },
       prefix: '.portable-directory-isolation-',
       verifySource: verifyDirectory,
     })
     assert.equal(result.state, 'isolated')
     await verifyDirectory(result.guard.payloadPath)
-    const reclaimed = await reclaimIsolatedPayload({ guard: result.guard, verifyPayload: verifyDirectory })
+    const reclaimed = await modules.isolation.reclaimIsolatedPayload({ guard: result.guard, verifyPayload: verifyDirectory })
     assert.equal(reclaimed.state, 'reclaimed')
     assert.equal(fs.existsSync(sourcePath), false)
     assert.equal(fs.existsSync(result.guard.isolationPath), false)
-    revalidateDirectDirectory(root)
+    modules.direct.revalidateDirectDirectory(root)
     return 'passed'
   } finally {
-    closeDirectDirectory(root)
+    modules.direct.closeDirectDirectory(root)
   }
 }
 
@@ -271,14 +305,15 @@ const runSyntheticPortableFlows = async({ root, expectedFs, probeFilesystem, fsA
   }
   const actualFilesystem = normalizeFilesystem(await probeFilesystem(root))
   if (actualFilesystem != expectedFs) throw smokeError('smoke_filesystem_mismatch')
+  const leaseModule = loadLeaseProductionModule(fsApi)
   return {
     filesystem: actualFilesystem,
     flows: {
-      lock: await runLeaseFlow(root),
+      lock: await runLeaseFlow(root, leaseModule),
       uniqueBackup: runProductionBackupFlow(root, fsApi),
-      themePublication: await runSyntheticThemeFlow(root),
-      fileIsolation: await runFileIsolationFlow(root),
-      directoryIsolation: await runDirectoryIsolationFlow(root),
+      themePublication: await runSyntheticThemeFlow(root, fsApi),
+      fileIsolation: await runFileIsolationFlow(root, loadIsolationProductionModules(fsApi)),
+      directoryIsolation: await runDirectoryIsolationFlow(root, loadIsolationProductionModules(fsApi)),
     },
   }
 }

@@ -721,9 +721,11 @@ const analyzeOwnershipFiles = files => {
       if (record.kinds.includes('source') && calleeValues.some(value => [
         'module:fs.link',
         'module:fs.linkSync',
+        'module:fs.promises.link',
         'module:fs/promises.link',
         'module:node:fs.link',
         'module:node:fs.linkSync',
+        'module:node:fs.promises.link',
         'module:node:fs/promises.link',
       ].includes(value))) {
         addFinding('production-hard-link', record, node)
@@ -822,6 +824,21 @@ describe('structured ownership analyzer regressions', () => {
         text: "import { link as createLink } from 'node:fs/promises'; createLink('source', 'target')",
       },
       {
+        file: 'src/main/promises-member.ts',
+        kinds: ['source'],
+        text: "const fs = require('node:fs'); fs.promises.link('source', 'target')",
+      },
+      {
+        file: 'src/main/promises-member-fs.ts',
+        kinds: ['source'],
+        text: "const fs = require('fs'); fs.promises['li' + 'nk']('source', 'target')",
+      },
+      {
+        file: 'src/main/promises-member-alias.ts',
+        kinds: ['source'],
+        text: "const fs = require('node:fs'); const promises = fs['pro' + 'mises']; const createLink = promises.link; createLink('source', 'target')",
+      },
+      {
         file: 'src/main/aliased.ts',
         kinds: ['source'],
         text: "import * as fs from 'node:fs'; const createLink = fs.linkSync; createLink('source', 'target')",
@@ -837,6 +854,9 @@ describe('structured ownership analyzer regressions', () => {
       { code: 'production-hard-link', file: 'src/main/computed.ts', line: 1 },
       { code: 'production-hard-link', file: 'src/main/destructured.ts', line: 1 },
       { code: 'production-hard-link', file: 'src/main/direct.ts', line: 1 },
+      { code: 'production-hard-link', file: 'src/main/promises-member-alias.ts', line: 1 },
+      { code: 'production-hard-link', file: 'src/main/promises-member-fs.ts', line: 1 },
+      { code: 'production-hard-link', file: 'src/main/promises-member.ts', line: 1 },
       { code: 'production-hard-link', file: 'src/main/promises.ts', line: 1 },
     ])
   })

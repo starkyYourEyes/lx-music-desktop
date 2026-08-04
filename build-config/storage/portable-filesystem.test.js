@@ -11,18 +11,85 @@ const integrationChild = process.env.LX_PORTABLE_FS_INTEGRATION_CHILD == '1'
 
 const loadSmoke = () => require('./portable-filesystem-smoke.js')
 
-const withoutLinkAndDirectoryFsync = fsApi => new Proxy(fsApi, {
-  get(target, property, receiver) {
-    if (property == 'link' || property == 'linkSync') return undefined
-    if (property == 'fsyncSync') {
-      return descriptor => {
-        if (target.fstatSync(descriptor).isDirectory()) throw new Error('directory_fsync_unsupported')
-        return target.fsyncSync(descriptor)
+const withoutLinkAndDirectoryFsync = fsApi => {
+  const unsupported = () => Object.assign(new Error('portable_operation_unsupported'), {
+    code: 'portable_operation_unsupported',
+  })
+  const promises = new Proxy(fsApi.promises, {
+    get(target, property, receiver) {
+      if (property == 'link') return async() => { throw unsupported() }
+      if (property == 'open') {
+        return async(...args) => {
+          const handle = await Reflect.apply(target.open, target, args)
+          return new Proxy(handle, {
+            get(fileHandle, handleProperty) {
+              if (handleProperty == 'sync') {
+                return async() => {
+                  if ((await fileHandle.stat()).isDirectory()) throw unsupported()
+                  return await fileHandle.sync()
+                }
+              }
+              const value = Reflect.get(fileHandle, handleProperty, fileHandle)
+              return typeof value == 'function' ? value.bind(fileHandle) : value
+            },
+          })
+        }
       }
-    }
-    return Reflect.get(target, property, receiver)
-  },
-})
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  return new Proxy(fsApi, {
+    get(target, property, receiver) {
+      if (property == 'linkSync') return () => { throw unsupported() }
+      if (property == 'link') return (...args) => process.nextTick(args.at(-1), unsupported())
+      if (property == 'promises') return promises
+      if (property == 'fsyncSync') {
+        return descriptor => {
+          if (target.fstatSync(descriptor).isDirectory()) throw unsupported()
+          return target.fsyncSync(descriptor)
+        }
+      }
+      if (property == 'fsync') {
+        return (descriptor, callback) => {
+          target.fstat(descriptor, (error, stat) => {
+            if (error != null) return callback(error)
+            if (stat.isDirectory()) return callback(unsupported())
+            target.fsync(descriptor, callback)
+          })
+        }
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+}
+
+const trackFilesystemPaths = (fsApi, observedPaths) => {
+  const track = args => {
+    if (typeof args[0] == 'string') observedPaths.add(path.resolve(args[0]))
+  }
+  const trackMethods = target => new Proxy(target, {
+    get(innerTarget, property, receiver) {
+      const value = Reflect.get(innerTarget, property, receiver)
+      if (typeof value != 'function') return value
+      return (...args) => {
+        track(args)
+        return Reflect.apply(value, innerTarget, args)
+      }
+    },
+  })
+  const promises = trackMethods(fsApi.promises)
+  return new Proxy(fsApi, {
+    get(target, property, receiver) {
+      if (property == 'promises') return promises
+      const value = Reflect.get(target, property, receiver)
+      if (typeof value != 'function') return value
+      return (...args) => {
+        track(args)
+        return Reflect.apply(value, target, args)
+      }
+    },
+  })
+}
 
 const createFixture = () => {
   const fixture = createTestStorageRoot('portable-filesystem')
@@ -36,11 +103,40 @@ const createFixture = () => {
 }
 
 if (supportsDatabase) {
+  test('rejects every hard-link and directory-fsync surface in the portable adapter', async() => {
+    const fixture = createFixture()
+    const fsApi = withoutLinkAndDirectoryFsync(fs)
+    const sourcePath = path.join(fixture.path, 'adapter-source')
+    const targetPath = path.join(fixture.path, 'adapter-target')
+    let descriptor
+    let handle
+    try {
+      fs.writeFileSync(sourcePath, 'source')
+      assert.throws(() => fsApi.linkSync(sourcePath, targetPath), /portable_operation_unsupported/)
+      await assert.rejects(new Promise((resolve, reject) => {
+        fsApi.link(sourcePath, targetPath, error => error == null ? resolve() : reject(error))
+      }), /portable_operation_unsupported/)
+      await assert.rejects(fsApi.promises.link(sourcePath, targetPath), /portable_operation_unsupported/)
+
+      descriptor = fs.openSync(fixture.runRoot, 'r')
+      await assert.rejects(new Promise((resolve, reject) => {
+        fsApi.fsync(descriptor, error => error == null ? resolve() : reject(error))
+      }), /portable_operation_unsupported/)
+      handle = await fsApi.promises.open(fixture.runRoot, 'r')
+      await assert.rejects(handle.sync(), /portable_operation_unsupported/)
+    } finally {
+      if (handle != null) await handle.close()
+      if (descriptor != null) fs.closeSync(descriptor)
+      fixture.cleanup()
+    }
+  })
+
   test('runs lock backup theme file-isolation and directory-isolation flows without link support', async() => {
     const fixture = createFixture()
     try {
       const { runSyntheticPortableFlows } = loadSmoke()
-      const fsApi = withoutLinkAndDirectoryFsync(fs)
+      const observedPaths = new Set()
+      const fsApi = withoutLinkAndDirectoryFsync(trackFilesystemPaths(fs, observedPaths))
       const report = await runSyntheticPortableFlows({
         root: fixture.runRoot,
         expectedFs: 'ntfs',
@@ -54,6 +150,15 @@ if (supportsDatabase) {
         themePublication: 'passed',
         uniqueBackup: 'passed',
       })
+      for (const expectedPath of [
+        'lease-root',
+        'portable-backup-artifacts',
+        'theme-profile',
+        'portable-file-isolation',
+        'portable-directory-isolation',
+      ]) {
+        assert.equal([...observedPaths].some(candidate => candidate.includes(expectedPath)), true, expectedPath)
+      }
     } finally {
       fixture.cleanup()
     }
@@ -87,16 +192,21 @@ if (supportsDatabase) {
   })
 } else {
   test('runs SQLite portable integrations under the installed Electron ABI', () => {
+    const environment = {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1',
+      LX_PORTABLE_FS_INTEGRATION_CHILD: '1',
+    }
+    delete environment.NODE_TEST_CONTEXT
     const result = require('node:child_process').spawnSync(require('electron'), ['--test', __filename], {
       encoding: 'utf8',
-      env: {
-        ...process.env,
-        ELECTRON_RUN_AS_NODE: '1',
-        LX_PORTABLE_FS_INTEGRATION_CHILD: '1',
-      },
+      env: environment,
       windowsHide: true,
     })
-    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const tap = `${result.stdout}${result.stderr}`
+    assert.equal(result.status, 0, tap)
+    assert.match(tap, /# fail 0(?:\r?\n|$)/, tap)
+    assert.doesNotMatch(tap, /(?:^|\r?\n)not ok /, tap)
   })
 }
 

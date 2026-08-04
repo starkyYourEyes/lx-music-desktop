@@ -17,8 +17,10 @@ const deferred = () => {
 
 const loadAuthorizationModule = () => {
   const cacheValidation = loadTsModule(path.join(root, 'src/common/storage/cacheValidation.ts'))
+  const qqMusicAuth = loadTsModule(path.join(root, 'src/main/modules/qqMusic/auth.ts'))
   return loadTsModule(path.join(root, 'src/main/services/musicUrlAuthorization.ts'), {
     '@common/storage/cacheValidation': cacheValidation,
+    '@main/modules/qqMusic/auth': qqMusicAuth,
   })
 }
 
@@ -35,7 +37,7 @@ const createAuthorizationFixture = () => {
   const storedProviders = []
   const accountsByProvider = new Map([
     ['netease', { cookie: 'netease-cookie', profile: profiles.wy }],
-    ['qq_music', { cookie: 'qq-cookie', profile: profiles.tx }],
+    ['qq_music', { cookie: 'uin=8; qqmusic_key=qq-key', profile: profiles.tx }],
   ])
   const accounts = {
     getCookie(provider) {
@@ -280,6 +282,21 @@ describe('main-owned music URL account generations', () => {
     assert.equal(await fixture.service.authorize('wy'), null)
     fixture.accountsByProvider.set('qq_music', { cookie: 'cookie', profile: { uin: '', nickname: 'Q' } })
     assert.equal(await fixture.service.authorize('tx'), null)
+  })
+
+  it('authorizes QQ Music only when the authenticated cookie UIN matches the public profile', async() => {
+    const fixture = createAuthorizationFixture()
+    fixture.accountsByProvider.set('qq_music', { cookie: 'qqmusic_key=qq-key', profile: profiles.tx })
+    assert.equal(await fixture.service.authorize('tx'), null)
+    fixture.accountsByProvider.set('qq_music', { cookie: 'uin=9; qqmusic_key=qq-key', profile: profiles.tx })
+    assert.equal(await fixture.service.authorize('tx'), null)
+    fixture.accountsByProvider.set('qq_music', { cookie: 'uin=8; qqmusic_key=qq-key', profile: profiles.tx })
+    assert.deepEqual(await fixture.service.authorize('tx'), {
+      version: 1,
+      provider: 'tx',
+      accountScope: 'profile-v1:uin:8',
+      generation: 1,
+    })
   })
 
   it('throws stale errors with fixed code and message and no request secrets', async() => {

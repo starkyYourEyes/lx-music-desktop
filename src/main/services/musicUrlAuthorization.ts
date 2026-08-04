@@ -1,4 +1,5 @@
 import type { AccountRepository } from '@main/storage/accounts/accountRepository'
+import { getQQMusicAccountUin } from '@main/modules/qqMusic/auth'
 import {
   neteaseAccountScope,
   qqMusicAccountScope,
@@ -73,9 +74,14 @@ export const createMusicUrlAuthorizationService = ({
 
   const currentScope = (provider: PersistentMusicUrlProviderV1): string | null => {
     const repositoryProvider = accountProvider(provider)
-    if (!accounts.getCookie(repositoryProvider)) return null
+    const cookie = accounts.getCookie(repositoryProvider)
+    if (!cookie) return null
     const profile = accounts.getStatus(repositoryProvider).profile
-    return provider == 'wy' ? neteaseAccountScope(profile) : qqMusicAccountScope(profile)
+    if (provider == 'wy') return neteaseAccountScope(profile)
+    const accountScope = qqMusicAccountScope(profile)
+    return accountScope != null && accountScope == qqMusicAccountScope({ uin: getQQMusicAccountUin(cookie) })
+      ? accountScope
+      : null
   }
 
   const invalidate = async(provider: PersistentMusicUrlProviderV1, accountScope: string): Promise<void> => {

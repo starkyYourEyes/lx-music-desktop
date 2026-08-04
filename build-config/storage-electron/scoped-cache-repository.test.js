@@ -166,7 +166,9 @@ describe('scoped URL cache repository', () => {
     await put({ ...urlKey('profile-v1:uin:a', 1), url: 'https://media.invalid/a' })
     await put({ ...urlKey('profile-v1:uin:b', 1, { sourceTrackId: 'b' }), url: 'https://media.invalid/b' })
     await put({ ...urlKey('profile-v1:user-id:9', 1, { provider: 'wy', sourceTrackId: 'c' }), url: 'https://media.invalid/c' })
-    assert.equal(await invalidateAccount({ provider: 'tx', accountScope: 'profile-v1:uin:a' }), 1)
+    assert.deepEqual(await invalidateAccount({ provider: 'tx', accountScope: 'profile-v1:uin:a' }), {
+      status: 'completed', deletedRows: 1,
+    })
     assert.equal(await invalidateSource({ provider: 'tx' }), 1)
     assert.deepEqual(await cacheDb.runCacheRead(db => db.prepare(`SELECT provider, count(*) AS count FROM music_urls GROUP BY provider`).all()), {
       status: 'hit', value: [{ provider: 'wy', count: 1 }],

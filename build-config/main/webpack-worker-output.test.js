@@ -26,7 +26,7 @@ const compileMainBundle = async(outputPath) => {
   })
 }
 
-test('production bundle creates the database worker with a valid constructor', async() => {
+test('production bundle preserves runtime environment and creates the database worker with a valid constructor', async() => {
   const outputPath = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-main-bundle-'))
 
   try {
@@ -36,6 +36,16 @@ test('production bundle creates the database worker with a valid constructor', a
       .filter(filename => filename.endsWith('.js') && filename !== 'dbService.worker.js')
       .map(filename => fs.readFileSync(path.join(outputPath, filename), 'utf8'))
       .join('\n')
+
+    assert.match(
+      applicationBundle,
+      /runtime = \{ platform: process\.platform, env: process\.env \}/,
+    )
+    assert.doesNotMatch(
+      applicationBundle,
+      /env: \(\{"NODE_ENV":"production"\}\)/,
+    )
+
     const workerConstructors = applicationBundle.match(/new external_node_worker_threads_\.Worker\(new URL\(/g) ?? []
 
     assert.doesNotMatch(applicationBundle, /Worker__webpack_require__\.wc/)

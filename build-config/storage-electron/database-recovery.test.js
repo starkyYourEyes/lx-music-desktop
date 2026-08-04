@@ -11,7 +11,7 @@ const typescript = require('typescript')
 require.extensions['.ts'] = (module, filename) => {
   const source = fs.readFileSync(filename, 'utf8')
   const output = typescript.transpileModule(source, {
-    compilerOptions: { module: typescript.ModuleKind.CommonJS, esModuleInterop: true },
+    compilerOptions: { target: typescript.ScriptTarget.ESNext, module: typescript.ModuleKind.CommonJS, esModuleInterop: true },
   }).outputText
   module._compile(output, filename)
 }
@@ -1079,61 +1079,195 @@ describe('database startup orchestration', () => {
   it('publishes committed schema 7 state before propagating a backup guard close failure', async() => {
     const paths = makePaths('lx-recovery-advance-close-failure-')
     createCurrentDatabase(paths.databasePath).close()
-    const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
-    const dbService = loadDbServiceWithBoundaries({
-      backupModule: {
-        ...actualBackup,
-        completeOnlineBackup(...args) {
-          const guard = actualBackup.completeOnlineBackup(...args)
-          return Object.freeze({
-            ...guard,
-            close() {
-              guard.close()
-              throw Object.assign(new Error('injected backup guard close failure'), {
-                code: 'injected_backup_guard_close_failure',
-              })
-            },
-          })
-        },
-      },
-    })
-    const cutover = require('../../src/main/migration/cache/cutover.ts')
-    const originals = {
-      markerRowSha256: cutover.markerRowSha256,
-      verifyCutoverBackup: cutover.verifyCutoverBackup,
-      verifySchema6CutoverPrerequisites: cutover.verifySchema6CutoverPrerequisites,
-      verifySchema7SteadyState: cutover.verifySchema7SteadyState,
+    const fixtureCacheModulePaths = [
+      '../../src/main/worker/dbService/migrations/index.ts',
+      '../../src/main/worker/dbService/migrations/0007_cache_cleanup.ts',
+      '../../src/main/worker/dbService/cacheDb.ts',
+      '../../src/main/worker/dbService/modules/phase3/index.ts',
+      '../../src/main/worker/dbService/modules/lyric/raw/repository.ts',
+      '../../src/main/worker/dbService/modules/music_url/index.ts',
+      '../../src/main/worker/dbService/modules/music_other_source/index.ts',
+      '../../src/main/worker/dbService/modules/cacheLifecycle/prune.ts',
+      '../../src/main/migration/cache/rawLyrics.ts',
+      '../../src/main/migration/cache/cutover.ts',
+    ]
+    const fixtureModulePaths = [
+      '../../src/main/worker/dbService/db.ts',
+      '../../src/main/worker/dbService/databaseBackup.ts',
+      '../../src/main/worker/dbService/verifyDB.ts',
+      ...fixtureCacheModulePaths,
+    ]
+    const resetFixtureModules = (modulePaths = fixtureModulePaths) => {
+      for (const filename of modulePaths) {
+        try { delete require.cache[require.resolve(filename)] } catch {}
+      }
     }
-    Object.assign(cutover, {
-      markerRowSha256: () => 'a'.repeat(64),
-      verifyCutoverBackup: () => {},
-      verifySchema6CutoverPrerequisites: () => ({ readWriteMarker: {} }),
-      verifySchema7SteadyState: database => {
-        const marker = cutover.readBackupPreparedMarker(database)
-        return {
-          readWriteMarker: {},
-          backupPreparedMarker: marker == null
-            ? null
-            : { ...marker, details: JSON.parse(marker.detailsJson) },
-        }
-      },
-    })
+    resetFixtureModules()
+    let dbService = null
+    let cacheDb = null
+    let injectedCloseCalls = 0
     try {
+      const actualBackup = require('../../src/main/worker/dbService/databaseBackup.ts')
+      dbService = loadDbServiceWithBoundaries({
+        backupModule: {
+          ...actualBackup,
+          completeOnlineBackup(...args) {
+            const guard = actualBackup.completeOnlineBackup(...args)
+            return Object.freeze({
+              ...guard,
+              close() {
+                guard.close()
+                injectedCloseCalls++
+                throw Object.assign(new Error('injected backup guard close failure'), {
+                  code: 'injected_backup_guard_close_failure',
+                })
+              },
+            })
+          },
+        },
+      })
       const initialized = await dbService.init(initOptions(paths))
       assert.equal(initialized.status, 'ready')
+      const database = dbService.getAppDB()
+      const phase3 = require('../../src/common/storage/phase3.ts')
+      const manifest = phase3.createPhase3Manifest({
+        version: 1,
+        completedAtMs: 1,
+        checks: {
+          credentials: { state: 'complete', evidenceSha256: 'a'.repeat(64) },
+          accountProfile: { state: 'complete', evidenceSha256: 'b'.repeat(64) },
+          phase2: { state: 'complete', evidenceSha256: 'c'.repeat(64) },
+          playbackActivity: { state: 'complete', evidenceSha256: 'd'.repeat(64) },
+          quarantine: { state: 'complete', evidenceSha256: 'e'.repeat(64) },
+          playbackWriter: { state: 'complete', evidenceSha256: 'f'.repeat(64) },
+          playbackReader: { state: 'complete', evidenceSha256: '0'.repeat(64) },
+        },
+      })
+      const manifestJson = phase3.phase3ManifestJson(manifest)
+      database.prepare(`
+        INSERT INTO migration_markers(name, source_sha256, completed_at_ms, details_json)
+        VALUES (?, ?, ?, ?)
+      `).run('legacy_data_v1.cross_artifact_complete', phase3.phase3ManifestSha256(manifest), 1, manifestJson)
+
+      cacheDb = require('../../src/main/worker/dbService/cacheDb.ts')
+      assert.deepEqual(await cacheDb.openCacheDatabase(), {
+        status: 'created',
+        schemaVersion: 1,
+        diagnostic: null,
+      })
+      const emptySha256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+      const rawLyrics = require('../../src/main/migration/cache/rawLyrics.ts')
+      assert.deepEqual(await rawLyrics.migrateRawLyrics({ nowMs: 10 }), {
+        status: 'complete',
+        sourceRows: 0,
+        sourceOwnerGroups: 0,
+        skippedInvalidRows: 0,
+        sourceSha256: emptySha256,
+        targetRows: 0,
+        targetOwnerGroups: 0,
+        targetSha256: emptySha256,
+      })
+      const cutover = require('../../src/main/migration/cache/cutover.ts')
+      const attestation = await cutover.attestSchema6TypedOwnership(database, 20)
+      assert.equal(attestation.status, 'completed')
+      const prerequisites = cutover.verifySchema6CutoverPrerequisites(database)
+      assert.equal(prerequisites.rawMarker.name, 'legacy_cache_v1.raw_lyrics')
+      assert.equal(prerequisites.rawLyricsDeletedRows, 0)
+      assert.deepEqual(prerequisites.readWriteMarker, attestation.value)
 
       await assert.rejects(
         dbService.advanceAppDatabase({ targetSchemaVersion: 7, backupsRoot: paths.backupsRoot }),
-        error => error?.code == 'database_advance_backup_invalid',
+        error => {
+          assert.equal(error?.code, 'database_advance_backup_invalid')
+          assert.equal(error?.message, 'database_advance_backup_invalid')
+          assert.equal(error?.cause, undefined)
+          assert.equal(error?.details, undefined)
+          assert.doesNotMatch(error?.stack ?? '', /injected backup guard close failure/)
+          return true
+        },
       )
 
+      assert.equal(injectedCloseCalls, 1)
       assert.equal(readSchemaVersion(paths.databasePath), 7)
       assert.equal(dbService.getDatabaseInitialization().schemaVersion, 7)
+      const committed = cutover.verifySchema7SteadyState(database)
+      assert.equal(committed.cutoverDetails.version, 2)
+      assert.equal(committed.cutoverDetails.backupRequired, true)
+      assert.equal(cutover.readBackupPreparedMarker(database), null)
+      const committedCutoverMarker = { ...committed.cutoverMarker }
+      const recordedBackupBasename = committed.cutoverDetails.backupBasename
+      const recordedBackupByteLength = committed.cutoverDetails.backupByteLength
+      const recordedBackupSha256 = committed.cutoverDetails.backupSha256
+      const recordedBackupPath = path.join(paths.backupsRoot, recordedBackupBasename)
+      const recordedBackupBytes = fs.readFileSync(recordedBackupPath)
+      assert.equal(recordedBackupBytes.length, recordedBackupByteLength)
+      assert.equal(
+        crypto.createHash('sha256').update(recordedBackupBytes).digest('hex'),
+        recordedBackupSha256,
+      )
+      const committedArtifacts = backupArtifactNames(paths.backupsRoot).sort()
+      assert.deepEqual(committedArtifacts, [recordedBackupBasename])
+
+      const parkedBackupPath = `${recordedBackupPath}.original`
+      const replacementBackupPath = `${recordedBackupPath}.replacement`
+      let replacement = null
+      let originalParked = false
+      try {
+        fs.copyFileSync(recordedBackupPath, replacementBackupPath)
+        replacement = new Database(replacementBackupPath)
+        replacement.prepare(`
+          INSERT INTO local_state(key, version, value_json, updated_at_ms)
+          VALUES ('view_prev_state', 1, '{"replacement":true}', 30)
+          ON CONFLICT(key) DO UPDATE SET
+            version = excluded.version,
+            value_json = excluded.value_json,
+            updated_at_ms = excluded.updated_at_ms
+        `).run()
+        replacement.close()
+        replacement = null
+        fs.renameSync(recordedBackupPath, parkedBackupPath)
+        originalParked = true
+        fs.renameSync(replacementBackupPath, recordedBackupPath)
+        await assert.rejects(
+          dbService.advanceAppDatabase({ targetSchemaVersion: 7, backupsRoot: paths.backupsRoot }),
+          error => error?.code == 'database_advance_backup_invalid',
+        )
+      } finally {
+        try {
+          if (replacement?.open) replacement.close()
+        } finally {
+          try {
+            if (originalParked) {
+              if (fs.existsSync(recordedBackupPath)) fs.unlinkSync(recordedBackupPath)
+              fs.renameSync(parkedBackupPath, recordedBackupPath)
+            }
+          } finally {
+            if (fs.existsSync(replacementBackupPath)) fs.unlinkSync(replacementBackupPath)
+          }
+        }
+      }
+
       const retried = await dbService.advanceAppDatabase({ targetSchemaVersion: 7, backupsRoot: paths.backupsRoot })
       assert.equal(retried.schemaVersion, 7)
-      assert.match(retried.backupPath, /[a-f0-9]{32}\.backup$/)
+      assert.equal(retried.backupPath, recordedBackupPath)
+      assert.equal(injectedCloseCalls, 1)
+      assert.deepEqual(backupArtifactNames(paths.backupsRoot).sort(), committedArtifacts)
+      assert.deepEqual(cutover.verifySchema7SteadyState(database).cutoverMarker, committedCutoverMarker)
+      assert.equal(cutover.readBackupPreparedMarker(database), null)
     } finally {
-      Object.assign(cutover, originals)
+      if (dbService == null) {
+        resetFixtureModules()
+      } else {
+        try {
+          await cacheDb?.closeCacheDatabase()
+        } finally {
+          try {
+            dbService.close()
+          } finally {
+            resetFixtureModules(fixtureCacheModulePaths)
+          }
+        }
+      }
     }
   })
 

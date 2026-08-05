@@ -265,14 +265,20 @@ describe('storage path contract', () => {
   it('prepares only stable Electron runtime roots before asynchronous bootstrap work', () => {
     const root = createFixture('storage-early-electron')
     const portableRoot = path.join(root, 'portable')
+    const roamingRoot = path.join(root, 'roaming')
+    const roamingMigrationTarget = path.join(roamingRoot, PROJECT_IDENTITY.userDataDirName)
+    const applicationRuntimeRoot = path.join(roamingMigrationTarget, 'runtime')
     fs.mkdirSync(portableRoot)
     const { prepareElectronBootstrapPaths } = require(storagePathsModule)
 
     const paths = prepareElectronBootstrapPaths({
-      applicationRuntimeRoot: path.join(root, 'ignored-runtime'),
+      applicationRuntimeRoot,
       portableRoot,
     })
 
+    for (const targetPath of [roamingRoot, roamingMigrationTarget, applicationRuntimeRoot]) {
+      assert.equal(fs.existsSync(targetPath), false)
+    }
     assert.deepEqual(paths, {
       runtimeRoot: path.join(portableRoot, 'runtime'),
       electronUserDataRoot: path.join(portableRoot, 'runtime', 'electron-user-data'),

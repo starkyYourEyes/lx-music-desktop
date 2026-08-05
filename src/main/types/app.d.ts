@@ -70,6 +70,7 @@ declare global {
   var storagePaths: Readonly<StoragePaths>
   var runTempReservation: RunTempReservation | null
   var portableProfileStartup: { token: PortableProfileStartupToken } | null
+  var isPortableProfileCutoverStartup: boolean
   var lx: Lx
   var appWorder: AppWorder
 }

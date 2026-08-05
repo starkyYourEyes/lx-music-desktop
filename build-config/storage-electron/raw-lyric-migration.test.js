@@ -369,6 +369,7 @@ describe('raw lyric cache migration', () => {
     insert.run('x'.repeat(1025), 'tlyric', Buffer.from('long id').toString('base64'), 'raw')
     insert.run('invalid-base64', 'rlyric', 'not base64', 'raw')
     insert.run('invalid-utf8', 'lxlyric', '/w==', 'raw')
+    insert.run('invalid-type', 'unsupported', Buffer.from('unsupported type').toString('base64'), 'raw')
     insert.run('edited', 'lyric', Buffer.from('edited bytes').toString('base64'), 'edited')
     const editedBefore = db.prepare(`SELECT id, type, text, source FROM lyric WHERE source = 'edited'`).all()
     const { rawLyricPut } = require('../../src/main/worker/dbService/modules/lyric/raw/repository.ts')
@@ -382,7 +383,7 @@ describe('raw lyric cache migration', () => {
       status: 'complete',
       sourceRows: 0,
       sourceOwnerGroups: 0,
-      skippedInvalidRows: 4,
+      skippedInvalidRows: 5,
       sourceSha256: emptySha256,
       targetRows: 0,
       targetOwnerGroups: 0,
@@ -404,7 +405,7 @@ describe('raw lyric cache migration', () => {
         tupleEncoding: 'u32be-length-prefixed-utf8-v1',
         sourceRows: 0,
         sourceOwnerGroups: 0,
-        skippedInvalidRows: 4,
+        skippedInvalidRows: 5,
         sourceSha256: emptySha256,
         targetRows: 0,
         targetOwnerGroups: 0,
@@ -425,7 +426,31 @@ describe('raw lyric cache migration', () => {
     assert.equal(db.prepare(`SELECT count(*) AS count FROM migration_markers WHERE name = ?`).get('legacy_cache_v1.raw_lyrics').count, 0)
   })
 
-  it('rejects duplicate valid source tuples before cache mutation', async() => {
+  it('deduplicates byte-identical source tuples and accounts for the skipped row', async() => {
+    await createFixture()
+    const db = dbService.getAppDB()
+    const insert = db.prepare(`INSERT INTO lyric(id, type, text, source) VALUES (?, ?, ?, ?)`)
+    const encoded = Buffer.from('same source').toString('base64')
+    insert.run('duplicate', 'lyric', encoded, 'raw')
+    insert.run('duplicate', 'lyric', encoded, 'raw')
+
+    const { migrateRawLyrics } = require('../../src/main/migration/cache/rawLyrics.ts')
+    const result = await migrateRawLyrics({ nowMs: 100 })
+
+    assert.equal(result.status, 'complete')
+    assert.equal(result.sourceRows, 1)
+    assert.equal(result.skippedInvalidRows, 1)
+    assert.equal(result.targetRows, 1)
+    assert.deepEqual(await cacheDb.runCacheRead(cache => cache.prepare(`
+      SELECT source_track_id AS sourceTrackId, lyric_type AS lyricType, text
+      FROM raw_lyrics WHERE provider = 'legacy'
+    `).all()), {
+      status: 'hit',
+      value: [{ sourceTrackId: 'duplicate', lyricType: 'lyric', text: 'same source' }],
+    })
+  })
+
+  it('rejects conflicting duplicate valid source tuples before cache mutation', async() => {
     await createFixture()
     const db = dbService.getAppDB()
     const insert = db.prepare(`INSERT INTO lyric(id, type, text, source) VALUES (?, ?, ?, ?)`)

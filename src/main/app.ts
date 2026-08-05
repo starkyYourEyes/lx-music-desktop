@@ -40,6 +40,7 @@ export const initGlobalData = () => {
   global.envParams = {
     cmdParams: envParams.cmdParams,
     deeplink: envParams.deeplink,
+    isPortableProfileCutoverStartup: global.isPortableProfileCutoverStartup,
   }
   global.lx = {
     inited: false,
@@ -106,11 +107,6 @@ export const initGlobalData = () => {
 
 export const initSingleInstanceHandle = () => {
   // 单例应用程序
-  if (!app.requestSingleInstanceLock()) {
-    app.quit()
-    process.exit(0)
-  }
-
   app.on('second-instance', (event, argv, cwd) => {
     if (isExistMainWindow()) {
       const envParams = parseEnvParams(argv)

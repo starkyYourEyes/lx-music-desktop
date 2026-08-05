@@ -86,16 +86,21 @@ export const readAuthoritativeRawLyric = (sourceTrackId: string): LX.Music.Lyric
 export const readAuthoritativeRawInventory = (
   db = getAppDB(),
 ): { tuples: RawLyricTuple[], skippedInvalidRows: number } => {
-  const rows = db.prepare('SELECT id, type, text FROM lyric WHERE source = \'raw\' AND type IN (\'lyric\', \'tlyric\', \'rlyric\', \'lxlyric\')').all() as Array<{ id: unknown, type: unknown, text: unknown }>
+  const rows = db.prepare('SELECT id, type, text FROM lyric WHERE source = \'raw\'').all() as Array<{ id: unknown, type: unknown, text: unknown }>
   const tuples: RawLyricTuple[] = []
-  const seen = new Map<string, Set<string>>()
+  const seen = new Map<string, Map<string, string>>()
   let skippedInvalidRows = 0
   for (const row of rows) {
     const text = decode(row.text)
     if (!validId(row.id) || typeof row.type != 'string' || !keys.has(row.type) || text == null) { skippedInvalidRows++; continue }
-    const types = seen.get(row.id) ?? new Set<string>()
-    if (types.has(row.type)) throw failure('raw_lyric_attestation_failed')
-    types.add(row.type)
+    const types = seen.get(row.id) ?? new Map<string, string>()
+    const previous = types.get(row.type)
+    if (previous != null) {
+      if (previous != text) throw failure('raw_lyric_attestation_failed')
+      skippedInvalidRows++
+      continue
+    }
+    types.set(row.type, text)
     seen.set(row.id, types)
     tuples.push({ provider: 'legacy', sourceTrackId: row.id, lyricType: row.type as RawLyricTuple['lyricType'], text })
   }

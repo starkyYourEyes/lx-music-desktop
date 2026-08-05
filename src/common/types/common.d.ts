@@ -54,6 +54,7 @@ declare namespace LX {
   interface EnvParams {
     deeplink?: string | null
     cmdParams: CmdParams
+    isPortableProfileCutoverStartup: boolean
     workAreaSize?: Electron.Size
     screenSize?: Electron.Size
   }

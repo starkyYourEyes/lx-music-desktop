@@ -589,11 +589,15 @@ export function backupPreparedSourceSha256(
 
   const actualTables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: unknown }>)
     .map(row => row.name)
-  if (actualTables.some(name => typeof name != 'string')) throw failure('backup_prepared_source_changed')
+  if (!actualTables.every((name): name is string => typeof name == 'string')) {
+    throw failure('backup_prepared_source_changed')
+  }
   const expectedTableNames = databaseSchema6Contract.tables.map(table => table.name)
+  const applicationTableNames = actualTables.filter(name => !name.startsWith('sqlite_'))
   const hasSqliteSequence = actualTables.includes('sqlite_sequence')
-  const allowedTableNames = new Set([...expectedTableNames, ...(hasSqliteSequence ? ['sqlite_sequence'] : [])])
-  if (actualTables.length != allowedTableNames.size || actualTables.some(name => !allowedTableNames.has(name as string))) {
+  const expectedApplicationTableNames = new Set(expectedTableNames)
+  if (applicationTableNames.length != expectedApplicationTableNames.size ||
+    applicationTableNames.some(name => !expectedApplicationTableNames.has(name))) {
     throw failure('backup_prepared_source_changed')
   }
 
@@ -771,7 +775,12 @@ export const verifySchema6CutoverPrerequisites = (db: Database.Database): {
   const rawMarker = verifyRawMarker(db, 'schema6-current')
   const readWriteMarker = verifyReadWriteMarker(db, rawMarker)
   if (readMarkerRow(db, CUTOVER_MARKER_NAME) != null) throw failure('phase4_cutover_marker_invalid')
-  return { rawMarker, rawLyricsDeletedRows: rawMarkerDetails(rawMarker).sourceRows, readWriteMarker }
+  const rawDetails = rawMarkerDetails(rawMarker)
+  const rawLyricsDeletedRows = rawDetails.sourceRows + rawDetails.skippedInvalidRows
+  if (!Number.isSafeInteger(rawLyricsDeletedRows) || countAuthoritativeRawRows(db) != rawLyricsDeletedRows) {
+    throw failure('raw_lyric_marker_conflict')
+  }
+  return { rawMarker, rawLyricsDeletedRows, readWriteMarker }
 }
 
 export const verifySchema6RollbackState = (db: Database.Database): boolean => {

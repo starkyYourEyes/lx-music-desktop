@@ -313,6 +313,7 @@ describe('portable bootstrap sequencing', () => {
     const electronApp = {
       getPath: () => 'C:\\portable\\app.exe',
       setPath: (name, value) => { setPathCalls.push([name, value]) },
+      requestSingleInstanceLock: () => true,
       exit: code => { calls.push(`exit:${code}`) },
     }
 
@@ -361,6 +362,7 @@ describe('portable bootstrap sequencing', () => {
         temp: 'C:\\temp',
       })[name],
       setPath: (name, value) => { setPathCalls.push([name, value]) },
+      requestSingleInstanceLock: () => true,
       exit: code => { calls.push(`exit:${code}`) },
     }
 
@@ -405,6 +407,7 @@ describe('portable bootstrap sequencing', () => {
         temp: 'C:\\temp',
       })[name],
       setPath: (name, value) => { setPathCalls.push([name, value]) },
+      requestSingleInstanceLock: () => true,
       exit: code => { calls.push(`exit:${code}`) },
     }
 
@@ -421,6 +424,160 @@ describe('portable bootstrap sequencing', () => {
       ['sessionData', expectedElectronPaths.sessionDataRoot],
     ])
     assert.deepEqual(calls, ['exit:1'])
+  })
+
+  it('locks immediately after Electron path publication before portable migration', async() => {
+    const calls = []
+    const { bootstrap } = loadTsModule(path.join(__dirname, bootstrapPath), {
+      electron: { app: {} },
+      './migration/legacyUserData': {
+        preparePortableUserDataPaths: () => ({ appDataPath: 'C:\\portable', userDataPath: 'C:\\portable\\userData' }),
+        migrateLegacyUserData: async() => { throw new Error('unexpected legacy migration') },
+      },
+      './migration/portableProfile': {
+        retireAcknowledgedPortableSource: async() => {
+          calls.push('retire')
+          return { state: 'not-acknowledged' }
+        },
+        preparePortableProfile: async() => {
+          calls.push('prepare')
+          return { state: 'not-present', token: null }
+        },
+      },
+      './utils/storagePaths': {
+        prepareElectronBootstrapPaths: () => expectedElectronPaths,
+        initializeStoragePaths: async() => {
+          calls.push('storage:init')
+          return {
+            paths: { ...expectedElectronPaths, profileRoot: 'C:\\portable\\profile' },
+            runTempReservation: null,
+          }
+        },
+        resolveApplicationCacheRoot: () => 'C:\\cache',
+        resolveApplicationRuntimeRoot: () => expectedElectronPaths.runtimeRoot,
+      },
+    })
+    const electronApp = {
+      getPath: name => name == 'temp' ? 'C:\\temp' : 'C:\\portable\\app.exe',
+      setPath: name => { calls.push(`setPath:${name}`) },
+      requestSingleInstanceLock: () => {
+        calls.push('lock')
+        return true
+      },
+      exit: code => { calls.push(`exit:${code}`) },
+    }
+
+    await bootstrap(electronApp, async() => { calls.push('application') }, { platform: 'win32', env: {} })
+
+    assert.deepEqual(calls, [
+      'setPath:userData',
+      'setPath:sessionData',
+      'lock',
+      'retire',
+      'prepare',
+      'storage:init',
+      'application',
+    ])
+  })
+
+  it('exits a secondary before portable migration or application loading', async() => {
+    const calls = []
+    const unexpected = name => async() => { calls.push(name) }
+    const { bootstrap } = loadTsModule(path.join(__dirname, bootstrapPath), {
+      electron: { app: {} },
+      './migration/legacyUserData': {
+        preparePortableUserDataPaths: () => ({ appDataPath: 'C:\\portable', userDataPath: 'C:\\portable\\userData' }),
+        migrateLegacyUserData: unexpected('legacy:migrate'),
+      },
+      './migration/portableProfile': {
+        retireAcknowledgedPortableSource: unexpected('retire'),
+        preparePortableProfile: unexpected('prepare'),
+      },
+      './utils/storagePaths': {
+        prepareElectronBootstrapPaths: () => expectedElectronPaths,
+        initializeStoragePaths: unexpected('storage:init'),
+        resolveApplicationCacheRoot: () => 'C:\\cache',
+        resolveApplicationRuntimeRoot: () => expectedElectronPaths.runtimeRoot,
+      },
+    })
+    const electronApp = {
+      getPath: () => 'C:\\portable\\app.exe',
+      setPath: name => { calls.push(`setPath:${name}`) },
+      requestSingleInstanceLock: () => {
+        calls.push('lock')
+        return false
+      },
+      exit: code => { calls.push(`exit:${code}`) },
+    }
+
+    await bootstrap(electronApp, unexpected('application'), { platform: 'win32', env: {} })
+
+    assert.deepEqual(calls, [
+      'setPath:userData',
+      'setPath:sessionData',
+      'lock',
+      'exit:0',
+    ])
+  })
+
+  it('defers source-list auto update only while portable profile cutover is active', async() => {
+    const cases = [
+      {
+        name: 'profile promotion',
+        retirement: { state: 'not-acknowledged' },
+        preparation: { state: 'promoted', token: { startupRunId: 'promotion' } },
+        expected: true,
+      },
+      {
+        name: 'source retirement',
+        retirement: { state: 'retired' },
+        preparation: { state: 'already-acknowledged', token: null },
+        expected: true,
+      },
+      {
+        name: 'ordinary startup after retirement',
+        retirement: { state: 'already-retired' },
+        preparation: { state: 'already-acknowledged', token: null },
+        expected: false,
+      },
+    ]
+
+    try {
+      for (const testCase of cases) {
+        const { bootstrap } = loadTsModule(path.join(__dirname, bootstrapPath), {
+          electron: { app: {} },
+          './migration/legacyUserData': {
+            preparePortableUserDataPaths: () => ({ appDataPath: 'C:\\portable', userDataPath: 'C:\\portable\\userData' }),
+            migrateLegacyUserData: async() => { throw new Error('unexpected legacy migration') },
+          },
+          './migration/portableProfile': {
+            retireAcknowledgedPortableSource: async() => testCase.retirement,
+            preparePortableProfile: async() => testCase.preparation,
+          },
+          './utils/storagePaths': {
+            prepareElectronBootstrapPaths: () => expectedElectronPaths,
+            initializeStoragePaths: async() => ({
+              paths: { ...expectedElectronPaths, profileRoot: 'C:\\portable\\profile' },
+              runTempReservation: null,
+            }),
+            resolveApplicationCacheRoot: () => 'C:\\cache',
+            resolveApplicationRuntimeRoot: () => expectedElectronPaths.runtimeRoot,
+          },
+        })
+        const electronApp = {
+          getPath: name => name == 'temp' ? 'C:\\temp' : 'C:\\portable\\app.exe',
+          setPath() {},
+          requestSingleInstanceLock: () => true,
+          exit: code => { throw new Error(`unexpected exit ${code}`) },
+        }
+
+        await bootstrap(electronApp, async() => {}, { platform: 'win32', env: {} })
+
+        assert.equal(globalThis.isPortableProfileCutoverStartup, testCase.expected, testCase.name)
+      }
+    } finally {
+      delete globalThis.isPortableProfileCutoverStartup
+    }
   })
 
   for (const failedPhase of ['retirement', 'preparation']) {
@@ -460,6 +617,7 @@ describe('portable bootstrap sequencing', () => {
       const electronApp = {
         getPath: () => 'C:\\portable\\app.exe',
         setPath: name => { calls.push(`setPath:${name}`) },
+        requestSingleInstanceLock: () => true,
         exit: code => { calls.push(`exit:${code}`) },
       }
 

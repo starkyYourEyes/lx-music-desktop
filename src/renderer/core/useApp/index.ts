@@ -71,7 +71,7 @@ export default () => {
       void initStatusbarLyric()
       sendInited()
 
-      handleListAutoUpdate()
+      if (!envParams.isPortableProfileCutoverStartup) handleListAutoUpdate()
     })
   })
 }

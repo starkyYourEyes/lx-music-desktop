@@ -11,7 +11,7 @@ import {
   type ElectronBootstrapPaths,
 } from './utils/storagePaths'
 
-type BootstrapApp = Pick<typeof app, 'getPath' | 'setPath' | 'exit'>
+type BootstrapApp = Pick<typeof app, 'getPath' | 'setPath' | 'requestSingleInstanceLock' | 'exit'>
 interface BootstrapRuntime {
   platform: NodeJS.Platform
   env: Readonly<NodeJS.ProcessEnv>
@@ -47,6 +47,7 @@ export const bootstrap = async(
   let installedAppDataRoot: string | null = null
   let electronPaths: ElectronBootstrapPaths
   global.portableProfileStartup = null
+  global.isPortableProfileCutoverStartup = false
   global.runTempReservation = null
   try {
     if (portablePaths != null) {
@@ -73,6 +74,10 @@ export const bootstrap = async(
     })
     electronApp.setPath('userData', electronPaths.electronUserDataRoot)
     electronApp.setPath('sessionData', electronPaths.sessionDataRoot)
+    if (!electronApp.requestSingleInstanceLock()) {
+      electronApp.exit(0)
+      return
+    }
   } catch (error) {
     console.error('Electron storage root validation failed; startup has been aborted.', error)
     electronApp.exit(1)
@@ -116,6 +121,7 @@ export const bootstrap = async(
       return
     }
     global.portableProfileStartup = preparation.token == null ? null : { token: preparation.token }
+    global.isPortableProfileCutoverStartup = preparation.token != null || retirement.state == 'retired'
     profileRoot = path.join(portablePaths.appDataPath, 'profile')
     legacyRoot = portablePaths.userDataPath
   } else {

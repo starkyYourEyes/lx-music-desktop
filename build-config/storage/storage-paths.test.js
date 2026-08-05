@@ -498,6 +498,7 @@ describe('early Electron bootstrap', () => {
         throw new Error(`installed path consulted: ${name}`)
       },
       setPath(name, value) { calls.push(`setPath:${name}:${value}`) },
+      requestSingleInstanceLock() { return true },
       exit(code) { calls.push(`exit:${code}`) },
     }
     const { bootstrap } = require(bootstrapModule)
@@ -527,6 +528,7 @@ describe('early Electron bootstrap', () => {
           throw new Error(`installed path consulted: ${name}`)
         },
         setPath(name) { calls.push(`setPath:${name}`) },
+        requestSingleInstanceLock() { return true },
         exit(code) { calls.push(`exit:${code}`) },
       }
       const { bootstrap } = require(bootstrapModule)
@@ -562,6 +564,7 @@ describe('early Electron bootstrap', () => {
         const fakeElectron = {
           getPath(name) { return { exe: path.join(root, 'app.exe'), temp: path.join(root, 'temp') }[name] },
           setPath(name) { calls.push(name) },
+          requestSingleInstanceLock() { return true },
           exit(code) { calls.push(`exit:${code}`) },
         }
         const { bootstrap } = require(bootstrapModule)
@@ -595,6 +598,7 @@ describe('early Electron bootstrap', () => {
         const fakeElectron = {
           getPath(name) { return { exe: path.join(root, 'app.exe'), temp: path.join(root, 'temp') }[name] },
           setPath(name) { calls.push(name) },
+          requestSingleInstanceLock() { return true },
           exit(code) { calls.push(`exit:${code}`) },
         }
         const { bootstrap } = require(bootstrapModule)
@@ -623,6 +627,7 @@ describe('early Electron bootstrap', () => {
         return { exe: path.join(root, 'app.exe'), temp: path.join(root, 'temp') }[name]
       },
       setPath(name) { calls.push(name) },
+      requestSingleInstanceLock() { return true },
       exit(code) { calls.push(`exit:${code}`) },
     }
     const { bootstrap } = require(bootstrapModule)
@@ -660,6 +665,7 @@ describe('early Electron bootstrap', () => {
         calls.push(`setPath:${name}`)
         assert.equal(path.isAbsolute(value), true)
       },
+      requestSingleInstanceLock() { return true },
       exit() { calls.push('exit') },
     }
     const importApplication = async() => { calls.push('import:application') }

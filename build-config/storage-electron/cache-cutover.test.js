@@ -608,6 +608,63 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
     assert.equal(laterStartup.schemaVersion, 7)
   })
 
+  it('does not let SQLite planner statistics prevent backup source binding during schema-7 cutover', async() => {
+    const paths = await createSchema6Fixture('cache-cutover-planner-statistics')
+    const db = dbService.getAppDB()
+    seedLyrics(db)
+    db.exec('ANALYZE')
+    const internalTables = db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name LIKE 'sqlite_stat%'
+      ORDER BY name
+    `).all().map(row => row.name)
+    assert.equal(internalTables.includes('sqlite_stat1'), true)
+
+    assert.deepEqual(await loadPhase4().initializePhase4(), {
+      schemaVersion: 7,
+      typedOwnershipVerified: true,
+    })
+    const backupNames = fs.readdirSync(paths.backupsRoot)
+    assert.equal(backupNames.length, 1)
+    const backupPath = path.join(paths.backupsRoot, backupNames[0])
+    assert.match(backupNames[0], /^lx\.data\.db\.pre-migration-v6-to-v7\.[a-f0-9]{32}\.backup$/)
+    assert.ok(fs.statSync(backupPath).size > 0)
+    assert.equal(loadRawMigration().countAuthoritativeRawRows(db), 0)
+  })
+
+  it('counts duplicate and invalid raw rows while schema 7 deletes every physical authoritative raw row', async() => {
+    await createSchema6Fixture('cache-cutover-duplicate-invalid-raw')
+    const db = dbService.getAppDB()
+    const duplicateText = Buffer.from('duplicate lyric').toString('base64')
+    const insert = db.prepare('INSERT INTO lyric(id, source, type, text) VALUES (?, ?, ?, ?)')
+    insert.run('duplicate-track', 'raw', 'lyric', duplicateText)
+    insert.run('duplicate-track', 'raw', 'lyric', duplicateText)
+    insert.run('invalid-track', 'raw', 'unsupported', Buffer.from('ignored lyric').toString('base64'))
+
+    assert.equal((await cacheDb.openCacheDatabase()).status, 'created')
+    const migration = await loadRawMigration().migrateRawLyrics({ nowMs: 10 })
+    assert.equal(migration.status, 'complete')
+    assert.equal(migration.sourceRows, 1)
+    assert.equal(migration.sourceOwnerGroups, 1)
+    assert.equal(migration.skippedInvalidRows, 2)
+    assert.equal(migration.targetRows, 1)
+    const rawMarker = markerRow(db, 'legacy_cache_v1.raw_lyrics')
+    assert.notEqual(rawMarker, null)
+    const rawDetails = JSON.parse(rawMarker.detailsJson)
+    assert.equal(rawDetails.sourceRows, 1)
+    assert.equal(rawDetails.sourceOwnerGroups, 1)
+    assert.equal(rawDetails.skippedInvalidRows, 2)
+    assert.equal(rawDetails.targetRows, 1)
+
+    assert.deepEqual(await loadPhase4().initializePhase4(), {
+      schemaVersion: 7,
+      typedOwnershipVerified: true,
+    })
+    assert.equal(dbService.getDatabaseHealth().schemaVersion, 7)
+    assert.equal(loadRawMigration().countAuthoritativeRawRows(db), 0)
+    assert.equal(readCutoverDetails().rawLyricsDeletedRows, 3)
+  })
+
   it('writes cutover v2 with exact backup evidence and removes prepared marker atomically', async() => {
     await prepareExistingSchema6('cache-cutover-v2-evidence')
     const result = await advanceExistingSchema6()

@@ -65,6 +65,7 @@ const runMainStartup = async({ appDataPath, materializeApplicationData, mutateLe
   const currentPath = path.join(appDataPath, 'starky-lx-music-desktop')
   let exitCode
   let applicationLoaded = false
+  let singleInstanceLockRequestCount = 0
   const paths = {
     appData: appDataPath,
     exe: path.join(appDataPath, 'LX Music.exe'),
@@ -75,6 +76,10 @@ const runMainStartup = async({ appDataPath, materializeApplicationData, mutateLe
   fs.mkdirSync(paths.temp)
   fs.mkdirSync(localAppData)
   const electronApp = {
+    requestSingleInstanceLock() {
+      singleInstanceLockRequestCount += 1
+      return true
+    },
     exit(code) {
       exitCode = code
     },
@@ -136,7 +141,7 @@ const runMainStartup = async({ appDataPath, materializeApplicationData, mutateLe
     delete global.portableProfileStartup
   }
 
-  return { applicationLoaded, currentPath, exitCode, paths }
+  return { applicationLoaded, currentPath, exitCode, paths, singleInstanceLockRequestCount }
 }
 
 const makeLockMetadata = (pid, createdAt = new Date().toISOString()) => JSON.stringify({
@@ -716,7 +721,7 @@ test('startup migrates legacy data before Electron materializes the default user
   fs.mkdirSync(path.dirname(legacyConfigPath), { recursive: true })
   fs.writeFileSync(legacyConfigPath, 'legacy')
 
-  const { currentPath, paths, applicationLoaded } = await runMainStartup({
+  const { currentPath, paths, applicationLoaded, singleInstanceLockRequestCount } = await runMainStartup({
     appDataPath,
     materializeApplicationData({ currentPath, paths }) {
       const migratedConfigPath = path.join(currentPath, 'LxDatas', 'config.json')
@@ -731,6 +736,7 @@ test('startup migrates legacy data before Electron materializes the default user
   const migratedConfigPath = path.join(currentPath, 'LxDatas', 'config.json')
   const electronUserDataPath = path.join(appDataPath, 'local', 'starky-lx-music-desktop', 'runtime', 'electron-user-data')
   assert.equal(applicationLoaded, true)
+  assert.equal(singleInstanceLockRequestCount, 1)
   assert.equal(fs.existsSync(migratedConfigPath), true, 'legacy config must exist before the Electron lock creates userData')
   assert.equal(fs.readFileSync(migratedConfigPath, 'utf8'), 'legacy')
   assert.equal(paths.userData, electronUserDataPath)

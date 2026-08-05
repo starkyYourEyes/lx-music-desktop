@@ -14,6 +14,7 @@ export interface StoragePaths {
   profileRoot: string
   cacheRoot: string
   runtimeRoot: string
+  electronUserDataRoot: string
   sessionDataRoot: string
   tempRoot: string
   runTempRoot: string
@@ -24,14 +25,29 @@ export interface StoragePaths {
 export interface StoragePathResolutionInput {
   profileRoot: string
   applicationCacheRoot: string
+  applicationRuntimeRoot?: string
   tempBase: string
   portableRoot: string | null
 }
+
+export interface ElectronBootstrapPathInput {
+  applicationRuntimeRoot: string
+  portableRoot: string | null
+}
+
+export type ElectronBootstrapPaths = Readonly<Pick<
+StoragePaths,
+'runtimeRoot' | 'electronUserDataRoot' | 'sessionDataRoot'
+>>
 
 export interface ApplicationCacheRootInput {
   platform: NodeJS.Platform
   env: Readonly<Record<string, string | undefined>>
   homePath: string
+}
+
+export interface ApplicationRuntimeRootInput extends ApplicationCacheRootInput {
+  appDataPath: string
 }
 
 type ResolvedStoragePaths = Omit<StoragePaths, 'runTempRoot'>
@@ -70,6 +86,16 @@ export const resolveApplicationCacheRoot = (input: ApplicationCacheRootInput): s
   return pathApi.join(basePath, PROJECT_IDENTITY.userDataDirName)
 }
 
+export const resolveApplicationRuntimeRoot = (input: ApplicationRuntimeRootInput): string => {
+  const pathApi = input.platform == 'win32' ? path.win32 : path.posix
+  if (input.platform == 'win32') return pathApi.join(resolveApplicationCacheRoot(input), 'runtime')
+  if (input.platform != 'darwin' && input.platform != 'linux') {
+    throw new Error('local_runtime_platform_unsupported')
+  }
+  if (!pathApi.isAbsolute(input.appDataPath)) throw new Error('local_runtime_app_data_invalid')
+  return pathApi.join(input.appDataPath, `${PROJECT_IDENTITY.userDataDirName}-runtime`)
+}
+
 const isOutsideRoot = (root: string, candidate: string): boolean => {
   const relative = path.relative(root, candidate)
   return relative == '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
@@ -95,16 +121,29 @@ export const assertContainedPath = (rootPath: string, candidatePath: string): st
   return candidate
 }
 
+const resolveElectronBootstrapPaths = (input: ElectronBootstrapPathInput): ElectronBootstrapPaths => {
+  const runtimeRoot = input.portableRoot == null
+    ? path.resolve(input.applicationRuntimeRoot)
+    : path.join(path.resolve(input.portableRoot), 'runtime')
+  return Object.freeze({
+    runtimeRoot,
+    electronUserDataRoot: path.join(runtimeRoot, 'electron-user-data'),
+    sessionDataRoot: path.join(runtimeRoot, 'session-data'),
+  })
+}
+
 export const resolveStoragePaths = (input: StoragePathResolutionInput): ResolvedStoragePaths => {
   if (input.portableRoot != null) {
     const portableRoot = path.resolve(input.portableRoot)
-    const runtimeRoot = path.join(portableRoot, 'runtime')
+    const electronPaths = resolveElectronBootstrapPaths({
+      applicationRuntimeRoot: input.applicationRuntimeRoot ?? path.join(portableRoot, 'runtime'),
+      portableRoot,
+    })
     return Object.freeze({
       portableRoot,
       profileRoot: path.join(portableRoot, 'profile'),
       cacheRoot: path.join(portableRoot, 'cache'),
-      runtimeRoot,
-      sessionDataRoot: path.join(runtimeRoot, 'session-data'),
+      ...electronPaths,
       tempRoot: path.join(portableRoot, 'temp'),
       backupsRoot: path.join(portableRoot, 'backups'),
     })
@@ -112,13 +151,15 @@ export const resolveStoragePaths = (input: StoragePathResolutionInput): Resolved
 
   const profileRoot = path.resolve(input.profileRoot)
   const applicationCacheRoot = path.resolve(input.applicationCacheRoot)
-  const runtimeRoot = path.join(applicationCacheRoot, 'runtime')
+  const electronPaths = resolveElectronBootstrapPaths({
+    applicationRuntimeRoot: input.applicationRuntimeRoot ?? path.join(applicationCacheRoot, 'runtime'),
+    portableRoot: null,
+  })
   return Object.freeze({
     portableRoot: null,
     profileRoot,
     cacheRoot: path.join(applicationCacheRoot, 'cache'),
-    runtimeRoot,
-    sessionDataRoot: path.join(runtimeRoot, 'session-data'),
+    ...electronPaths,
     tempRoot: path.join(path.resolve(input.tempBase), PROJECT_IDENTITY.appId),
     backupsRoot: path.join(profileRoot, 'backups'),
   })
@@ -145,12 +186,38 @@ const ensureDirectDirectory = (directoryPath: string): DirectDirectoryGuard => {
   }
 }
 
+export const prepareElectronBootstrapPaths = (input: ElectronBootstrapPathInput): ElectronBootstrapPaths => {
+  const resolved = resolveElectronBootstrapPaths(input)
+  let runtimeGuard: DirectDirectoryGuard | null = null
+  let electronUserDataGuard: DirectDirectoryGuard | null = null
+  let sessionDataGuard: DirectDirectoryGuard | null = null
+  try {
+    runtimeGuard = ensureDirectDirectory(resolved.runtimeRoot)
+    electronUserDataGuard = createDirectChildDirectory(runtimeGuard, 'electron-user-data', { mode: 0o700 })
+    sessionDataGuard = createDirectChildDirectory(runtimeGuard, 'session-data', { mode: 0o700 })
+    revalidateDirectDirectory(runtimeGuard)
+    revalidateDirectDirectory(electronUserDataGuard)
+    revalidateDirectDirectory(sessionDataGuard)
+    return resolved
+  } finally {
+    if (sessionDataGuard != null) closeDirectDirectory(sessionDataGuard)
+    if (electronUserDataGuard != null) closeDirectDirectory(electronUserDataGuard)
+    if (runtimeGuard != null) closeDirectDirectory(runtimeGuard)
+  }
+}
+
 const closeGuards = (guards: DirectDirectoryGuard[]): void => {
   for (const guard of guards.reverse()) closeDirectDirectory(guard)
 }
 
 const validateAndCreateRequiredRoots = async(resolved: ResolvedStoragePaths): Promise<DirectDirectoryGuard[]> => {
-  const roots = [resolved.profileRoot, resolved.tempRoot, resolved.runtimeRoot, resolved.sessionDataRoot]
+  const roots = [
+    resolved.profileRoot,
+    resolved.tempRoot,
+    resolved.runtimeRoot,
+    resolved.electronUserDataRoot,
+    resolved.sessionDataRoot,
+  ]
   const guards: DirectDirectoryGuard[] = []
   try {
     for (const root of roots) guards.push(ensureDirectDirectory(root))

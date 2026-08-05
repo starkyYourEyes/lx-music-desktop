@@ -71,6 +71,44 @@ describe('storage path contract', () => {
     }), `/home/alice/.cache/${appDirectory}`)
   })
 
+  it('resolves persistent installed runtime roots independently from cache locations', () => {
+    const { resolveApplicationRuntimeRoot } = require(storagePathsModule)
+    const appDirectory = PROJECT_IDENTITY.userDataDirName
+    const cases = [
+      {
+        input: {
+          platform: 'win32',
+          env: { LOCALAPPDATA: 'D:\\LocalData' },
+          homePath: 'C:\\Users\\Alice',
+          appDataPath: 'C:\\Users\\Alice\\AppData\\Roaming',
+        },
+        expected: `D:\\LocalData\\${appDirectory}\\runtime`,
+      },
+      {
+        input: {
+          platform: 'darwin',
+          env: {},
+          homePath: '/Users/alice',
+          appDataPath: '/Users/alice/Library/Application Support',
+        },
+        expected: `/Users/alice/Library/Application Support/${appDirectory}-runtime`,
+      },
+      {
+        input: {
+          platform: 'linux',
+          env: { XDG_CACHE_HOME: '/var/cache/alice' },
+          homePath: '/home/alice',
+          appDataPath: '/home/alice/.config',
+        },
+        expected: `/home/alice/.config/${appDirectory}-runtime`,
+      },
+    ]
+
+    for (const { input, expected } of cases) {
+      assert.equal(resolveApplicationRuntimeRoot(input), expected)
+    }
+  })
+
   it('builds distinct installed roots and keeps backups under the durable profile', () => {
     const { resolveStoragePaths } = require(storagePathsModule)
     const profileRoot = 'C:\\Users\\Alice\\AppData\\Roaming\\starky-lx-music-desktop\\LxDatas'
@@ -78,6 +116,7 @@ describe('storage path contract', () => {
     assert.deepEqual(resolveStoragePaths({
       profileRoot,
       applicationCacheRoot: 'C:\\Users\\Alice\\AppData\\Local\\starky-lx-music-desktop',
+      applicationRuntimeRoot: 'C:\\Users\\Alice\\AppData\\Local\\starky-lx-music-desktop\\runtime',
       tempBase: 'C:\\Windows\\Temp',
       portableRoot: null,
     }), {
@@ -85,6 +124,7 @@ describe('storage path contract', () => {
       profileRoot,
       cacheRoot: 'C:\\Users\\Alice\\AppData\\Local\\starky-lx-music-desktop\\cache',
       runtimeRoot: 'C:\\Users\\Alice\\AppData\\Local\\starky-lx-music-desktop\\runtime',
+      electronUserDataRoot: 'C:\\Users\\Alice\\AppData\\Local\\starky-lx-music-desktop\\runtime\\electron-user-data',
       sessionDataRoot: 'C:\\Users\\Alice\\AppData\\Local\\starky-lx-music-desktop\\runtime\\session-data',
       tempRoot: `C:\\Windows\\Temp\\${PROJECT_IDENTITY.appId}`,
       backupsRoot: `${profileRoot}\\backups`,
@@ -99,6 +139,7 @@ describe('storage path contract', () => {
     assert.deepEqual(resolveStoragePaths({
       profileRoot: 'C:\\ignored\\profile',
       applicationCacheRoot: 'C:\\ignored\\cache',
+      applicationRuntimeRoot: 'C:\\ignored\\runtime',
       tempBase: 'C:\\ignored\\temp',
       portableRoot,
     }), {
@@ -106,6 +147,7 @@ describe('storage path contract', () => {
       profileRoot: 'D:\\Player\\portable\\profile',
       cacheRoot: 'D:\\Player\\portable\\cache',
       runtimeRoot: 'D:\\Player\\portable\\runtime',
+      electronUserDataRoot: 'D:\\Player\\portable\\runtime\\electron-user-data',
       sessionDataRoot: 'D:\\Player\\portable\\runtime\\session-data',
       tempRoot: 'D:\\Player\\portable\\temp',
       backupsRoot: 'D:\\Player\\portable\\backups',
@@ -116,12 +158,14 @@ describe('storage path contract', () => {
     const root = createFixture('storage-path-init')
     const profileRoot = path.join(root, 'profile')
     const applicationCacheRoot = path.join(root, 'application-cache')
+    const applicationRuntimeRoot = path.join(root, 'application-runtime')
     const tempBase = path.join(root, 'os-temp')
     const { initializeStoragePaths } = require(storagePathsModule)
 
     const initialized = await initializeStoragePaths({
       profileRoot,
       applicationCacheRoot,
+      applicationRuntimeRoot,
       tempBase,
       portableRoot: null,
     })
@@ -132,6 +176,7 @@ describe('storage path contract', () => {
     assert.equal(fs.statSync(paths.runTempRoot).isDirectory(), true)
     assert.equal(fs.statSync(paths.profileRoot).isDirectory(), true)
     assert.equal(fs.statSync(paths.runtimeRoot).isDirectory(), true)
+    assert.equal(fs.statSync(paths.electronUserDataRoot).isDirectory(), true)
     assert.equal(fs.statSync(paths.sessionDataRoot).isDirectory(), true)
     assert.equal(fs.existsSync(paths.cacheRoot), false)
     assert.equal(fs.existsSync(paths.backupsRoot), false)
@@ -147,6 +192,7 @@ describe('storage path contract', () => {
     const profileRoot = path.join(root, 'profile')
     const parkedProfile = path.join(root, 'parked-profile')
     const applicationCacheRoot = path.join(root, 'application-cache')
+    const applicationRuntimeRoot = path.join(applicationCacheRoot, 'runtime')
     const tempBase = path.join(root, 'os-temp')
     fs.mkdirSync(profileRoot)
     fs.mkdirSync(applicationCacheRoot)
@@ -165,7 +211,7 @@ describe('storage path contract', () => {
     const { initializeStoragePaths } = require(storagePathsModule)
     try {
       await assert.rejects(
-        initializeStoragePaths({ profileRoot, applicationCacheRoot, tempBase, portableRoot: null }),
+        initializeStoragePaths({ profileRoot, applicationCacheRoot, applicationRuntimeRoot, tempBase, portableRoot: null }),
         /direct_directory_changed/,
       )
       assert.equal(swapped, true)
@@ -198,12 +244,13 @@ describe('storage path contract', () => {
     const outside = createFixture('storage-optional-linked-outside')
     const profileRoot = path.join(root, 'profile')
     const applicationCacheRoot = path.join(root, 'application-cache')
+    const applicationRuntimeRoot = path.join(applicationCacheRoot, 'runtime')
     const tempBase = path.join(root, 'temp-base')
     fs.mkdirSync(profileRoot, { recursive: true })
     fs.mkdirSync(applicationCacheRoot)
     fs.mkdirSync(tempBase)
     const { initializeStoragePaths, resolveStoragePaths } = require(storagePathsModule)
-    const resolved = resolveStoragePaths({ profileRoot, applicationCacheRoot, tempBase, portableRoot: null })
+    const resolved = resolveStoragePaths({ profileRoot, applicationCacheRoot, applicationRuntimeRoot, tempBase, portableRoot: null })
     for (const targetPath of [resolved.cacheRoot, resolved.backupsRoot]) {
       try {
         fs.symlinkSync(outside, targetPath, process.platform == 'win32' ? 'junction' : 'dir')
@@ -212,7 +259,163 @@ describe('storage path contract', () => {
         throw error
       }
     }
-    await assert.rejects(initializeStoragePaths({ profileRoot, applicationCacheRoot, tempBase, portableRoot: null }), /direct_directory_invalid/)
+    await assert.rejects(initializeStoragePaths({ profileRoot, applicationCacheRoot, applicationRuntimeRoot, tempBase, portableRoot: null }), /direct_directory_invalid/)
+  })
+
+  it('prepares only stable Electron runtime roots before asynchronous bootstrap work', () => {
+    const root = createFixture('storage-early-electron')
+    const portableRoot = path.join(root, 'portable')
+    fs.mkdirSync(portableRoot)
+    const { prepareElectronBootstrapPaths } = require(storagePathsModule)
+
+    const paths = prepareElectronBootstrapPaths({
+      applicationRuntimeRoot: path.join(root, 'ignored-runtime'),
+      portableRoot,
+    })
+
+    assert.deepEqual(paths, {
+      runtimeRoot: path.join(portableRoot, 'runtime'),
+      electronUserDataRoot: path.join(portableRoot, 'runtime', 'electron-user-data'),
+      sessionDataRoot: path.join(portableRoot, 'runtime', 'session-data'),
+    })
+    assert.equal(Object.isFrozen(paths), true)
+    for (const targetPath of Object.values(paths)) {
+      const stat = fs.lstatSync(targetPath)
+      assert.equal(stat.isDirectory(), true)
+      assert.equal(stat.isSymbolicLink(), false)
+    }
+    for (const basename of ['profile', 'temp', 'cache', 'backups']) {
+      assert.equal(fs.existsSync(path.join(portableRoot, basename)), false)
+    }
+    assert.equal(fs.existsSync(path.join(portableRoot, 'temp', 'run-early')), false)
+  })
+
+  it('prepares only stable installed Electron roots and leaves migration and storage roots absent', () => {
+    const root = createFixture('storage-early-electron-installed')
+    const roamingRoot = path.join(root, 'roaming')
+    const applicationCacheRoot = path.join(root, 'local-cache', PROJECT_IDENTITY.userDataDirName)
+    const applicationRuntimeRoot = path.join(root, 'persistent-runtime', `${PROJECT_IDENTITY.userDataDirName}-runtime`)
+    const migrationTarget = path.join(roamingRoot, PROJECT_IDENTITY.userDataDirName)
+    const profileRoot = path.join(migrationTarget, 'LxDatas')
+    const tempRoot = path.join(root, 'os-temp', PROJECT_IDENTITY.appId)
+    fs.mkdirSync(roamingRoot)
+    const { prepareElectronBootstrapPaths } = require(storagePathsModule)
+
+    const paths = prepareElectronBootstrapPaths({ applicationRuntimeRoot, portableRoot: null })
+
+    assert.deepEqual(paths, {
+      runtimeRoot: applicationRuntimeRoot,
+      electronUserDataRoot: path.join(applicationRuntimeRoot, 'electron-user-data'),
+      sessionDataRoot: path.join(applicationRuntimeRoot, 'session-data'),
+    })
+    for (const targetPath of Object.values(paths)) {
+      const stat = fs.lstatSync(targetPath)
+      assert.equal(stat.isDirectory(), true)
+      assert.equal(stat.isSymbolicLink(), false)
+    }
+    for (const targetPath of [
+      migrationTarget,
+      profileRoot,
+      tempRoot,
+      path.join(tempRoot, 'run-early'),
+      applicationCacheRoot,
+      path.join(applicationCacheRoot, 'cache'),
+      path.join(profileRoot, 'backups'),
+    ]) assert.equal(fs.existsSync(targetPath), false)
+  })
+
+  it('rejects linked early Electron runtime roots before returning paths', async(t) => {
+    for (const linkedBasename of ['runtime', 'electron-user-data', 'session-data']) {
+      await t.test(linkedBasename, t => {
+        const root = createFixture(`storage-early-linked-${linkedBasename}`)
+        const portableRoot = path.join(root, 'portable')
+        const runtimeRoot = path.join(portableRoot, 'runtime')
+        const outside = createFixture(`storage-early-linked-${linkedBasename}-outside`)
+        fs.mkdirSync(portableRoot)
+        const linkedPath = linkedBasename == 'runtime'
+          ? runtimeRoot
+          : path.join(runtimeRoot, linkedBasename)
+        if (linkedBasename != 'runtime') fs.mkdirSync(runtimeRoot)
+        try {
+          fs.symlinkSync(outside, linkedPath, process.platform == 'win32' ? 'junction' : 'dir')
+        } catch (error) {
+          if (process.platform == 'win32' && error.code == 'EPERM') {
+            t.skip('Directory links require privileges on this Windows host')
+            return
+          }
+          throw error
+        }
+        const { prepareElectronBootstrapPaths } = require(storagePathsModule)
+
+        assert.throws(
+          () => prepareElectronBootstrapPaths({
+            applicationRuntimeRoot: path.join(root, 'ignored-runtime'),
+            portableRoot,
+          }),
+          error => error.code == 'direct_directory_invalid',
+        )
+      })
+    }
+  })
+
+  it('rejects replaced early Electron roots during final identity revalidation', () => {
+    const directDirectory = require('../../src/main/storage/directDirectory.js')
+    for (const replacedBasename of ['runtime', 'electron-user-data', 'session-data']) {
+      const root = createFixture(`storage-early-replaced-${replacedBasename}`)
+      const portableRoot = path.join(root, 'portable')
+      const runtimeRoot = path.join(portableRoot, 'runtime')
+      const replacedPath = replacedBasename == 'runtime'
+        ? runtimeRoot
+        : path.join(runtimeRoot, replacedBasename)
+      const parkedPath = path.join(root, `parked-${replacedBasename}`)
+      fs.mkdirSync(portableRoot)
+      const { prepareElectronBootstrapPaths } = require(storagePathsModule)
+      const originalCreateChild = directDirectory.createDirectChildDirectory
+      const originalRevalidate = directDirectory.revalidateDirectDirectory
+      const heldGuards = new Map()
+      let swapped = false
+      directDirectory.createDirectChildDirectory = (...args) => {
+        const guard = originalCreateChild(...args)
+        if (path.resolve(guard.path) == path.resolve(runtimeRoot) ||
+          path.resolve(guard.path).startsWith(`${path.resolve(runtimeRoot)}${path.sep}`)) {
+          heldGuards.set(path.resolve(guard.path), guard)
+        }
+        return guard
+      }
+      directDirectory.revalidateDirectDirectory = guard => {
+        if (!swapped && path.resolve(guard.path) == path.resolve(replacedPath)) {
+          swapped = true
+          const guardsToReopen = replacedBasename == 'runtime'
+            ? [
+                heldGuards.get(path.resolve(runtimeRoot, 'electron-user-data')),
+                heldGuards.get(path.resolve(runtimeRoot, 'session-data')),
+              ]
+            : [heldGuards.get(path.resolve(replacedPath))]
+          for (const held of [...guardsToReopen].reverse()) fs.closeSync(held.descriptor)
+          fs.renameSync(replacedPath, parkedPath)
+          fs.mkdirSync(replacedPath)
+          for (const held of guardsToReopen) {
+            const relative = path.relative(replacedPath, held.path)
+            const parkedHeldPath = path.join(parkedPath, relative)
+            assert.equal(fs.openSync(parkedHeldPath, 'r'), held.descriptor)
+          }
+        }
+        return originalRevalidate(guard)
+      }
+      try {
+        assert.throws(
+          () => prepareElectronBootstrapPaths({
+            applicationRuntimeRoot: path.join(root, 'ignored-runtime'),
+            portableRoot,
+          }),
+          error => error.code == 'direct_directory_changed',
+        )
+        assert.equal(swapped, true)
+      } finally {
+        directDirectory.createDirectChildDirectory = originalCreateChild
+        directDirectory.revalidateDirectDirectory = originalRevalidate
+      }
+    }
   })
 
   it('rejects a Windows reparse directory even when it reports as a directory', () => {

@@ -210,7 +210,20 @@ git commit -m "fix: flush storage before closing main window"
 - Consumes: the reviewed Task 1 production bundle, reviewed Task 2 close order, and `pack:win:portable:x64`.
 - Produces: a new artifact SHA-256, complete source/package evidence, first/second-launch evidence, and a running verified portable application.
 
-- [ ] **Step 1: Run the complete source matrix from the fixed commit**
+- [ ] **Step 1: Preserve failed-run evidence, then run the complete source matrix**
+
+Before running any command below, check whether `build\portable` exists from a
+failed release attempt. If it exists, resolve and verify that it is exactly the
+direct `portable` child of the repository's `build` directory. Move it, without
+deletion, to the initially absent path:
+
+```text
+.superpowers\evidence\2026-08-05-pre-clean-shutdown-fix-portable
+```
+
+Create only the `.superpowers\evidence` parent if needed. Stop if the source or
+destination identity is unexpected. This preservation must happen before
+`npm run build`, because `build-config/pack.js` removes `build/**`.
 
 Use the disposable storage root and run every command independently:
 
@@ -230,19 +243,9 @@ git diff --check
 
 Expected: every command exits 0. Record platform-conditional skips as skips. Give full lint and build commands at least 300 seconds before treating them as timed out.
 
-- [ ] **Step 2: Preserve failed-run evidence, then build and fingerprint a new artifact**
+- [ ] **Step 2: Build and fingerprint a new artifact**
 
-If `build\portable` exists from the blocked clean-shutdown attempt, resolve and
-verify that it is exactly the direct `portable` child of the repository's
-`build` directory. Move it, without deletion, to the initially absent path:
-
-```text
-.superpowers\evidence\2026-08-05-pre-clean-shutdown-fix-portable
-```
-
-Create only the `.superpowers\evidence` parent if needed. Stop if the source or
-destination identity is unexpected. Confirm `build\portable` and target-app
-processes are then absent, and run:
+Confirm `build\portable` and target-app processes are absent, and run:
 
 ```powershell
 npm run pack:win:portable:x64

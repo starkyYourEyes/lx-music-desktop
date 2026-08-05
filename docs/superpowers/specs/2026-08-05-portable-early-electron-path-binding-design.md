@@ -63,14 +63,20 @@ remain in force.
 
 ## Storage Contract
 
-Add `electronUserDataRoot` to the canonical `StoragePaths` contract. Installed
-and portable layouts become:
+Add `electronUserDataRoot` to the canonical `StoragePaths` contract. Keep the
+installed runtime owner separate from the cache owner on platforms whose
+standard cache directories may be cleared by the OS or user. Installed and
+portable layouts become:
 
 ```text
-<installed application cache root>/
+Windows LocalAppData/<application>/
   runtime/
     electron-user-data/
     session-data/
+
+macOS or Linux <Electron appData>/<application>-runtime/
+  electron-user-data/
+  session-data/
 
 portable/
   profile/
@@ -81,6 +87,12 @@ portable/
   temp/
   backups/
 ```
+
+On Windows, the installed runtime root remains under the application's
+LocalAppData owner. On macOS and Linux it is a dedicated sibling of the roaming
+application profile under Electron's `appData` root, not under `Library/Caches`
+or `XDG_CACHE_HOME`. The cache database remains under the existing application
+cache root on every platform.
 
 `electron-user-data` is persistent, device-local runtime state. It may contain
 Electron Preferences, Chromium Local State, and fallback framework metadata. It
@@ -129,7 +141,9 @@ Bootstrap uses this order:
 2. Resolve and guard-create the asserted portable root, or select installed
    mode through the existing compatibility detector.
 3. Resolve the application-local runtime root without reading or mutating
-   legacy user data.
+   legacy user data. Installed mode derives its persistent runtime root from
+   LocalAppData on Windows or a dedicated `appData` sibling on macOS/Linux;
+   portable mode derives it only from the guarded launcher-local root.
 4. Synchronously prepare `runtime`, `electron-user-data`, and `session-data`.
 5. Call `app.setPath('userData', electronUserDataRoot)`.
 6. Call `app.setPath('sessionData', sessionDataRoot)`.
@@ -218,6 +232,9 @@ RED/GREEN automated coverage must prove:
   before path publication.
 - Full storage initialization reuses the same early paths and still leaves a
   missing cache or backups directory absent.
+- A full-initialization result whose Electron roots differ from the early
+  published roots exits without loading the application or rebinding either
+  Electron path.
 - Existing portable-profile and installed legacy migration suites remain
   unchanged in behavior.
 

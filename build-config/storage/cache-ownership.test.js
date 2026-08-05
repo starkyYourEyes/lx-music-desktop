@@ -34,6 +34,7 @@ const rawLyricOwnerName = ['r', 'aw'].join('')
 const editedLyricSqlOwner = 'src/main/worker/dbService/modules/lyric/edited/statements.ts'
 const exactTestFixtureOwners = new Map([
   ['backup-root-derivation', new Set([
+    'build-config/portable-packaged-bootstrap.test.js',
     'build-config/storage-electron/account-profile.test.js',
     'build-config/storage-electron/cache-cutover.test.js',
     'build-config/storage-electron/cache-db.test.js',
@@ -54,6 +55,7 @@ const exactTestFixtureOwners = new Map([
     'build-config/storage-electron/storage-foundation.integration.test.js',
     'build-config/storage/cache-phase-prerequisite.test.js',
     'build-config/storage/helpers/phase4-durable-fixture.js',
+    'build-config/storage/storage-paths.test.js',
     'build-config/storage/startup-coordinator.test.js',
   ])],
   ['migrated-producer-temp-root', new Set([

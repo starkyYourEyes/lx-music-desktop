@@ -48,7 +48,7 @@ test('portable build passes a launch-unique extraction directory configuration t
 
   assert.deepEqual(buildConfiguration.win, ['portable'])
   assert.deepEqual(buildConfiguration.config.portable, {
-    unpackDirName: false,
+    unpackDirName: true,
   })
 })
 

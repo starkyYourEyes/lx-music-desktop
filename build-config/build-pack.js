@@ -279,7 +279,7 @@ const createTarget = {
           options: {
             ...winOptions,
             portable: {
-              unpackDirName: false,
+              unpackDirName: true,
             },
           },
         }

@@ -721,6 +721,7 @@ test('startup migrates legacy data before Electron materializes the default user
     materializeApplicationData({ currentPath, paths }) {
       const migratedConfigPath = path.join(currentPath, 'LxDatas', 'config.json')
       assert.equal(fs.readFileSync(migratedConfigPath, 'utf8'), 'legacy')
+      assert.equal(global.lxDataPath, path.join(currentPath, 'LxDatas'))
       const logPath = path.join(paths.userData, 'logs', 'startup.log')
       fs.mkdirSync(path.dirname(logPath), { recursive: true })
       fs.writeFileSync(logPath, 'started')
@@ -728,10 +729,11 @@ test('startup migrates legacy data before Electron materializes the default user
   })
 
   const migratedConfigPath = path.join(currentPath, 'LxDatas', 'config.json')
+  const electronUserDataPath = path.join(appDataPath, 'local', 'starky-lx-music-desktop', 'runtime', 'electron-user-data')
   assert.equal(applicationLoaded, true)
   assert.equal(fs.existsSync(migratedConfigPath), true, 'legacy config must exist before the Electron lock creates userData')
   assert.equal(fs.readFileSync(migratedConfigPath, 'utf8'), 'legacy')
-  assert.equal(paths.userData, path.join(currentPath, 'LxDatas'))
+  assert.equal(paths.userData, electronUserDataPath)
   assert.equal(fs.readFileSync(path.join(paths.userData, 'logs', 'startup.log'), 'utf8'), 'started')
 })
 

@@ -3,7 +3,13 @@ import path from 'node:path'
 import { app } from 'electron'
 import { migrateLegacyUserData, preparePortableUserDataPaths } from './migration/legacyUserData'
 import { preparePortableProfile, retireAcknowledgedPortableSource } from './migration/portableProfile'
-import { initializeStoragePaths, resolveApplicationCacheRoot } from './utils/storagePaths'
+import {
+  initializeStoragePaths,
+  prepareElectronBootstrapPaths,
+  resolveApplicationCacheRoot,
+  resolveApplicationRuntimeRoot,
+  type ElectronBootstrapPaths,
+} from './utils/storagePaths'
 
 type BootstrapApp = Pick<typeof app, 'getPath' | 'setPath' | 'exit'>
 interface BootstrapRuntime {
@@ -37,8 +43,42 @@ export const bootstrap = async(
   let profileRoot: string
   let legacyRoot: string
   let applicationCacheRoot: string
+  let applicationRuntimeRoot: string
+  let installedAppDataRoot: string | null = null
+  let electronPaths: ElectronBootstrapPaths
   global.portableProfileStartup = null
   global.runTempReservation = null
+  try {
+    if (portablePaths != null) {
+      applicationCacheRoot = portablePaths.appDataPath
+      applicationRuntimeRoot = path.join(portablePaths.appDataPath, 'runtime')
+    } else {
+      installedAppDataRoot = electronApp.getPath('appData')
+      const installedHomePath = electronApp.getPath('home')
+      applicationCacheRoot = resolveApplicationCacheRoot({
+        platform: runtime.platform,
+        env: runtime.env,
+        homePath: installedHomePath,
+      })
+      applicationRuntimeRoot = resolveApplicationRuntimeRoot({
+        platform: runtime.platform,
+        env: runtime.env,
+        homePath: installedHomePath,
+        appDataPath: installedAppDataRoot,
+      })
+    }
+    electronPaths = prepareElectronBootstrapPaths({
+      applicationRuntimeRoot,
+      portableRoot: portablePaths?.appDataPath ?? null,
+    })
+    electronApp.setPath('userData', electronPaths.electronUserDataRoot)
+    electronApp.setPath('sessionData', electronPaths.sessionDataRoot)
+  } catch (error) {
+    console.error('Electron storage root validation failed; startup has been aborted.', error)
+    electronApp.exit(1)
+    return
+  }
+
   if (portablePaths != null) {
     const startupRunId = crypto.randomUUID()
     let retirement
@@ -78,9 +118,13 @@ export const bootstrap = async(
     global.portableProfileStartup = preparation.token == null ? null : { token: preparation.token }
     profileRoot = path.join(portablePaths.appDataPath, 'profile')
     legacyRoot = portablePaths.userDataPath
-    applicationCacheRoot = portablePaths.appDataPath
   } else {
-    const migration = await migrateLegacyUserData({ appDataPath: electronApp.getPath('appData'), logger: console })
+    if (installedAppDataRoot == null) {
+      console.error('Installed application data root is unavailable; startup has been aborted.')
+      electronApp.exit(1)
+      return
+    }
+    const migration = await migrateLegacyUserData({ appDataPath: installedAppDataRoot, logger: console })
     if (!migration.userDataPathReady) {
       console.error('User data is unavailable; startup has been aborted.', migration.error)
       electronApp.exit(1)
@@ -88,11 +132,6 @@ export const bootstrap = async(
     }
     profileRoot = path.join(migration.userDataPath, 'LxDatas')
     legacyRoot = migration.userDataPath
-    applicationCacheRoot = resolveApplicationCacheRoot({
-      platform: runtime.platform,
-      env: runtime.env,
-      homePath: electronApp.getPath('home'),
-    })
   }
 
   let initialized
@@ -100,6 +139,7 @@ export const bootstrap = async(
     initialized = await initializeStoragePaths({
       profileRoot,
       applicationCacheRoot,
+      applicationRuntimeRoot,
       tempBase: electronApp.getPath('temp'),
       portableRoot: portablePaths?.appDataPath ?? null,
     })
@@ -108,8 +148,12 @@ export const bootstrap = async(
     electronApp.exit(1)
     return
   }
-  electronApp.setPath('userData', initialized.paths.profileRoot)
-  electronApp.setPath('sessionData', initialized.paths.sessionDataRoot)
+  if (initialized.paths.electronUserDataRoot != electronPaths.electronUserDataRoot ||
+    initialized.paths.sessionDataRoot != electronPaths.sessionDataRoot) {
+    console.error('Electron storage root changed during startup; startup has been aborted.')
+    electronApp.exit(1)
+    return
+  }
   global.storagePaths = initialized.paths
   global.runTempReservation = initialized.runTempReservation
   global.lxDataPath = initialized.paths.profileRoot

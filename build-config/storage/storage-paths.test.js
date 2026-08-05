@@ -535,7 +535,7 @@ describe('early Electron bootstrap', () => {
     }
   })
 
-  it('rejects profile, temp, and portable junction roots before any app.setPath call', async(t) => {
+  it('publishes stable paths before rejecting linked profile or temp roots, but rejects a linked portable root first', async(t) => {
     for (const linkedRoot of ['profile', 'temp', 'portable']) {
       await t.test(linkedRoot, async() => {
         const root = createFixture(`storage-portable-linked-${linkedRoot}`)
@@ -547,6 +547,39 @@ describe('early Electron bootstrap', () => {
         } else {
           fs.mkdirSync(portableRoot)
           fs.symlinkSync(outside, path.join(portableRoot, linkedRoot), process.platform == 'win32' ? 'junction' : 'dir')
+        }
+        const fakeElectron = {
+          getPath(name) { return { exe: path.join(root, 'app.exe'), temp: path.join(root, 'temp') }[name] },
+          setPath(name) { calls.push(name) },
+          exit(code) { calls.push(`exit:${code}`) },
+        }
+        const { bootstrap } = require(bootstrapModule)
+
+        await bootstrap(fakeElectron, async() => { calls.push('application') }, { platform: 'win32', env: {} })
+
+        assert.deepEqual(calls, linkedRoot == 'portable'
+          ? ['exit:1']
+          : ['userData', 'sessionData', 'exit:1'])
+      })
+    }
+  })
+
+  it('rejects linked early Electron runtime roots before any app.setPath call', async(t) => {
+    for (const linkedRoot of ['runtime', 'electron-user-data', 'session-data']) {
+      await t.test(linkedRoot, async() => {
+        const root = createFixture(`storage-bootstrap-linked-${linkedRoot}`)
+        const portableRoot = path.join(root, 'portable')
+        const runtimeRoot = path.join(portableRoot, 'runtime')
+        const outside = createFixture(`storage-bootstrap-linked-${linkedRoot}-outside`)
+        const calls = []
+        fs.mkdirSync(portableRoot)
+        if (linkedRoot != 'runtime') fs.mkdirSync(runtimeRoot)
+        const linkedPath = linkedRoot == 'runtime' ? runtimeRoot : path.join(runtimeRoot, linkedRoot)
+        try {
+          fs.symlinkSync(outside, linkedPath, process.platform == 'win32' ? 'junction' : 'dir')
+        } catch (error) {
+          if (process.platform == 'win32' && error.code == 'EPERM') return t.skip('Directory links require privileges on this Windows host')
+          throw error
         }
         const fakeElectron = {
           getPath(name) { return { exe: path.join(root, 'app.exe'), temp: path.join(root, 'temp') }[name] },
@@ -585,7 +618,7 @@ describe('early Electron bootstrap', () => {
 
     await bootstrap(fakeElectron, async() => { calls.push('application') }, { platform: 'win32', env: {} })
 
-    assert.deepEqual(calls, ['exit:1'])
+    assert.deepEqual(calls, ['userData', 'sessionData', 'exit:1'])
   })
 
   it('sets userData and sessionData before loading application modules', async() => {
@@ -640,6 +673,7 @@ describe('early Electron bootstrap', () => {
     assert.equal(calls.includes('getPath:sessionData'), false)
     assert.equal(global.storagePaths.cacheRoot, path.join(applicationCacheRoot, 'cache'))
     assert.equal(global.storagePaths.runtimeRoot, path.join(applicationCacheRoot, 'runtime'))
+    assert.equal(global.storagePaths.electronUserDataRoot, path.join(applicationCacheRoot, 'runtime', 'electron-user-data'))
     assert.equal(global.storagePaths.sessionDataRoot, path.join(applicationCacheRoot, 'runtime', 'session-data'))
     assert.equal(fs.existsSync(global.storagePaths.cacheRoot), false)
   })

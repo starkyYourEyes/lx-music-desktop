@@ -273,6 +273,156 @@ const loadWorkerAdapter = databaseInit => {
 }
 
 describe('portable bootstrap sequencing', () => {
+  const expectedElectronPaths = {
+    electronUserDataRoot: 'C:\\runtime\\electron-user-data',
+    runtimeRoot: 'C:\\runtime',
+    sessionDataRoot: 'C:\\runtime\\session-data',
+  }
+
+  it('publishes stable Electron paths before portable asynchronous bootstrap work', async() => {
+    const calls = []
+    const setPathCalls = []
+    const assertPublished = () => assert.deepEqual(setPathCalls, [
+      ['userData', expectedElectronPaths.electronUserDataRoot],
+      ['sessionData', expectedElectronPaths.sessionDataRoot],
+    ])
+    const { bootstrap } = loadTsModule(path.join(__dirname, bootstrapPath), {
+      electron: { app: {} },
+      './migration/legacyUserData': {
+        preparePortableUserDataPaths: () => ({ appDataPath: 'C:\\portable', userDataPath: 'C:\\portable\\userData' }),
+        migrateLegacyUserData: async() => { throw new Error('unexpected legacy migration') },
+      },
+      './migration/portableProfile': {
+        retireAcknowledgedPortableSource: async() => {
+          assertPublished()
+          await Promise.resolve()
+          return { state: 'not-acknowledged' }
+        },
+        preparePortableProfile: async() => ({ state: 'not-present', token: null }),
+      },
+      './utils/storagePaths': {
+        prepareElectronBootstrapPaths: () => expectedElectronPaths,
+        initializeStoragePaths: async() => ({
+          paths: { ...expectedElectronPaths, profileRoot: 'C:\\portable\\profile' },
+          runTempReservation: null,
+        }),
+        resolveApplicationCacheRoot: () => 'C:\\cache',
+        resolveApplicationRuntimeRoot: () => expectedElectronPaths.runtimeRoot,
+      },
+    })
+    const electronApp = {
+      getPath: () => 'C:\\portable\\app.exe',
+      setPath: (name, value) => { setPathCalls.push([name, value]) },
+      exit: code => { calls.push(`exit:${code}`) },
+    }
+
+    await bootstrap(electronApp, async() => { calls.push('application') }, { platform: 'win32', env: {} })
+
+    assertPublished()
+    assert.deepEqual(calls, ['application'])
+  })
+
+  it('publishes stable Electron paths before installed asynchronous bootstrap work', async() => {
+    const calls = []
+    const setPathCalls = []
+    const assertPublished = () => assert.deepEqual(setPathCalls, [
+      ['userData', expectedElectronPaths.electronUserDataRoot],
+      ['sessionData', expectedElectronPaths.sessionDataRoot],
+    ])
+    const { bootstrap } = loadTsModule(path.join(__dirname, bootstrapPath), {
+      electron: { app: {} },
+      './migration/legacyUserData': {
+        preparePortableUserDataPaths: () => null,
+        migrateLegacyUserData: async() => {
+          assertPublished()
+          await Promise.resolve()
+          return { userDataPathReady: true, userDataPath: 'C:\\roaming\\current' }
+        },
+      },
+      './migration/portableProfile': {
+        retireAcknowledgedPortableSource: async() => { throw new Error('unexpected portable retirement') },
+        preparePortableProfile: async() => { throw new Error('unexpected portable preparation') },
+      },
+      './utils/storagePaths': {
+        prepareElectronBootstrapPaths: () => expectedElectronPaths,
+        initializeStoragePaths: async() => ({
+          paths: { ...expectedElectronPaths, profileRoot: 'C:\\roaming\\current\\LxDatas' },
+          runTempReservation: null,
+        }),
+        resolveApplicationCacheRoot: () => 'C:\\cache',
+        resolveApplicationRuntimeRoot: () => expectedElectronPaths.runtimeRoot,
+      },
+    })
+    const electronApp = {
+      getPath: name => ({
+        exe: 'C:\\installed\\app.exe',
+        appData: 'C:\\roaming',
+        home: 'C:\\Users\\Alice',
+        temp: 'C:\\temp',
+      })[name],
+      setPath: (name, value) => { setPathCalls.push([name, value]) },
+      exit: code => { calls.push(`exit:${code}`) },
+    }
+
+    await bootstrap(electronApp, async() => { calls.push('application') }, { platform: 'win32', env: {} })
+
+    assertPublished()
+    assert.deepEqual(calls, ['application'])
+  })
+
+  it('exits without rebinding when full initialization changes a stable Electron path', async() => {
+    const calls = []
+    const setPathCalls = []
+    const { bootstrap } = loadTsModule(path.join(__dirname, bootstrapPath), {
+      electron: { app: {} },
+      './migration/legacyUserData': {
+        preparePortableUserDataPaths: () => null,
+        migrateLegacyUserData: async() => ({ userDataPathReady: true, userDataPath: 'C:\\roaming\\current' }),
+      },
+      './migration/portableProfile': {
+        retireAcknowledgedPortableSource: async() => { throw new Error('unexpected portable retirement') },
+        preparePortableProfile: async() => { throw new Error('unexpected portable preparation') },
+      },
+      './utils/storagePaths': {
+        prepareElectronBootstrapPaths: () => expectedElectronPaths,
+        initializeStoragePaths: async() => ({
+          paths: {
+            ...expectedElectronPaths,
+            profileRoot: 'C:\\roaming\\current\\LxDatas',
+            sessionDataRoot: 'C:\\changed\\session-data',
+          },
+          runTempReservation: null,
+        }),
+        resolveApplicationCacheRoot: () => 'C:\\cache',
+        resolveApplicationRuntimeRoot: () => expectedElectronPaths.runtimeRoot,
+      },
+    })
+    const electronApp = {
+      getPath: name => ({
+        exe: 'C:\\installed\\app.exe',
+        appData: 'C:\\roaming',
+        home: 'C:\\Users\\Alice',
+        temp: 'C:\\temp',
+      })[name],
+      setPath: (name, value) => { setPathCalls.push([name, value]) },
+      exit: code => { calls.push(`exit:${code}`) },
+    }
+
+    const originalConsoleError = console.error
+    try {
+      console.error = () => {}
+      await bootstrap(electronApp, async() => { calls.push('application') }, { platform: 'win32', env: {} })
+    } finally {
+      console.error = originalConsoleError
+    }
+
+    assert.deepEqual(setPathCalls, [
+      ['userData', expectedElectronPaths.electronUserDataRoot],
+      ['sessionData', expectedElectronPaths.sessionDataRoot],
+    ])
+    assert.deepEqual(calls, ['exit:1'])
+  })
+
   for (const failedPhase of ['retirement', 'preparation']) {
     it(`awaits portable ${failedPhase} failure before application loading`, async() => {
       const calls = []
@@ -301,13 +451,15 @@ describe('portable bootstrap sequencing', () => {
           },
         },
         './utils/storagePaths': {
+          prepareElectronBootstrapPaths: () => expectedElectronPaths,
           initializeStoragePaths: async() => { calls.push('storage:init') },
           resolveApplicationCacheRoot: () => 'C:\\cache',
+          resolveApplicationRuntimeRoot: () => expectedElectronPaths.runtimeRoot,
         },
       })
       const electronApp = {
         getPath: () => 'C:\\portable\\app.exe',
-        setPath: () => { calls.push('setPath') },
+        setPath: name => { calls.push(`setPath:${name}`) },
         exit: code => { calls.push(`exit:${code}`) },
       }
 
@@ -320,8 +472,8 @@ describe('portable bootstrap sequencing', () => {
       }
 
       assert.deepEqual(calls, failedPhase == 'retirement'
-        ? ['retirement:start', 'retirement:end', 'exit:1']
-        : ['retirement:start', 'retirement:end', 'preparation:start', 'preparation:end', 'exit:1'])
+        ? ['setPath:userData', 'setPath:sessionData', 'retirement:start', 'retirement:end', 'exit:1']
+        : ['setPath:userData', 'setPath:sessionData', 'retirement:start', 'retirement:end', 'preparation:start', 'preparation:end', 'exit:1'])
     })
   }
 })

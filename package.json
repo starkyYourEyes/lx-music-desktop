@@ -64,7 +64,7 @@
     "test:storage": "node --test build-config/storage/*.test.js",
     "test:storage:portable": "node --test build-config/storage/portable-filesystem.test.js build-config/storage/cache-ownership.test.js",
     "test:storage:electron": "cross-env ELECTRON_RUN_AS_NODE=1 electron --test build-config/storage-electron/*.test.js",
-    "test:packaged-app": "node --test build-config/packaged-app.test.js",
+    "test:packaged-app": "node --test build-config/portable-packaging-config.test.js build-config/packaged-app.test.js",
     "test:portable-packaged-bootstrap": "node --test build-config/portable-packaged-bootstrap.test.js",
     "build:renderer": "cross-env NODE_ENV=production webpack --config build-config/renderer/webpack.config.prod.js --progress",
     "build:renderer-lyric": "cross-env NODE_ENV=production webpack --config build-config/renderer-lyric/webpack.config.prod.js --progress",

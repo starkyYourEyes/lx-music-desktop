@@ -276,7 +276,12 @@ const createTarget = {
         winOptions.artifactName = `\${productName}-v\${version}-${arch}-portable.\${ext}`
         return {
           buildOptions: { win: ['portable'] },
-          options: winOptions,
+          options: {
+            ...winOptions,
+            portable: {
+              unpackDirName: false,
+            },
+          },
         }
       default: throw new Error('Unknown package type: ' + packageType)
     }

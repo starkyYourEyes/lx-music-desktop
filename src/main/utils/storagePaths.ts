@@ -25,7 +25,7 @@ export interface StoragePaths {
 export interface StoragePathResolutionInput {
   profileRoot: string
   applicationCacheRoot: string
-  applicationRuntimeRoot?: string
+  applicationRuntimeRoot: string
   tempBase: string
   portableRoot: string | null
 }
@@ -136,7 +136,7 @@ export const resolveStoragePaths = (input: StoragePathResolutionInput): Resolved
   if (input.portableRoot != null) {
     const portableRoot = path.resolve(input.portableRoot)
     const electronPaths = resolveElectronBootstrapPaths({
-      applicationRuntimeRoot: input.applicationRuntimeRoot ?? path.join(portableRoot, 'runtime'),
+      applicationRuntimeRoot: input.applicationRuntimeRoot,
       portableRoot,
     })
     return Object.freeze({
@@ -149,10 +149,11 @@ export const resolveStoragePaths = (input: StoragePathResolutionInput): Resolved
     })
   }
 
+  if (input.applicationRuntimeRoot == null) throw new Error('application_runtime_root_required')
   const profileRoot = path.resolve(input.profileRoot)
   const applicationCacheRoot = path.resolve(input.applicationCacheRoot)
   const electronPaths = resolveElectronBootstrapPaths({
-    applicationRuntimeRoot: input.applicationRuntimeRoot ?? path.join(applicationCacheRoot, 'runtime'),
+    applicationRuntimeRoot: input.applicationRuntimeRoot,
     portableRoot: null,
   })
   return Object.freeze({

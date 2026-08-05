@@ -223,8 +223,9 @@ $env:LX_PORTABLE_ARTIFACT=(Resolve-Path '.superpowers\evidence\2026-08-05-defaul
 npm run test:portable-packaged-bootstrap
 ```
 
-Expected: exit 1 after the launcher exits with code 1, before all required
-portable paths exist. Confirm the test launched with no `--user-data-dir`.
+Expected: npm exits `1` after the harness reports the broken launcher exit as
+`2147483651 (0x80000003)`, before all required portable paths exist. Confirm
+the test launched with no `--user-data-dir`.
 
 - [ ] **Step 4: Verify the harness and corrected release ordering**
 
@@ -591,6 +592,7 @@ lint and build at least 300 seconds.
 ```powershell
 npm run pack:win:portable:x64
 npm run test:packaged-app
+$env:LX_TEST_STORAGE_ROOT=(Resolve-Path '.superpowers\t').Path
 $env:LX_PORTABLE_ARTIFACT=(Resolve-Path 'build\starky-lx-music-desktop-v3.0.0-x64-portable.exe').Path
 npm run test:portable-packaged-bootstrap
 Get-Item -LiteralPath $env:LX_PORTABLE_ARTIFACT
@@ -599,8 +601,9 @@ Get-FileHash -LiteralPath $env:LX_PORTABLE_ARTIFACT -Algorithm SHA256
 ```
 
 Expected: packaging exits 0, packaged-content checks pass, the default NSIS
-smoke reports exactly 1 pass, 0 skip, and 0 fail with no `--user-data-dir`,
-7-Zip reports `Everything is Ok`, and
+smoke reports exactly 3 passes, 0 skip, and 0 fail: two helper tests plus one
+real default-empty-argv packaged launch with no `--user-data-dir`. 7-Zip
+reports `Everything is Ok`, and
 the new artifact hash differs from all three blocked hashes:
 
 ```text

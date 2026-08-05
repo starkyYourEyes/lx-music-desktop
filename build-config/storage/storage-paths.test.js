@@ -131,6 +131,17 @@ describe('storage path contract', () => {
     })
   })
 
+  it('rejects installed resolution when the application runtime root is missing', () => {
+    const { resolveStoragePaths } = require(storagePathsModule)
+
+    assert.throws(() => resolveStoragePaths({
+      profileRoot: 'C:\\Users\\Alice\\AppData\\Roaming\\starky-lx-music-desktop\\LxDatas',
+      applicationCacheRoot: 'C:\\Users\\Alice\\AppData\\Local\\starky-lx-music-desktop',
+      tempBase: 'C:\\Windows\\Temp',
+      portableRoot: null,
+    }), /application_runtime_root_required/)
+  })
+
   it('builds explicit portable siblings beside the executable', () => {
     const { resolveStoragePaths } = require(storagePathsModule)
     const executablePath = 'D:\\Player\\app.exe'

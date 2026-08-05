@@ -24,9 +24,13 @@ contained both portable plans and both amended designs.
 The only unrelated worktree change was
 `build-config/storage-electron/database-recovery.test.js`. It was checked only
 with status and `git hash-object`; its start and end blob was
-`959df4d23cd581ce43493e1c83c95881e64a710f`. It was never opened, printed,
-parsed, modified, restored, staged, or committed. The protected stash, commit,
-and branch were not changed.
+`959df4d23cd581ce43493e1c83c95881e64a710f`. It was not manually inspected or
+printed, and it was not modified, restored, staged, or committed. However,
+`npm run test:storage:electron` expanded
+`build-config/storage-electron/*.test.js`, so the protected worktree file was
+loaded and executed by that suite. The protected `stash@{0}`, commit
+`611e43f8`, and branch `codex-pre-merge-user-db-assertion-20260804` were not
+changed.
 
 ## Source Matrix
 
@@ -51,6 +55,12 @@ $env:LX_TEST_STORAGE_ROOT=(Resolve-Path '.superpowers\t').Path
 Source-test aggregate: `1498 pass / 5 skip / 0 fail`. Lint completed in 169.7
 seconds. Build completed in 94.6 seconds and all webpack targets compiled
 successfully.
+
+The 431 Electron-storage passes are working-tree evidence for the committed
+base plus the protected blob, not exact-commit evidence for the verification
+base alone. Exact-commit Electron-storage coverage is **PENDING CONTROLLER
+VERIFICATION** from a retained `git archive` source tree that does not use the
+protected worktree file. That run must target the new source-fix commit.
 
 The final whitespace check was deliberately scoped around the protected user
 file:
@@ -112,9 +122,11 @@ test used electron-builder's installed cache binary:
 & 'C:\Users\hao238\AppData\Local\electron-builder\Cache\7zip@1.0.0\7zip-win-x64-1nrf7\bin\7za.exe' t $env:LX_PORTABLE_ARTIFACT
 ```
 
-This was 7-Zip `24.09 (x86)`. It exited `0` with `Everything is Ok`, testing 3
-folders and 79 files. It reported one expected NSIS warning, `There are data
-after the end of archive`.
+The fallback binary was `849920` bytes with SHA-256
+`223B873C50380FE9A39F1A22B6ABF8D46DB506E1C08D08312902F6F3CD1F7AC3` before
+the archive check. It was 7-Zip `24.09 (x86)` and exited `0` with `Everything
+is Ok`, testing 3 folders and 79 files. It reported one expected NSIS warning,
+`There are data after the end of archive`.
 
 ## Installed Sentinel Isolation
 

@@ -182,20 +182,25 @@ const processDepth = (processInfo, inventoryByPid) => {
   return depth
 }
 
-const cleanupFixture = async(fixture, launcher, copiedArtifact) => {
-  const deadline = Date.now() + cleanupTimeoutMs
+const cleanupFixture = async(fixture, launcher, copiedArtifact, dependencies = {}) => {
+  const {
+    enumerateProcesses = enumerateFixtureProcesses,
+    now = Date.now,
+    wait = delay,
+  } = dependencies
+  const deadline = now() + cleanupTimeoutMs
   let inventory = []
   let cleanupError
 
   try {
-    while (Date.now() < deadline) {
-      inventory = await enumerateFixtureProcesses(fixture.path, Math.max(1, deadline - Date.now()))
-      if (inventory.length == 0) {
+    while (now() < deadline) {
+      inventory = await enumerateProcesses(fixture.path, Math.max(1, deadline - now()))
+      if (inventory.length == 0 && !launcherIsAlive(launcher)) {
         fixture.cleanup()
         return
       }
 
-      if (launcherIsAlive(launcher)) {
+      if (inventory.length > 0 && launcherIsAlive(launcher)) {
         const launcherProcess = inventory.find(processInfo => processInfo.processId == launcher.pid)
         if (launcherProcess == null ||
           normalizeFullPath(launcherProcess.executablePath) != normalizeFullPath(copiedArtifact)) {
@@ -203,23 +208,25 @@ const cleanupFixture = async(fixture, launcher, copiedArtifact) => {
         }
       }
 
-      const inventoryByPid = new Map(inventory.map(processInfo => [processInfo.processId, processInfo]))
-      const deepestFirst = [...inventory].sort((left, right) =>
-        processDepth(right, inventoryByPid) - processDepth(left, inventoryByPid))
-      for (const processInfo of deepestFirst) {
-        const remainingMs = deadline - Date.now()
-        if (remainingMs <= 0) break
-        try {
-          execFileSync('taskkill.exe', ['/PID', String(processInfo.processId), '/F'], {
-            stdio: 'ignore',
-            timeout: remainingMs,
-            windowsHide: true,
-          })
-        } catch {}
+      if (inventory.length > 0) {
+        const inventoryByPid = new Map(inventory.map(processInfo => [processInfo.processId, processInfo]))
+        const deepestFirst = [...inventory].sort((left, right) =>
+          processDepth(right, inventoryByPid) - processDepth(left, inventoryByPid))
+        for (const processInfo of deepestFirst) {
+          const remainingMs = deadline - now()
+          if (remainingMs <= 0) break
+          try {
+            execFileSync('taskkill.exe', ['/PID', String(processInfo.processId), '/F'], {
+              stdio: 'ignore',
+              timeout: remainingMs,
+              windowsHide: true,
+            })
+          } catch {}
+        }
       }
 
-      if (Date.now() < deadline) {
-        await delay(Math.min(pollIntervalMs, Math.max(1, deadline - Date.now())))
+      if (now() < deadline) {
+        await wait(Math.min(pollIntervalMs, Math.max(1, deadline - now())))
       }
     }
   } catch (error) {
@@ -232,6 +239,35 @@ const cleanupFixture = async(fixture, launcher, copiedArtifact) => {
     cleanupError == null ? null : `cleanup error: ${cleanupError.message}`,
   ].filter(Boolean).join('; '))
 }
+
+test('retains the fixture when CIM inventory is empty while the launcher remains alive', async() => {
+  const fixturePath = path.join(__dirname, 'empty-inventory-fixture')
+  let cleanupCalled = false
+  let nowMs = 0
+  let cleanupError
+
+  try {
+    await cleanupFixture({
+      path: fixturePath,
+      cleanup: () => { cleanupCalled = true },
+    }, {
+      pid: 1234,
+      exitCode: null,
+      signalCode: null,
+    }, path.join(fixturePath, 'artifact.exe'), {
+      enumerateProcesses: async() => [],
+      now: () => nowMs,
+      wait: async() => { nowMs = cleanupTimeoutMs },
+    })
+  } catch (error) {
+    cleanupError = error
+  }
+
+  assert.equal(cleanupCalled, false, 'a live launcher fixture must not be deleted')
+  assert.match(cleanupError?.message ?? '', new RegExp(
+    `retained fixture: ${fixturePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*fixture process inventory: \\[\\]`,
+  ))
+})
 
 test('forbidden path check rejects a dangling junction', {
   skip: process.platform != 'win32' || process.env.LX_TEST_STORAGE_ROOT == null

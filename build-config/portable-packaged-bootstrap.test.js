@@ -99,6 +99,21 @@ const formatLauncherOutput = (readStdout, readStderr) => [
   readStderr(),
 ].join('\n')
 
+const assertForbiddenPathAbsent = targetPath => {
+  try {
+    fs.lstatSync(targetPath)
+  } catch (error) {
+    if (error.code == 'ENOENT') return
+    throw error
+  }
+  assert.fail(`forbidden path exists: ${targetPath}`)
+}
+
+const observeLauncherSpawn = launcher => new Promise(resolve => {
+  launcher.once('spawn', () => { resolve(null) })
+  launcher.once('error', error => { resolve(error) })
+})
+
 const requiredPathIsReady = ({ targetPath, type }) => {
   let identity
   try {
@@ -126,15 +141,17 @@ const waitForDefaultStartup = async({
   requiredPaths,
   readStdout,
   readStderr,
-  readSpawnError,
+  launcherSpawn,
 }) => {
+  const spawnError = await launcherSpawn
+  if (spawnError != null) {
+    assert.fail(`portable launcher spawn failed: ${spawnError.message}${formatLauncherOutput(readStdout, readStderr)}`)
+  }
   const deadline = Date.now() + startupTimeoutMs
   let inventory = []
   let nextProcessPollAt = 0
   while (Date.now() < deadline) {
     const output = formatLauncherOutput(readStdout, readStderr)
-    const spawnError = readSpawnError()
-    if (spawnError != null) assert.fail(`portable launcher spawn failed: ${spawnError.message}${output}`)
     if (!launcherIsAlive(launcher)) {
       assert.fail(`portable launcher exited before startup completed: ${launcher.exitCode}${output}`)
     }
@@ -216,6 +233,43 @@ const cleanupFixture = async(fixture, launcher, copiedArtifact) => {
   ].filter(Boolean).join('; '))
 }
 
+test('forbidden path check rejects a dangling junction', {
+  skip: process.platform != 'win32' || process.env.LX_TEST_STORAGE_ROOT == null
+    ? 'Windows and LX_TEST_STORAGE_ROOT required'
+    : false,
+}, t => {
+  const fixture = createTestStorageRoot('packaged-bootstrap-forbidden-path')
+  t.after(() => { fixture.cleanup() })
+  const danglingTarget = path.join(fixture.path, 'missing-target')
+  const danglingJunction = path.join(fixture.path, 'dangling-junction')
+  fs.symlinkSync(danglingTarget, danglingJunction, 'junction')
+
+  assert.throws(
+    () => { assertForbiddenPathAbsent(danglingJunction) },
+    /forbidden path exists/,
+  )
+})
+
+test('failed spawn is reported before launcher liveness is checked', async() => {
+  const missingExecutable = path.join(__dirname, 'missing-portable-artifact.exe')
+  const launcher = spawn(missingExecutable, [], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  })
+  const launcherSpawn = observeLauncherSpawn(launcher)
+  const readStdout = createOutputTail(launcher.stdout)
+  const readStderr = createOutputTail(launcher.stderr)
+
+  await assert.rejects(waitForDefaultStartup({
+    fixturePath: __dirname,
+    launcher,
+    launcherSpawn,
+    requiredPaths: [],
+    readStdout,
+    readStderr,
+  }), /portable launcher spawn failed: .*ENOENT/)
+})
+
 test('default NSIS portable launch reaches launcher-local storage without a user-data-dir override', {
   skip: process.platform != 'win32' || process.env.LX_PORTABLE_ARTIFACT == null
     ? 'Windows portable artifact and LX_PORTABLE_ARTIFACT required'
@@ -268,15 +322,15 @@ test('default NSIS portable launch reaches launcher-local storage without a user
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   })
+  const launcherSpawn = observeLauncherSpawn(launcher)
   const readStdout = createOutputTail(launcher.stdout)
   const readStderr = createOutputTail(launcher.stderr)
-  let spawnError
-  launcher.once('error', error => { spawnError = error })
 
   const portableRoot = path.join(launcherRoot, 'portable')
   await waitForDefaultStartup({
     fixturePath: fixture.path,
     launcher,
+    launcherSpawn,
     requiredPaths: [
       { targetPath: path.join(portableRoot, 'profile', 'lx.data.db'), type: 'file' },
       { targetPath: path.join(portableRoot, 'runtime', 'electron-user-data'), type: 'directory' },
@@ -286,10 +340,9 @@ test('default NSIS portable launch reaches launcher-local storage without a user
     ],
     readStdout,
     readStderr,
-    readSpawnError: () => spawnError,
   })
 
-  assert.equal(fs.existsSync(path.join(roaming, 'starky-lx-music-desktop')), false)
-  assert.equal(fs.existsSync(path.join(local, 'starky-lx-music-desktop')), false)
-  assert.equal(fs.existsSync(path.join(portableRoot, 'backups')), false)
+  assertForbiddenPathAbsent(path.join(roaming, 'starky-lx-music-desktop'))
+  assertForbiddenPathAbsent(path.join(local, 'starky-lx-music-desktop'))
+  assertForbiddenPathAbsent(path.join(portableRoot, 'backups'))
 })

@@ -1,317 +1,266 @@
 # Portable First-Launch Bootstrap Release Evidence
 
-- Verification base: `40ab3fd84bc3704183ef7ba094bff856fb3e0771`
+- Source verification base: exact HEAD `15093773cad3e64946aebee3886d0754dc126fab`
 - Platform: Windows x64
-- Artifact verdict: `PASS`
-- Default packaged smoke: `3 pass / 0 skip / 0 fail`
-- First-launch storage/schema/UI verdict: `PASS`
-- Clean title-bar shutdown and snapshot verdict: `PASS`
-- Historical second-launch reuse verdict: `PASS`; that implementer instance later exited cleanly
-- Controller finalization verdict: `PASS`, current instance running
-- Current launcher/main PIDs: `37536` / `32560`
-- Controller audit UTC: `2026-08-05T04:49:37.1003241Z`
-- Residual coverage: real provider media and real-volume filesystem loops not exercised
+- Artifact and bootstrap verdict: `PASS`
+- Default portable smoke: `4 pass / 0 skip / 0 fail`
+- First launch, schema, close, snapshot, and second launch: `PASS`
+- Current controller state: the verified second launch remains running.
+- Residual coverage: real provider media and real NTFS/FAT32/exFAT removable-root loops were not exercised.
 
-## Preflight And Protection
+## Scope And Historical Evidence
 
-The release run started on branch `master` at exact HEAD `40ab3fd8`. The
-blocked artifact evidence copy was still `103490907` bytes with SHA-256
+This is the final reconstructed release evidence for exact HEAD
+`15093773cad3e64946aebee3886d0754dc126fab`. The previous `40ab3fd` /
+`0a0af3` records are historical and are not current evidence. In particular,
+the old `89829...` artifact and all old PIDs are historical only.
+
+The protected test was not manually opened, inspected, printed, modified,
+restored, staged, or committed. The worktree Electron glob did load and execute
+it; pure exact-commit Electron evidence instead comes from the archive suite.
+Its required blob remains
+`959df4d23cd581ce43493e1c83c95881e64a710f`. Protected Git references remain:
+`stash@{0}`, commit `611e43f8f80ae348a062c66edef2be1db6986060`, and branch
+`codex-pre-merge-user-db-assertion-20260804`.
+
+## Preflight And Exact-Source Evidence
+
+At the start, the only worktree change was the protected test. The blocked
+artifact evidence remained `103490907` bytes with SHA-256
 `6A0BAEB3A88A7830ADD547B1ADCAC1F0FD63D795E7C92CB5C990A0FC4EC305B5`.
-No target application process was running, `build\portable` and the final
-snapshot destination were absent, and the committed documentation baseline
-contained both portable plans and both amended designs.
+Before build, `build/portable` was absent and target process count was zero.
 
-The only unrelated worktree change was
-`build-config/storage-electron/database-recovery.test.js`. It was checked only
-with status and `git hash-object`; its start and end blob was
-`959df4d23cd581ce43493e1c83c95881e64a710f`. It was not manually inspected or
-printed, and it was not modified, restored, staged, or committed. However,
-`npm run test:storage:electron` expanded
-`build-config/storage-electron/*.test.js`, so the protected worktree file was
-loaded and executed by that suite. The protected `stash@{0}`, commit
-`611e43f8`, and branch `codex-pre-merge-user-db-assertion-20260804` were not
-changed.
+The old portable tree was retained without deletion at
+`.superpowers/evidence/2026-08-05-pre-final-review-fix-portable`:
+`225` files, `49` child directories, `71203481` bytes.
+
+| Exact-source item | Result |
+| --- | --- |
+| Archive | `.superpowers/evidence/2026-08-05-exact-head-storage-electron.zip` |
+| Archive length / SHA-256 | `14671534` bytes / `FA67B361AF1EE4E5A3FA7B4DE6A75476DADE080CD10D51796A7B4EA3E679002E` |
+| Extracted source | `1274` files |
+| Isolated Electron suite | `431` tests, `30` suites, `431 pass / 0 fail / 0 skip` |
+| Isolated duration / exit | `19779.1949 ms` / `0` |
+
+The isolated suite ran from the archive extraction, rather than the worktree,
+and is the pure exact-commit Electron-storage evidence. Its working directory
+and exact archive-isolation command were:
+
+```powershell
+$env:LX_TEST_STORAGE_ROOT='D:\projects\lx-music-desktop\.superpowers\t'
+$env:ELECTRON_RUN_AS_NODE='1'
+$env:NODE_PATH='D:\projects\lx-music-desktop\node_modules'
+Set-Location 'D:\projects\lx-music-desktop\.superpowers\evidence\2026-08-05-exact-head-storage-electron'
+& 'D:\projects\lx-music-desktop\node_modules\electron\dist\electron.exe' --test 'build-config/storage-electron/*.test.js'
+```
 
 ## Source Matrix
 
-Each command ran independently with ordinary system Node and:
+All effective commands ran independently in an environment that permits child
+processes. The common setup was:
 
 ```powershell
 $env:LX_TEST_STORAGE_ROOT=(Resolve-Path '.superpowers\t').Path
 ```
 
-| Command | Exit | Pass | Skip | Fail |
-| --- | ---: | ---: | ---: | ---: |
-| `node --test scripts/test-legacy-user-data-migration.js` | 0 | 31 | 0 | 0 |
-| `npm run test:storage` | 0 | 725 | 5 | 0 |
-| `npm run test:storage:portable` | 0 | 37 | 0 | 0 |
-| `npm run test:user-api` | 0 | 122 | 0 | 0 |
-| `node --test build-config/playback-source-fallback.test.js build-config/playback-media-validation.test.js build-config/playback-source-setting.test.js` | 0 | 151 | 0 | 0 |
-| `npm run test:storage:electron` | 0 | 431 | 0 | 0 |
-| `npm run lint` | 0 | n/a | n/a | 0 findings |
-| `npm run build` | 0 | n/a | n/a | 0 build errors |
-| `npm run test:main-bundle` | 0 | 1 | 0 | 0 |
+A restricted sandbox's spawn `EPERM` is an environment diagnostic, not a code
+failure; it is not counted as valid matrix evidence.
 
-Source-test aggregate: `1498 pass / 5 skip / 0 fail`. Lint completed in 169.7
-seconds. Build completed in 94.6 seconds and all webpack targets compiled
-successfully.
+| Command | Exit | Result | Duration |
+| --- | ---: | --- | ---: |
+| `node --test scripts/test-legacy-user-data-migration.js` | 0 | `31 pass / 0 skip / 0 fail` | `15454.6831 ms` |
+| `npm run test:storage` | 0 | `731` tests, `56` suites, `726 pass / 5 skip / 0 fail` | `37672.0752 ms` |
+| `npm run test:storage:portable` | 0 | `37` tests, `2` suites, `37 pass / 0 fail` | `7259.1302 ms` |
+| `npm run test:user-api` | 0 | `122 pass / 0 fail` | `6142.8349 ms` |
+| `node --test build-config/playback-source-fallback.test.js build-config/playback-media-validation.test.js build-config/playback-source-setting.test.js` | 0 | `151 pass / 0 fail` | `8312.2246 ms` |
+| `npm run test:storage:electron` | 0 | `431` tests, `30` suites, `431 pass / 0 skip / 0 fail` | `18622.3496 ms` |
+| `npm run lint` | 0 | `caniuse-lite` notice only | n/a |
+| `npm run build` | 0 | successful build | `85 s` wall; pack `1:22.103` |
+| `npm run test:main-bundle` | 0 | `1 pass / 0 fail` | `15661.6318 ms` |
+| `git diff --check -- . ':(exclude)build-config/storage-electron/database-recovery.test.js'` | 0 | scoped whitespace check | n/a |
 
-The 431 Electron-storage passes are working-tree evidence for the committed
-base plus the protected blob, not exact-commit evidence for the verification
-base alone. Exact-commit Electron-storage coverage is **PENDING CONTROLLER
-VERIFICATION** from a retained `git archive` source tree that does not use the
-protected worktree file. That run must target the new source-fix commit.
+The worktree Electron glob executes the protected worktree test, so its 431
+passes are not pure exact-commit evidence. The archive suite above is the pure
+exact-commit result.
 
-The final whitespace check was deliberately scoped around the protected user
-file:
+## Package, 7-Zip, And Default Smoke
 
-```powershell
-git status --short
-git diff --check -- . ':(exclude)build-config/storage-electron/database-recovery.test.js'
-```
-
-It exited `0`, and status still showed only the protected file. An unrestricted
-`git diff --check` would have parsed that file, contrary to the controller's
-explicit protection rule.
-
-## Package And Default Smoke
-
-| Command | Exit | Result |
-| --- | ---: | --- |
-| `npm run pack:win:portable:x64` | 0 | Windows x64 NSIS portable produced |
-| `npm run test:packaged-app` | 0 | 2 pass, 0 skip, 0 fail |
-
-An initial invalid smoke invocation set only `LX_PORTABLE_ARTIFACT`; its
-independent shell lacked `LX_TEST_STORAGE_ROOT`. It exited `1` before artifact
-launch with `1 pass / 1 skip / 1 fail` and
-`LX_TEST_STORAGE_ROOT is required`. The valid invocation restarted the full
-test file with both variables:
+`npm run pack:win:portable:x64` exited `0` in `153.7 s`.
+`npm run test:packaged-app` passed `2/2` in `165.4846 ms`.
 
 ```powershell
+npm run pack:win:portable:x64
+npm run test:packaged-app
 $env:LX_TEST_STORAGE_ROOT=(Resolve-Path '.superpowers\t').Path
 $env:LX_PORTABLE_ARTIFACT=(Resolve-Path 'build\starky-lx-music-desktop-v3.0.0-x64-portable.exe').Path
 npm run test:portable-packaged-bootstrap
 ```
 
-The valid invocation exited `0` with `3 pass / 0 skip / 0 fail`: two helper
-tests and one real default-NSIS launch contract. The real launch used an empty
-argument array and no `--user-data-dir`.
+| Artifact property | Value |
+| --- | --- |
+| Path | `build/starky-lx-music-desktop-v3.0.0-x64-portable.exe` |
+| Length | `103493632` bytes |
+| Creation UTC | `2026-08-05T06:53:53.0161920Z` |
+| Last-write UTC | `2026-08-05T06:53:53.3166291Z` |
+| SHA-256 | `E2EE87DEA443E7115B2F2B7ADCB53610017970474659B2555C9D39C3B0E7FBAC` |
 
-## Artifact And 7-Zip
+The current artifact differs from the three blocked hashes
+`937C05AF1EAA5F6FED1D6B9C208A031FF4ABDF3CE023404BA56CD7DDAA9FF4E3`,
+`11FD8058213BC3558C593CEED9C872D45BC9F16A44B34CAE544ACA9C0BFC0186`, and
+`6A0BAEB3A88A7830ADD547B1ADCAC1F0FD63D795E7C92CB5C990A0FC4EC305B5`.
+It also differs from the historical previously passing artifact
+`89829C7538240AB4FB0E5FAF85F5EFB8A804AFF58C13E95104216CE23C215E41`.
+The default portable smoke was three helper tests plus one real
+default-empty-argv packaged launch, for `4` total: `4 pass / 0 skip / 0 fail`,
+`13879.3275 ms`, exit `0`. It used empty argv and no `--user-data-dir`
+override. After smoke, target process count, fixture process count, and
+`build/portable` were all zero/absent.
 
-- Path: `D:\projects\lx-music-desktop\build\starky-lx-music-desktop-v3.0.0-x64-portable.exe`
-- Length: `103490485` bytes
-- Creation UTC: `2026-08-05T04:06:19.3179656Z`
-- Last-write UTC: `2026-08-05T04:06:19.6547389Z`
-- SHA-256: `89829C7538240AB4FB0E5FAF85F5EFB8A804AFF58C13E95104216CE23C215E41`
+The local planned 7-Zip path was unavailable. The fallback was:
 
-The hash differs from all blocked hashes:
+    C:\Users\hao238\AppData\Local\electron-builder\Cache\7zip@1.0.0\7zip-win-x64-1nrf7\bin\7za.exe
 
-```text
-937C05AF1EAA5F6FED1D6B9C208A031FF4ABDF3CE023404BA56CD7DDAA9FF4E3
-11FD8058213BC3558C593CEED9C872D45BC9F16A44B34CAE544ACA9C0BFC0186
-6A0BAEB3A88A7830ADD547B1ADCAC1F0FD63D795E7C92CB5C990A0FC4EC305B5
-```
-
-The planned binary path
-`D:\projects\lx-music-desktop\node_modules\7zip-bin\win\x64\7za.exe` did not
-exist. Attempts through that path did not execute 7-Zip. The actual independent
-test used electron-builder's installed cache binary:
+It was `849920` bytes, SHA-256
+`223B873C50380FE9A39F1A22B6ABF8D46DB506E1C08D08312902F6F3CD1F7AC3`.
+7-Zip `24.09 x86` exited `0` with `Everything is Ok`, covering `79`
+files and `3` folders. The expected NSIS tail-signature warning was reported
+but did not affect the successful exit.
 
 ```powershell
 & 'C:\Users\hao238\AppData\Local\electron-builder\Cache\7zip@1.0.0\7zip-win-x64-1nrf7\bin\7za.exe' t $env:LX_PORTABLE_ARTIFACT
 ```
 
-The fallback binary was `849920` bytes with SHA-256
-`223B873C50380FE9A39F1A22B6ABF8D46DB506E1C08D08312902F6F3CD1F7AC3` before
-the archive check. It was 7-Zip `24.09 (x86)` and exited `0` with `Everything
-is Ok`, testing 3 folders and 79 files. It reported one expected NSIS warning,
-`There are data after the end of archive`.
-
 ## Installed Sentinel Isolation
 
-Only length, UTC mtime, and SHA-256 were read. Contents were never printed or
-parsed.
+Only metadata and hashes were read. No sentinel contents were printed or parsed.
+The frozen absolute paths were:
 
-| Sentinel | Length | LastWriteTimeUtc | SHA-256 |
+```text
+C:\Users\hao238\AppData\Roaming\starky-lx-music-desktop\LxDatas\lx.data.db
+C:\Users\hao238\AppData\Roaming\starky-lx-music-desktop\LxDatas\config_v2.json
+C:\Users\hao238\AppData\Local\starky-lx-music-desktop\cache\cache.db
+C:\Users\hao238\AppData\Local\starky-lx-music-desktop\runtime\run-state.v1.json
+```
+
+| Sentinel | Length | UTC mtime | SHA-256 |
 | --- | ---: | --- | --- |
-| installed `LxDatas\lx.data.db` | 49512448 | `2026-08-04T22:04:38.4306334Z` | `CD318C24446E97ADA1B354E88650A1DF5A8FB8DE618EFFFF522A25E823C7724B` |
-| installed `LxDatas\config_v2.json` | 5493 | `2026-08-04T22:04:37.9573321Z` | `F7F73169F99D3B30B25C904921EDF37E540ECC4105FE2A28C41BFDB2B166F6A7` |
-| installed `cache\cache.db` | 86016 | `2026-08-04T22:04:38.4386651Z` | `2FE3EC5A833BF2AC3BFAA62106F0A963E1CA4EA6BBD5D8F57821BA6AD3CF0AB0` |
-| installed `runtime\run-state.v1.json` | 73 | `2026-08-04T22:59:26.6913437Z` | `45503D71B01251A11D37346B8C6C0AA84F36E564F6B95EB443B7C38B087432A4` |
+| `LxDatas/lx.data.db` | 49512448 | `2026-08-04T22:04:38.4306334Z` | `CD318C24446E97ADA1B354E88650A1DF5A8FB8DE618EFFFF522A25E823C7724B` |
+| `LxDatas/config_v2.json` | 5493 | `2026-08-04T22:04:37.9573321Z` | `F7F73169F99D3B30B25C904921EDF37E540ECC4105FE2A28C41BFDB2B166F6A7` |
+| `cache/cache.db` | 86016 | `2026-08-04T22:04:38.4386651Z` | `2FE3EC5A833BF2AC3BFAA62106F0A963E1CA4EA6BBD5D8F57821BA6AD3CF0AB0` |
+| `runtime/run-state.v1.json` | 73 | `2026-08-04T22:59:26.6913437Z` | `45503D71B01251A11D37346B8C6C0AA84F36E564F6B95EB443B7C38B087432A4` |
 
-All four rows were unchanged after first launch, after clean close, and after
-second launch.
+All four were unchanged on the first and second launch (`4/4` each).
 
-## First Default Launch
+## True First Launch And Schema
 
-Before UI actions, the Computer Use wrapper was initialized and its required
-`guidance` and `confirmations` documents were read. `sky.launch_app` received
-the real artifact path and no arguments. Its initial internal wait expired,
-then fresh `list_apps` and `list_windows` each returned exactly one running
-candidate with title `LX Music`. That returned window object was selected and
-captured.
+Computer Use launched the real current artifact with default empty arguments.
+`sky.launch_app` reported that it did not expose a targetable window; a fresh
+list then found exactly one `LX Music` instance. Launcher PID was `18996`; main
+PID was `3500`.
 
-The normal license screen was visible. After accepting it, the main music UI
-appeared. A normal free/open-source information notice also appeared. Neither
-screen contained a recovery, startup, migration, or database error.
+The new-profile license-agreement countdown was visible and accepted as an
+allowed ToS action. The normal free-software notice appeared, followed by the
+main UI. No recovery, startup, migration, or database error was visible.
 
-- First main PID: `7880`
-- Launcher parent PID: `47708`
-- Main argv: executable only; no application argument and no
-  `--user-data-dir`
-- Electron process count: `6`
+Required direct, non-reparse paths:
 
-The portable root was a direct, non-reparse directory under `build`. Its exact
-direct children were `cache`, `profile`, `runtime`, and `temp`. All required
-paths existed:
+    portable/profile/lx.data.db
+    portable/cache/cache.db
+    portable/runtime/electron-user-data
+    portable/runtime/session-data
+    portable/runtime/run-state.v1.json
+    portable/temp
 
-```text
-build\portable\profile\lx.data.db
-build\portable\cache\cache.db
-build\portable\runtime\electron-user-data\
-build\portable\runtime\session-data\
-build\portable\runtime\run-state.v1.json
-build\portable\temp\
-```
+Absent paths:
 
-These remained absent:
+    portable/backups
+    portable/profile/data.json
+    portable/userData
+    portable/.portable-profile-migration.json
+    portable/.portable-profile-migration.pending.json
 
-```text
-build\portable\backups
-build\portable\profile\data.json
-build\portable\userData
-build\portable\.portable-profile-migration.json
-build\portable\.portable-profile-migration.pending.json
-```
+The query used the Electron ABI with `better-sqlite3`, `readonly:true`,
+`fileMustExist:true`, and SQLite `query_only=1`; it returned version `7`.
 
-Chromium's own `*-journal` files under `runtime\session-data` do not match the
-two exact portable migration filenames and are not migration evidence.
-
-## Read-Only Schema Evidence
-
-The installed Electron ABI opened the portable application database with
-`readonly:true`, `fileMustExist:true`, and SQLite `query_only=1`. The first
-launch returned `db_info.version == '7'` and these exact ledger rows:
-
-| Version | Name | Checksum | applied_at_ms |
+| Version | Name | Checksum suffix | applied_at_ms |
 | ---: | --- | --- | ---: |
-| 3 | `storage_foundation` | `9243aa510e8355d2c3d0f687c6736654adf584ec6007b1bcf46f374a9d694e41` | 1785903027018 |
-| 4 | `account_profiles` | `885ff60acc5b2eece73a566fb59f73a7d3d3496d846c98a38d2f6be359638451` | 1785903027018 |
-| 5 | `non_activity_state` | `a4dda51309eb5e7e98d61125bc50bf7342b6aba5e367d5824a9b357774bc8c65` | 1785903027018 |
-| 6 | `playback_activity` | `41fd08b6838c90dcd78435d38eb0ec112be9a0ee9c442fdf0efec669da60904b` | 1785903027018 |
-| 7 | `cache_cleanup` | `493156099746b38631fc96a4ec2c03a3607e5e848f6f05bafa5f510bf1fa61b2` | 1785903027211 |
+| 3 | `storage_foundation` | `9243...e41` | 1785913032398 |
+| 4 | `account_profiles` | `885ff...451` | 1785913032398 |
+| 5 | `non_activity_state` | `a4dda...c65` | 1785913032398 |
+| 6 | `playback_activity` | `41fd...04b` | 1785913032398 |
+| 7 | `cache_cleanup` | `493156...1b2` | 1785913032559 |
 
-## Title-Bar Shutdown And Preserved Snapshot
+Full migration checksums were verified as:
+`9243aa510e8355d2c3d0f687c6736654adf584ec6007b1bcf46f374a9d694e41`,
+`885ff60acc5b2eece73a566fb59f73a7d3d3496d846c98a38d2f6be359638451`,
+`a4dda51309eb5e7e98d61125bc50bf7342b6aba5e367d5824a9b357774bc8c65`,
+`41fd08b6838c90dcd78435d38eb0ec112be9a0ee9c442fdf0efec669da60904b`,
+and `493156099746b38631fc96a4ec2c03a3607e5e848f6f05bafa5f510bf1fa61b2`.
 
-The first title-bar Close click occurred while the information modal was still
-present, so the window remained and no close claim was made. Computer Use
-dismissed the notice through a fresh `OK` element, refreshed the accessibility
-tree, and clicked the fresh real title-bar `Close` element. The target window
-then disappeared and all target processes exited naturally.
+## Title-Bar Close And Snapshot
 
-- Run-state version: `1`
-- Clean: `true`
-- Started: `1785903026808` (`2026-08-05T04:10:26.8080000Z`)
-- Completed: `1785903411152` (`2026-08-05T04:16:51.1520000Z`)
-- `portable\temp\run-*` direct-child count: `0`
+The real title-bar Close was sent. Escape interrupted the tool return, not the
+action. An independent subsequent state check found zero windows and zero target
+processes, confirming a natural close; the result is not unknown.
 
-With the application closed, source identity was rechecked and the exact tree
-was copied without deleting the source to the initially absent path:
+Run-state recorded `version:1`, `clean:true`,
+`startedAtMs:1785913032222` (`2026-08-05T06:57:12.222Z`), and
+`completedAtMs:1785913443668` (`2026-08-05T07:04:03.668Z`).
+`portable/temp/run-*` direct-child count was `0`.
 
-```text
-D:\projects\lx-music-desktop\.superpowers\evidence\2026-08-05-post-early-path-fix-first-launch-portable
-```
+The source was retained and copied to initially absent
+`.superpowers/evidence/2026-08-05-post-final-review-fix-first-launch-portable`.
+Before copy it was absent; source and full tree had zero reparse entries.
+Item type, length, and SHA-256 were verified. The snapshot is `130` files,
+`45` child directories, and `38730899` bytes.
 
-The source and snapshot each contain 82 files, 45 directories, and 11152826
-bytes. Relative paths, types, lengths, and per-file SHA-256 values matched;
-manifest delta count was `0`.
+The first evidence script failed because PowerShell 5.1 lacks
+`GetRelativePath`, after copying had completed. Without deleting or recopying,
+it was corrected to use validated prefix-relative paths; full verification of
+the existing copy then passed. This records an evidence-script correction only.
 
-## Historical Implementer Second Launch Reuse
+## Second Launch Reuse
 
-Computer Use launched the same artifact again with no arguments. Fresh app and
-window lists again returned one `LX Music` candidate. The normal UI appeared
-directly, with no license, startup, recovery, migration, or database error.
+The same artifact launched again with empty arguments. Its helper timed out, but
+fresh inspection found exactly one `LX Music` instance. The settings page was
+reused, the license did not reappear, no error was visible, and tray-minimize
+was unchecked.
 
-The same profile database, cache database, electron-user-data, session-data,
-run-state, and temp paths existed. Backups, legacy `data.json`, `userData`, and
-both portable migration files remained absent. A second Electron ABI read-only
-query returned `query_only=1`, version `7`, and ledger versions
-`[3,4,5,6,7]`. Installed sentinels remained `4/4` unchanged.
+- Launcher PID `50420`, started `2026-08-05T07:13:51.0285320Z`
+- Main PID `7700`, started `2026-08-05T07:13:59.1671560Z`
+- Main child count `5`
+- Liveness audit `2026-08-05T07:18:10.7875463Z`
+- Run-state: `clean:false`, `startedAtMs:1785914040347`
+  (`2026-08-05T07:14:00.347Z`)
 
-- Historical main PID: `37544`
-- Historical launcher parent PID: `31912`
-- Main argv: executable only, no `--user-data-dir`
-- Electron process count: `6`
-- State at implementer finalization: verified second instance intentionally left running
+At that audit all six required paths remained direct/non-reparse; all five
+forbidden paths remained absent. The second query was again `query_only=1`,
+version `7`, with the same migration rows. Sentinel metadata was unchanged
+`4/4`, snapshot counts were unchanged, and artifact hash remained
+`E2EE87DEA443E7115B2F2B7ADCB53610017970474659B2555C9D39C3B0E7FBAC`.
 
-That historical instance subsequently exited cleanly and is not the current
-final process. Its post-exit portable run-state was `version:1`, `clean:true`,
-`startedAtMs:1785903602398`, and `completedAtMs:1785904434329`.
+The parent controller intentionally holds this verified second instance. This
+documentation refresh did not start, close, click, or otherwise alter it.
 
-## Controller Finalization
+## Evidence-Loss History And Coverage Gaps
 
-The controller relaunched the same
-`build\starky-lx-music-desktop-v3.0.0-x64-portable.exe` through Computer Use
-with an empty argument list. The launcher started at
-`2026-08-05T04:38:17.3573580Z` as PID `37536`; the extracted main process
-started at `2026-08-05T04:38:27.7952289Z` as PID `32560`, with parent PID
-`37536`.
+An earlier release-evidence ordering allowed an unpreserved `build/portable`
+tree to be lost because `build-config/pack.js` removes `build/**`. This run
+does not reconstruct that tree: it began with `build/portable` absent,
+preserved older evidence before building, and copied the current first-launch
+tree before the second launch.
 
-At the controller audit time `2026-08-05T04:49:37.1003241Z`:
-
-- Fresh `list_windows` returned exactly one `LX Music` window.
-- A fresh accessibility tree showed the normal recommendation UI with no
-  startup, recovery, migration, or database error.
-- The launcher command line contained only the quoted artifact executable;
-  the main command line contained only the extracted executable.
-- All six current Electron child processes had parent PID `32560` and used
-  `D:\projects\lx-music-desktop\build\portable\runtime\electron-user-data`.
-- The artifact remained `103490485` bytes with SHA-256
-  `89829C7538240AB4FB0E5FAF85F5EFB8A804AFF58C13E95104216CE23C215E41`.
-- All six required portable paths were direct/non-reparse, and backups,
-  legacy `data.json`, `userData`, and both portable migration files remained
-  absent.
-- The Electron ABI query remained read-only with `query_only=1`,
-  `db_info.field_value == '7'`, and migrations `[3,4,5,6,7]`.
-- Installed sentinels remained `4/4` unchanged.
-- The preserved snapshot remained 82 files, 45 child directories, and
-  11152826 bytes.
-- The fallback 7-Zip binary and hash were unchanged; its fresh archive test
-  exited `0` with `Everything is Ok`, 3 folders, 79 files, and the one expected
-  NSIS tail warning.
-
-A separate read-only process liveness check at
-`2026-08-05T04:52:03.2647821Z` found launcher PID `37536` and main PID `32560`
-still running with the exact start times above; historical PIDs `31912` and
-`37544` were absent. No process was closed, restarted, or otherwise touched by
-this review fix.
-
-## Evidence-Loss History And Gaps
-
-The amended design records that `build-config/pack.js` removes `build/**`. An
-earlier release-evidence ordering allowed an unpreserved `build\portable` tree
-to be lost. This run does not reconstruct or claim that missing tree. It began
-with `build\portable` absent, preserved and rechecked the blocked artifact
-before build, and copied the new clean first-launch tree before relaunch.
-
-No real provider track was requested or played. This evidence covers build,
-package structure, default artifact launch, visible UI, portable storage
-isolation, schema creation/reuse, clean shutdown, snapshot preservation, and
-second launch. It does not cover provider network resolution, real audio
-decode/output, or account-scoped playback URL persistence. No configured real
-NTFS/FAT32/exFAT disposable-volume loop was available, so those real-media
-filesystem checks remain evidence gaps, not passes.
+No real provider track was configured or played. No real NTFS, FAT32, or exFAT
+removable roots were configured and exercised. Provider/network/decode/output
+and real-media filesystem coverage remain declared gaps, not passes.
 
 ## Release Ruling
 
-The Windows x64 portable artifact now reaches launcher-local storage with
-default arguments, publishes stable Electron roots, leaves the installed
-profile untouched, creates and reuses schema 7, closes cleanly through the
-title bar, and relaunches from the preserved first-launch state. The historical
-implementer instance at main PID `37544` later exited cleanly. The current
-controller-relaunched instance remained running at audit and fix-round
-liveness check with launcher PID `37536` and main PID `32560`.
+Exact HEAD `15093773cad3e64946aebee3886d0754dc126fab` produced the current,
+distinct Windows x64 portable artifact. Default-argument launch created and
+reused launcher-local schema-7 storage, left installed sentinels unchanged,
+closed cleanly, preserved a verified first-launch tree, and reached the normal
+UI on its controller-held second launch.
 
-**Release bootstrap verification passed with the explicitly recorded
-real-media coverage gaps.**
+**Release bootstrap verification passes with the explicit real-media and
+real-volume coverage gaps above.**

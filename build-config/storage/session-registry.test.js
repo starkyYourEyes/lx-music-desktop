@@ -780,6 +780,9 @@ test('main window construction waits for readiness and releases its matching tok
   const registrations = []
   const windows = []
   const targetSession = {}
+  let quitCalls = 0
+  let closePreventCalls = 0
+  let mainWindowCloseCalls = 0
   class FakeWindow {
     constructor(options) {
       this.options = options
@@ -792,7 +795,9 @@ test('main window construction waits for readiness and releases its matching tok
     async loadURL() {}
     isDestroyed() { return false }
     close() {}
-    emit(name) { this.listeners.get(name)?.() }
+    hide() { this.hideCalls = (this.hideCalls ?? 0) + 1 }
+    setProgressBar() {}
+    emit(name, ...args) { this.listeners.get(name)?.(...args) }
   }
   global.envParams = { cmdParams: { dt: true } }
   global.lx = {
@@ -803,12 +808,13 @@ test('main window construction waits for readiness and releases its matching tok
         return { ready: gate.promise, unregister: () => { item.unregisterCalls++ } }
       },
     },
-    appSetting: { 'common.windowSizeId': 0, 'common.startInFullscreen': false },
+    appSetting: { 'common.windowSizeId': 0, 'common.startInFullscreen': false, 'tray.enable': false },
+    isSkipTrayQuit: false,
     theme: { shouldUseDarkColors: false, theme: { colors: { '--color-primary-light-1000': '#fff' } } },
-    event_app: { main_window_created() {} },
+    event_app: { main_window_created() {}, main_window_close() { mainWindowCloseCalls++ } },
   }
   const main = loadTsModule(path.join(__dirname, '../../src/main/modules/winMain/main.ts'), {
-    electron: { BrowserWindow: FakeWindow, dialog: {}, session: { fromPartition: () => targetSession } },
+    electron: { app: { quit() { quitCalls++ } }, BrowserWindow: FakeWindow, dialog: {}, session: { fromPartition: () => targetSession } },
     'node:path': { join: (...parts) => parts.join('/') },
     './utils': { createTaskBarButtons() {}, getWindowSizeInfo: () => ({ width: 800, height: 600 }) },
     '@common/utils': { getPlatform: () => 'win32', isLinux: false, isWin: true },
@@ -826,6 +832,18 @@ test('main window construction waits for readiness and releases its matching tok
   await creating
   assert.equal(windows.length, 1)
   assert.deepEqual(registrations[0].input, { key: 'main:win-main', session: targetSession })
+  windows[0].emit('close', { preventDefault() { closePreventCalls++ } })
+  assert.equal(closePreventCalls, 1)
+  assert.equal(windows[0].hideCalls, 1)
+  assert.equal(quitCalls, 1)
+  assert.equal(mainWindowCloseCalls, 0)
+
+  global.lx.isSkipTrayQuit = true
+  windows[0].emit('close', { preventDefault() { closePreventCalls++ } })
+  assert.equal(closePreventCalls, 1)
+  assert.equal(windows[0].hideCalls, 1)
+  assert.equal(quitCalls, 1)
+  assert.equal(mainWindowCloseCalls, 1)
   windows[0].emit('closed')
   assert.equal(registrations[0].unregisterCalls, 1)
 })

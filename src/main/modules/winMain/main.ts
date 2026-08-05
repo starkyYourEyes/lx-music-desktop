@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, session } from 'electron'
+import { app, BrowserWindow, dialog, session } from 'electron'
 import path from 'node:path'
 import { createTaskBarButtons, getWindowSizeInfo } from './utils'
 import { getPlatform, isLinux, isWin } from '@common/utils'
@@ -16,6 +16,13 @@ const winEvent = () => {
   if (!browserWindow) return
 
   browserWindow.on('close', event => {
+    if (!global.lx.isSkipTrayQuit && !global.lx.appSetting['tray.enable']) {
+      event.preventDefault()
+      browserWindow!.hide()
+      app.quit()
+      return
+    }
+
     if (global.lx.isSkipTrayQuit || !global.lx.appSetting['tray.enable']) {
       browserWindow!.setProgressBar(-1)
       // global.lx.mainWindowClosed = true

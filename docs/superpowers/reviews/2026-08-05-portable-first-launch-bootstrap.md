@@ -2,7 +2,7 @@
 
 - Source verification base: exact HEAD `29044c21cc4cf2cca8b38d698b1720f5d0f2fd21` (`fix: preserve mutable state after legacy migration`)
 - Platform and artifact: Windows x64 portable EXE
-- Final verdict: `PASS`, subject only to the declared real-removable-media coverage gap
+- Final verdict: the requested final restored-data release is verified by the recorded evidence, with the declared snapshot and removable-media evidence gaps
 - Controller state: the verified restored-data second launch remains running; this documentation pass did not interact with it.
 
 ## Superseded Records And Scope
@@ -34,48 +34,43 @@ Previously established on exact final HEAD: mutable-state replay `1/1`,
 `non-activity-retry` `5/5`, legacy migration `31/31`, storage `732 pass / 5
 skip / 0 fail` (`737` total), and portable storage `37/37`.
 
-The final-pass commands were run independently with this storage-root setup:
+The complete source commands were run independently with this storage-root
+setup:
 
 ```powershell
 $env:LX_TEST_STORAGE_ROOT=(Resolve-Path '.superpowers\t').Path
+node --test scripts/test-legacy-user-data-migration.js
+npm run test:storage
+npm run test:storage:portable
 npm run test:user-api
 node --test build-config/playback-source-fallback.test.js build-config/playback-media-validation.test.js build-config/playback-source-setting.test.js
-electron.exe --test --test-concurrency=1 `
-  build-config/storage-electron/account-profile.test.js `
-  build-config/storage-electron/cache-cutover.test.js `
-  build-config/storage-electron/cache-db.test.js `
-  build-config/storage-electron/cache-lifecycle.test.js `
-  build-config/storage-electron/cache-phase4.integration.test.js `
-  build-config/storage-electron/cache-policy.test.js `
-  build-config/storage-electron/migration-runner.test.js `
-  build-config/storage-electron/non-activity-repository.test.js `
-  build-config/storage-electron/non-activity-retry.test.js `
-  build-config/storage-electron/playback-clear.test.js `
-  build-config/storage-electron/playback-migration.test.js `
-  build-config/storage-electron/playback-phase3.integration.test.js `
-  build-config/storage-electron/playback-renderer-crash.integration.test.js `
-  build-config/storage-electron/playback-retention.test.js `
-  build-config/storage-electron/playback-schema.test.js `
-  build-config/storage-electron/playback-storage.test.js `
-  build-config/storage-electron/raw-lyric-migration.test.js `
-  build-config/storage-electron/safe-storage-vault.test.js `
-  build-config/storage-electron/scoped-cache-repository.test.js `
-  build-config/storage-electron/storage-foundation.integration.test.js
+$tests=@(Get-ChildItem -LiteralPath 'build-config\storage-electron' -Filter '*.test.js' -File | Where-Object { $_.Name -ne 'database-recovery.test.js' } | Sort-Object Name | ForEach-Object FullName)
+if ($tests.Count -ne 20) { throw "Expected 20 Electron ABI tests, got $($tests.Count)" }
+$env:ELECTRON_RUN_AS_NODE='1'
+$arguments=@('--test','--test-concurrency=1')+$tests
+$electronStdout=Join-Path (Resolve-Path '.superpowers\t').Path 'final-electron-abi.stdout.log'
+$electronStderr=Join-Path (Resolve-Path '.superpowers\t').Path 'final-electron-abi.stderr.log'
+$electronProcess=Start-Process -FilePath (Resolve-Path 'node_modules\electron\dist\electron.exe').Path -ArgumentList $arguments -Wait -PassThru -RedirectStandardOutput $electronStdout -RedirectStandardError $electronStderr
+if ($electronProcess.ExitCode -ne 0) { throw "Electron ABI suite failed: $($electronProcess.ExitCode)" }
 npm run lint
 npm run build
 npm run test:main-bundle
 git diff --check -- . ':(exclude)build-config/storage-electron/database-recovery.test.js'
 ```
 
-The explicit Electron command is the final-pass substitute for the plan's
-protected-file-inclusive glob; it names all 20 allowed suites and excludes the
-protected test without opening or executing it.
+The successful explicit Electron process exit was `0`. This is the final-pass
+substitute for the plan's protected-file-inclusive glob: it selects 20 sorted
+allowed suites, excludes the protected test by name, and does not open or
+execute it.
 
 | Command | Final result |
 | --- | --- |
+| `node --test scripts/test-legacy-user-data-migration.js` | exit `0`; `31 pass / 0 fail` |
+| `npm run test:storage` | `732 pass / 5 skip / 0 fail`; `737` total |
+| `npm run test:storage:portable` | `37 pass / 0 fail` |
 | `npm run test:user-api` | exit `0`; `122 pass / 0 skip/fail`; 7.620 s TAP |
 | `node --test build-config/playback-source-fallback.test.js build-config/playback-media-validation.test.js build-config/playback-source-setting.test.js` | exit `0`; `151 pass / 0 skip/fail`; 11.552 s TAP |
-| Explicit `electron.exe --test --test-concurrency=1` 20-file command above | exit `0`; `369 pass / 0 skip/fail`; 26 suites; 65.761 s TAP |
+| Explicit repository-Electron `Start-Process` allowlist command above | process exit `0`; `369 pass / 0 skip/fail`; 26 suites; 65.761 s TAP |
 | `npm run lint` | exit `0`; 205.4 s; existing Browserslist/caniuse-lite age advisory only |
 | `npm run build` | exit `0`; 106.9 s; all webpack targets compiled |
 | `npm run test:main-bundle` | exit `0`; `1 pass / 0 fail`; live runtime environment preserved |
@@ -83,11 +78,24 @@ protected test without opening or executing it.
 
 ## Artifact And Packaging
 
-`npm run pack:win:portable:x64` exited `0` in 221.7 s. `npm run test:packaged-app`
-passed `4/4`; the count includes launch-unique extraction configuration tests.
-The artifact's empty-argv bootstrap test passed `6/6` in 41.946 s TAP (44.9 s
-wall), including real default launch and concurrent-launch extraction coverage.
-Post-smoke target process count was zero.
+The complete packaging and smoke commands were:
+
+```powershell
+npm run pack:win:portable:x64
+npm run test:packaged-app
+$env:LX_TEST_STORAGE_ROOT=(Resolve-Path '.superpowers\t').Path
+$env:LX_PORTABLE_ARTIFACT=(Resolve-Path 'build\starky-lx-music-desktop-v3.0.0-x64-portable.exe').Path
+npm run test:portable-packaged-bootstrap
+Get-Item -LiteralPath $env:LX_PORTABLE_ARTIFACT
+Get-FileHash -LiteralPath $env:LX_PORTABLE_ARTIFACT -Algorithm SHA256
+& (Get-Command 7z.exe -ErrorAction Stop).Source t $env:LX_PORTABLE_ARTIFACT
+```
+
+Packaging exited `0` in 221.7 s. `npm run test:packaged-app` passed `4/4`; the
+count includes launch-unique extraction configuration tests. The artifact's
+empty-argv bootstrap test passed `6/6` in 41.946 s TAP (44.9 s wall), including
+real default launch and concurrent-launch extraction coverage. Post-smoke
+target process count was zero.
 
 | Property | Final value |
 | --- | --- |
@@ -166,11 +174,16 @@ portable config then has `setting.tray.enable=true`, while artifact hash,
 journal state, absent legacy source, and installed sentinels stayed unchanged.
 This verified second instance remains controller-owned and running.
 
-## Coverage Gap And Release Ruling
+## Evidence Gaps And Release Ruling
 
-No separately configured real NTFS, FAT32, or exFAT removable-media roots were
-exercised. Final HEAD `29044c21` nevertheless proves local-volume portable
-packaging, isolated default startup, unique concurrent extraction, restored
-state integrity, schema/migration health, installed-data isolation, clean
-title-bar shutdown, and second-launch reuse. Release bootstrap verification
-passes subject to that explicit removable-media coverage gap.
+The final restored-data pass did not preserve a separate post-first-launch
+snapshot before the second launch, and no separately configured real NTFS,
+FAT32, or exFAT removable-media roots were exercised. Those are declared
+evidence deviations, not passes or substituted claims.
+
+The requested final restored-data release is verified by the recorded
+local-volume portable packaging, isolated default startup, unique concurrent
+extraction, restored-state integrity, schema/migration health, installed-data
+isolation, clean title-bar shutdown, and second-launch reuse. This ruling does
+not claim literal full Task 4 evidence compliance beyond the documented record
+or supersession authority beyond the documented historical distinctions.

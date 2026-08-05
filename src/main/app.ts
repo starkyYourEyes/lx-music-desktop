@@ -118,8 +118,6 @@ export const initSingleInstanceHandle = () => {
       if (envParams.cmdParams.hidden !== true) {
         showMainWindow()
       }
-    } else {
-      app.quit()
     }
   })
 }

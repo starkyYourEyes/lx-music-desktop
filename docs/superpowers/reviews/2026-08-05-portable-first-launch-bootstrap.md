@@ -21,21 +21,65 @@ explicit 20-file allowlist excluding that filename. Installed sentinel contents
 were not printed or parsed; only length, UTC modification time, and SHA-256
 were compared.
 
+## Earlier Evidence-Loss Incident
+
+An earlier Task 4 ordering allowed `npm run build` to clean blocked
+`build\portable` before it was moved. No recoverable tree copy was found, and
+no placeholder was claimed. That historical loss is distinct from the final
+HEAD backup-and-restore evidence below.
+
 ## Final Source Verification
 
 Previously established on exact final HEAD: mutable-state replay `1/1`,
 `non-activity-retry` `5/5`, legacy migration `31/31`, storage `732 pass / 5
 skip / 0 fail` (`737` total), and portable storage `37/37`.
 
+The final-pass commands were run independently with this storage-root setup:
+
+```powershell
+$env:LX_TEST_STORAGE_ROOT=(Resolve-Path '.superpowers\t').Path
+npm run test:user-api
+node --test build-config/playback-source-fallback.test.js build-config/playback-media-validation.test.js build-config/playback-source-setting.test.js
+electron.exe --test --test-concurrency=1 `
+  build-config/storage-electron/account-profile.test.js `
+  build-config/storage-electron/cache-cutover.test.js `
+  build-config/storage-electron/cache-db.test.js `
+  build-config/storage-electron/cache-lifecycle.test.js `
+  build-config/storage-electron/cache-phase4.integration.test.js `
+  build-config/storage-electron/cache-policy.test.js `
+  build-config/storage-electron/migration-runner.test.js `
+  build-config/storage-electron/non-activity-repository.test.js `
+  build-config/storage-electron/non-activity-retry.test.js `
+  build-config/storage-electron/playback-clear.test.js `
+  build-config/storage-electron/playback-migration.test.js `
+  build-config/storage-electron/playback-phase3.integration.test.js `
+  build-config/storage-electron/playback-renderer-crash.integration.test.js `
+  build-config/storage-electron/playback-retention.test.js `
+  build-config/storage-electron/playback-schema.test.js `
+  build-config/storage-electron/playback-storage.test.js `
+  build-config/storage-electron/raw-lyric-migration.test.js `
+  build-config/storage-electron/safe-storage-vault.test.js `
+  build-config/storage-electron/scoped-cache-repository.test.js `
+  build-config/storage-electron/storage-foundation.integration.test.js
+npm run lint
+npm run build
+npm run test:main-bundle
+git diff --check -- . ':(exclude)build-config/storage-electron/database-recovery.test.js'
+```
+
+The explicit Electron command is the final-pass substitute for the plan's
+protected-file-inclusive glob; it names all 20 allowed suites and excludes the
+protected test without opening or executing it.
+
 | Command | Final result |
 | --- | --- |
 | `npm run test:user-api` | exit `0`; `122 pass / 0 skip/fail`; 7.620 s TAP |
-| Three playback source tests | exit `0`; `151 pass / 0 skip/fail`; 11.552 s TAP |
-| Explicit 20-file Electron ABI allowlist | exit `0`; `369 pass / 0 skip/fail`; 26 suites; 65.761 s TAP |
+| `node --test build-config/playback-source-fallback.test.js build-config/playback-media-validation.test.js build-config/playback-source-setting.test.js` | exit `0`; `151 pass / 0 skip/fail`; 11.552 s TAP |
+| Explicit `electron.exe --test --test-concurrency=1` 20-file command above | exit `0`; `369 pass / 0 skip/fail`; 26 suites; 65.761 s TAP |
 | `npm run lint` | exit `0`; 205.4 s; existing Browserslist/caniuse-lite age advisory only |
 | `npm run build` | exit `0`; 106.9 s; all webpack targets compiled |
 | `npm run test:main-bundle` | exit `0`; `1 pass / 0 fail`; live runtime environment preserved |
-| Protected-path-excluding `git diff --check` | exit `0` |
+| `git diff --check -- . ':(exclude)build-config/storage-electron/database-recovery.test.js'` | exit `0` |
 
 ## Artifact And Packaging
 
@@ -68,6 +112,14 @@ SHA-256: `124` files, `58` descendant directories, `295853550` bytes, zero
 reparse points, and no mismatches. After packaging, robocopy staging and the
 published restore had the same zero-mismatch result.
 
+### Snapshot Deviation
+
+This final restored-data pass did not create the plan's separate
+post-first-launch snapshot before the second launch. The verified external
+backup is a recovery source, not a replacement snapshot claim. The in-place
+clean-close evidence below remains verified; no post-first-launch inventory or
+snapshot path is invented for this final pass.
+
 While stopped, the main database opened through Electron 37.6.1 ABI with
 `better-sqlite3`, readonly/file-must-exist/query-only boundaries: `quick_check`
 was exactly `ok`, foreign-key check had zero rows, and `db_info.version=7`.
@@ -82,10 +134,16 @@ shell, and `backups`.
 
 ## Installed Isolation And Restored Lifecycle
 
-The four installed sentinels (`lx.data.db`, `config_v2.json`, `cache.db`, and
-`run-state.v1.json`) matched their frozen length, UTC mtime, and SHA-256 before
-first launch, while it ran, after second launch, and after enabling tray:
-`4/4` unchanged each time.
+All four installed sentinel rows matched before launch, during first launch,
+after second launch, and after the tray-setting change (`4/4` unchanged at each
+comparison). Contents were not read or parsed.
+
+| Sentinel | Bytes | UTC mtime | SHA-256 |
+| --- | ---: | --- | --- |
+| `C:\Users\hao238\AppData\Roaming\starky-lx-music-desktop\LxDatas\lx.data.db` | 49,512,448 | `2026-08-04T22:04:38.4306334Z` | `CD318C24446E97ADA1B354E88650A1DF5A8FB8DE618EFFFF522A25E823C7724B` |
+| `C:\Users\hao238\AppData\Roaming\starky-lx-music-desktop\LxDatas\config_v2.json` | 5,493 | `2026-08-04T22:04:37.9573321Z` | `F7F73169F99D3B30B25C904921EDF37E540ECC4105FE2A28C41BFDB2B166F6A7` |
+| `C:\Users\hao238\AppData\Local\starky-lx-music-desktop\cache\cache.db` | 86,016 | `2026-08-04T22:04:38.4386651Z` | `2FE3EC5A833BF2AC3BFAA62106F0A963E1CA4EA6BBD5D8F57821BA6AD3CF0AB0` |
+| `C:\Users\hao238\AppData\Local\starky-lx-music-desktop\runtime\run-state.v1.json` | 73 | `2026-08-04T22:59:26.6913437Z` | `45503D71B01251A11D37346B8C6C0AA84F36E564F6B95EB443B7C38B087432A4` |
 
 The final EXE's first real restored-data launch reached one normal, error-free
 `LX Music` window from `Temp\nsa6113.tmp`; helper targeting timed out, but
@@ -93,13 +151,17 @@ window discovery recovered the live main window. Direct non-reparse portable
 paths existed for profile database/config, cache, Electron user/session data,
 run state, and temp. During the run, `clean=false`, one `temp\run-*` existed,
 and sentinels remained unchanged. A real title-bar Close with tray disabled
-left all target processes at zero, `clean=true`, completed-after-start timing,
-no `run-*`, and an empty portable temp directory.
+left all target processes at zero, `clean=true`,
+`startedAtMs=1785950689101` (`2026-08-05T17:24:49.101Z`), and
+`completedAtMs=1785950762267` (`2026-08-05T17:26:02.267Z`), with completion
+after start, no `run-*`, and an empty portable temp directory.
 
 The same artifact then reused restored data from `Temp\nsm3893.tmp`: one normal
 exact-titled main window (with one auxiliary untitled window belonging to its
 main process), no startup/recovery error, `clean=false` while active, and one
-run-temp reservation. Settings changed tray-minimize from unchecked to checked;
+run-temp reservation. Its launcher PID was `39172`, main PID was `47868`, and
+`run-state.startedAtMs=1785950809733` (`2026-08-05T17:26:49.733Z`). Settings
+changed tray-minimize from unchecked to checked;
 portable config then has `setting.tray.enable=true`, while artifact hash,
 journal state, absent legacy source, and installed sentinels stayed unchanged.
 This verified second instance remains controller-owned and running.

@@ -163,6 +163,30 @@ describe('legacy non-activity migration retries', () => {
     assert.deepEqual(db.prepare('SELECT * FROM migration_markers ORDER BY name').all(), before)
   })
 
+  it('preserves later typed local-state updates after a completed migration', async() => {
+    const { db, runMigration } = await createFixture()
+    await runMigration()
+    const markersBeforeReplay = db.prepare('SELECT * FROM migration_markers ORDER BY name').all()
+    const updatedViewPrevState = { url: '/list', query: { id: 'updated' } }
+
+    repository.setLocalState({
+      version: 1,
+      key: 'view_prev_state',
+      value: updatedViewPrevState,
+      updatedAtMs: 5678,
+    })
+    assert.equal(db.prepare('SELECT updated_at_ms AS updatedAtMs FROM local_state WHERE key = ?')
+      .get('view_prev_state').updatedAtMs, 5678)
+
+    const outcome = await runMigration()
+
+    assert.equal(outcome.status, 'already-complete')
+    assert.deepEqual(repository.getLocalState().viewPrevState, updatedViewPrevState)
+    assert.equal(db.prepare('SELECT updated_at_ms AS updatedAtMs FROM local_state WHERE key = ?')
+      .get('view_prev_state').updatedAtMs, 5678)
+    assert.deepEqual(db.prepare('SELECT * FROM migration_markers ORDER BY name').all(), markersBeforeReplay)
+  })
+
   it('retries after activity-only source changes without conflicting with the Phase 2 marker', async() => {
     const { db, profileDataPath, runMigration } = await createFixture()
     await runMigration()

@@ -99,21 +99,28 @@ const databaseCounts = (result: LegacyNonActivityImportResultV1): NonActivityMig
   searchHistory: result.searchHistory.length,
 })
 
-const smokeRead = async(
+const readNonActivityState = async(
   deps: NonActivityMigrationDeps,
-  normalized: NormalizedNonActivitySourceV1,
 ): Promise<{ result: LegacyNonActivityImportResultV1, settings: SettingsDocumentV1 }> => {
   const result = {
     localState: await deps.repository.getLocalState(),
     playlistMetadata: await deps.repository.getPlaylistMetadata(),
     searchHistory: await deps.repository.getSearchHistory(),
   }
-  assertSame(normalized.localState, result.localState, 'Local state')
-  assertSame(normalized.playlistMetadata, result.playlistMetadata, 'Playlist metadata')
-  assertSame(normalized.searchHistory, result.searchHistory, 'Search history')
   const active = await deps.settingsFile.read()
   if (active == null) throw new Error('Settings migration readback failed')
   const settings = parseSettingsDocument(active)
+  return { result, settings }
+}
+
+const smokeRead = async(
+  deps: NonActivityMigrationDeps,
+  normalized: NormalizedNonActivitySourceV1,
+): Promise<{ result: LegacyNonActivityImportResultV1, settings: SettingsDocumentV1 }> => {
+  const { result, settings } = await readNonActivityState(deps)
+  assertSame(normalized.localState, result.localState, 'Local state')
+  assertSame(normalized.playlistMetadata, result.playlistMetadata, 'Playlist metadata')
+  assertSame(normalized.searchHistory, result.searchHistory, 'Search history')
   assertSame(normalized.catalogPreferences, settings.catalogPreferences, 'Catalog preferences')
   return { result, settings }
 }
@@ -139,10 +146,10 @@ export const migrateLegacyNonActivity = async(
   const phase2SourceSha256 = sha256Canonical({ version: 1, ...normalized.hashes })
   const existingPhase2 = await deps.repository.getNonActivityMigrationMarker(phase2MarkerName)
   if (assertCompatibleMarker(existingPhase2, phase2SourceSha256, phase2MarkerName)) {
-    const smoke = await smokeRead(deps, normalized)
+    const state = await readNonActivityState(deps)
     return {
       status: 'already-complete',
-      databaseCounts: databaseCounts(smoke.result),
+      databaseCounts: databaseCounts(state.result),
       catalogPreferencesSha256: normalized.hashes.catalogPreferences,
     }
   }

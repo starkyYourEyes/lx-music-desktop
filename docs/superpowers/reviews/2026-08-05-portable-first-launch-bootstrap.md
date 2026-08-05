@@ -16,10 +16,10 @@ the installed application.
 The only unrelated tracked worktree change is the protected
 `build-config/storage-electron/database-recovery.test.js`. It was not opened,
 run, modified, restored, staged, or committed in this final pass.
-`npm run test:storage:electron` was not run; the Electron ABI command used an
-explicit 20-file allowlist excluding that filename. Installed sentinel contents
-were not printed or parsed; only length, UTC modification time, and SHA-256
-were compared.
+`npm run test:storage:electron` was not run; the final Electron ABI rerun used
+a literal 20-path array, without glob enumeration or exclusion, and did not
+include that filename. Installed sentinel contents were not printed or parsed;
+only length, UTC modification time, and SHA-256 were compared.
 
 ## Earlier Evidence-Loss Incident
 
@@ -44,7 +44,28 @@ npm run test:storage
 npm run test:storage:portable
 npm run test:user-api
 node --test build-config/playback-source-fallback.test.js build-config/playback-media-validation.test.js build-config/playback-source-setting.test.js
-$tests=@(Get-ChildItem -LiteralPath 'build-config\storage-electron' -Filter '*.test.js' -File | Where-Object { $_.Name -ne 'database-recovery.test.js' } | Sort-Object Name | ForEach-Object FullName)
+$tests=@(
+  (Resolve-Path 'build-config\storage-electron\account-profile.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\cache-cutover.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\cache-db.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\cache-lifecycle.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\cache-phase4.integration.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\cache-policy.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\migration-runner.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\non-activity-repository.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\non-activity-retry.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\playback-clear.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\playback-migration.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\playback-phase3.integration.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\playback-renderer-crash.integration.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\playback-retention.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\playback-schema.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\playback-storage.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\raw-lyric-migration.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\safe-storage-vault.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\scoped-cache-repository.test.js').Path
+  (Resolve-Path 'build-config\storage-electron\storage-foundation.integration.test.js').Path
+)
 if ($tests.Count -ne 20) { throw "Expected 20 Electron ABI tests, got $($tests.Count)" }
 $env:ELECTRON_RUN_AS_NODE='1'
 $arguments=@('--test','--test-concurrency=1')+$tests
@@ -58,10 +79,9 @@ npm run test:main-bundle
 git diff --check -- . ':(exclude)build-config/storage-electron/database-recovery.test.js'
 ```
 
-The successful explicit Electron process exit was `0`. This is the final-pass
-substitute for the plan's protected-file-inclusive glob: it selects 20 sorted
-allowed suites, excludes the protected test by name, and does not open or
-execute it.
+The final literal Electron process exit was `0`; stderr length was `0`. It
+uses the 20 listed resolved paths in the stated order, with no enumeration or
+exclusion operation, and does not open or execute the protected test.
 
 | Command | Final result |
 | --- | --- |
@@ -70,7 +90,7 @@ execute it.
 | `npm run test:storage:portable` | `37 pass / 0 fail` |
 | `npm run test:user-api` | exit `0`; `122 pass / 0 skip/fail`; 7.620 s TAP |
 | `node --test build-config/playback-source-fallback.test.js build-config/playback-media-validation.test.js build-config/playback-source-setting.test.js` | exit `0`; `151 pass / 0 skip/fail`; 11.552 s TAP |
-| Explicit repository-Electron `Start-Process` allowlist command above | process exit `0`; `369 pass / 0 skip/fail`; 26 suites; 65.761 s TAP |
+| Literal repository-Electron `Start-Process` array command above | process exit `0`; stderr `0` bytes; `369 pass / 0 skip/fail`; 26 suites; 61.3934978 s TAP |
 | `npm run lint` | exit `0`; 205.4 s; existing Browserslist/caniuse-lite age advisory only |
 | `npm run build` | exit `0`; 106.9 s; all webpack targets compiled |
 | `npm run test:main-bundle` | exit `0`; `1 pass / 0 fail`; live runtime environment preserved |
@@ -88,7 +108,10 @@ $env:LX_PORTABLE_ARTIFACT=(Resolve-Path 'build\starky-lx-music-desktop-v3.0.0-x6
 npm run test:portable-packaged-bootstrap
 Get-Item -LiteralPath $env:LX_PORTABLE_ARTIFACT
 Get-FileHash -LiteralPath $env:LX_PORTABLE_ARTIFACT -Algorithm SHA256
-& (Get-Command 7z.exe -ErrorAction Stop).Source t $env:LX_PORTABLE_ARTIFACT
+$sevenZip='D:\software\YesPlayMusic\shims\7z.exe'
+if (-not (Test-Path -LiteralPath $sevenZip -PathType Leaf)) { throw "Missing 7-Zip: $sevenZip" }
+$artifact=(Resolve-Path 'build\starky-lx-music-desktop-v3.0.0-x64-portable.exe').Path
+& $sevenZip t $artifact
 ```
 
 Packaging exited `0` in 221.7 s. `npm run test:packaged-app` passed `4/4`; the
@@ -105,10 +128,10 @@ target process count was zero.
 | SHA-256 | `1D736DDB513B1B1C4F526FB6AE83FDFC175C17F6538EE6600BCD7A830E86455E` |
 
 The final hash differs from historical/blocked `937C05...`, `11FD805...`,
-`6A0BAE...`, and `98E90B...` artifacts. `D:\software\YesPlayMusic\shims\7z.exe`
-successfully tested the artifact with 7-Zip 26.01, `Everything is Ok`, NSIS-3
-Unicode, and four files; the former repository-local `7zip-bin` path was
-unavailable.
+`6A0BAE...`, and `98E90B...` artifacts. The literal final archive command
+above exited `0`; 7-Zip 26.01 reported `Everything is Ok`, NSIS-3 Unicode, and
+four files. The earlier repository-local `7zip-bin` unavailability and any
+fallback command discovery are historical, not the final archive command.
 
 ## Backup, Restore, And Database State
 

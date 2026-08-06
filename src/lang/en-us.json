@@ -540,6 +540,7 @@
   "setting__list_source": "Show which music streaming service the song is from (Only valid for \"Your Library\" page)",
   "setting__list_my_list_sidebar_scale": "Your Library sidebar scale",
   "setting__list_playlist_profile_scale": "Playlist detail header scale",
+  "setting__local_music_webdav": "Local Music/WebDAV",
   "setting__recommend": "Recommendations",
   "setting__recommend_qq_guess_like_api": "QQ Music Guess You Like API",
   "setting__recommend_qq_guess_like_api_new": "New API",

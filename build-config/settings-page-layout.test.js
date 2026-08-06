@@ -137,3 +137,34 @@ test('ODC controls are the final Other card and list cleanup is not exposed', ()
   assert.doesNotMatch(otherHtml, /setting__other_listdata/)
   assert.equal(Object.hasOwn(loadSettingOther().setup(), 'handleClearListData'), false)
 })
+
+test('Local Music/WebDAV owns the connection card between folders and source settings', () => {
+  const toc = getSettingsToc()
+  assert.equal(
+    toc.find(item => item.id == 'SettingLocalMusic').title,
+    'setting__local_music_webdav',
+  )
+
+  const localMusicHtml = renderPugTemplate('src/renderer/views/Setting/components/SettingLocalMusic.vue')
+  const folderPosition = positionOf(localMusicHtml, 'id="local_music_dirs"')
+  const connectionPosition = positionOf(localMusicHtml, '<SettingWebDAV>')
+  const sourcePosition = positionOf(localMusicHtml, 'id="local_music_webdav"')
+  assert(folderPosition < connectionPosition && connectionPosition < sourcePosition)
+
+  const webDAVHtml = renderPugTemplate('src/renderer/views/Setting/components/SettingWebDAV.vue')
+  assert.match(webDAVHtml, /^\s*<dd>\s*<h3 id="local_music_webdav_connection">WebDAV 音乐<\/h3>/)
+  assert.match(webDAVHtml, /id="setting_webdav_auto_refresh"/)
+
+  const otherHtml = renderPugTemplate('src/renderer/views/Setting/components/SettingOther.vue')
+  assert.doesNotMatch(otherHtml, /other_webdav|setting_webdav_auto_refresh/)
+
+  const locales = [
+    ['zh-cn.json', '本地音乐/WebDAV'],
+    ['zh-tw.json', '本地音樂/WebDAV'],
+    ['en-us.json', 'Local Music/WebDAV'],
+  ]
+  for (const [file, expected] of locales) {
+    const messages = JSON.parse(fs.readFileSync(path.join(root, 'src/lang', file), 'utf8'))
+    assert.equal(messages.setting__local_music_webdav, expected)
+  }
+})

@@ -540,6 +540,7 @@
   "setting__list_source": "显示歌曲来源平台（仅对「我的列表」有效）",
   "setting__list_my_list_sidebar_scale": "我的列表侧边栏缩放",
   "setting__list_playlist_profile_scale": "歌单详情头部缩放",
+  "setting__local_music_webdav": "本地音乐/WebDAV",
   "setting__recommend": "推荐设置",
   "setting__recommend_qq_guess_like_api": "QQ 音乐猜你喜欢接口",
   "setting__recommend_qq_guess_like_api_new": "新版接口",

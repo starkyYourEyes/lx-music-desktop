@@ -1,5 +1,5 @@
 <template lang="pug">
-dt#local_music {{ $t('local_music') }}
+dt#local_music {{ $t('setting__local_music_webdav') }}
 dd
   h3#local_music_dirs {{ $t('local_music__folders') }}
   div
@@ -11,6 +11,7 @@ dd
     .p(v-for="dir in localMusicDirs" :key="dir")
       span.auto-hidden(:title="dir") {{ dir }}
       base-btn.btn.gap-left(min @click="handleRemoveLocalMusicDir(dir)") {{ $t('local_music__remove_folder') }}
+SettingWebDAV
 dd
   h3#local_music_webdav {{ $t('local_music__webdav_source') }}
   div
@@ -29,9 +30,13 @@ import {
 } from '@common/utils/localMusicSettings'
 import { showSelectDialog } from '@renderer/utils/ipc'
 import { appSetting, updateSetting } from '@renderer/store/setting'
+import SettingWebDAV from './SettingWebDAV.vue'
 
 export default {
   name: 'SettingLocalMusic',
+  components: {
+    SettingWebDAV,
+  },
   setup() {
     const localMusicDirs = computed(() => normalizeLocalMusicDirs(appSetting['localMusic.dirs']))
 

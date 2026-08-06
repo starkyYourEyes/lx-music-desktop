@@ -100,7 +100,7 @@ export default {
         { id: 'SettingDesktopLyric', title: t('setting__desktop_lyric') },
         { id: 'SettingRecommend', title: t('setting__recommend') },
         { id: 'SettingList', title: t('setting__list') },
-        { id: 'SettingLocalMusic', title: t('local_music') },
+        { id: 'SettingLocalMusic', title: t('setting__local_music_webdav') },
         { id: 'SettingDownload', title: t('setting__download') },
         { id: 'SettingHotKey', title: t('setting__hot_key') },
         { id: 'SettingSync', title: t('setting__sync') },

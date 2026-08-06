@@ -540,6 +540,7 @@
   "setting__list_source": "顯示歌曲來自哪個音樂串流平台（僅對「我的清單」有效）",
   "setting__list_my_list_sidebar_scale": "我的清單側邊欄縮放",
   "setting__list_playlist_profile_scale": "歌單詳情頂部縮放",
+  "setting__local_music_webdav": "本地音樂/WebDAV",
   "setting__recommend": "推薦設定",
   "setting__recommend_qq_guess_like_api": "QQ 音樂猜你喜歡介面",
   "setting__recommend_qq_guess_like_api_new": "新版介面",

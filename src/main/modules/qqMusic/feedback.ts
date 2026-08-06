@@ -23,6 +23,11 @@ interface FeedbackRequest {
   transport?: FeedbackTransport
 }
 
+const hasValidUpdateTime = (value: unknown) => {
+  const timestamp = Number(value)
+  return Number.isFinite(timestamp) && timestamp > 0
+}
+
 const getNumericSongId = (musicInfo: LX.Music.MusicInfo_tx) => {
   const id = Number(musicInfo.meta.id)
   if (Number.isInteger(id) && id > 0) return id
@@ -128,11 +133,14 @@ export const createQQMusicFeedbackService = ({
       if (!response.ok) throw new Error(FEEDBACK_ERROR)
       const payload = await response.json()
       const result = payload?.[REQUEST_KEY]
-      const operationCode = result?.data?.[requestData.resultCodeName]
+      const data = result?.data
+      const operationCode = data?.[requestData.resultCodeName]
+      const operationSucceeded = operationCode === 0 ||
+        (requestData.transport == 'musicu' && hasValidUpdateTime(data?.result?.updateTime))
       if (payload?.code == 1000 || result?.code == 1000 || operationCode == 1000) {
         throw new QQMusicAuthError()
       }
-      if (payload?.code != 0 || result?.code != 0 || operationCode != 0) {
+      if (payload?.code !== 0 || result?.code !== 0 || !operationSucceeded) {
         throw new Error(FEEDBACK_ERROR)
       }
     } catch (error) {

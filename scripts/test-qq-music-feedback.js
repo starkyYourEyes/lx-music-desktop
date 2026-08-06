@@ -95,6 +95,18 @@ const main = async() => {
     tmeAppID: 'qqmusic',
   })
 
+  payloads.push({
+    code: 0,
+    req_1: { code: 0, data: { result: { updateTime: 1_786_000_000 } } },
+  })
+  await assert.doesNotReject(service.likeMusic(song()))
+
+  payloads.push({ code: 0, req_1: { code: 0, data: { result: {} } } })
+  await assert.rejects(
+    service.likeMusic(song()),
+    error => error.message == 'QQ Music feedback request failed',
+  )
+
   payloads.push({ code: 0, req_1: { code: 0, data: { retCode: 0 } } })
   const wxService = createService(
     () => 'uin=o10001; qqmusic_key=W_X_synthetic-key',

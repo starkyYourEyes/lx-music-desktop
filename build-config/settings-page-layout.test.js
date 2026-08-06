@@ -74,6 +74,29 @@ const positionOf = (html, fragment) => {
   return position
 }
 
+const getSettingCardRoots = html => html
+  .split(/\r?\n/)
+  .flatMap(line => {
+    const match = /^<([A-Za-z][\w-]*)\b/.exec(line)
+    return match ? [match[1]] : []
+  })
+  .filter(tagName => tagName == 'dd' || tagName.startsWith('Setting'))
+
+const loadSettingBasic = () => loadVueComponent(
+  'src/renderer/views/Setting/components/SettingBasic.vue',
+  {
+    '@common/utils/vueTools': {},
+    '@renderer/store': {},
+    '@root/lang': {},
+    '@renderer/utils/ipc': {},
+    '@renderer/utils/musicSdk/api-source-info': { __esModule: true, default: [] },
+    '@renderer/core/player/timeoutStop': {},
+    '@renderer/plugins/Dialog': {},
+    '@renderer/store/setting': {},
+    '@renderer/store/utils': {},
+  },
+)
+
 test('search controls are the final visible card in Basic settings, not a top-level page', () => {
   const toc = getSettingsToc()
   assert.equal(toc.some(item => item.id == 'SettingSearch'), false)
@@ -82,10 +105,12 @@ test('search controls are the final visible card in Basic settings, not a top-le
   assert.match(searchHtml, /^\s*<dd>\s*<h3 id="search">/)
 
   const basicHtml = renderPugTemplate('src/renderer/views/Setting/components/SettingBasic.vue')
+  assert.equal(Object.hasOwn(loadSettingBasic().components, 'SettingSearch'), true)
   assert(
     positionOf(basicHtml, '<SettingSearch>') > positionOf(basicHtml, 'id="basic_playbar_progress_style"'),
     'Search controls must follow the last existing Basic settings card',
   )
+  assert.equal(getSettingCardRoots(basicHtml).at(-1), 'SettingSearch')
 })
 
 const loadSettingOther = () => loadVueComponent(
@@ -115,7 +140,6 @@ const loadSettingOther = () => loadVueComponent(
     '@renderer/plugins/Dialog': { dialog: Object.assign(() => {}, { confirm: async() => false }) },
     '@renderer/plugins/i18n': { useI18n: () => key => key },
     '@renderer/store/setting': { appSetting: {}, updateSetting() {} },
-    '@renderer/store/list/listManage': { overwriteListFull() {} },
     '@renderer/store/dislikeList': { dislikeRuleCount: { value: 0 } },
     '@common/constants': { TRAY_AUTO_ID: 3 },
     '@common/projectIdentity': { PROJECT_IDENTITY: { defaultWebdavUrl: '' } },
@@ -130,12 +154,15 @@ test('ODC controls are the final Other card and list cleanup is not exposed', ()
   assert.match(odcHtml, /^\s*<dd>\s*<h3 id="odc">/)
 
   const otherHtml = renderPugTemplate('src/renderer/views/Setting/components/SettingOther.vue')
+  const settingOther = loadSettingOther()
+  assert.equal(Object.hasOwn(settingOther.components, 'SettingOdc'), true)
   assert(
     positionOf(otherHtml, '<SettingOdc>') > positionOf(otherHtml, 'setting__other_lyric_edited_cache'),
     'ODC controls must follow every remaining Other settings card',
   )
+  assert.equal(getSettingCardRoots(otherHtml).at(-1), 'SettingOdc')
   assert.doesNotMatch(otherHtml, /setting__other_listdata/)
-  assert.equal(Object.hasOwn(loadSettingOther().setup(), 'handleClearListData'), false)
+  assert.equal(Object.hasOwn(settingOther.setup(), 'handleClearListData'), false)
 })
 
 test('Local Music/WebDAV owns the connection card between folders and source settings', () => {

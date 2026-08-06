@@ -16,32 +16,14 @@ import { sync } from '@renderer/store'
 import { useI18n } from '@renderer/plugins/i18n'
 import { appSetting, updateSetting } from '@renderer/store/setting'
 import { debounce } from '@common/utils/common'
-import { SYNC_CODE } from '@common/constants_sync'
+import { getSyncClientStatusText } from './clientStatus'
 
 export default {
   name: 'SettingSyncClient',
   setup() {
     const t = useI18n()
 
-    const clientStatus = computed(() => {
-      let status
-      switch (sync.client.status.message) {
-        case SYNC_CODE.msgBlockedIp:
-          status = t('setting__sync_code_blocked_ip')
-          break
-        case SYNC_CODE.authFailed:
-          status = t('setting__sync_code_fail')
-          break
-        default:
-          status = sync.client.status.message
-            ? sync.client.status.message
-            : sync.client.status.status
-              ? t('setting_sync_status_enabled')
-              : t('sync_status_disabled')
-          break
-      }
-      return status
-    })
+    const clientStatus = computed(() => getSyncClientStatusText(sync.client.status, t))
 
     const setSyncClientHost = debounce(host => {
       updateSetting({ 'sync.client.host': host.trim() })

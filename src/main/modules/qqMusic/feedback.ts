@@ -7,16 +7,25 @@ import {
 import { QQMusicAuthError } from './song'
 
 const FEEDBACK_ERROR = 'QQ Music feedback request failed'
-const FEEDBACK_URL = 'https://u6.y.qq.com/cgi-bin/musics.fcg'
+const SIGNED_FEEDBACK_URL = 'https://u6.y.qq.com/cgi-bin/musics.fcg'
+const MUSICU_FEEDBACK_URL = 'https://u.y.qq.com/cgi-bin/musicu.fcg'
+const MUSICU_VERSION = 13_020_508
 const REQUEST_KEY = 'req_1'
 
 type ResultCodeName = 'retCode' | 'Retcode'
+type FeedbackTransport = 'signed' | 'musicu'
 
 interface FeedbackRequest {
   module: string
   method: string
   param: Record<string, unknown>
   resultCodeName: ResultCodeName
+  transport?: FeedbackTransport
+}
+
+const hasValidUpdateTime = (value: unknown) => {
+  const timestamp = Number(value)
+  return Number.isFinite(timestamp) && timestamp > 0
 }
 
 const getNumericSongId = (musicInfo: LX.Music.MusicInfo_tx) => {
@@ -30,6 +39,30 @@ const getNumericSongId = (musicInfo: LX.Music.MusicInfo_tx) => {
 const getSongType = (musicInfo: LX.Music.MusicInfo_tx) => {
   return Number.isInteger(musicInfo.meta.songType) ? musicInfo.meta.songType! : 0
 }
+
+const getTmeLoginType = (cookie: string, key: string) => {
+  const value = Number(
+    getCookieValue(cookie, 'tmeLoginType') ||
+    getCookieValue(cookie, 'login_type'),
+  )
+  if (Number.isInteger(value) && value > 0) return value
+  return key.startsWith('W_X') ? 1 : 2
+}
+
+const createMusicuComm = (cookie: string, uin: string, key: string) => ({
+  cv: MUSICU_VERSION,
+  v: MUSICU_VERSION,
+  ct: '11',
+  format: 'json',
+  inCharset: 'utf-8',
+  outCharset: 'utf-8',
+  uid: uin,
+  qq: uin,
+  authst: key,
+  loginUin: uin,
+  tmeLoginType: getTmeLoginType(cookie, key),
+  tmeAppID: 'qqmusic',
+})
 
 export const createQQMusicFeedbackService = ({
   fetchImpl = fetch,
@@ -53,30 +86,39 @@ export const createQQMusicFeedbackService = ({
       createQQMusicFallbackGuid(uin)
     const uid = getCookieValue(cookie, 'uid') || createQQMusicFallbackUid(uin)
     const gtk = getGtk(key)
+    const isMusicu = requestData.transport == 'musicu'
     const body = JSON.stringify({
-      comm: {
-        format: 'json',
-        ct: 20,
-        cv: 2116,
-        platform: 'wk_v17',
-        uid,
-        guid,
-        inCharset: 'utf-8',
-        outCharset: 'utf-8',
-        notice: 0,
-        needNewCode: 1,
-        uin,
-        g_tk_new_20200303: gtk,
-        g_tk: gtk,
-      },
+      comm: isMusicu
+        ? createMusicuComm(cookie, uin, key)
+        : {
+            format: 'json',
+            ct: 20,
+            cv: 2116,
+            platform: 'wk_v17',
+            uid,
+            guid,
+            inCharset: 'utf-8',
+            outCharset: 'utf-8',
+            notice: 0,
+            needNewCode: 1,
+            uin,
+            g_tk_new_20200303: gtk,
+            g_tk: gtk,
+          },
       [REQUEST_KEY]: {
         module: requestData.module,
         method: requestData.method,
         param: requestData.param,
       },
     })
-    const url = new URL(FEEDBACK_URL)
-    url.searchParams.set('sign', createQQMusicRequestSign(body))
+    const url = new URL(isMusicu ? MUSICU_FEEDBACK_URL : SIGNED_FEEDBACK_URL)
+    if (!isMusicu) url.searchParams.set('sign', createQQMusicRequestSign(body))
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Referer: 'https://y.qq.com/',
+      Cookie: cookie,
+    }
+    if (isMusicu) headers.Origin = 'https://y.qq.com'
     const controller = new AbortController()
     const timer = setTimeoutImpl(() => {
       controller.abort()
@@ -85,21 +127,20 @@ export const createQQMusicFeedbackService = ({
       const response = await fetchImpl(url, {
         method: 'POST',
         signal: controller.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          Referer: 'https://y.qq.com/',
-          Cookie: cookie,
-        },
+        headers,
         body,
       })
       if (!response.ok) throw new Error(FEEDBACK_ERROR)
       const payload = await response.json()
       const result = payload?.[REQUEST_KEY]
-      const operationCode = result?.data?.[requestData.resultCodeName]
+      const data = result?.data
+      const operationCode = data?.[requestData.resultCodeName]
+      const operationSucceeded = operationCode === 0 ||
+        (requestData.transport == 'musicu' && hasValidUpdateTime(data?.result?.updateTime))
       if (payload?.code == 1000 || result?.code == 1000 || operationCode == 1000) {
         throw new QQMusicAuthError()
       }
-      if (payload?.code != 0 || result?.code != 0 || operationCode != 0) {
+      if (payload?.code !== 0 || result?.code !== 0 || !operationSucceeded) {
         throw new Error(FEEDBACK_ERROR)
       }
     } catch (error) {
@@ -122,6 +163,7 @@ export const createQQMusicFeedbackService = ({
         v_songInfo: [{ songId, songType: getSongType(musicInfo) }],
       },
       resultCodeName: 'retCode',
+      transport: 'musicu',
     })
   }
 

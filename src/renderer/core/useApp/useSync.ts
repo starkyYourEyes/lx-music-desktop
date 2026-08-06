@@ -27,7 +27,16 @@ export default () => {
         sync.client.status.status = event.data.status
         sync.client.status.message = event.data.message
         sync.client.status.address = markRaw(event.data.address)
-        if (event.data.message == SYNC_CODE.missingAuthCode || event.data.message == SYNC_CODE.authFailed) {
+        if (event.data.unavailableReason == null) {
+          Reflect.deleteProperty(sync.client.status, 'unavailableReason')
+        } else {
+          sync.client.status.unavailableReason = event.data.unavailableReason
+        }
+        if (
+          event.data.unavailableReason == 'credential_undecryptable' ||
+          event.data.message == SYNC_CODE.missingAuthCode ||
+          event.data.message == SYNC_CODE.authFailed
+        ) {
           if (!sync.isShowAuthCodeModal) sync.isShowAuthCodeModal = true
         } else if (sync.isShowAuthCodeModal) sync.isShowAuthCodeModal = false
         break

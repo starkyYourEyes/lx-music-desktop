@@ -659,6 +659,7 @@
   "setting__sync_client_host_tip": "http://<Host>:<Port>",
   "setting__sync_client_mode": "Client Mode",
   "setting__sync_client_status": "Status: {status}",
+  "setting__sync_credential_reauth_required": "Sync credentials are unavailable. Enter a new connection code.",
   "setting__sync_code_blocked_ip": "The IP of the current device has been blocked by the server!",
   "setting__sync_code_fail": "Invalid connection code",
   "setting__sync_enable": "Enable Sync",

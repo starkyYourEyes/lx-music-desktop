@@ -659,6 +659,7 @@
   "setting__sync_client_host_tip": "http://<IP 地址>:<端口号>",
   "setting__sync_client_mode": "客户端模式",
   "setting__sync_client_status": "状态：{status}",
+  "setting__sync_credential_reauth_required": "同步凭据不可用，请重新输入连接码",
   "setting__sync_code_blocked_ip": "当前设备的 IP 已被服务端封禁！",
   "setting__sync_code_fail": "连接码无效",
   "setting__sync_enable": "启用同步功能",

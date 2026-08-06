@@ -39,11 +39,7 @@ export const sync: {
   }
   client: {
     host: string
-    status: {
-      status: boolean
-      message: string
-      address: string[]
-    }
+    status: LX.Sync.ClientStatus
   }
 } = reactive({
   enable: false,

@@ -36,7 +36,7 @@ const { createQQMusicFeedbackService } = loadTsModule(
   },
 )
 
-const cookie = 'uin=o10001; qqmusic_key=synthetic-key'
+const cookie = 'uin=o10001; qqmusic_key=synthetic-key; tmeLoginType=2'
 const song = (meta = { id: 12345, songType: 7 }) => ({
   id: 'tx_mid',
   source: 'tx',
@@ -73,7 +73,34 @@ const main = async() => {
     },
   })
   assert.strictEqual(calls.at(-1).options.headers.Cookie, cookie)
-  assert.match(calls.at(-1).url, /sign=synthetic-sign/)
+  const likeCall = calls.at(-1)
+  const likeUrl = new URL(likeCall.url)
+  const likeBody = JSON.parse(likeCall.options.body)
+  assert.strictEqual(likeUrl.origin, 'https://u.y.qq.com')
+  assert.strictEqual(likeUrl.pathname, '/cgi-bin/musicu.fcg')
+  assert.strictEqual(likeUrl.search, '')
+  assert.deepStrictEqual({
+    uid: likeBody.comm.uid,
+    qq: likeBody.comm.qq,
+    authst: likeBody.comm.authst,
+    loginUin: likeBody.comm.loginUin,
+    tmeLoginType: likeBody.comm.tmeLoginType,
+    tmeAppID: likeBody.comm.tmeAppID,
+  }, {
+    uid: '10001',
+    qq: '10001',
+    authst: 'synthetic-key',
+    loginUin: '10001',
+    tmeLoginType: 2,
+    tmeAppID: 'qqmusic',
+  })
+
+  payloads.push({ code: 0, req_1: { code: 0, data: { retCode: 0 } } })
+  const wxService = createService(
+    () => 'uin=o10001; qqmusic_key=W_X_synthetic-key',
+  )
+  await wxService.likeMusic(song())
+  assert.strictEqual(parseLastBody().comm.tmeLoginType, 1)
 
   payloads.push({ code: 0, req_1: { code: 0, data: { Retcode: 0 } } })
   await service.dislikeMusic(song())
@@ -82,6 +109,10 @@ const main = async() => {
     method: 'AddDislike',
     param: { Songs: [{ ID: '12345' }] },
   })
+  const dislikeUrl = new URL(calls.at(-1).url)
+  assert.strictEqual(dislikeUrl.origin, 'https://u6.y.qq.com')
+  assert.strictEqual(dislikeUrl.pathname, '/cgi-bin/musics.fcg')
+  assert.strictEqual(dislikeUrl.searchParams.get('sign'), 'synthetic-sign')
 
   payloads.push({ code: 0, req_1: { code: 0, data: { retCode: 0 } } })
   await service.likeMusic(song({ songId: 67890 }))

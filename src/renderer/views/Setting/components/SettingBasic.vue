@@ -122,6 +122,8 @@ dd
       id="setting_basic_playbar_progress_style_full" name="setting_basic_playbar_progress_style"
       need :model-value="appSetting['common.playBarProgressStyle']" value="full" :label="$t('setting__basic_playbar_progress_style_full')" @update:model-value="updateSetting({'common.playBarProgressStyle': $event})")
 
+SettingSearch
+
 ThemeSelectorModal(v-model="isShowThemeSelectorModal")
 ThemeEditModal(v-model="isShowThemeEditModal" :theme-id="editThemeId" @submit="handleRefreshTheme")
 play-timeout-modal(v-model="isShowPlayTimeoutModal")
@@ -142,6 +144,7 @@ import ThemeEditModal from './ThemeEditModal/index.vue'
 import PlayTimeoutModal from './PlayTimeoutModal.vue'
 import UserApiModal from './UserApiModal.vue'
 import ApiFallbackSources from './ApiFallbackSources.vue'
+import SettingSearch from './SettingSearch.vue'
 import { appSetting, updateSetting, setApiSource } from '@renderer/store/setting'
 import { getThemes, applyTheme, findTheme, buildBgUrl } from '@renderer/store/utils'
 
@@ -153,6 +156,7 @@ export default {
     PlayTimeoutModal,
     UserApiModal,
     ApiFallbackSources,
+    SettingSearch,
   },
   setup() {
     const t = useI18n()

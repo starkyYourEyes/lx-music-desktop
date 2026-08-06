@@ -30,7 +30,6 @@
         <SettingPlay />
         <SettingPlayDetail />
         <SettingDesktopLyric />
-        <SettingSearch />
         <SettingList />
         <SettingDownload />
         <SettingSync />
@@ -55,7 +54,6 @@ import SettingBasic from './components/SettingBasic.vue'
 import SettingPlay from './components/SettingPlay.vue'
 import SettingPlayDetail from './components/SettingPlayDetail.vue'
 import SettingDesktopLyric from './components/SettingDesktopLyric.vue'
-import SettingSearch from './components/SettingSearch.vue'
 import SettingRecommend from './components/SettingRecommend.vue'
 import SettingList from './components/SettingList.vue'
 import SettingLocalMusic from './components/SettingLocalMusic.vue'
@@ -77,7 +75,6 @@ export default {
     SettingPlay,
     SettingPlayDetail,
     SettingDesktopLyric,
-    SettingSearch,
     SettingRecommend,
     SettingList,
     SettingLocalMusic,
@@ -104,7 +101,6 @@ export default {
         { id: 'SettingPlay', title: t('setting__play') },
         { id: 'SettingPlayDetail', title: t('setting__play_detail') },
         { id: 'SettingDesktopLyric', title: t('setting__desktop_lyric') },
-        { id: 'SettingSearch', title: t('setting__search') },
         { id: 'SettingRecommend', title: t('setting__recommend') },
         { id: 'SettingList', title: t('setting__list') },
         { id: 'SettingLocalMusic', title: t('local_music') },

@@ -35,7 +35,6 @@
         <SettingSync />
         <SettingHotKey />
         <SettingNetwork />
-        <SettingOdc />
         <SettingBackup />
         <SettingOther />
         <SettingAbout /> -->
@@ -62,7 +61,6 @@ import SettingSync from './components/SettingSync/index.vue'
 import SettingOpenAPI from './components/SettingOpenAPI.vue'
 import SettingHotKey from './components/SettingHotKey.vue'
 import SettingNetwork from './components/SettingNetwork.vue'
-import SettingOdc from './components/SettingOdc.vue'
 import SettingBackup from './components/SettingBackup.vue'
 import SettingOther from './components/SettingOther.vue'
 import SettingListeningTime from './components/SettingListeningTime.vue'
@@ -83,7 +81,6 @@ export default {
     SettingOpenAPI,
     SettingHotKey,
     SettingNetwork,
-    SettingOdc,
     SettingBackup,
     SettingOther,
     SettingListeningTime,
@@ -109,7 +106,6 @@ export default {
         { id: 'SettingSync', title: t('setting__sync') },
         { id: 'SettingOpenAPI', title: t('setting__open_api') },
         { id: 'SettingNetwork', title: t('setting__network') },
-        { id: 'SettingOdc', title: t('setting__odc') },
         { id: 'SettingBackup', title: t('setting__backup') },
         { id: 'SettingOther', title: t('setting__other') },
         { id: 'SettingListeningTime', title: '听歌时间' },

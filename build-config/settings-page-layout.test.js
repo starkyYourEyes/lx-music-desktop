@@ -87,3 +87,53 @@ test('search controls are the final visible card in Basic settings, not a top-le
     'Search controls must follow the last existing Basic settings card',
   )
 })
+
+const loadSettingOther = () => loadVueComponent(
+  'src/renderer/views/Setting/components/SettingOther.vue',
+  {
+    '@common/utils/vueTools': {
+      computed: createComputed,
+      ref: value => ({ value }),
+    },
+    '@renderer/utils/ipc': {
+      clearCache() {},
+      clearLyricEdited() {},
+      clearLyricRaw() {},
+      clearMusicUrl() {},
+      clearOtherSource() {},
+      getCacheSize: async() => 0,
+      getLyricEditedCount: async() => 0,
+      getLyricRawCount: async() => 0,
+      getMusicUrlCount: async() => 0,
+      getOtherSourceCount: async() => 0,
+      getWebDAVCredentialStatus: async() => ({ configured: false, usernameHint: null, persistence: 'missing' }),
+      removeWebDAVCredentials: async() => {},
+      setWebDAVCredentials: async() => {},
+      testWebDAV: async() => {},
+    },
+    '@common/utils/common': { sizeFormate: () => '0 B' },
+    '@renderer/plugins/Dialog': { dialog: Object.assign(() => {}, { confirm: async() => false }) },
+    '@renderer/plugins/i18n': { useI18n: () => key => key },
+    '@renderer/store/setting': { appSetting: {}, updateSetting() {} },
+    '@renderer/store/list/listManage': { overwriteListFull() {} },
+    '@renderer/store/dislikeList': { dislikeRuleCount: { value: 0 } },
+    '@common/constants': { TRAY_AUTO_ID: 3 },
+    '@common/projectIdentity': { PROJECT_IDENTITY: { defaultWebdavUrl: '' } },
+  },
+)
+
+test('ODC controls are the final Other card and list cleanup is not exposed', () => {
+  const toc = getSettingsToc()
+  assert.equal(toc.some(item => item.id == 'SettingOdc'), false)
+
+  const odcHtml = renderPugTemplate('src/renderer/views/Setting/components/SettingOdc.vue')
+  assert.match(odcHtml, /^\s*<dd>\s*<h3 id="odc">/)
+
+  const otherHtml = renderPugTemplate('src/renderer/views/Setting/components/SettingOther.vue')
+  assert(
+    positionOf(otherHtml, '<SettingOdc>') > positionOf(otherHtml, 'setting__other_lyric_edited_cache'),
+    'ODC controls must follow every remaining Other settings card',
+  )
+  assert.doesNotMatch(otherHtml, /setting__other_listdata/)
+  assert.equal(Object.hasOwn(loadSettingOther().setup(), 'handleClearListData'), false)
+})

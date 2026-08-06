@@ -81,12 +81,7 @@ dd
     .p
       base-btn.btn(min :disabled="isDisabledLyricEditedCacheClear" @click="handleClearLyricEditedCache") {{ $t('setting__other_lyric_edited_clear_btn') }}
 
-dd
-  h3#other_lyric_edited {{ $t('setting__other_listdata') }}
-  div
-    .p
-      base-btn.btn(min @click="handleClearListData") {{ $t('setting__other_listdata_clear_btn') }}
-
+SettingOdc
 </template>
 
 <script>
@@ -104,9 +99,9 @@ import { sizeFormate } from '@common/utils/common'
 import { dialog } from '@renderer/plugins/Dialog'
 import { useI18n } from '@renderer/plugins/i18n'
 import { appSetting, updateSetting } from '@renderer/store/setting'
-import { overwriteListFull } from '@renderer/store/list/listManage'
 import { dislikeRuleCount } from '@renderer/store/dislikeList'
 import DislikeListModal from './DislikeListModal.vue'
+import SettingOdc from './SettingOdc.vue'
 import { TRAY_AUTO_ID } from '@common/constants'
 import { PROJECT_IDENTITY } from '@common/projectIdentity'
 
@@ -114,6 +109,7 @@ export default {
   name: 'SettingOther',
   components: {
     DislikeListModal,
+    SettingOdc,
   },
   setup() {
     const t = useI18n()
@@ -284,20 +280,6 @@ export default {
     }
     refreshLyricEditedCount()
 
-    const handleClearListData = async() => {
-      if (!await dialog.confirm({
-        message: t('setting__other_listdata_clear_tip_confirm'),
-        cancelButtonText: t('cancel_button_text'),
-        confirmButtonText: t('setting__other_resource_cache_confirm'),
-      })) return
-      void overwriteListFull({
-        defaultList: [],
-        loveList: [],
-        userList: [],
-        tempList: [],
-      })
-    }
-
     return {
       PROJECT_IDENTITY,
       appSetting,
@@ -335,7 +317,6 @@ export default {
       isDisabledLyricEditedCacheClear,
       handleClearLyricEditedCache,
 
-      handleClearListData,
     }
   },
 }

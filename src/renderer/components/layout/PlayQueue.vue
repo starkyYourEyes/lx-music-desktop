@@ -16,6 +16,7 @@
               @click="handlePlayQueueItem(item)"
             >
               <span :class="$style.mark">{{ $t('player__play_queue_current') }}</span>
+              <common-track-artwork :class="$style.artwork" :music-info="item.musicInfo" :size="44" />
               <span :class="$style.name">{{ item.musicInfo.name }}</span>
               <span :class="$style.singer">{{ item.musicInfo.singer }}</span>
             </button>
@@ -29,6 +30,7 @@
                 @click="handlePlayQueueItem(item)"
               >
                 <span :class="$style.index">{{ item.displayIndex }}</span>
+                <common-track-artwork :class="$style.artwork" :music-info="item.musicInfo" :size="44" />
                 <span :class="$style.name">{{ item.musicInfo.name }}</span>
                 <span :class="$style.singer">{{ item.musicInfo.singer }}</span>
               </button>
@@ -43,6 +45,7 @@
                 @click="handlePlayQueueItem(item)"
               >
                 <span :class="$style.index">{{ item.displayIndex }}</span>
+                <common-track-artwork :class="$style.artwork" :music-info="item.musicInfo" :size="44" />
                 <span :class="$style.name">{{ item.musicInfo.name }}</span>
                 <span :class="$style.singer">{{ item.musicInfo.singer }}</span>
               </button>
@@ -231,15 +234,15 @@ const handlePlayQueueItem = (item: QueueItem) => {
 
 .song {
   width: 100%;
-  min-height: 42px;
+  min-height: 60px;
   border: none;
   border-radius: 6px;
   padding: 7px 8px;
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr);
+  grid-template-columns: 30px 44px minmax(0, 1fr);
   grid-template-areas:
-    "index name"
-    "index singer";
+    "index artwork name"
+    "index artwork singer";
   gap: 2px 8px;
   background-color: transparent;
   color: var(--color-font);
@@ -277,6 +280,11 @@ const handlePlayQueueItem = (item: QueueItem) => {
 .mark {
   color: var(--color-primary);
   font-weight: 700;
+}
+
+.artwork {
+  grid-area: artwork;
+  align-self: center;
 }
 
 .name {

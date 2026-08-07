@@ -12,8 +12,7 @@
           <thead>
             <tr>
               <th class="num" style="width: 5%;">#</th>
-              <th class="nobreak">{{ $t('music_name') }}</th>
-              <th class="nobreak" style="width: 22%;">{{ $t('music_singer') }}</th>
+              <th class="nobreak">{{ $t('music_title') }}</th>
               <th class="nobreak" style="width: 22%;">{{ $t('music_album') }}</th>
               <th class="nobreak" style="width: 9%;">{{ $t('music_time') }}</th>
               <th class="nobreak" style="width: 8%;">{{ $t('list_sort_modal_by_source') }}</th>
@@ -47,12 +46,12 @@
                 </transition>
               </div>
               <div class="list-item-cell auto name">
-                <span class="select name" :aria-label="item.name">{{ item.name }}</span>
-                <span v-if="item.playablePayload?.meta?._qualitys?.flac24bit" class="no-select badge badge-theme-primary">{{ $t('tag__lossless_24bit') }}</span>
-                <span v-else-if="item.playablePayload?.meta?._qualitys?.ape || item.playablePayload?.meta?._qualitys?.flac || item.playablePayload?.meta?._qualitys?.wav" class="no-select badge badge-theme-primary">{{ $t('tag__lossless') }}</span>
-                <span v-else-if="item.playablePayload?.meta?._qualitys?.['320k']" class="no-select badge badge-theme-secondary">{{ $t('tag__high_quality') }}</span>
+                <material-music-title-cell :music-info="item.playablePayload" :title="item.name" :artist="item.singer || '--/--'" :artwork-size="artworkSize">
+                  <span v-if="item.playablePayload?.meta?._qualitys?.flac24bit" class="no-select badge badge-theme-primary">{{ $t('tag__lossless_24bit') }}</span>
+                  <span v-else-if="item.playablePayload?.meta?._qualitys?.ape || item.playablePayload?.meta?._qualitys?.flac || item.playablePayload?.meta?._qualitys?.wav" class="no-select badge badge-theme-primary">{{ $t('tag__lossless') }}</span>
+                  <span v-else-if="item.playablePayload?.meta?._qualitys?.['320k']" class="no-select badge badge-theme-secondary">{{ $t('tag__high_quality') }}</span>
+                </material-music-title-cell>
               </div>
-              <div class="list-item-cell" style="flex: 0 0 22%;"><span class="select" :aria-label="item.singer">{{ item.singer || '--/--' }}</span></div>
               <div class="list-item-cell" style="flex: 0 0 22%;"><span class="select" :aria-label="item.playablePayload?.meta?.albumName">{{ item.playablePayload?.meta?.albumName || '--/--' }}</span></div>
               <div class="list-item-cell" style="flex: 0 0 9%;"><span class="no-select">{{ item.playablePayload?.interval || formatDuration(item.durationMs) }}</span></div>
               <div class="list-item-cell" style="flex: 0 0 8%;"><span class="no-select">{{ getSourceName(item.source) }}</span></div>
@@ -86,8 +85,9 @@ import { playMusicInfo } from '@renderer/store/player/state'
 import { RECENT_PLAY_LIMIT } from '@renderer/store/recentPlay/action'
 import { recentPlayList } from '@renderer/store/recentPlay/state'
 import { appSetting } from '@renderer/store/setting'
+import { useMusicRowMetrics } from '@renderer/components/material/useMusicRowMetrics'
 
-const listItemHeight = 50
+const { listItemHeight, artworkSize } = useMusicRowMetrics()
 const selectedIndex = ref(-1)
 const isShowListAdd = ref(false)
 const selectedAddMusicInfo = ref(null)

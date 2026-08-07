@@ -12,6 +12,8 @@ const artworkSessionPath = path.join(root, 'src/renderer/components/common/Track
 const titleCellPath = path.join(root, 'src/renderer/components/material/MusicTitleCell.vue')
 const onlineListPath = path.join(root, 'src/renderer/components/material/OnlineList/index.vue')
 const musicListPath = path.join(root, 'src/renderer/views/List/MusicList/index.vue')
+const recentPlayPath = path.join(root, 'src/renderer/views/RecentPlay/index.vue')
+const playQueuePath = path.join(root, 'src/renderer/components/layout/PlayQueue.vue')
 
 const music = (id, picUrl = null, source = 'wy') => ({
   id,
@@ -414,6 +416,211 @@ const createMusicListHarness = async(actionButtonsVisible) => {
   return { html, item, observed }
 }
 
+const createRecentPlayHarness = async() => {
+  const playablePayload = {
+    ...music('history-playable', 'history.jpg', 'tx'),
+    name: 'Resolved Song Name',
+    singer: 'Resolved Artist',
+    interval: '04:32',
+    meta: {
+      songId: 'history-playable',
+      albumName: 'History Album',
+      picUrl: 'history.jpg',
+      _qualitys: { flac24bit: true },
+    },
+  }
+  const playableRecord = {
+    id: 'history-record',
+    source: 'tx',
+    sourceTrackId: 'history-playable',
+    name: 'Recorded Song Name',
+    singer: 'Recorded Artist',
+    durationMs: 272000,
+    playablePayload,
+  }
+  const unavailableRecord = {
+    id: 'history-unavailable',
+    source: 'wy',
+    sourceTrackId: 'history-unavailable',
+    name: 'Unavailable Song Name',
+    singer: '',
+    durationMs: 125000,
+    playablePayload: null,
+  }
+  const observed = {
+    buttons: [],
+    playCalls: [],
+    rows: [],
+    titleCellSlots: [],
+    titleCells: [],
+    virtualListAttrs: [],
+  }
+  let performanceTime = 900
+  const originalWindow = global.window
+  global.window = { performance: { now: () => performanceTime += 100 } }
+
+  try {
+    const vueTools = {
+      ...require('vue'),
+      ref: initialValue => ref(initialValue === -1 ? 0 : initialValue),
+    }
+    const RecentPlay = loadVueSfc(recentPlayPath, {
+      '@common/utils/vueTools': vueTools,
+      '@common/utils/common': { formatPlayTime2: seconds => `formatted-${seconds}` },
+      '@root/lang': { useI18n: () => key => key },
+      '@renderer/core/player': {
+        playMusicByInfo: (...args) => observed.playCalls.push(args),
+      },
+      '@renderer/store/player/state': {
+        playMusicInfo: { musicInfo: playablePayload },
+      },
+      '@renderer/store/recentPlay/action': { RECENT_PLAY_LIMIT: 500 },
+      '@renderer/store/recentPlay/state': {
+        recentPlayList: [playableRecord, unavailableRecord],
+      },
+      '@renderer/store/setting': {
+        appSetting: { 'common.sourceNameType': 'name' },
+      },
+      '@renderer/components/material/useMusicRowMetrics': {
+        useMusicRowMetrics: () => ({
+          listItemHeight: ref(60),
+          artworkSize: ref(44),
+        }),
+      },
+    }).default
+
+    const VirtualizedList = defineComponent({
+      inheritAttrs: false,
+      props: {
+        list: { type: Array, required: true },
+        itemHeight: { type: Number, required: true },
+      },
+      setup(props, { attrs, slots }) {
+        return () => {
+          observed.virtualListAttrs.push({ ...attrs, itemHeight: props.itemHeight })
+          const rows = props.list.map((item, index) => {
+            const renderedRow = slots.default?.({ item, index })
+            const row = Array.isArray(renderedRow) ? renderedRow[0] : renderedRow
+            if (row) observed.rows.push(row)
+            return row
+          })
+          return h('div', { class: 'virtualized-list' }, rows)
+        }
+      },
+    })
+    const TitleCell = defineComponent({
+      props: {
+        musicInfo: { type: Object, default: null },
+        title: { type: String, required: true },
+        artist: { type: String, required: true },
+        artworkSize: { type: Number, required: true },
+      },
+      setup(props, { slots }) {
+        return () => {
+          const slotContent = slots.default?.() ?? []
+          observed.titleCellSlots.push(slotContent)
+          observed.titleCells.push({
+            musicInfo: props.musicInfo,
+            title: props.title,
+            artist: props.artist,
+            artworkSize: props.artworkSize,
+          })
+          return h('div', { class: 'title-cell' }, [
+            h('span', { class: 'title' }, props.title),
+            h('span', { class: 'artist' }, props.artist),
+            slotContent,
+          ])
+        }
+      },
+    })
+    const ListButtons = defineComponent({
+      props: {
+        index: { type: Number, required: true },
+        downloadBtn: { type: Boolean, default: true },
+        playBtn: { type: Boolean, default: true },
+        listAddBtn: { type: Boolean, default: true },
+      },
+      setup(props) {
+        observed.buttons.push(props)
+        return () => h('button', { class: 'actions' }, `actions-${props.index}`)
+      },
+    })
+    const EmptyStub = defineComponent({ setup: () => () => h('div') })
+    const app = createSSRApp({ render: () => h(RecentPlay) })
+    app.config.globalProperties.$style = new Proxy({}, { get: (_, property) => `recent-${String(property)}` })
+    app.config.globalProperties.$t = key => key
+    app.component('BaseVirtualizedList', VirtualizedList)
+    app.component('MaterialMusicTitleCell', TitleCell)
+    app.component('MaterialListButtons', ListButtons)
+    app.component('CommonListAddModal', EmptyStub)
+
+    const html = await renderToString(app)
+    observed.rows[0].props.onClick()
+    observed.rows[0].props.onClick()
+    observed.rows[1].props.onClick()
+    observed.rows[1].props.onClick()
+    return { html, observed, playablePayload, playableRecord, unavailableRecord }
+  } finally {
+    global.window = originalWindow
+  }
+}
+
+const createPlayQueueHarness = async() => {
+  const current = { ...music('queue-current', 'current.jpg'), name: 'Current Queue Song', singer: 'Current Artist' }
+  const later = { ...music('queue-later', 'later.jpg'), name: 'Play Later Song', singer: 'Later Artist' }
+  const pending = { ...music('queue-pending', 'pending.jpg'), name: 'Pending Queue Song', singer: 'Pending Artist' }
+  const observed = { artwork: [], emits: [], playListCalls: [], playMusicCalls: [] }
+  const originalWindow = global.window
+  global.window = { i18n: { t: (key, params) => params ? `${key}:${params.num}` : key } }
+
+  try {
+    const PlayQueue = loadVueSfc(playQueuePath, {
+      '@common/utils/vueTools': require('vue'),
+      '@common/constants': { LIST_IDS: { PLAY_LATER: 'play_later' } },
+      '@renderer/core/player': {
+        playList: (...args) => observed.playListCalls.push(args),
+        playMusicByInfo: (...args) => observed.playMusicCalls.push(args),
+      },
+      '@renderer/store/player/action': { getList: () => [current, pending] },
+      '@renderer/store/player/state': {
+        playInfo: { playerListId: 'queue-list', playIndex: 0, playerPlayIndex: 0 },
+        playMusicInfo: { musicInfo: current, listId: 'queue-list', isTempPlay: false },
+        tempPlayList: [{ musicInfo: later, listId: 'later-origin', isTempPlay: true }],
+      },
+    }).default
+
+    const Artwork = defineComponent({
+      props: {
+        musicInfo: { type: Object, required: true },
+        size: { type: Number, required: true },
+      },
+      setup(props) {
+        observed.artwork.push({ musicInfo: props.musicInfo, size: props.size })
+        return () => h('span', { class: 'queue-artwork' }, `artwork-${props.musicInfo.id}`)
+      },
+    })
+    const app = createSSRApp({ render: () => h(PlayQueue, { show: true }) })
+    app.config.globalProperties.$style = styleProxy
+    app.config.globalProperties.$t = key => key
+    app.component('CommonTrackArtwork', Artwork)
+    const context = {}
+    const shellHtml = await renderToString(app, context)
+    const html = context.teleports?.['#root'] ?? shellHtml
+
+    const bindings = PlayQueue.setup({ show: true }, {
+      emit: (...args) => observed.emits.push(args),
+      expose() {},
+    })
+    bindings.handlePlayQueueItem(bindings.currentQueueItems.value[0])
+    bindings.handlePlayQueueItem(bindings.tempQueueItems.value[0])
+    bindings.handlePlayQueueItem(bindings.pendingQueueItems.value[0])
+
+    return { current, html, later, observed, pending }
+  } finally {
+    global.window = originalWindow
+  }
+}
+
 const countRenderedText = (html, expected) => {
   const renderedText = html.replace(/<[^>]+>/g, '')
   return renderedText.split(expected).length - 1
@@ -700,4 +907,100 @@ test('My Lists renders artwork title cells and preserves interactive rows with a
 
 test('My Lists renders artwork title cells and preserves interactive rows without action buttons', async() => {
   await assertMusicListMode(false)
+})
+
+test('Recent Play renders history records through artwork title cells and preserves row behavior', async() => {
+  const { html, observed, playablePayload } = await createRecentPlayHarness()
+  const header = html.match(/<thead>[\s\S]*?<\/thead>/)?.[0] ?? ''
+
+  assert.match(header, />music_title</)
+  assert.doesNotMatch(header, />music_singer</)
+  assert.deepEqual(observed.titleCells, [
+    {
+      musicInfo: playablePayload,
+      title: 'Recorded Song Name',
+      artist: 'Recorded Artist',
+      artworkSize: 44,
+    },
+    {
+      musicInfo: null,
+      title: 'Unavailable Song Name',
+      artist: '--/--',
+      artworkSize: 44,
+    },
+  ])
+  assert.deepEqual(observed.titleCellSlots.map(slot => slot
+    .filter(vnode => typeof vnode.type == 'string')
+    .map(vnode => vnode.children)), [
+    ['tag__lossless_24bit'],
+    [],
+  ])
+  assert.equal(countRenderedText(html, 'History Album'), 1)
+  assert.equal(countRenderedText(html, '--/--'), 2)
+  assert.equal(countRenderedText(html, '04:32'), 1)
+  assert.equal(countRenderedText(html, 'formatted-125'), 1)
+  assert.equal(countRenderedText(html, 'source_tx'), 1)
+  assert.equal(countRenderedText(html, 'source_wy'), 1)
+  assert.equal(countRenderedText(html, 'actions-0'), 1)
+  assert.equal(countRenderedText(html, 'actions-1'), 1)
+  assert.equal(observed.virtualListAttrs.at(-1).itemHeight, 60)
+
+  const firstRow = observed.rows[0]
+  assert.match(firstRow.props.class, /recent-playing/)
+  assert.match(firstRow.props.class, /\bactive\b/)
+  assert.deepEqual(observed.playCalls, [[playablePayload, {
+    listId: null,
+    isTempPlay: true,
+    clearTempList: false,
+  }]])
+
+  assert.deepEqual(observed.buttons.map(button => ({
+    downloadBtn: button.downloadBtn,
+    playBtn: button.playBtn,
+    listAddBtn: button.listAddBtn,
+  })), [
+    { downloadBtn: false, playBtn: true, listAddBtn: true },
+    { downloadBtn: false, playBtn: false, listAddBtn: false },
+  ])
+  const columnStyles = firstRow.children
+    .filter(child => child && typeof child == 'object')
+    .map(child => child.props?.style)
+    .filter(Boolean)
+  assert.deepEqual(columnStyles, [
+    { flex: '0 0 5%' },
+    { flex: '0 0 22%' },
+    { flex: '0 0 9%' },
+    { flex: '0 0 8%' },
+    { flex: '0 0 16%', 'padding-left': '0', 'padding-right': '0' },
+  ])
+})
+
+test('Play Queue renders 44px artwork for every group and preserves click routing', async() => {
+  const { current, html, later, observed, pending } = await createPlayQueueHarness()
+
+  assert.match(html, />player__play_queue</)
+  assert.match(html, />player__play_queue_current</)
+  assert.match(html, />player__play_queue_later</)
+  assert.match(html, />player__play_queue_pending</)
+  assert.deepEqual(observed.artwork, [
+    { musicInfo: current, size: 44 },
+    { musicInfo: later, size: 44 },
+    { musicInfo: pending, size: 44 },
+  ])
+  const rows = html.match(/<button[\s\S]*?<\/button>/g) ?? []
+  assert.equal(rows.length, 3)
+  assert.match(rows[0], /player__play_queue_current[\s\S]*artwork-queue-current[\s\S]*Current Queue Song[\s\S]*Current Artist/)
+  assert.match(rows[1], />1<[\s\S]*artwork-queue-later[\s\S]*Play Later Song[\s\S]*Later Artist/)
+  assert.match(rows[2], />1<[\s\S]*artwork-queue-pending[\s\S]*Pending Queue Song[\s\S]*Pending Artist/)
+  assert.doesNotMatch(html, /music_album|music_time|favorite|action/)
+  assert.deepEqual(observed.playMusicCalls, [[later, {
+    listId: 'later-origin',
+    isTempPlay: true,
+    clearTempList: false,
+  }]])
+  assert.deepEqual(observed.playListCalls, [['queue-list', 1]])
+  assert.deepEqual(observed.emits, [
+    ['update:show', false],
+    ['update:show', false],
+  ])
 })

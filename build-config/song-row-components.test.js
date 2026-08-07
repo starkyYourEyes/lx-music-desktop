@@ -897,6 +897,12 @@ test('OnlineList renders artwork title cells and preserves interactive rows with
   await assertOnlineListMode(true)
 })
 
+test('OnlineList exposes a local hook for narrow action button spacing', async() => {
+  const { html } = await createOnlineListHarness(true)
+
+  assert.match(html, /class="actions actionButtons"/)
+})
+
 test('OnlineList renders artwork title cells and preserves interactive rows without action buttons', async() => {
   await assertOnlineListMode(false)
 })

@@ -48,7 +48,7 @@
                 <div class="list-item-cell" style="flex: 0 0 22%;"><span class="select" :aria-label="item.meta.albumName">{{ item.meta.albumName }}</span></div>
                 <div class="list-item-cell" style="flex: 0 0 9%;"><span class="no-select">{{ item.interval || '--/--' }}</span></div>
                 <div class="list-item-cell" style="flex: 0 0 16%; padding-left: 0; padding-right: 0;">
-                  <material-list-buttons :index="index" :remove-btn="false" :download-btn="canOpenPrimaryDownload(item.source)" :play-btn="checkApiSource ? canStartPlayback(item.source) : true" @btn-click="handleListBtnClick" />
+                  <material-list-buttons :class="$style.actionButtons" :index="index" :remove-btn="false" :download-btn="canOpenPrimaryDownload(item.source)" :play-btn="checkApiSource ? canStartPlayback(item.source) : true" @btn-click="handleListBtnClick" />
                 </div>
               </div>
             </template>
@@ -419,6 +419,16 @@ export default {
   height: 15px;
   color: var(--color-primary);
   vertical-align: middle;
+}
+
+@media (max-width: 800px) {
+  .actionButtons {
+    :global(button) {
+      margin-right: 1px;
+      padding-left: 3px;
+      padding-right: 3px;
+    }
+  }
 }
 
 </style>

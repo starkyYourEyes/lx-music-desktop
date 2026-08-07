@@ -495,7 +495,7 @@ const assertMusicListMode = async(actionButtonsVisible) => {
   assert.match(row.props.class, /music-list-active/)
   assert.match(row.props.class, /music-list-locatingCurrent/)
   assert.match(row.props.class, /\bselected\b/)
-  assert.match(row.props.class, /\bactive\b/)
+  assert.ok(row.props.class.split(/\s+/).includes('active'))
   assert.match(row.props.class, /\bdisabled\b/)
   const clickEvent = {}
   const contextMenuEvent = {}

@@ -1,7 +1,5 @@
-import { computed, watch, ref, onBeforeUnmount } from '@common/utils/vueTools'
-import { isFullscreen } from '@renderer/store'
-import { getFontSizeWithScreen } from '@renderer/utils'
-import { appSetting } from '@renderer/store/setting'
+import { watch, ref, onBeforeUnmount } from '@common/utils/vueTools'
+import { useMusicRowMetrics } from '@renderer/components/material/useMusicRowMetrics'
 
 const useKeyEvent = ({ handleSelectAllData, listRef }) => {
   const keyEvent = {
@@ -49,9 +47,7 @@ export default ({ listRef, list }) => {
   const selectedList = ref([])
 
   let lastSelectIndex = -1
-  const listItemHeight = computed(() => {
-    return Math.ceil((isFullscreen.value ? getFontSizeWithScreen() : appSetting['common.fontSize']) * 2.3)
-  })
+  const { listItemHeight, artworkSize } = useMusicRowMetrics()
 
   const removeAllSelect = () => {
     selectedList.value = []
@@ -101,6 +97,7 @@ export default ({ listRef, list }) => {
   return {
     selectedList,
     listItemHeight,
+    artworkSize,
     removeAllSelect,
     handleSelectData,
   }

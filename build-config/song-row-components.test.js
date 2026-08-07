@@ -11,6 +11,7 @@ const artworkPath = path.join(root, 'src/renderer/components/common/TrackArtwork
 const artworkSessionPath = path.join(root, 'src/renderer/components/common/TrackArtwork/artworkSession.ts')
 const titleCellPath = path.join(root, 'src/renderer/components/material/MusicTitleCell.vue')
 const onlineListPath = path.join(root, 'src/renderer/components/material/OnlineList/index.vue')
+const musicListPath = path.join(root, 'src/renderer/views/List/MusicList/index.vue')
 
 const music = (id, picUrl = null, source = 'wy') => ({
   id,
@@ -217,6 +218,202 @@ const createOnlineListHarness = async(actionButtonsVisible) => {
   return { html, item, observed }
 }
 
+const createMusicListHarness = async(actionButtonsVisible) => {
+  const item = {
+    ...music('saved'),
+    name: 'Saved Song',
+    singer: 'Saved Artist',
+    interval: '05:06',
+    meta: {
+      songId: 'saved',
+      albumName: 'Saved Album',
+      picUrl: 'saved.jpg',
+    },
+  }
+  const observed = {
+    actionButtons: 0,
+    clickIndexes: [],
+    contextMenus: [],
+    doubleClickIndexes: [],
+    rows: [],
+    titleCellSlots: [],
+    titleCells: [],
+    virtualListAttrs: [],
+  }
+  const value = initialValue => ref(initialValue)
+  const noop = () => {}
+  const EmptyStub = defineComponent({ setup: () => () => h('div') })
+  const vueTools = {
+    ...require('vue'),
+    ref: initialValue => ref(initialValue === -1 ? 0 : initialValue),
+  }
+  const MusicList = loadVueSfc(musicListPath, {
+    '@common/utils/electron': { clipboardWriteText: noop },
+    '@common/utils/common': { encodePath: path => path },
+    '@common/utils/vueTools': vueTools,
+    '@renderer/store/utils': {
+      canOpenPrimaryDownload: () => true,
+      canStartPlayback: () => false,
+    },
+    './components/SearchList.vue': EmptyStub,
+    './components/MusicSortModal.vue': EmptyStub,
+    './components/MusicToggleModal.vue': EmptyStub,
+    './components/ListProfileEditModal.vue': EmptyStub,
+    './useListInfo': () => ({
+      rightClickSelectedIndex: value(-1),
+      selectedIndex: value(0),
+      dom_listContent: value(null),
+      listRef: value(null),
+      list: value([item]),
+      playerInfo: value({ isPlayList: true, playIndex: 0 }),
+      setSelectedIndex: noop,
+      isShowSource: value(true),
+      excludeListIds: value(['userlist_test']),
+    }),
+    './useList': () => ({
+      selectedList: value([item]),
+      listItemHeight: value(52),
+      artworkSize: value(36),
+      handleSelectData: index => observed.clickIndexes.push(index),
+      removeAllSelect: noop,
+    }),
+    './useMenu': () => ({
+      menus: value([]),
+      menuLocation: value({ x: 0, y: 0 }),
+      isShowItemMenu: value(false),
+      showMenu: (event, musicInfo, index) => observed.contextMenus.push({ event, musicInfo, index }),
+      menuClick: noop,
+    }),
+    './usePlay': () => ({
+      handlePlayMusic: noop,
+      handlePlayMusicLater: noop,
+      doubleClickPlay: index => observed.doubleClickIndexes.push(index),
+    }),
+    './useMusicDownload': () => ({
+      isShowDownload: value(false),
+      isShowDownloadMultiple: value(false),
+      selectedDownloadMusicInfo: value(null),
+      handleShowDownloadModal: noop,
+    }),
+    './useMusicAdd': () => ({
+      isShowListAdd: value(false),
+      isMove: value(false),
+      isShowListAddMultiple: value(false),
+      isMoveMultiple: value(false),
+      selectedAddMusicInfo: value(null),
+      handleShowMusicAddModal: noop,
+      handleShowMusicMoveModal: noop,
+    }),
+    './useSort': () => ({
+      isShowMusicSortModal: value(false),
+      selectedNum: value(0),
+      selectedSortMusicInfo: value(null),
+      handleShowSortModal: noop,
+      sortMusic: noop,
+    }),
+    './useMusicToggle': () => ({
+      handleShowMusicToggleModal: noop,
+      isShowMusicToggleModal: value(false),
+      selectedToggleMusicInfo: value(null),
+      toggleSource: noop,
+    }),
+    './useMusicActions': () => ({
+      handleSearch: noop,
+      handleOpenMusicDetail: noop,
+      handleCopyName: noop,
+      handleDislikeMusic: noop,
+      handleRemoveMusic: noop,
+    }),
+    './useSearch': () => ({
+      isShowSearchBar: value(false),
+      searchList: value([]),
+      handleMusicSearchAction: noop,
+    }),
+    './useListScroll': () => ({
+      saveListPosition: noop,
+      restoreScroll: async() => {},
+      scrollToListIndex: async() => {},
+    }),
+    '@renderer/store/setting': {
+      appSetting: {
+        'list.actionButtonsVisible': actionButtonsVisible,
+        'list.playlistProfileScale': 85,
+      },
+    },
+    '@renderer/store/list/state': {
+      userLists: [{ id: 'userlist_test', name: 'Saved Songs' }],
+      loveList: { id: 'love', name: 'Love' },
+    },
+    '@renderer/store/list/action': { updateUserList: async() => {} },
+    '@renderer/utils/data': {
+      getListUpdateInfo: async() => ({}),
+      setUserListProfile: async() => {},
+    },
+    '@renderer/core/player': { playList: noop },
+    '@common/constants': { LIST_IDS: { LOVE: 'love' } },
+  }).default
+
+  const VirtualizedList = defineComponent({
+    inheritAttrs: false,
+    props: { list: { type: Array, required: true } },
+    setup(props, { attrs, slots }) {
+      return () => {
+        observed.virtualListAttrs.push({ ...attrs })
+        const renderedRow = slots.default?.({ item: props.list[0], index: 0 })
+        const row = Array.isArray(renderedRow) ? renderedRow[0] : renderedRow
+        if (row) observed.rows.push(row)
+        return h('div', { class: 'virtualized-list' }, row)
+      }
+    },
+  })
+  const TitleCell = defineComponent({
+    props: {
+      musicInfo: { type: Object, default: null },
+      title: { type: String, required: true },
+      artist: { type: String, required: true },
+      artworkSize: { type: Number, required: true },
+    },
+    setup(props, { slots }) {
+      return () => {
+        const slotContent = slots.default?.() ?? []
+        observed.titleCellSlots.push(slotContent)
+        observed.titleCells.push({
+          musicInfo: props.musicInfo,
+          title: props.title,
+          artist: props.artist,
+          artworkSize: props.artworkSize,
+        })
+        return h('div', { class: 'title-cell' }, [
+          h('span', { class: 'title' }, props.title),
+          h('span', { class: 'artist' }, props.artist),
+          slotContent,
+        ])
+      }
+    },
+  })
+  const ListButtons = defineComponent({
+    setup() {
+      observed.actionButtons++
+      return () => h('button', { class: 'actions' }, 'actions')
+    },
+  })
+  const app = createSSRApp({ render: () => h(MusicList, { listId: 'userlist_test' }) })
+  app.config.globalProperties.$style = new Proxy({}, { get: (_, property) => `music-list-${String(property)}` })
+  app.config.globalProperties.$t = key => key
+  app.component('BaseVirtualizedList', VirtualizedList)
+  app.component('MaterialMusicTitleCell', TitleCell)
+  app.component('MaterialListButtons', ListButtons)
+  app.component('CommonListAddModal', EmptyStub)
+  app.component('CommonListAddMultipleModal', EmptyStub)
+  app.component('CommonDownloadModal', EmptyStub)
+  app.component('CommonDownloadMultipleModal', EmptyStub)
+  app.component('BaseMenu', EmptyStub)
+  app.component('SvgIcon', SvgIcon)
+
+  const html = await renderToString(app)
+  return { html, item, observed }
+}
+
 const countRenderedText = (html, expected) => {
   const renderedText = html.replace(/<[^>]+>/g, '')
   return renderedText.split(expected).length - 1
@@ -267,6 +464,63 @@ const assertOnlineListMode = async(actionButtonsVisible) => {
         { flex: '0 0 16%', 'padding-left': '0', 'padding-right': '0' },
       ]
     : [{ flex: '0 0 5%' }, { flex: '0 0 27%' }, { flex: '0 0 10%' }])
+}
+
+const assertMusicListMode = async(actionButtonsVisible) => {
+  const { html, item, observed } = await createMusicListHarness(actionButtonsVisible)
+  const header = html.match(/<thead>[\s\S]*?<\/thead>/)?.[0] ?? ''
+
+  assert.match(header, />music_title</)
+  assert.doesNotMatch(header, />music_singer</)
+  assert.equal(observed.titleCells.length, 1)
+  assert.deepEqual(observed.titleCells[0], {
+    musicInfo: item,
+    title: 'Saved Song',
+    artist: 'Saved Artist',
+    artworkSize: 36,
+  })
+  assert.match(html, /class="title"[^>]*>Saved Song</)
+  assert.match(html, /class="artist"[^>]*>Saved Artist</)
+  assert.deepEqual(observed.titleCellSlots[0].map(vnode => ({
+    class: vnode.props.class,
+    children: vnode.children,
+  })), [{ class: 'no-select label-source', children: 'wy' }])
+  assert.equal(countRenderedText(html, 'Saved Album'), 1)
+  assert.equal(countRenderedText(html, '05:06'), 1)
+  assert.equal(observed.actionButtons, actionButtonsVisible ? 1 : 0)
+
+  const row = observed.rows.at(-1)
+  assert.equal(typeof row.props.onClick, 'function')
+  assert.equal(typeof row.props.onContextmenu, 'function')
+  assert.match(row.props.class, /music-list-active/)
+  assert.match(row.props.class, /music-list-locatingCurrent/)
+  assert.match(row.props.class, /\bselected\b/)
+  assert.match(row.props.class, /\bactive\b/)
+  assert.match(row.props.class, /\bdisabled\b/)
+  const clickEvent = {}
+  const contextMenuEvent = {}
+  row.props.onClick(clickEvent)
+  row.props.onContextmenu(contextMenuEvent)
+  assert.deepEqual(observed.clickIndexes, [0])
+  assert.deepEqual(observed.doubleClickIndexes, [0])
+  assert.deepEqual(observed.contextMenus, [{ event: contextMenuEvent, musicInfo: item, index: 0 }])
+
+  const virtualListAttrs = observed.virtualListAttrs.at(-1)
+  assert.equal(typeof virtualListAttrs.onScroll, 'function')
+  assert.equal(typeof virtualListAttrs.onContextmenuCapture, 'function')
+
+  const columnStyles = row.children
+    .filter(child => child && typeof child == 'object')
+    .map(child => child.props?.style)
+    .filter(Boolean)
+  assert.deepEqual(columnStyles, actionButtonsVisible
+    ? [
+        { flex: '0 0 5%' },
+        { flex: '0 0 22%' },
+        { flex: '0 0 9%' },
+        { flex: '0 0 16%', 'padding-left': '0', 'padding-right': '0' },
+      ]
+    : [{ flex: '0 0 5%' }, { flex: '0 0 28%' }, { flex: '0 0 10%' }])
 }
 
 const createLifecycleHarness = () => {
@@ -438,4 +692,12 @@ test('OnlineList renders artwork title cells and preserves interactive rows with
 
 test('OnlineList renders artwork title cells and preserves interactive rows without action buttons', async() => {
   await assertOnlineListMode(false)
+})
+
+test('My Lists renders artwork title cells and preserves interactive rows with action buttons', async() => {
+  await assertMusicListMode(true)
+})
+
+test('My Lists renders artwork title cells and preserves interactive rows without action buttons', async() => {
+  await assertMusicListMode(false)
 })

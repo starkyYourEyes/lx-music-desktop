@@ -25,7 +25,7 @@ export const createArtworkSession = (loadArtwork: ArtworkLoader): ArtworkSession
     const identity = getArtworkIdentity(musicInfo)
     if (!identity) return null
     if (resolved.has(identity)) return resolved.get(identity)
-    return getInitialArtworkUrl(musicInfo)
+    return getInitialArtworkUrl(musicInfo) ?? undefined
   }
 
   const resolve = async(musicInfo: LX.Music.MusicInfo | null | undefined): Promise<string | null> => {

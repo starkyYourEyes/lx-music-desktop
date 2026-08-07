@@ -37,6 +37,7 @@ test('concurrent missing-artwork lookups share one request and cache its result'
   const track = music('2')
   const session = createArtworkSession(async() => { calls++; return pending })
 
+  assert.equal(session.peek(track), undefined)
   const first = session.resolve(track)
   const second = session.resolve(track)
   assert.equal(calls, 1)

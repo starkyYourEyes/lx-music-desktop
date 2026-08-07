@@ -3,16 +3,14 @@ const fs = require('node:fs')
 const path = require('node:path')
 const test = require('node:test')
 const { compileStyleAsync, parse } = require('@vue/compiler-sfc')
-const { createSSRApp, defineComponent, h, ref } = require('vue')
+const { createRenderer, createSSRApp, defineComponent, h, nextTick, ref } = require('vue')
 const { renderToString } = require('@vue/server-renderer')
 const less = require('less')
 const postcss = require('postcss')
-const loadTsModule = require('../scripts/test-utils/load-ts-module')
 const { loadVueSfc } = require('../scripts/test-utils/load-vue-sfc')
 
 const root = path.resolve(__dirname, '..')
 const artworkPath = path.join(root, 'src/renderer/components/common/TrackArtwork/index.vue')
-const artworkSessionPath = path.join(root, 'src/renderer/components/common/TrackArtwork/artworkSession.ts')
 const titleCellPath = path.join(root, 'src/renderer/components/material/MusicTitleCell.vue')
 const onlineListPath = path.join(root, 'src/renderer/components/material/OnlineList/index.vue')
 const musicListPath = path.join(root, 'src/renderer/views/List/MusicList/index.vue')
@@ -72,6 +70,8 @@ const getInitialArtworkUrl = musicInfo => {
   return picUrl && !picUrl.startsWith('webdav:') ? picUrl : null
 }
 
+const getArtworkIdentity = musicInfo => musicInfo ? `${musicInfo.source}:${musicInfo.id}` : ''
+
 const SvgIcon = {
   inheritAttrs: false,
   setup(_, { attrs }) {
@@ -90,7 +90,7 @@ const createSessionStub = () => ({
 const loadArtwork = (session = createSessionStub(), vueTools = require('vue')) => {
   return loadVueSfc(artworkPath, {
     '@common/utils/vueTools': vueTools,
-    './artworkSession': { artworkSession: session, getInitialArtworkUrl },
+    './artworkSession': { artworkSession: session, getArtworkIdentity, getInitialArtworkUrl },
   }).default
 }
 
@@ -608,7 +608,7 @@ const createRecentPlayHarness = async() => {
   }
 }
 
-const createPlayQueueHarness = async() => {
+const createPlayQueueHarness = async(metrics = { listItemHeight: 60, artworkSize: 44 }) => {
   const current = { ...music('queue-current', 'current.jpg'), name: 'Current Queue Song', singer: 'Current Artist' }
   const later = { ...music('queue-later', 'later.jpg'), name: 'Play Later Song', singer: 'Later Artist' }
   const pending = { ...music('queue-pending', 'pending.jpg'), name: 'Pending Queue Song', singer: 'Pending Artist' }
@@ -620,6 +620,12 @@ const createPlayQueueHarness = async() => {
     const PlayQueue = loadVueSfc(playQueuePath, {
       '@common/utils/vueTools': require('vue'),
       '@common/constants': { LIST_IDS: { PLAY_LATER: 'play_later' } },
+      '@renderer/components/material/useMusicRowMetrics': {
+        useMusicRowMetrics: () => ({
+          listItemHeight: ref(metrics.listItemHeight),
+          artworkSize: ref(metrics.artworkSize),
+        }),
+      },
       '@renderer/core/player': {
         playList: (...args) => observed.playListCalls.push(args),
         playMusicByInfo: (...args) => observed.playMusicCalls.push(args),
@@ -669,12 +675,22 @@ const countRenderedText = (html, expected) => {
   return renderedText.split(expected).length - 1
 }
 
+const assertTitleHeaderOffset = (header, offset, expectedWidths) => {
+  assert.match(header, new RegExp(`<span style="margin-left:${offset}px;">music_title</span>`))
+  assert.equal((header.match(/margin-left:/g) ?? []).length, 1)
+  assert.deepEqual(
+    [...header.matchAll(/<th[^>]*style="width:\s*([\d.]+)%[^"]*"/g)].map(match => Number(match[1])),
+    expectedWidths,
+  )
+}
+
 const assertOnlineListMode = async(actionButtonsVisible) => {
   const { html, item, observed } = await createOnlineListHarness(actionButtonsVisible)
   const header = html.match(/<thead>[\s\S]*?<\/thead>/)?.[0] ?? ''
 
   assert.match(header, />music_title</)
   assert.doesNotMatch(header, />music_singer</)
+  assertTitleHeaderOffset(header, 46, actionButtonsVisible ? [5, 22, 9, 16] : [5, 27, 10])
   assert.equal(observed.titleCells.length, 1)
   assert.equal(observed.titleCells[0].musicInfo, item)
   assert.deepEqual(observed.titleCells[0], {
@@ -722,6 +738,7 @@ const assertMusicListMode = async(actionButtonsVisible) => {
 
   assert.match(header, />music_title</)
   assert.doesNotMatch(header, />music_singer</)
+  assertTitleHeaderOffset(header, 46, actionButtonsVisible ? [5, 22, 9, 16] : [5, 28, 10])
   assert.equal(observed.titleCells.length, 1)
   assert.deepEqual(observed.titleCells[0], {
     musicInfo: item,
@@ -799,6 +816,85 @@ const setupArtwork = (props, session) => {
   return { bindings, lifecycle }
 }
 
+const mountArtwork = (initialMusicInfo, session) => {
+  const createNode = (type, text = '') => ({ type, text, children: [], parent: null, props: {}, dataset: {} })
+  const renderer = createRenderer({
+    patchProp(node, key, _, value) {
+      node.props[key] = value
+      if (key.startsWith('data-')) {
+        const datasetKey = key.slice(5).replace(/-([a-z])/g, (__, char) => char.toUpperCase())
+        node.dataset[datasetKey] = value
+      }
+    },
+    insert(node, parent, anchor) {
+      node.parent = parent
+      const index = anchor ? parent.children.indexOf(anchor) : -1
+      if (index < 0) parent.children.push(node)
+      else parent.children.splice(index, 0, node)
+    },
+    remove(node) {
+      if (!node.parent) return
+      const index = node.parent.children.indexOf(node)
+      if (index > -1) node.parent.children.splice(index, 1)
+      node.parent = null
+    },
+    createElement: type => createNode(type),
+    createText: text => createNode('#text', text),
+    createComment: text => createNode('#comment', text),
+    setText: (node, text) => { node.text = text },
+    setElementText: (node, text) => { node.children = [createNode('#text', text)] },
+    parentNode: node => node.parent,
+    nextSibling(node) {
+      if (!node.parent) return null
+      return node.parent.children[node.parent.children.indexOf(node) + 1] ?? null
+    },
+    querySelector: () => null,
+    setScopeId() {},
+    insertStaticContent(content, parent, anchor) {
+      const node = createNode('#static', content)
+      this.insert(node, parent, anchor)
+      return [node, node]
+    },
+  })
+  const Artwork = loadArtwork(session)
+  const musicInfo = ref(initialMusicInfo)
+  const app = renderer.createApp({ render: () => h(Artwork, { musicInfo: musicInfo.value, size: 44 }) })
+  app.component('SvgIcon', SvgIcon)
+  app.config.globalProperties.$style = styleProxy
+  const container = createNode('#root')
+  app.mount(container)
+  return {
+    image: () => container.children[0].children[0],
+    setMusic: value => { musicInfo.value = value },
+    unmount: () => app.unmount(),
+  }
+}
+
+const setupSharedArtworkInstances = (propsList, session) => {
+  const mounted = []
+  const beforeUnmount = []
+  const propChanged = []
+  const vueTools = {
+    ref: value => ({ value }),
+    watch: (_, callback) => { propChanged.push(callback) },
+    onMounted: callback => { mounted.push(callback) },
+    onBeforeUnmount: callback => { beforeUnmount.push(callback) },
+  }
+  const Artwork = loadArtwork(session, vueTools)
+  const instances = propsList.map((props, index) => {
+    const bindings = Artwork.setup(props, { expose() {} })
+    bindings.root.value = { id: props.musicInfo.id }
+    return {
+      bindings,
+      props,
+      mount: () => mounted[index](),
+      unmount: () => beforeUnmount[index](),
+      changeMusic: musicInfo => propChanged[index](musicInfo),
+    }
+  })
+  return { Artwork, instances }
+}
+
 test('title cell renders artwork, a badge-bearing title line, and a muted artist line', async() => {
   const html = await renderTitleCell({
     musicInfo: music('1', 'cover.jpg'),
@@ -827,13 +923,14 @@ test('intersection gates missing artwork resolution but not a stored cover', asy
   global.IntersectionObserver = class {
     constructor(callback) { observerCallback = callback }
     observe() {}
+    unobserve() {}
     disconnect() {}
   }
   t.after(() => { global.IntersectionObserver = originalIntersectionObserver })
 
   let missingCalls = 0
   const missing = setupArtwork({ musicInfo: music('2'), size: 44 }, {
-    peek: () => null,
+    peek: () => undefined,
     resolve: async() => { missingCalls++; return 'resolved.jpg' },
     fail() {},
   })
@@ -863,13 +960,14 @@ test('late artwork results cannot repaint a reused or unmounted row', async t =>
   global.IntersectionObserver = class {
     constructor(callback) { observerCallback = callback }
     observe() {}
+    unobserve() {}
     disconnect() {}
   }
   t.after(() => { global.IntersectionObserver = originalIntersectionObserver })
 
   const releases = new Map()
   const session = {
-    peek: () => null,
+    peek: () => undefined,
     resolve: track => new Promise(resolve => { releases.set(track.id, resolve) }),
     fail() {},
   }
@@ -880,6 +978,7 @@ test('late artwork results cannot repaint a reused or unmounted row', async t =>
 
   props.musicInfo = music('5')
   lifecycle.changeMusic(props.musicInfo)
+  observerCallback([{ target: bindings.root.value, isIntersecting: true }])
   releases.get('5')('new.jpg')
   await Promise.resolve()
   assert.equal(bindings.artworkUrl.value, 'new.jpg')
@@ -889,6 +988,7 @@ test('late artwork results cannot repaint a reused or unmounted row', async t =>
 
   props.musicInfo = music('6')
   lifecycle.changeMusic(props.musicInfo)
+  observerCallback([{ target: bindings.root.value, isIntersecting: true }])
   lifecycle.unmount()
   releases.get('6')('unmounted.jpg')
   await Promise.resolve()
@@ -901,13 +1001,14 @@ test('a queued intersection callback cannot start artwork resolution after unmou
   global.IntersectionObserver = class {
     constructor(callback) { observerCallback = callback }
     observe() {}
+    unobserve() {}
     disconnect() {}
   }
   t.after(() => { global.IntersectionObserver = originalIntersectionObserver })
 
   let resolveCalls = 0
   const { bindings, lifecycle } = setupArtwork({ musicInfo: music('7'), size: 44 }, {
-    peek: () => null,
+    peek: () => undefined,
     resolve: async() => { resolveCalls++; return 'late.jpg' },
     fail() {},
   })
@@ -921,19 +1022,141 @@ test('a queued intersection callback cannot start artwork resolution after unmou
   assert.equal(bindings.artworkUrl.value, null)
 })
 
-test('native failure caches a placeholder for an initially displayed stored URL', async() => {
-  const { createArtworkSession } = loadTsModule(artworkSessionPath, {
-    '@renderer/core/music': { getPicPath: async() => null },
-  })
-  const track = music('7', 'broken.jpg')
-  const session = createArtworkSession(async() => 'unused.jpg')
-  const { bindings } = setupArtwork({ musicInfo: track, size: 44 }, session)
+test('unresolved artwork instances share one observer and unobserve visible targets before resolving', async t => {
+  const originalIntersectionObserver = global.IntersectionObserver
+  const callbacks = []
+  const events = []
+  let constructorCalls = 0
+  global.IntersectionObserver = class {
+    constructor(callback) {
+      constructorCalls++
+      callbacks.push(callback)
+    }
 
-  assert.equal(bindings.artworkUrl.value, 'broken.jpg')
-  await bindings.handleArtworkError()
-  assert.equal(bindings.artworkUrl.value, null)
-  assert.equal(session.peek(track), null)
-  assert.equal(await session.resolve(track), null)
+    observe(target) { events.push(`observe:${target.id}`) }
+    unobserve(target) { events.push(`unobserve:${target.id}`) }
+    disconnect() { events.push('disconnect') }
+  }
+  t.after(() => { global.IntersectionObserver = originalIntersectionObserver })
+
+  const session = {
+    peek: () => undefined,
+    resolve: async musicInfo => {
+      events.push(`resolve:${musicInfo.id}`)
+      return `${musicInfo.id}.jpg`
+    },
+    fail() {},
+  }
+  const { instances } = setupSharedArtworkInstances([
+    { musicInfo: music('shared-a'), size: 44 },
+    { musicInfo: music('shared-b'), size: 44 },
+  ], session)
+
+  instances.forEach(instance => instance.mount())
+  assert.equal(constructorCalls, 1)
+  assert.deepEqual(events, ['observe:shared-a', 'observe:shared-b'])
+
+  callbacks[0]([{ target: instances[0].bindings.root.value, isIntersecting: true }])
+  await Promise.resolve()
+  assert.deepEqual(events.slice(2), ['unobserve:shared-a', 'resolve:shared-a'])
+  assert.equal(instances[0].bindings.artworkUrl.value, 'shared-a.jpg')
+})
+
+test('artwork observation skips settled outcomes and unregisters targets on reuse and unmount', () => {
+  const originalIntersectionObserver = global.IntersectionObserver
+  const observed = []
+  const unobserved = []
+  let disconnectCalls = 0
+  global.IntersectionObserver = class {
+    observe(target) { observed.push(target.id) }
+    unobserve(target) { unobserved.push(target.id) }
+    disconnect() { disconnectCalls++ }
+  }
+
+  try {
+    const outcomes = new Map([
+      ['stored', 'stored.jpg'],
+      ['cached-success', 'cached.jpg'],
+      ['cached-failure', null],
+    ])
+    const session = {
+      peek: musicInfo => outcomes.has(musicInfo.id) ? outcomes.get(musicInfo.id) : undefined,
+      resolve: async() => null,
+      fail() {},
+    }
+    const { instances } = setupSharedArtworkInstances([
+      { musicInfo: music('stored', 'stored.jpg'), size: 44 },
+      { musicInfo: music('cached-success'), size: 44 },
+      { musicInfo: music('cached-failure'), size: 44 },
+      { musicInfo: music('reuse'), size: 44 },
+      { musicInfo: music('unmount'), size: 44 },
+    ], session)
+
+    instances.forEach(instance => instance.mount())
+    assert.deepEqual(observed, ['reuse', 'unmount'])
+
+    instances[3].props.musicInfo = music('stored', 'stored.jpg')
+    instances[3].changeMusic(instances[3].props.musicInfo)
+    assert.deepEqual(unobserved, ['reuse'])
+    assert.equal(disconnectCalls, 0)
+
+    instances[4].unmount()
+    assert.deepEqual(unobserved, ['reuse', 'unmount'])
+    assert.equal(disconnectCalls, 1)
+  } finally {
+    global.IntersectionObserver = originalIntersectionObserver
+  }
+})
+
+test('unresolved artwork resolves immediately when IntersectionObserver is unavailable', async t => {
+  const originalIntersectionObserver = global.IntersectionObserver
+  delete global.IntersectionObserver
+  t.after(() => { global.IntersectionObserver = originalIntersectionObserver })
+
+  let resolveCalls = 0
+  const { bindings, lifecycle } = setupArtwork({ musicInfo: music('no-observer'), size: 44 }, {
+    peek: () => undefined,
+    resolve: async() => { resolveCalls++; return 'immediate.jpg' },
+    fail() {},
+  })
+
+  lifecycle.mount()
+  await Promise.resolve()
+  assert.equal(resolveCalls, 1)
+  assert.equal(bindings.artworkUrl.value, 'immediate.jpg')
+})
+
+test('native image errors ignore stale rendered nodes and fail the current identity and URL', async t => {
+  const trackA = music('error-a', 'a.jpg')
+  const trackB = music('error-b', 'b.jpg')
+  const failed = []
+  const resolved = []
+  const session = {
+    peek: getInitialArtworkUrl,
+    resolve: async musicInfo => {
+      resolved.push(musicInfo)
+      return getInitialArtworkUrl(musicInfo)
+    },
+    fail: (musicInfo, url) => failed.push({ musicInfo, url }),
+  }
+  const mounted = mountArtwork(trackA, session)
+  t.after(() => mounted.unmount())
+  const imageA = mounted.image()
+
+  mounted.setMusic(trackB)
+  await nextTick()
+  const imageB = mounted.image()
+
+  await imageA.props.onError({ currentTarget: imageA })
+  assert.equal(mounted.image().props.src, 'b.jpg')
+  assert.deepEqual(resolved, [])
+  assert.deepEqual(failed, [])
+
+  await imageB.props.onError({ currentTarget: imageB })
+  await nextTick()
+  assert.equal(mounted.image().type, 'svg')
+  assert.deepEqual(resolved, [trackB])
+  assert.deepEqual(failed, [{ musicInfo: trackB, url: 'b.jpg' }])
 })
 
 test('OnlineList renders artwork title cells and preserves interactive rows with action buttons', async() => {
@@ -989,6 +1212,7 @@ test('Recent Play renders history records through artwork title cells and preser
 
   assert.match(header, />music_title</)
   assert.doesNotMatch(header, />music_singer</)
+  assertTitleHeaderOffset(header, 54, [5, 22, 9, 8, 16])
   assert.deepEqual(observed.titleCells, [
     {
       musicInfo: playablePayload,
@@ -1063,6 +1287,10 @@ test('Play Queue renders 44px artwork for every group and preserves click routin
   ])
   const rows = html.match(/<button[\s\S]*?<\/button>/g) ?? []
   assert.equal(rows.length, 3)
+  rows.forEach(row => {
+    assert.match(row, /style="[^"]*min-height:60px/)
+    assert.match(row, /grid-template-columns:30px 44px minmax\(0, 1fr\)/)
+  })
   assert.match(rows[0], /player__play_queue_current[\s\S]*artwork-queue-current[\s\S]*Current Queue Song[\s\S]*Current Artist/)
   assert.match(rows[1], />1<[\s\S]*artwork-queue-later[\s\S]*Play Later Song[\s\S]*Later Artist/)
   assert.match(rows[2], />1<[\s\S]*artwork-queue-pending[\s\S]*Pending Queue Song[\s\S]*Pending Artist/)
@@ -1077,4 +1305,16 @@ test('Play Queue renders 44px artwork for every group and preserves click routin
     ['update:show', false],
     ['update:show', false],
   ])
+})
+
+test('Play Queue applies injected row and artwork metrics to every queue group', async() => {
+  const { html, observed } = await createPlayQueueHarness({ listItemHeight: 72, artworkSize: 56 })
+
+  assert.deepEqual(observed.artwork.map(artwork => artwork.size), [56, 56, 56])
+  const rows = html.match(/<button[\s\S]*?<\/button>/g) ?? []
+  assert.equal(rows.length, 3)
+  rows.forEach(row => {
+    assert.match(row, /style="[^"]*min-height:72px/)
+    assert.match(row, /grid-template-columns:30px 56px minmax\(0, 1fr\)/)
+  })
 })

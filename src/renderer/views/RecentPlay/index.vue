@@ -12,7 +12,7 @@
           <thead>
             <tr>
               <th class="num" style="width: 5%;">#</th>
-              <th class="nobreak">{{ $t('music_title') }}</th>
+              <th class="nobreak"><span :style="{ marginLeft: `${artworkSize + 10}px` }">{{ $t('music_title') }}</span></th>
               <th class="nobreak" style="width: 22%;">{{ $t('music_album') }}</th>
               <th class="nobreak" style="width: 9%;">{{ $t('music_time') }}</th>
               <th class="nobreak" style="width: 8%;">{{ $t('list_sort_modal_by_source') }}</th>

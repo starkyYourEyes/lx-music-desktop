@@ -6,7 +6,10 @@
   >
     <img
       v-if="artworkUrl"
+      :key="`${artworkIdentity}:${artworkUrl}`"
       :src="artworkUrl"
+      :data-artwork-identity="artworkIdentity"
+      :data-artwork-url="artworkUrl"
       alt=""
       loading="lazy"
       decoding="async"
@@ -17,10 +20,42 @@
   </div>
 </template>
 
-<script setup lang="ts">
+<script lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from '@common/utils/vueTools'
-import { artworkSession, getInitialArtworkUrl } from './artworkSession'
+import { artworkSession, getArtworkIdentity, getInitialArtworkUrl } from './artworkSession'
 
+type ArtworkVisibilityHandler = () => void
+
+const visibilityHandlers = new Map<Element, ArtworkVisibilityHandler>()
+let visibilityObserver: IntersectionObserver | null = null
+
+const unobserveArtworkTarget = (target: Element): void => {
+  if (!visibilityHandlers.delete(target)) return
+  visibilityObserver?.unobserve(target)
+  if (visibilityHandlers.size) return
+  visibilityObserver?.disconnect()
+  visibilityObserver = null
+}
+
+const observeArtworkTarget = (target: Element, onVisible: ArtworkVisibilityHandler): boolean => {
+  if (typeof IntersectionObserver == 'undefined') return false
+  unobserveArtworkTarget(target)
+  visibilityObserver ??= new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue
+      const handler = visibilityHandlers.get(entry.target)
+      if (!handler) continue
+      unobserveArtworkTarget(entry.target)
+      handler()
+    }
+  })
+  visibilityHandlers.set(target, onVisible)
+  visibilityObserver.observe(target)
+  return true
+}
+</script>
+
+<script setup lang="ts">
 const props = defineProps<{
   musicInfo: LX.Music.MusicInfo | null
   size: number
@@ -35,15 +70,15 @@ const getVisibleArtworkUrl = (musicInfo: LX.Music.MusicInfo | null): string | nu
 }
 
 const artworkUrl = ref<string | null>(getVisibleArtworkUrl(props.musicInfo))
-let observer: IntersectionObserver | null = null
-let isIntersecting = false
+const artworkIdentity = ref(getArtworkIdentity(props.musicInfo))
+let isMounted = false
 let isUnmounted = false
 let requestToken = 0
 
 const resolveArtwork = async(): Promise<void> => {
   if (isUnmounted) return
   const musicInfo = props.musicInfo
-  if (!musicInfo || artworkUrl.value) return
+  if (!musicInfo || artworkUrl.value != null || artworkSession.peek(musicInfo) !== undefined) return
 
   const token = ++requestToken
   resolving.value = true
@@ -53,11 +88,26 @@ const resolveArtwork = async(): Promise<void> => {
   resolving.value = false
 }
 
-const handleArtworkError = async(): Promise<void> => {
+const unregisterArtworkTarget = (): void => {
+  if (root.value) unobserveArtworkTarget(root.value)
+}
+
+const registerArtworkTarget = (): void => {
+  if (!isMounted || isUnmounted || !root.value || artworkSession.peek(props.musicInfo) !== undefined) return
+  if (!observeArtworkTarget(root.value, () => { void resolveArtwork() })) void resolveArtwork()
+}
+
+const handleArtworkError = async(event: Event): Promise<void> => {
   if (isUnmounted) return
+  const target = event.currentTarget as HTMLImageElement | null
   const musicInfo = props.musicInfo
-  const failedUrl = artworkUrl.value
-  if (!musicInfo || !failedUrl) return
+  const failedUrl = target?.dataset.artworkUrl
+  if (
+    !musicInfo ||
+    !failedUrl ||
+    target.dataset.artworkIdentity != getArtworkIdentity(musicInfo) ||
+    failedUrl != artworkUrl.value
+  ) return
 
   ++requestToken
   resolving.value = false
@@ -71,31 +121,21 @@ const handleArtworkError = async(): Promise<void> => {
 watch(() => props.musicInfo, musicInfo => {
   ++requestToken
   resolving.value = false
+  unregisterArtworkTarget()
+  artworkIdentity.value = getArtworkIdentity(musicInfo)
   artworkUrl.value = getVisibleArtworkUrl(musicInfo)
-  if (isIntersecting && !artworkUrl.value) void resolveArtwork()
+  registerArtworkTarget()
 })
 
 onMounted(() => {
-  if (typeof IntersectionObserver == 'undefined') {
-    isIntersecting = true
-    if (!artworkUrl.value) void resolveArtwork()
-    return
-  }
-
-  observer = new IntersectionObserver(entries => {
-    if (isUnmounted) return
-    const entry = entries.find(entry => entry.target == root.value) ?? entries[0]
-    isIntersecting = entry?.isIntersecting ?? false
-    if (isIntersecting && !artworkUrl.value) void resolveArtwork()
-  })
-  if (root.value) observer.observe(root.value)
+  isMounted = true
+  registerArtworkTarget()
 })
 
 onBeforeUnmount(() => {
   isUnmounted = true
   ++requestToken
-  observer?.disconnect()
-  observer = null
+  unregisterArtworkTarget()
 })
 </script>
 

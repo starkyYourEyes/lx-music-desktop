@@ -13,10 +13,11 @@
               :key="item.key"
               type="button"
               :class="[$style.song, $style.current]"
+              :style="songStyle"
               @click="handlePlayQueueItem(item)"
             >
               <span :class="$style.mark">{{ $t('player__play_queue_current') }}</span>
-              <common-track-artwork :class="$style.artwork" :music-info="item.musicInfo" :size="44" />
+              <common-track-artwork :class="$style.artwork" :music-info="item.musicInfo" :size="artworkSize" />
               <span :class="$style.name">{{ item.musicInfo.name }}</span>
               <span :class="$style.singer">{{ item.musicInfo.singer }}</span>
             </button>
@@ -27,10 +28,11 @@
                 :key="item.key"
                 type="button"
                 :class="$style.song"
+                :style="songStyle"
                 @click="handlePlayQueueItem(item)"
               >
                 <span :class="$style.index">{{ item.displayIndex }}</span>
-                <common-track-artwork :class="$style.artwork" :music-info="item.musicInfo" :size="44" />
+                <common-track-artwork :class="$style.artwork" :music-info="item.musicInfo" :size="artworkSize" />
                 <span :class="$style.name">{{ item.musicInfo.name }}</span>
                 <span :class="$style.singer">{{ item.musicInfo.singer }}</span>
               </button>
@@ -42,10 +44,11 @@
                 :key="item.key"
                 type="button"
                 :class="$style.song"
+                :style="songStyle"
                 @click="handlePlayQueueItem(item)"
               >
                 <span :class="$style.index">{{ item.displayIndex }}</span>
-                <common-track-artwork :class="$style.artwork" :music-info="item.musicInfo" :size="44" />
+                <common-track-artwork :class="$style.artwork" :music-info="item.musicInfo" :size="artworkSize" />
                 <span :class="$style.name">{{ item.musicInfo.name }}</span>
                 <span :class="$style.singer">{{ item.musicInfo.singer }}</span>
               </button>
@@ -63,6 +66,7 @@
 <script setup lang="ts">
 import { computed } from '@common/utils/vueTools'
 import { LIST_IDS } from '@common/constants'
+import { useMusicRowMetrics } from '@renderer/components/material/useMusicRowMetrics'
 import { playList, playMusicByInfo } from '@renderer/core/player'
 import { getList } from '@renderer/store/player/action'
 import { playInfo, playMusicInfo, tempPlayList } from '@renderer/store/player/state'
@@ -83,6 +87,11 @@ defineProps<{
 }>()
 
 const emit = defineEmits<(event: 'update:show', value: boolean) => void>()
+const { listItemHeight, artworkSize } = useMusicRowMetrics()
+const songStyle = computed(() => ({
+  minHeight: `${listItemHeight.value}px`,
+  gridTemplateColumns: `30px ${artworkSize.value}px minmax(0, 1fr)`,
+}))
 
 const toMusicInfo = (musicInfo: LX.Music.MusicInfo | LX.Download.ListItem): LX.Music.MusicInfo => {
   return 'progress' in musicInfo ? musicInfo.metadata.musicInfo : musicInfo
@@ -234,12 +243,10 @@ const handlePlayQueueItem = (item: QueueItem) => {
 
 .song {
   width: 100%;
-  min-height: 60px;
   border: none;
   border-radius: 6px;
   padding: 7px 8px;
   display: grid;
-  grid-template-columns: 30px 44px minmax(0, 1fr);
   grid-template-areas:
     "index artwork name"
     "index artwork singer";

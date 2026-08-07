@@ -224,6 +224,7 @@
   "music_album": "专辑名",
   "music_duplicate": "重复歌曲",
   "music_name": "歌曲名",
+  "music_title": "标题",
   "music_singer": "艺术家",
   "music_sort__input_tip": "请输入要调整到第几个位置",
   "music_sort__title": "将「{name}」的位置调整到：",

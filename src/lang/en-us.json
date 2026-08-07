@@ -224,6 +224,7 @@
   "music_album": "Album",
   "music_duplicate": "Duplicate song",
   "music_name": "Title",
+  "music_title": "Title",
   "music_singer": "Artist",
   "music_sort__input_tip": "Please enter which position you want to adjust to",
   "music_sort__title": "Adjust the position of \"{name}\" to: ",

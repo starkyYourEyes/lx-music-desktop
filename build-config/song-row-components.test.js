@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict')
 const path = require('node:path')
 const test = require('node:test')
-const { createSSRApp, h } = require('vue')
+const { createSSRApp, defineComponent, h, ref } = require('vue')
 const { renderToString } = require('@vue/server-renderer')
 const loadTsModule = require('../scripts/test-utils/load-ts-module')
 const { loadVueSfc } = require('../scripts/test-utils/load-vue-sfc')
@@ -10,6 +10,7 @@ const root = path.resolve(__dirname, '..')
 const artworkPath = path.join(root, 'src/renderer/components/common/TrackArtwork/index.vue')
 const artworkSessionPath = path.join(root, 'src/renderer/components/common/TrackArtwork/artworkSession.ts')
 const titleCellPath = path.join(root, 'src/renderer/components/material/MusicTitleCell.vue')
+const onlineListPath = path.join(root, 'src/renderer/components/material/OnlineList/index.vue')
 
 const music = (id, picUrl = null, source = 'wy') => ({
   id,
@@ -66,6 +67,206 @@ const renderTitleCell = async(props, slots = {}) => {
   const app = configureApp(createSSRApp({ render: () => h(TitleCell, props, slots) }), Artwork)
   app.component('MaterialMusicTitleCell', TitleCell)
   return renderToString(app)
+}
+
+const createOnlineListHarness = async(actionButtonsVisible) => {
+  const item = {
+    ...music('online'),
+    name: 'Online Song',
+    singer: 'Online Artist',
+    interval: '04:05',
+    meta: {
+      songId: 'online',
+      albumName: 'Online Album',
+      picUrl: 'online.jpg',
+      _qualitys: { flac24bit: true },
+    },
+  }
+  const observed = {
+    actionButtons: 0,
+    clickIndexes: [],
+    contextMenus: [],
+    rows: [],
+    titleCellSlots: [],
+    titleCells: [],
+  }
+  const value = initialValue => ref(initialValue)
+  const noop = () => {}
+  const OnlineList = loadVueSfc(onlineListPath, {
+    '@common/utils/electron': { clipboardWriteText: noop },
+    '@renderer/store/utils': {
+      canOpenPrimaryDownload: () => true,
+      canStartPlayback: () => true,
+    },
+    '@common/utils/vueTools': require('vue'),
+    './useList': () => ({
+      selectedList: value([]),
+      listItemHeight: value(52),
+      artworkSize: value(36),
+      handleSelectData: index => observed.clickIndexes.push(index),
+      removeAllSelect: noop,
+    }),
+    './useMenu': () => ({
+      menus: value([]),
+      menuLocation: value({ x: 0, y: 0 }),
+      isShowItemMenu: value(false),
+      showMenu: (event, musicInfo, index) => observed.contextMenus.push({ event, musicInfo, index }),
+      menuClick: noop,
+    }),
+    './usePlay': () => ({
+      handlePlayMusic: noop,
+      handlePlayMusicLater: noop,
+      doubleClickPlay: noop,
+    }),
+    './useMusicDownload': () => ({
+      isShowDownload: value(false),
+      isShowDownloadMultiple: value(false),
+      selectedDownloadMusicInfo: value(null),
+      handleShowDownloadModal: noop,
+    }),
+    './useMusicAdd': () => ({
+      isShowListAdd: value(false),
+      isShowListAddMultiple: value(false),
+      selectedAddMusicInfo: value(null),
+      handleShowMusicAddModal: noop,
+    }),
+    './useMusicActions': () => ({
+      handleSearch: noop,
+      handleOpenMusicDetail: noop,
+      handleDislikeMusic: noop,
+    }),
+    '@renderer/store/setting': {
+      appSetting: {
+        'list.actionButtonsVisible': actionButtonsVisible,
+      },
+    },
+    '@renderer/store/player/state': {
+      playInfo: { playerListId: '', playerPlayIndex: -1 },
+      playMusicInfo: { musicInfo: null },
+    },
+    '@renderer/store/list/state': { tempListMeta: { id: '' } },
+    '@common/constants': { LIST_IDS: { TEMP: 'temp' } },
+  }).default
+
+  const VirtualizedList = defineComponent({
+    props: { list: { type: Array, required: true } },
+    setup(props, { slots }) {
+      return () => {
+        const renderedRow = slots.default?.({ item: props.list[0], index: 0 })
+        const row = Array.isArray(renderedRow) ? renderedRow[0] : renderedRow
+        if (row) observed.rows.push(row)
+        return h('div', { class: 'virtualized-list' }, [row, slots.footer?.()])
+      }
+    },
+  })
+  const TitleCell = defineComponent({
+    props: {
+      musicInfo: { type: Object, default: null },
+      title: { type: String, required: true },
+      artist: { type: String, required: true },
+      artworkSize: { type: Number, required: true },
+    },
+    setup(props, { slots }) {
+      return () => {
+        const slotContent = slots.default?.() ?? []
+        observed.titleCellSlots.push(slotContent)
+        observed.titleCells.push({
+          musicInfo: props.musicInfo,
+          title: props.title,
+          artist: props.artist,
+          artworkSize: props.artworkSize,
+        })
+        return h('div', { class: 'title-cell' }, [
+          h('span', { class: 'title' }, props.title),
+          h('span', { class: 'artist' }, props.artist),
+          slotContent,
+        ])
+      }
+    },
+  })
+  const ListButtons = defineComponent({
+    setup() {
+      observed.actionButtons++
+      return () => h('button', { class: 'actions' }, 'actions')
+    },
+  })
+  const EmptyStub = defineComponent({ setup: () => () => h('div') })
+  const app = createSSRApp({
+    render: () => h(OnlineList, {
+      list: [item],
+      page: 1,
+      limit: 30,
+      total: 1,
+      sourceTag: true,
+    }),
+  })
+  app.config.globalProperties.$style = styleProxy
+  app.config.globalProperties.$t = key => key
+  app.component('BaseVirtualizedList', VirtualizedList)
+  app.component('MaterialMusicTitleCell', TitleCell)
+  app.component('MaterialListButtons', ListButtons)
+  app.component('MaterialPagination', EmptyStub)
+  app.component('CommonListAddModal', EmptyStub)
+  app.component('CommonListAddMultipleModal', EmptyStub)
+  app.component('CommonDownloadModal', EmptyStub)
+  app.component('CommonDownloadMultipleModal', EmptyStub)
+  app.component('BaseMenu', EmptyStub)
+  app.component('SvgIcon', SvgIcon)
+
+  const html = await renderToString(app)
+  return { html, item, observed }
+}
+
+const countRenderedText = (html, expected) => {
+  const renderedText = html.replace(/<[^>]+>/g, '')
+  return renderedText.split(expected).length - 1
+}
+
+const assertOnlineListMode = async(actionButtonsVisible) => {
+  const { html, item, observed } = await createOnlineListHarness(actionButtonsVisible)
+  const header = html.match(/<thead>[\s\S]*?<\/thead>/)?.[0] ?? ''
+
+  assert.match(header, />music_title</)
+  assert.doesNotMatch(header, />music_singer</)
+  assert.equal(observed.titleCells.length, 1)
+  assert.equal(observed.titleCells[0].musicInfo, item)
+  assert.deepEqual(observed.titleCells[0], {
+    musicInfo: item,
+    title: 'Online Song',
+    artist: 'Online Artist',
+    artworkSize: 36,
+  })
+  assert.match(html, /class="title"[^>]*>Online Song</)
+  assert.match(html, /class="artist"[^>]*>Online Artist</)
+  assert.match(html, />tag__lossless_24bit</)
+  assert.match(html, />wy</)
+  assert.deepEqual(observed.titleCellSlots[0].map(vnode => vnode.children), ['tag__lossless_24bit', 'wy'])
+  assert.equal(countRenderedText(html, 'Online Album'), 1)
+  assert.equal(countRenderedText(html, '04:05'), 1)
+  assert.equal(observed.actionButtons, actionButtonsVisible ? 1 : 0)
+
+  const row = observed.rows.at(-1)
+  assert.equal(typeof row.props.onClick, 'function')
+  assert.equal(typeof row.props.onContextmenu, 'function')
+  const clickEvent = {}
+  const contextMenuEvent = {}
+  row.props.onClick(clickEvent)
+  row.props.onContextmenu(contextMenuEvent)
+  assert.deepEqual(observed.clickIndexes, [0])
+  assert.deepEqual(observed.contextMenus, [{ event: contextMenuEvent, musicInfo: item, index: 0 }])
+
+  const columnStyles = row.children
+    .filter(child => child && typeof child == 'object')
+    .map(child => child.props?.style)
+    .filter(Boolean)
+  assert.deepEqual(columnStyles, actionButtonsVisible
+    ? [
+        { flex: '0 0 5%' },
+        { flex: '0 0 22%' },
+        { flex: '0 0 9%' },
+        { flex: '0 0 16%', 'padding-left': '0', 'padding-right': '0' },
+      ]
+    : [{ flex: '0 0 5%' }, { flex: '0 0 27%' }, { flex: '0 0 10%' }])
 }
 
 const createLifecycleHarness = () => {
@@ -229,4 +430,12 @@ test('native failure caches a placeholder for an initially displayed stored URL'
   assert.equal(bindings.artworkUrl.value, null)
   assert.equal(session.peek(track), null)
   assert.equal(await session.resolve(track), null)
+})
+
+test('OnlineList renders artwork title cells and preserves interactive rows with action buttons', async() => {
+  await assertOnlineListMode(true)
+})
+
+test('OnlineList renders artwork title cells and preserves interactive rows without action buttons', async() => {
+  await assertOnlineListMode(false)
 })

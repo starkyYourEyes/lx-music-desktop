@@ -421,7 +421,7 @@ export default {
   vertical-align: middle;
 }
 
-@media (max-width: 800px) {
+@media (max-width: 900px) {
   .actionButtons {
     :global(button) {
       margin-right: 1px;

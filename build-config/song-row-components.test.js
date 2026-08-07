@@ -1,8 +1,12 @@
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
 const path = require('node:path')
 const test = require('node:test')
+const { compileStyleAsync, parse } = require('@vue/compiler-sfc')
 const { createSSRApp, defineComponent, h, ref } = require('vue')
 const { renderToString } = require('@vue/server-renderer')
+const less = require('less')
+const postcss = require('postcss')
 const loadTsModule = require('../scripts/test-utils/load-ts-module')
 const { loadVueSfc } = require('../scripts/test-utils/load-vue-sfc')
 
@@ -14,6 +18,45 @@ const onlineListPath = path.join(root, 'src/renderer/components/material/OnlineL
 const musicListPath = path.join(root, 'src/renderer/views/List/MusicList/index.vue')
 const recentPlayPath = path.join(root, 'src/renderer/views/RecentPlay/index.vue')
 const playQueuePath = path.join(root, 'src/renderer/components/layout/PlayQueue.vue')
+
+const compileOnlineListStyle = async() => {
+  class RendererAliasFileManager extends less.FileManager {
+    supports(filename) {
+      return filename.startsWith('@renderer/')
+    }
+
+    loadFile(filename, currentDirectory, options, environment) {
+      const resolvedPath = path.join(root, 'src/renderer', filename.slice('@renderer/'.length))
+      return super.loadFile(resolvedPath, '', options, environment)
+    }
+  }
+
+  const aliasPlugin = {
+    install(_, pluginManager) {
+      pluginManager.addFileManager(new RendererAliasFileManager())
+    },
+  }
+  const source = fs.readFileSync(onlineListPath, 'utf8')
+  const { descriptor, errors: parseErrors } = parse(source, { filename: onlineListPath })
+  assert.deepEqual(parseErrors, [])
+  const style = descriptor.styles.find(styleBlock => styleBlock.module)
+  assert.ok(style, 'OnlineList must expose a CSS Modules style block')
+
+  const result = await compileStyleAsync({
+    filename: onlineListPath,
+    source: style.content,
+    id: 'data-v-online-list-contract',
+    modules: true,
+    preprocessLang: style.lang,
+    preprocessOptions: { plugins: [aliasPlugin] },
+  })
+  assert.deepEqual(result.errors, [])
+
+  return {
+    modules: result.modules,
+    stylesheet: postcss.parse(result.code),
+  }
+}
 
 const music = (id, picUrl = null, source = 'wy') => ({
   id,
@@ -901,6 +944,31 @@ test('OnlineList exposes a local hook for narrow action button spacing', async()
   const { html } = await createOnlineListHarness(true)
 
   assert.match(html, /class="actions actionButtons"/)
+})
+
+test('OnlineList compiles compact action spacing through the measured unsafe width', async() => {
+  const { modules, stylesheet } = await compileOnlineListStyle()
+  const expectedSelector = `.${modules.actionButtons} button`
+  const matchingRules = []
+
+  stylesheet.walkAtRules('media', mediaRule => {
+    mediaRule.walkRules(rule => {
+      if (rule.selector == expectedSelector) matchingRules.push({ mediaRule, rule })
+    })
+  })
+
+  assert.equal(matchingRules.length, 1)
+  const [{ mediaRule, rule }] = matchingRules
+  const maxWidth = mediaRule.params.match(/^\(max-width:\s*(\d+)px\)$/)?.[1]
+  assert.equal(Number(maxWidth), 900)
+  assert.deepEqual(
+    Object.fromEntries(rule.nodes.map(declaration => [declaration.prop, declaration.value])),
+    {
+      'margin-right': '1px',
+      'padding-left': '3px',
+      'padding-right': '3px',
+    },
+  )
 })
 
 test('OnlineList renders artwork title cells and preserves interactive rows without action buttons', async() => {

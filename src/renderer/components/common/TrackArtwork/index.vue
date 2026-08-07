@@ -37,9 +37,11 @@ const getVisibleArtworkUrl = (musicInfo: LX.Music.MusicInfo | null): string | nu
 const artworkUrl = ref<string | null>(getVisibleArtworkUrl(props.musicInfo))
 let observer: IntersectionObserver | null = null
 let isIntersecting = false
+let isUnmounted = false
 let requestToken = 0
 
 const resolveArtwork = async(): Promise<void> => {
+  if (isUnmounted) return
   const musicInfo = props.musicInfo
   if (!musicInfo || artworkUrl.value) return
 
@@ -52,6 +54,7 @@ const resolveArtwork = async(): Promise<void> => {
 }
 
 const handleArtworkError = async(): Promise<void> => {
+  if (isUnmounted) return
   const musicInfo = props.musicInfo
   const failedUrl = artworkUrl.value
   if (!musicInfo || !failedUrl) return
@@ -80,6 +83,7 @@ onMounted(() => {
   }
 
   observer = new IntersectionObserver(entries => {
+    if (isUnmounted) return
     const entry = entries.find(entry => entry.target == root.value) ?? entries[0]
     isIntersecting = entry?.isIntersecting ?? false
     if (isIntersecting && !artworkUrl.value) void resolveArtwork()
@@ -88,6 +92,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  isUnmounted = true
   ++requestToken
   observer?.disconnect()
   observer = null

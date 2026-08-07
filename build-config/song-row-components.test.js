@@ -190,6 +190,32 @@ test('late artwork results cannot repaint a reused or unmounted row', async t =>
   assert.equal(bindings.artworkUrl.value, null)
 })
 
+test('a queued intersection callback cannot start artwork resolution after unmount', async t => {
+  const originalIntersectionObserver = global.IntersectionObserver
+  let observerCallback
+  global.IntersectionObserver = class {
+    constructor(callback) { observerCallback = callback }
+    observe() {}
+    disconnect() {}
+  }
+  t.after(() => { global.IntersectionObserver = originalIntersectionObserver })
+
+  let resolveCalls = 0
+  const { bindings, lifecycle } = setupArtwork({ musicInfo: music('7'), size: 44 }, {
+    peek: () => null,
+    resolve: async() => { resolveCalls++; return 'late.jpg' },
+    fail() {},
+  })
+  lifecycle.mount()
+  lifecycle.unmount()
+
+  observerCallback([{ target: bindings.root.value, isIntersecting: true }])
+  await Promise.resolve()
+
+  assert.equal(resolveCalls, 0)
+  assert.equal(bindings.artworkUrl.value, null)
+})
+
 test('native failure caches a placeholder for an initially displayed stored URL', async() => {
   const { createArtworkSession } = loadTsModule(artworkSessionPath, {
     '@renderer/core/music': { getPicPath: async() => null },

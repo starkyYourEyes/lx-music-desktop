@@ -13,6 +13,7 @@ export default ({ dom_mine_list, dom_external_list, handleSaveListName, handleMe
   const styles = useCssModule()
 
   const restoreItem = (event: { item: HTMLElement, from: HTMLElement, oldDraggableIndex: number }) => {
+    event.item.remove()
     const rows = event.from.querySelectorAll<HTMLElement>('.user-list')
     const target = rows[event.oldDraggableIndex]
     if (target) event.from.insertBefore(event.item, target)

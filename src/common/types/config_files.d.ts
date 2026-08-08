@@ -1,8 +1,17 @@
 declare namespace LX {
   namespace ConfigFile {
+    interface UserListInfoBackup extends LX.List.UserListInfoFull {
+      group?: LX.List.UserListGroup
+    }
+
+    type ListInfoBackup =
+      | LX.List.MyDefaultListInfoFull
+      | LX.List.MyLoveListInfoFull
+      | UserListInfoBackup
+
     interface MyListInfoPart {
       type: 'playListPart_v2'
-      data: LX.List.MyDefaultListInfoFull | LX.List.MyLoveListInfoFull | LX.List.UserListInfoFull
+      data: ListInfoBackup
     }
 
   }

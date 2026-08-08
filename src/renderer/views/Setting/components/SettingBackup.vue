@@ -39,7 +39,9 @@ import { dialog } from '@renderer/plugins/Dialog'
 import useImportTip from '@renderer/utils/compositions/useImportTip'
 import { useI18n } from '@renderer/plugins/i18n'
 import { getListMusics, overwriteListFull, overwriteListMusics } from '@renderer/store/list/action'
+import { getUserListGroup, setUserListGroup } from '@renderer/store/list/group'
 import { LIST_IDS } from '@common/constants'
+import { resolveUserListGroup } from '@common/listGroup'
 import { defaultList, loveList, userLists } from '@renderer/store/list/state'
 import { appSetting, updateSetting } from '@renderer/store/setting'
 import migrateSetting from '@common/utils/migrateSetting'
@@ -58,20 +60,31 @@ export default {
     // const setList = useCommit('list', 'setList')
     const showImportTip = useImportTip()
 
-    const getAllLists = async() => {
+    const getAllLists = async(includeUserListGroups = true) => {
       const lists = []
       lists.push(await getListMusics(defaultList.id).then(musics => ({ ...defaultList, list: toRaw(musics) })))
       lists.push(await getListMusics(loveList.id).then(musics => ({ ...loveList, list: toRaw(musics) })))
 
       for await (const list of userLists) {
-        lists.push(await getListMusics(list.id).then(musics => ({ ...toRaw(list), list: toRaw(musics) })))
+        lists.push(await getListMusics(list.id).then(musics => ({
+          ...toRaw(list),
+          list: toRaw(musics),
+          ...(includeUserListGroups ? { group: getUserListGroup(list) } : {}),
+        })))
       }
 
       return lists
     }
 
+    const applyImportedUserListGroups = async(importedUserLists) => {
+      await Promise.all(Array.from(importedUserLists.values(), async list => {
+        await setUserListGroup(list.id, resolveUserListGroup(list, list.group))
+      }))
+    }
+
     const importOldListData = async(lists) => {
-      const allLists = await getAllLists()
+      const allLists = await getAllLists(false)
+      const importedUserLists = new Map()
       for (const list of lists) {
         try {
           const targetList = allLists.find(l => l.id == list.id)
@@ -87,6 +100,7 @@ export default {
               locationUpdateTime: list.locationUpdateTime ?? null,
             })
           }
+          if (list.id != LIST_IDS.DEFAULT && list.id != LIST_IDS.LOVE) importedUserLists.set(list.id, list)
         } catch (err) {
           console.log(err)
         }
@@ -94,9 +108,11 @@ export default {
       const defaultList = allLists.shift().list
       const loveList = allLists.shift().list
       await overwriteListFull({ defaultList, loveList, userList: allLists })
+      await applyImportedUserListGroups(importedUserLists)
     }
     const importNewListData = async(lists) => {
-      const allLists = await getAllLists()
+      const allLists = await getAllLists(false)
+      const importedUserLists = new Map()
       for (const list of lists) {
         try {
           const targetList = allLists.find(l => l.id == list.id)
@@ -112,6 +128,7 @@ export default {
               locationUpdateTime: list.locationUpdateTime ?? null,
             })
           }
+          if (list.id != LIST_IDS.DEFAULT && list.id != LIST_IDS.LOVE) importedUserLists.set(list.id, list)
         } catch (err) {
           console.log(err)
         }
@@ -119,6 +136,7 @@ export default {
       const defaultList = allLists.shift().list
       const loveList = allLists.shift().list
       await overwriteListFull({ defaultList, loveList, userList: allLists })
+      await applyImportedUserListGroups(importedUserLists)
     }
     const importOldSettingData = (setting) => {
       console.log(setting)
@@ -154,25 +172,23 @@ export default {
         default: { showImportTip(allData.type) }
       }
     }
-    const handleImportAllData = () => {
-      void showSelectDialog({
+    const handleImportAllData = async() => {
+      const result = await showSelectDialog({
         title: t('setting__backup_all_import_desc'),
         properties: ['openFile'],
         filters: [
           { name: 'Setting', extensions: [...BACKUP_IMPORT_EXTENSIONS] },
           { name: 'All Files', extensions: ['*'] },
         ],
-      }).then(result => {
-        if (result.canceled) return
-        void dialog.confirm({
-          message: t('setting__backup_part_import_list_confirm'),
-          cancelButtonText: t('cancel_button_text'),
-          confirmButtonText: t('confirm_button_text'),
-        }).then(confirm => {
-          if (!confirm) return
-          void importAllData(result.filePaths[0])
-        })
       })
+      if (result.canceled) return
+      const confirm = await dialog.confirm({
+        message: t('setting__backup_part_import_list_confirm'),
+        cancelButtonText: t('cancel_button_text'),
+        confirmButtonText: t('confirm_button_text'),
+      })
+      if (!confirm) return
+      await importAllData(result.filePaths[0])
     }
 
     const handleExportAllData = async() => {
@@ -251,8 +267,6 @@ export default {
       } catch (error) {
         return
       }
-      console.log(listData.type)
-
       switch (listData.type) {
         case 'defautlList': // 兼容0.6.2及以前版本的列表数据
           await overwriteListMusics({ listId: LIST_IDS.DEFAULT, musicInfos: filterMusicList(listData.data.list.map(m => toNewMusicInfo(m))) })
@@ -266,25 +280,23 @@ export default {
         default: { showImportTip(listData.type) }
       }
     }
-    const handleImportPlayList = () => {
-      void showSelectDialog({
+    const handleImportPlayList = async() => {
+      const result = await showSelectDialog({
         title: t('setting__backup_part_import_list_desc'),
         properties: ['openFile'],
         filters: [
           { name: 'Play List', extensions: [...BACKUP_IMPORT_EXTENSIONS] },
           { name: 'All Files', extensions: ['*'] },
         ],
-      }).then(result => {
-        if (result.canceled) return
-        void dialog.confirm({
-          message: t('setting__backup_part_import_list_confirm'),
-          cancelButtonText: t('cancel_button_text'),
-          confirmButtonText: t('confirm_button_text'),
-        }).then(confirm => {
-          if (!confirm) return
-          void importPlayList(result.filePaths[0])
-        })
       })
+      if (result.canceled) return
+      const confirm = await dialog.confirm({
+        message: t('setting__backup_part_import_list_confirm'),
+        cancelButtonText: t('cancel_button_text'),
+        confirmButtonText: t('confirm_button_text'),
+      })
+      if (!confirm) return
+      await importPlayList(result.filePaths[0])
     }
 
     const exportPlayListToText = async(savePath, isMerge) => {

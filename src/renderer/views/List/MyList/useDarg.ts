@@ -1,25 +1,39 @@
 import { onBeforeUnmount, ref, type Ref, useCssModule } from '@common/utils/vueTools'
-import { updateUserListPosition } from '@renderer/store/list/action'
-import { userLists } from '@renderer/store/list/state'
 import useDarg from '@renderer/utils/compositions/useDrag'
+import { reorderUserListWithinGroup } from './groupActions'
 
 
-export default ({ dom_lists_list, handleSaveListName, handleMenuClick }: {
-  dom_lists_list: Ref<HTMLElement | null>
+export default ({ dom_mine_list, dom_external_list, handleSaveListName, handleMenuClick }: {
+  dom_mine_list: Ref<HTMLElement | null>
+  dom_external_list: Ref<HTMLElement | null>
   handleSaveListName: () => Promise<void> | void
   handleMenuClick: () => void
 }) => {
   const isModDown = ref(false)
   const styles = useCssModule()
 
-  const { setDisabled } = useDarg({
-    dom_list: dom_lists_list,
+  const restoreItem = (event: { item: HTMLElement, from: HTMLElement, oldDraggableIndex: number }) => {
+    const rows = event.from.querySelectorAll<HTMLElement>('.user-list')
+    const target = rows[event.oldDraggableIndex]
+    if (target) event.from.insertBefore(event.item, target)
+    else event.from.insertBefore(event.item, event.from.querySelector('.new-list-input'))
+  }
+  const createGroupDrag = (dom_list: Ref<HTMLElement | null>) => useDarg({
+    dom_list,
     dragingItemClassName: styles.dragingItem,
-    filter: 'default-list',
-    onUpdate(newIndex: number, oldIndex: number) {
-      void updateUserListPosition({ ids: [userLists[oldIndex - 1].id], position: newIndex - 1 })
+    draggable: '.user-list',
+    filter: '.my-list-group-heading, .default-list',
+    onUpdate(event: { item: HTMLElement, from: HTMLElement, to: HTMLElement, newDraggableIndex: number, oldDraggableIndex: number }) {
+      const id = event.item.dataset.listId
+      const group = event.to.dataset.group as LX.List.UserListGroup
+      if (!id || (group != 'mine' && group != 'external')) return
+      void reorderUserListWithinGroup({ id, group, toIndex: event.newDraggableIndex }).catch(() => {
+        restoreItem(event)
+      })
     },
   })
+  const mineDrag = createGroupDrag(dom_mine_list)
+  const externalDrag = createGroupDrag(dom_external_list)
 
   const handle_key_mod_down = ({ event }: LX.KeyDownEevent) => {
     if (!isModDown.value) {
@@ -33,7 +47,8 @@ export default ({ dom_lists_list, handleSaveListName, handleMenuClick }: {
       }
 
       isModDown.value = true
-      setDisabled(false)
+      mineDrag.setDisabled(false)
+      externalDrag.setDisabled(false)
       void handleSaveListName()
     }
     handleMenuClick()
@@ -41,7 +56,8 @@ export default ({ dom_lists_list, handleSaveListName, handleMenuClick }: {
   const handle_key_mod_up = () => {
     if (isModDown.value) {
       isModDown.value = false
-      setDisabled(true)
+      mineDrag.setDisabled(true)
+      externalDrag.setDisabled(true)
     }
   }
 

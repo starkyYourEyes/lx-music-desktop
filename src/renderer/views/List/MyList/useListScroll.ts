@@ -6,9 +6,10 @@ export default ({ dom_lists_list }: {
 }) => {
   const styles = useCssModule()
 
-  const setListsScroll = () => {
+  const scrollToList = (id: string) => {
     if (!dom_lists_list.value) return
-    let target = dom_lists_list.value.querySelector('.' + styles.active) as HTMLElement
+    let target = Array.from(dom_lists_list.value.querySelectorAll<HTMLElement>('[data-list-id]'))
+      .find(element => element.dataset.listId == id)
     if (!target) return
     let offsetTop = target.offsetTop
     let location = offsetTop - 150
@@ -16,6 +17,9 @@ export default ({ dom_lists_list }: {
   }
 
   onMounted(() => {
-    setListsScroll()
+    const target = dom_lists_list.value?.querySelector('.' + styles.active) as HTMLElement
+    if (target?.dataset.listId) scrollToList(target.dataset.listId)
   })
+
+  return { scrollToList }
 }

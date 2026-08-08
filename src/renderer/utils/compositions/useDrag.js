@@ -6,7 +6,7 @@ Sortable.mount(new AutoScroll())
 
 const noop = () => {}
 
-export default ({ dom_list, dragingItemClassName, filter, onUpdate, onStart = noop, onEnd = noop }) => {
+export default ({ dom_list, dragingItemClassName, draggable, filter, onUpdate, onStart = noop, onEnd = noop }) => {
   let sortable
 
   onMounted(() => {
@@ -14,13 +14,14 @@ export default ({ dom_list, dragingItemClassName, filter, onUpdate, onStart = no
       animation: 150,
       disabled: true,
       forceFallback: false,
-      filter: filter ? '.' + filter : null,
+      draggable,
+      filter: filter ?? null,
       ghostClass: dragingItemClassName,
       onUpdate(event) {
-        onUpdate(event.newIndex, event.oldIndex)
+        onUpdate(event)
       },
       onMove(event) {
-        return filter ? !event.related.classList.contains(filter) : true
+        return filter ? !event.related?.matches(filter) : true
       },
       onChoose() {
         onStart()

@@ -185,6 +185,7 @@ const loadMyListRender = () => loadVueSfc(myListPath, {
   './useDarg': () => ({}),
   './useEditList': () => ({}),
   './useListScroll': () => {},
+  './useGroups': () => ({}),
   './useDuplicate': () => ({}),
 }).default
 
@@ -203,6 +204,12 @@ const renderUserListRows = (userLists, handleListsItemRigthClick = () => {}) => 
     fetchingListStatus: {},
     getListCover: () => '',
     userLists,
+    groups: {
+      mine: { lists: userLists, count: userLists.length + 1 },
+      external: { lists: [], count: 0 },
+    },
+    collapsed: { mine: false, external: false },
+    toggle: () => {},
     handleListsItemRigthClick,
     handleListToggle: () => {},
     handleSaveListName: () => {},

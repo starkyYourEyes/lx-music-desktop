@@ -3,7 +3,7 @@
     <div :class="$style.listHeader">
       <h2 :class="$style.listsTitle">{{ $t('my_list') }}</h2>
       <div :class="$style.headerBtns">
-        <button :class="$style.listsAdd" :aria-label="$t('lists__new_list_btn')" @click="isShowNewList = true">
+        <button :class="$style.listsAdd" :aria-label="$t('lists__new_list_btn')" @click="handleShowNewList">
           <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" height="70%" viewBox="0 0 24 24" space="preserve">
             <use xlink:href="#icon-list-add" />
           </svg>
@@ -15,51 +15,54 @@
         </button>
       </div>
     </div>
-    <ul ref="dom_lists_list" class="scroll" :class="[$style.listsContent, { [$style.sortable]: isModDown }]">
-      <li
-        class="default-list" :class="[$style.listsItem, {[$style.active]: loveList.id == listId}, {[$style.clicked]: rightClickItemId == loveList.id}, {[$style.fetching]: fetchingListStatus[loveList.id]}]"
-        :aria-label="$t(loveList.name)" :aria-selected="loveList.id == listId"
-        @contextmenu="handleListsItemRigthClick($event, loveList)" @click="handleListToggle(loveList.id)"
-      >
-        <span :class="$style.listsLabel">
-          <span :class="$style.coverBox">
-            <img v-if="getListCover(loveList)" :class="$style.coverImg" :src="getListCover(loveList)" loading="lazy">
-            <svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 444.87 391.18" space="preserve">
-              <use xlink:href="#icon-love" />
-            </svg>
-          </span>
-          <span :class="$style.listName">{{ $t(loveList.name) }}</span>
-        </span>
-      </li>
-      <li
-        v-for="item in userLists"
-        :key="item.id" class="user-list"
-        :class="[$style.listsItem, {[$style.active]: item.id == listId}, {[$style.clicked]: rightClickItemId == item.id}, {[$style.fetching]: fetchingListStatus[item.id]}]"
-        :data-list-id="item.id" :aria-label="item.name" :aria-selected="item.id == listId" @contextmenu="handleListsItemRigthClick($event, item)"
-      >
-        <span :class="$style.listsLabel" @click="handleListToggle(item.id)">
-          <span :class="$style.coverBox">
-            <img v-if="getListCover(item)" :class="$style.coverImg" :src="getListCover(item)" loading="lazy">
-            <svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 247.498 247.498" space="preserve">
-              <use xlink:href="#icon-musicFolder" />
-            </svg>
-          </span>
-          <span :class="$style.listName">{{ item.name }}</span>
-        </span>
-        <base-input
-          :class="$style.listsInput" type="text" :value="item.name"
-          :placeholder="item.name" @keyup.enter="handleSaveListName" @blur="handleSaveListName"
-        />
-      </li>
-      <transition enter-active-class="animated-fast slideInLeft" leave-active-class="animated-fast fadeOut" @after-leave="isNewListLeave = false" @after-enter="$refs.dom_listsNewInput.focus()">
-        <li v-if="isShowNewList" :class="[$style.listsItem, $style.listsNew, {[$style.newLeave]: isNewListLeave}]">
-          <base-input
-            ref="dom_listsNewInput" :class="$style.listsInput" type="text" :placeholder="$t('lists__new_list_input')"
-            @keyup.enter="handleCreateList" @blur="handleCreateList"
-          />
+    <div ref="dom_lists_list" class="scroll" :class="[$style.listsContent, { [$style.sortable]: isModDown }]">
+      <ul ref="dom_mine_list" class="my-list-group" :class="$style.groupRoot" data-group="mine">
+        <li class="my-list-group-heading">
+          <button type="button" :class="$style.groupHeading" :aria-expanded="String(!collapsed.mine)" @click="toggle('mine')">
+            <span :class="[$style.groupDisclosure, { [$style.groupCollapsed]: collapsed.mine }]">&#9662;</span>
+            <span :class="$style.groupName">{{ $t('lists__group_mine') }}</span>
+            <span :class="$style.groupCount">{{ groups.mine.count }}</span>
+          </button>
         </li>
-      </transition>
-    </ul>
+        <template v-if="!collapsed.mine">
+          <li
+            class="default-list" :class="[$style.listsItem, {[$style.active]: loveList.id == listId}, {[$style.clicked]: rightClickItemId == loveList.id}, {[$style.fetching]: fetchingListStatus[loveList.id]}]"
+            :data-list-id="loveList.id" :aria-label="$t(loveList.name)" :aria-selected="loveList.id == listId"
+            @contextmenu="handleListsItemRigthClick($event, loveList)" @click="handleListToggle(loveList.id)"
+          >
+            <span :class="$style.listsLabel">
+              <span :class="$style.coverBox">
+                <img v-if="getListCover(loveList)" :class="$style.coverImg" :src="getListCover(loveList)" loading="lazy">
+                <svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 444.87 391.18" space="preserve"><use xlink:href="#icon-love" /></svg>
+              </span>
+              <span :class="$style.listName">{{ $t(loveList.name) }}</span>
+            </span>
+          </li>
+          <li v-for="item in groups.mine.lists" :key="item.id" class="user-list" :class="[$style.listsItem, {[$style.active]: item.id == listId}, {[$style.clicked]: rightClickItemId == item.id}, {[$style.fetching]: fetchingListStatus[item.id]}]" :data-list-id="item.id" :aria-label="item.name" :aria-selected="item.id == listId" @contextmenu="handleListsItemRigthClick($event, item)">
+            <span :class="$style.listsLabel" @click="handleListToggle(item.id)"><span :class="$style.coverBox"><img v-if="getListCover(item)" :class="$style.coverImg" :src="getListCover(item)" loading="lazy"><svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 247.498 247.498" space="preserve"><use xlink:href="#icon-musicFolder" /></svg></span><span :class="$style.listName">{{ item.name }}</span></span>
+            <base-input :class="$style.listsInput" type="text" :value="item.name" :placeholder="item.name" @keyup.enter="handleSaveListName" @blur="handleSaveListName" />
+          </li>
+          <transition enter-active-class="animated-fast slideInLeft" leave-active-class="animated-fast fadeOut" @after-leave="isNewListLeave = false" @after-enter="$refs.dom_listsNewInput.focus()">
+            <li v-if="isShowNewList" class="new-list-input" :class="[$style.listsItem, $style.listsNew, {[$style.newLeave]: isNewListLeave}]"><base-input ref="dom_listsNewInput" :class="$style.listsInput" type="text" :placeholder="$t('lists__new_list_input')" @keyup.enter="handleCreateList" @blur="handleCreateList" /></li>
+          </transition>
+        </template>
+      </ul>
+      <ul ref="dom_external_list" class="my-list-group" :class="$style.groupRoot" data-group="external">
+        <li class="my-list-group-heading">
+          <button type="button" :class="$style.groupHeading" :aria-expanded="String(!collapsed.external)" @click="toggle('external')">
+            <span :class="[$style.groupDisclosure, { [$style.groupCollapsed]: collapsed.external }]">&#9662;</span>
+            <span :class="$style.groupName">{{ $t('lists__group_external') }}</span>
+            <span :class="$style.groupCount">{{ groups.external.count }}</span>
+          </button>
+        </li>
+        <template v-if="!collapsed.external">
+          <li v-for="item in groups.external.lists" :key="item.id" class="user-list" :class="[$style.listsItem, {[$style.active]: item.id == listId}, {[$style.clicked]: rightClickItemId == item.id}, {[$style.fetching]: fetchingListStatus[item.id]}]" :data-list-id="item.id" :aria-label="item.name" :aria-selected="item.id == listId" @contextmenu="handleListsItemRigthClick($event, item)">
+            <span :class="$style.listsLabel" @click="handleListToggle(item.id)"><span :class="$style.coverBox"><img v-if="getListCover(item)" :class="$style.coverImg" :src="getListCover(item)" loading="lazy"><svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 247.498 247.498" space="preserve"><use xlink:href="#icon-musicFolder" /></svg></span><span :class="$style.listName">{{ item.name }}</span></span>
+            <base-input :class="$style.listsInput" type="text" :value="item.name" :placeholder="item.name" @keyup.enter="handleSaveListName" @blur="handleSaveListName" />
+          </li>
+        </template>
+      </ul>
+    </div>
     <base-menu v-model="isShowMenu" :menus="menus" :xy="menuLocation" item-name="name" @menu-click="handleMenuClick" />
     <DuplicateMusicModal v-model:visible="isShowDuplicateMusicModal" :list-info="duplicateListInfo" />
     <ListSortModal v-model:visible="isShowListSortModal" :list-info="sortListInfo" />
@@ -99,6 +102,7 @@ import useDarg from './useDarg'
 import useEditList from './useEditList'
 import useListScroll from './useListScroll'
 import useDuplicate from './useDuplicate'
+import useGroups from './useGroups'
 
 const clampSidebarScale = scale => Math.min(130, Math.max(70, Number(scale) || 90))
 const toPx = value => `${Math.round(value)}px`
@@ -128,6 +132,8 @@ export default {
     const t = useI18n()
 
     const dom_lists_list = ref(null)
+    const dom_mine_list = ref(null)
+    const dom_external_list = ref(null)
     const rightClickItemId = ref(null)
     const coverVersion = ref(0)
     const userListProfiles = ref({})
@@ -156,7 +162,16 @@ export default {
     const { isShowListSortModal, sortListInfo, handleSortList } = useSort()
     const { isShowDuplicateMusicModal, duplicateListInfo, handleDuplicateList } = useDuplicate()
     const { handleRename, handleSaveListName, isShowNewList, isNewListLeave, handleCreateList } = useEditList({ dom_lists_list })
-    useListScroll({ dom_lists_list })
+    const { scrollToList } = useListScroll({ dom_lists_list })
+    const { groups, collapsed, toggle, expand } = useGroups({
+      userLists,
+      activeListId: () => props.listId,
+      scrollToList,
+    })
+    const handleShowNewList = () => {
+      expand('mine')
+      isShowNewList.value = true
+    }
 
     const handleOpenSourceDetailPage = async(listInfo) => {
       const { source, sourceListId } = listInfo
@@ -227,7 +242,7 @@ export default {
       menuClick(action, listInfo)
     }
 
-    const { isModDown } = useDarg({ dom_lists_list, handleMenuClick, handleSaveListName })
+    const { isModDown } = useDarg({ dom_mine_list, dom_external_list, handleMenuClick, handleSaveListName })
 
     const refreshUserListProfiles = () => {
       void getListUpdateInfo().then(info => {
@@ -293,6 +308,8 @@ export default {
       listSidebarStyle,
       getListCover,
       dom_lists_list,
+      dom_mine_list,
+      dom_external_list,
       isShowListUpdateModal,
       isShowListSortModal,
       sortListInfo,
@@ -302,6 +319,10 @@ export default {
       isShowNewList,
       isNewListLeave,
       handleCreateList,
+      handleShowNewList,
+      groups,
+      collapsed,
+      toggle,
       handleListsItemRigthClick,
       isShowMenu,
       handleMenuClick,
@@ -415,6 +436,35 @@ export default {
     }
   }
 }
+.groupRoot {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.groupHeading {
+  width: 100%;
+  min-height: 30px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--color-font);
+  cursor: pointer;
+  text-align: left;
+  &:hover { background-color: var(--color-primary-background-hover); }
+  &:focus-visible { outline: 1px solid var(--color-primary); outline-offset: -1px; }
+}
+.groupDisclosure {
+  flex: none;
+  width: 12px;
+  text-align: center;
+  transition: transform @transition-normal;
+}
+.groupCollapsed { transform: rotate(-90deg); }
+.groupName { flex: auto; min-width: 0; font-size: 12px; .mixin-ellipsis-1(); }
+.groupCount { flex: none; min-width: 20px; text-align: right; opacity: .6; font-size: 12px; }
 .listsItem {
   position: relative;
   transition: .3s ease;

@@ -105,10 +105,11 @@ const assertListScrollPosition: (value: unknown) => asserts value is LX.List.Lis
 
 const assertPlaylistProfile: (value: unknown) => asserts value is LX.List.UserListProfile = value => {
   assertStorageRecord(value, 'profile')
-  assertExactKeys(value, 'profile', ['description', 'coverUrl', 'createdAt'])
+  assertExactKeys(value, 'profile', ['description', 'coverUrl', 'createdAt', 'group'])
   if (Object.hasOwn(value, 'description') && typeof value.description != 'string') invalidField('description')
   if (Object.hasOwn(value, 'coverUrl')) assertStorageString(value.coverUrl, 'coverUrl', 1, MAX_URL_LENGTH)
   if (Object.hasOwn(value, 'createdAt')) assertSafeTimestamp(value.createdAt, 'createdAt')
+  if (Object.hasOwn(value, 'group') && value.group != 'mine' && value.group != 'external') invalidField('group')
   assertJsonByteSize(value, 'profile', MAX_JSON_BYTES)
 }
 

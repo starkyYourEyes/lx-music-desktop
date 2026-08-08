@@ -64,6 +64,8 @@ const playlistMetadata = {
   },
 }
 
+const groupedProfile = { description: 'kept', group: 'external' }
+
 const marker = (name, source = 'a', completedAtMs = 100) => ({
   name,
   sourceSha256: source.repeat(64),
@@ -376,6 +378,40 @@ describe('authoritative non-activity storage', () => {
       repository.applySearchHistory({ version: 1, action: 'remove', term: 'a' }),
       afterRecord.filter(term => term != 'a'),
     )
+  })
+
+  it('persists a grouped profile through reload and removes it when retain omits its playlist', async() => {
+    const { root } = await createStore()
+    const repository = getRepository()
+    repository.applyPlaylistMetadata({
+      version: 1,
+      action: 'upsert',
+      playlistId: 'grouped',
+      value: { updateTime: 1, isAutoUpdate: false, profile: groupedProfile },
+      updatedAtMs: 1,
+    })
+
+    dbService.close()
+    const result = await dbService.init({
+      dataPath: root,
+      cacheRoot: path.join(root, 'cache'),
+      backupsRoot: path.join(root, 'backups'),
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
+    assert.equal(result.status, 'ready')
+
+    assert.deepEqual(getRepository().getPlaylistMetadata().grouped.profile, groupedProfile)
+    assert.deepEqual(repository.applyPlaylistMetadata({
+      version: 1,
+      action: 'retain',
+      playlistIds: ['grouped'],
+    }).grouped.profile, groupedProfile)
+    assert.deepEqual(repository.applyPlaylistMetadata({
+      version: 1,
+      action: 'retain',
+      playlistIds: [],
+    }), {})
   })
 
   it('enforces the 10000-row playlist metadata limit without blocking updates', async() => {

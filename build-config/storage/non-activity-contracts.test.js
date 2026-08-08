@@ -155,6 +155,20 @@ describe('non-activity storage contracts', () => {
     assert.equal(parsePlaylistMetadataCommand({ version: 1, action: 'remove', playlistId: 'p' }).action, 'remove')
     assert.equal(parsePlaylistMetadataCommand({
       version: 1,
+      action: 'upsert',
+      playlistId: 'mine',
+      value: { updateTime: 0, isAutoUpdate: false, profile: { group: 'mine' } },
+      updatedAtMs: 0,
+    }).value.profile.group, 'mine')
+    assert.equal(parsePlaylistMetadataCommand({
+      version: 1,
+      action: 'upsert',
+      playlistId: 'external',
+      value: { updateTime: 0, isAutoUpdate: false, profile: { group: 'external' } },
+      updatedAtMs: 0,
+    }).value.profile.group, 'external')
+    assert.equal(parsePlaylistMetadataCommand({
+      version: 1,
       action: 'retain',
       playlistIds: Array.from({ length: 10000 }, () => 'p'),
     }).playlistIds.length, 10000)
@@ -175,6 +189,9 @@ describe('non-activity storage contracts', () => {
     assert.throws(() => parsePlaylistMetadataCommand({ ...upsert, value: { updateTime: 0, isAutoUpdate: false, profile: { createdAt: MAX_SAFE_INTEGER + 1 } } }))
     assert.throws(() => parsePlaylistMetadataCommand({ ...upsert, value: { updateTime: 0, isAutoUpdate: false, profile: { coverUrl: 'u'.repeat(4097) } } }))
     assert.throws(() => parsePlaylistMetadataCommand({ ...upsert, value: { updateTime: 0, isAutoUpdate: false, profile: { description: 'x'.repeat(32751) } } }))
+    assert.throws(() => parsePlaylistMetadataCommand({ ...upsert, value: { updateTime: 0, isAutoUpdate: false, profile: { group: 'other' } } }))
+    assert.throws(() => parsePlaylistMetadataCommand({ ...upsert, value: { updateTime: 0, isAutoUpdate: false, profile: { group: null } } }))
+    assert.throws(() => parsePlaylistMetadataCommand({ ...upsert, value: { updateTime: 0, isAutoUpdate: false, profile: { unknown: true } } }))
     assert.throws(() => parsePlaylistMetadataCommand({ ...upsert, value: { updateTime: 0, isAutoUpdate: false, extra: true } }))
     assert.throws(() => parsePlaylistMetadataCommand({ version: 1, action: 'remove', playlistId: 'p', extra: true }))
     assert.throws(() => parsePlaylistMetadataCommand({ version: 1, action: 'retain', playlistIds: [''] }))

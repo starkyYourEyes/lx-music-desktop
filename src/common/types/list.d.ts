@@ -10,10 +10,13 @@ declare namespace LX {
       locationUpdateTime: number | null
     }
 
+    type UserListGroup = 'mine' | 'external'
+
     interface UserListProfile {
       description?: string
       coverUrl?: string
       createdAt?: number
+      group?: UserListGroup
     }
 
     interface MyDefaultListInfo {

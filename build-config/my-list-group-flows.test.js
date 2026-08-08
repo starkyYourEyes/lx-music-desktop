@@ -81,7 +81,7 @@ const loadEditList = () => {
   return { handlers: useEditList({ dom_lists_list }), renderedRows, updates }
 }
 
-const loadMenu = () => {
+const loadMenu = ({ groups = { local: 'mine', collected: 'external' }, moveUserList = async() => {}, dialog = () => {} } = {}) => {
   const local = { id: 'local', name: 'Local' }
   const collected = { id: 'collected', name: 'Collected', source: 'wy', sourceListId: '42' }
   const calls = {
@@ -90,6 +90,7 @@ const loadMenu = () => {
     import: [],
     export: [],
     sync: [],
+    reveals: [],
   }
   const useMenu = loadTsModule(useMenuPath, {
     '@common/utils/vueTools': {
@@ -105,6 +106,12 @@ const loadMenu = () => {
       loveList,
       webDAVList: { id: 'webdav', name: 'WebDAV' },
     },
+    '@renderer/store/list/group': {
+      getUserListGroup: list => groups[list.id],
+      requestUserListReveal: id => calls.reveals.push(id),
+    },
+    './groupActions': { moveUserList },
+    '@renderer/plugins/Dialog': { dialog },
     '@renderer/utils/musicSdk': {
       wy: { songList: { getDetailPageUrl: () => 'https://example.test/playlist/42' } },
     },
@@ -480,6 +487,50 @@ test('menu source capabilities derive from the passed playlist', () => {
   const disabledByAction = Object.fromEntries(loaded.menu.menus.value.map(item => [item.action, item.disabled]))
   assert.equal(disabledByAction.sync, false)
   assert.equal(disabledByAction.sourceDetail, false)
+})
+
+test('normal playlist menus offer the other group while fixed lists offer none', () => {
+  const loaded = loadMenu()
+
+  loaded.menu.showMenu({ pageX: 10, pageY: 20 }, loaded.collected)
+  const moveItems = loaded.menu.menus.value.filter(item => item.action == 'move_group')
+  assert.deepEqual(moveItems, [{
+    name: 'lists__move_to_group',
+    action: 'move_group',
+    group: 'mine',
+    disabled: false,
+  }])
+  const actions = new Set(loaded.menu.menus.value.map(item => item.action))
+  assert.equal(actions.has('sync'), true)
+  assert.equal(actions.has('sourceDetail'), true)
+
+  for (const fixed of [loveList, defaultList, { id: 'webdav', name: 'WebDAV' }]) {
+    loaded.menu.showMenu({ pageX: 10, pageY: 20 }, fixed)
+    assert.equal(loaded.menu.menus.value.some(item => item.action == 'move_group'), false)
+  }
+})
+
+test('menu movement persists to the target group and reveals only after success', async() => {
+  const moves = []
+  const loaded = loadMenu({ moveUserList: async request => moves.push(request) })
+
+  loaded.menu.menuClick({ action: 'move_group', group: 'mine' }, loaded.collected)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(moves, [{ id: 'collected', toGroup: 'mine', toIndex: 1 }])
+  assert.deepEqual(loaded.calls.reveals, ['collected'])
+})
+
+test('failed menu movement reports the localized movement error without revealing', async() => {
+  const errors = []
+  const loaded = loadMenu({
+    moveUserList: async() => { throw new Error('write failed') },
+    dialog: message => errors.push(message),
+  })
+
+  loaded.menu.menuClick({ action: 'move_group', group: 'mine' }, loaded.collected)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(errors, ['lists__move_group_failed'])
+  assert.deepEqual(loaded.calls.reveals, [])
 })
 
 test('menu actions keep the passed playlist as their target', () => {

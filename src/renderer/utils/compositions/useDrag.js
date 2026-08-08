@@ -1,12 +1,12 @@
 import Sortable, { AutoScroll } from 'sortablejs/modular/sortable.core.esm'
-import { onMounted } from '@common/utils/vueTools'
+import { onBeforeUnmount, onMounted } from '@common/utils/vueTools'
 import { clearDownKeys } from '@renderer/event'
 
 Sortable.mount(new AutoScroll())
 
-const noop = () => {}
+const noop = (..._args) => {}
 
-export default ({ dom_list, dragingItemClassName, draggable, filter, onUpdate, onStart = noop, onEnd = noop }) => {
+export default ({ dom_list, dragingItemClassName, group, draggable, filter, onAdd = noop, onUpdate = noop, onMove, onStart = noop, onEnd = noop }) => {
   let sortable
 
   onMounted(() => {
@@ -14,13 +14,18 @@ export default ({ dom_list, dragingItemClassName, draggable, filter, onUpdate, o
       animation: 150,
       disabled: true,
       forceFallback: false,
+      group,
       draggable,
       filter: filter ?? null,
       ghostClass: dragingItemClassName,
       onUpdate(event) {
         onUpdate(event)
       },
+      onAdd(event) {
+        onAdd(event)
+      },
       onMove(event) {
+        if (onMove) return onMove(event)
         return filter ? !event.related?.matches(filter) : true
       },
       onChoose() {
@@ -41,10 +46,19 @@ export default ({ dom_list, dragingItemClassName, draggable, filter, onUpdate, o
     })
   })
 
+  onBeforeUnmount(() => {
+    sortable?.destroy()
+    sortable = null
+  })
+
   return {
     setDisabled(enable) {
       if (!sortable) return
       sortable.option('disabled', enable)
+    },
+    destroy() {
+      sortable?.destroy()
+      sortable = null
     },
   }
 }

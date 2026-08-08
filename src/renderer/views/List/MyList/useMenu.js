@@ -1,8 +1,11 @@
 import { computed, ref, reactive, nextTick } from '@common/utils/vueTools'
 import { useI18n } from '@renderer/plugins/i18n'
-import { defaultList, loveList, webDAVList } from '@renderer/store/list/state'
+import { defaultList, loveList, userLists, webDAVList } from '@renderer/store/list/state'
+import { getUserListGroup, requestUserListReveal } from '@renderer/store/list/group'
+import { dialog } from '@renderer/plugins/Dialog'
 import musicSdk from '@renderer/utils/musicSdk'
 import { addLocalFile, addWebDAVMusics, refreshWebDAVMusics } from './actions'
+import { moveUserList } from './groupActions'
 
 export default ({
   emit,
@@ -32,9 +35,10 @@ export default ({
   const t = useI18n()
   const menuLocation = reactive({ x: 0, y: 0 })
   const isShowMenu = ref(false)
+  const moveGroup = ref(null)
 
   const menus = computed(() => {
-    return [
+    const items = [
       {
         name: t('lists__rename'),
         action: 'rename',
@@ -91,6 +95,15 @@ export default ({
         disabled: !menuControl.remove,
       },
     ]
+    if (moveGroup.value) {
+      items.push({
+        name: t('lists__move_to_group', { name: t(`lists__group_${moveGroup.value}`) }),
+        action: 'move_group',
+        group: moveGroup.value,
+        disabled: false,
+      })
+    }
+    return items
   })
 
   const assertSupportDetail = (listInfo) => {
@@ -137,6 +150,9 @@ export default ({
         menuControl.sync = !!source && !!musicSdk[source]?.songList
         break
     }
+    moveGroup.value = userLists.some(item => item.id == listInfo.id)
+      ? getUserListGroup(listInfo) == 'mine' ? 'external' : 'mine'
+      : null
     // menuControl.sort = !!getList(listInfo.id).length
     menuControl.sourceDetail = assertSupportDetail(listInfo)
 
@@ -192,6 +208,20 @@ export default ({
       case 'remove':
         handleRemove(listInfo)
         break
+      case 'move_group': {
+        if (!userLists.some(item => item.id == listInfo.id)) break
+        const request = {
+          id: listInfo.id,
+          toGroup: action.group,
+          toIndex: userLists.filter(item => getUserListGroup(item) == action.group).length,
+        }
+        moveUserList(request)
+          .then(() => requestUserListReveal(request.id))
+          .catch(() => {
+            dialog(t('lists__move_group_failed'))
+          })
+        break
+      }
     }
   }
 

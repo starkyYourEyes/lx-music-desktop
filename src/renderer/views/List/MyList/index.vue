@@ -242,7 +242,15 @@ export default {
       menuClick(action, listInfo)
     }
 
-    const { isModDown } = useDarg({ dom_mine_list, dom_external_list, handleMenuClick, handleSaveListName })
+    const { isModDown } = useDarg({
+      dom_mine_list,
+      dom_external_list,
+      handleMenuClick,
+      handleSaveListName,
+      expand,
+      isGroupCollapsed: group => collapsed.value[group],
+      getGroupListLength: group => groups.value[group].lists.length,
+    })
 
     const refreshUserListProfiles = () => {
       void getListUpdateInfo().then(info => {

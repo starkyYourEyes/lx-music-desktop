@@ -1,16 +1,33 @@
 import { onBeforeUnmount, ref, type Ref, useCssModule } from '@common/utils/vueTools'
 import useDarg from '@renderer/utils/compositions/useDrag'
-import { reorderUserListWithinGroup } from './groupActions'
+import { dialog } from '@renderer/plugins/Dialog'
+import { useI18n } from '@renderer/plugins/i18n'
+import { requestUserListReveal } from '@renderer/store/list/group'
+import { moveUserList } from './groupActions'
 
 
-export default ({ dom_mine_list, dom_external_list, handleSaveListName, handleMenuClick }: {
+export default ({ dom_mine_list, dom_external_list, handleSaveListName, handleMenuClick, expand, isGroupCollapsed, getGroupListLength }: {
   dom_mine_list: Ref<HTMLElement | null>
   dom_external_list: Ref<HTMLElement | null>
   handleSaveListName: () => Promise<void> | void
   handleMenuClick: () => void
+  expand: (group: LX.List.UserListGroup) => void
+  isGroupCollapsed: (group: LX.List.UserListGroup) => boolean
+  getGroupListLength: (group: LX.List.UserListGroup) => number
 }) => {
   const isModDown = ref(false)
   const styles = useCssModule()
+  const t = useI18n()
+  let headingTimer: ReturnType<typeof setTimeout> | null = null
+  let headingGroup: LX.List.UserListGroup | null = null
+  const collapsedDropGroups = new Set<LX.List.UserListGroup>()
+
+  const clearHeadingTimer = (clearDrop = false) => {
+    if (headingTimer) clearTimeout(headingTimer)
+    if (clearDrop && headingGroup) collapsedDropGroups.delete(headingGroup)
+    headingTimer = null
+    headingGroup = null
+  }
 
   const restoreItem = (event: { item: HTMLElement, from: HTMLElement, oldDraggableIndex: number }) => {
     event.item.remove()
@@ -19,20 +36,56 @@ export default ({ dom_mine_list, dom_external_list, handleSaveListName, handleMe
     if (target) event.from.insertBefore(event.item, target)
     else event.from.insertBefore(event.item, event.from.querySelector('.new-list-input'))
   }
+  const handleMove = (event: { to: HTMLElement, related?: HTMLElement | null }) => {
+    const group = event.to.dataset.group as LX.List.UserListGroup
+    if ((group != 'mine' && group != 'external') || !event.related?.matches('.my-list-group-heading')) {
+      clearHeadingTimer(true)
+      return true
+    }
+    if (!isGroupCollapsed(group)) {
+      clearHeadingTimer(true)
+      return true
+    }
+    if (headingGroup == group && headingTimer) return true
+    clearHeadingTimer(true)
+    collapsedDropGroups.add(group)
+    headingGroup = group
+    headingTimer = setTimeout(() => {
+      expand(group)
+      clearHeadingTimer(true)
+    }, 400)
+    return true
+  }
+
   const createGroupDrag = (dom_list: Ref<HTMLElement | null>) => useDarg({
     dom_list,
     dragingItemClassName: styles.dragingItem,
+    group: 'my-list-groups',
     draggable: '.user-list',
     filter: '.my-list-group-heading, .default-list',
-    onUpdate(event: { item: HTMLElement, from: HTMLElement, to: HTMLElement, newDraggableIndex: number, oldDraggableIndex: number }) {
-      const id = event.item.dataset.listId
-      const group = event.to.dataset.group as LX.List.UserListGroup
-      if (!id || (group != 'mine' && group != 'external')) return
-      void reorderUserListWithinGroup({ id, group, toIndex: event.newDraggableIndex }).catch(() => {
-        restoreItem(event)
-      })
+    onMove: handleMove,
+    onEnd: () => {
+      clearHeadingTimer(true)
     },
+    onAdd: handleDrop,
+    onUpdate: handleDrop,
   })
+
+  function handleDrop(event: { item: HTMLElement, from: HTMLElement, to: HTMLElement, newDraggableIndex: number, oldDraggableIndex: number }) {
+    clearHeadingTimer()
+    const id = event.item.dataset.listId
+    const toGroup = event.to.dataset.group as LX.List.UserListGroup
+    if (!id || (toGroup != 'mine' && toGroup != 'external')) return
+    const wasCollapsed = collapsedDropGroups.delete(toGroup)
+    const toIndex = wasCollapsed && isGroupCollapsed(toGroup)
+      ? getGroupListLength(toGroup)
+      : event.newDraggableIndex
+    const request = { id, toGroup, toIndex }
+    void moveUserList(request).then(() => requestUserListReveal(request.id)).catch(() => {
+      restoreItem(event)
+      void dialog(t('lists__move_group_failed'))
+    })
+  }
   const mineDrag = createGroupDrag(dom_mine_list)
   const externalDrag = createGroupDrag(dom_external_list)
 
@@ -66,6 +119,9 @@ export default ({ dom_mine_list, dom_external_list, handleSaveListName, handleMe
   window.key_event.on('key_mod_up', handle_key_mod_up)
 
   onBeforeUnmount(() => {
+    clearHeadingTimer(true)
+    mineDrag.destroy()
+    externalDrag.destroy()
     window.key_event.off('key_mod_down', handle_key_mod_down)
     window.key_event.off('key_mod_up', handle_key_mod_up)
   })

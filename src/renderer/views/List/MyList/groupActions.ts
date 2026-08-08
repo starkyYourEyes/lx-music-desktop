@@ -1,8 +1,8 @@
 import { log } from '@common/utils'
 import { buildMovedUserListOrder } from '@common/listGroup'
-import { updateUserListPosition } from '@renderer/store/list/action'
+import { getUserLists, updateUserListPosition } from '@renderer/store/list/action'
 import { userLists } from '@renderer/store/list/state'
-import { userListGroups } from '@renderer/store/list/group'
+import { getUserListGroup, initializeUserListGroups, setUserListGroup } from '@renderer/store/list/group'
 
 export const persistExactUserListOrder = async(ids: readonly string[]): Promise<void> => {
   for (let position = 0; position < ids.length; position++) {
@@ -11,17 +11,68 @@ export const persistExactUserListOrder = async(ids: readonly string[]): Promise<
   }
 }
 
+interface MoveUserListDependencies {
+  readLists: () => LX.List.UserListInfo[]
+  getGroup: (list: LX.List.UserListInfo) => LX.List.UserListGroup
+  setGroup: (id: string, group: LX.List.UserListGroup) => Promise<void>
+  setOrder: (ids: readonly string[]) => Promise<void>
+  reload: () => Promise<void>
+}
+
+export const createMoveUserList = (dependencies: MoveUserListDependencies) => {
+  return async({ id, toGroup, toIndex }: {
+    id: string
+    toGroup: LX.List.UserListGroup
+    toIndex: number
+  }): Promise<void> => {
+    const lists = dependencies.readLists()
+    const list = lists.find(item => item.id == id)
+    if (!list) return
+
+    const oldGroup = dependencies.getGroup(list)
+    const oldOrder = lists.map(item => item.id)
+    const groups = Object.fromEntries(lists.map(item => [item.id, dependencies.getGroup(item)]))
+    const nextOrder = buildMovedUserListOrder(lists, groups, id, toGroup, toIndex)
+    let groupWritten = false
+    let orderStarted = false
+
+    try {
+      if (oldGroup != toGroup) {
+        await dependencies.setGroup(id, toGroup)
+        groupWritten = true
+      }
+      orderStarted = true
+      await dependencies.setOrder(nextOrder)
+    } catch (error) {
+      if (!orderStarted) throw error
+
+      const rollbacks: Array<Promise<void>> = []
+      if (groupWritten) rollbacks.push(dependencies.setGroup(id, oldGroup))
+      rollbacks.push(dependencies.setOrder(oldOrder))
+      const results = await Promise.allSettled(rollbacks)
+      if (results.some(result => result.status == 'rejected')) {
+        await dependencies.reload().catch(log.error)
+      }
+      throw error
+    }
+  }
+}
+
+export const moveUserList = createMoveUserList({
+  readLists: () => userLists,
+  getGroup: getUserListGroup,
+  setGroup: setUserListGroup,
+  setOrder: persistExactUserListOrder,
+  reload: async() => {
+    const lists = await getUserLists()
+    await initializeUserListGroups([...lists])
+  },
+})
+
 export const reorderUserListWithinGroup = async({ id, group, toIndex }: {
   id: string
   group: LX.List.UserListGroup
   toIndex: number
 }): Promise<void> => {
-  const oldOrder = userLists.map(list => list.id)
-  const nextOrder = buildMovedUserListOrder(userLists, userListGroups, id, group, toIndex)
-  try {
-    await persistExactUserListOrder(nextOrder)
-  } catch (error) {
-    await persistExactUserListOrder(oldOrder).catch(log.error)
-    throw error
-  }
+  await moveUserList({ id, toGroup: group, toIndex })
 }

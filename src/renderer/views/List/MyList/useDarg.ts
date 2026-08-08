@@ -22,11 +22,11 @@ export default ({ dom_mine_list, dom_external_list, handleSaveListName, handleMe
   let headingGroup: LX.List.UserListGroup | null = null
   const collapsedDropGroups = new Set<LX.List.UserListGroup>()
 
-  const clearHeadingTimer = (clearDrop = false) => {
+  const clearHeadingState = () => {
     if (headingTimer) clearTimeout(headingTimer)
-    if (clearDrop && headingGroup) collapsedDropGroups.delete(headingGroup)
     headingTimer = null
     headingGroup = null
+    collapsedDropGroups.clear()
   }
 
   const restoreItem = (event: { item: HTMLElement, from: HTMLElement, oldDraggableIndex: number }) => {
@@ -39,20 +39,20 @@ export default ({ dom_mine_list, dom_external_list, handleSaveListName, handleMe
   const handleMove = (event: { to: HTMLElement, related?: HTMLElement | null }) => {
     const group = event.to.dataset.group as LX.List.UserListGroup
     if ((group != 'mine' && group != 'external') || !event.related?.matches('.my-list-group-heading')) {
-      clearHeadingTimer(true)
+      clearHeadingState()
       return true
     }
     if (!isGroupCollapsed(group)) {
-      clearHeadingTimer(true)
+      clearHeadingState()
       return true
     }
     if (headingGroup == group && headingTimer) return true
-    clearHeadingTimer(true)
+    clearHeadingState()
     collapsedDropGroups.add(group)
     headingGroup = group
     headingTimer = setTimeout(() => {
       expand(group)
-      clearHeadingTimer(true)
+      clearHeadingState()
     }, 400)
     return true
   }
@@ -65,18 +65,18 @@ export default ({ dom_mine_list, dom_external_list, handleSaveListName, handleMe
     filter: '.my-list-group-heading, .default-list',
     onMove: handleMove,
     onEnd: () => {
-      clearHeadingTimer(true)
+      clearHeadingState()
     },
     onAdd: handleDrop,
     onUpdate: handleDrop,
   })
 
   function handleDrop(event: { item: HTMLElement, from: HTMLElement, to: HTMLElement, newDraggableIndex: number, oldDraggableIndex: number }) {
-    clearHeadingTimer()
-    const id = event.item.dataset.listId
     const toGroup = event.to.dataset.group as LX.List.UserListGroup
+    const wasCollapsed = collapsedDropGroups.has(toGroup)
+    clearHeadingState()
+    const id = event.item.dataset.listId
     if (!id || (toGroup != 'mine' && toGroup != 'external')) return
-    const wasCollapsed = collapsedDropGroups.delete(toGroup)
     const toIndex = wasCollapsed && isGroupCollapsed(toGroup)
       ? getGroupListLength(toGroup)
       : event.newDraggableIndex
@@ -119,7 +119,7 @@ export default ({ dom_mine_list, dom_external_list, handleSaveListName, handleMe
   window.key_event.on('key_mod_up', handle_key_mod_up)
 
   onBeforeUnmount(() => {
-    clearHeadingTimer(true)
+    clearHeadingState()
     mineDrag.destroy()
     externalDrag.destroy()
     window.key_event.off('key_mod_down', handle_key_mod_down)

@@ -19,12 +19,15 @@ interface MoveUserListDependencies {
   reload: () => Promise<void>
 }
 
+interface MoveRequest {
+  id: string
+  toGroup: LX.List.UserListGroup
+  toIndex: number
+}
+
 export const createMoveUserList = (dependencies: MoveUserListDependencies) => {
-  return async({ id, toGroup, toIndex }: {
-    id: string
-    toGroup: LX.List.UserListGroup
-    toIndex: number
-  }): Promise<void> => {
+  let transaction = Promise.resolve()
+  const execute = async({ id, toGroup, toIndex }: MoveRequest): Promise<void> => {
     const lists = dependencies.readLists()
     const list = lists.find(item => item.id == id)
     if (!list) return
@@ -55,6 +58,11 @@ export const createMoveUserList = (dependencies: MoveUserListDependencies) => {
       }
       throw error
     }
+  }
+  return async(request: MoveRequest): Promise<void> => {
+    const result = transaction.then(async() => execute(request))
+    transaction = result.catch(() => {})
+    await result
   }
 }
 

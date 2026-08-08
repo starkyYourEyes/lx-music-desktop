@@ -20,6 +20,7 @@ export default ({ dom_mine_list, dom_external_list, handleSaveListName, handleMe
   const t = useI18n()
   let headingTimer: ReturnType<typeof setTimeout> | null = null
   let headingGroup: LX.List.UserListGroup | null = null
+  let pendingDrop: Promise<void> | null = null
   const collapsedDropGroups = new Set<LX.List.UserListGroup>()
 
   const clearHeadingState = () => {
@@ -38,7 +39,8 @@ export default ({ dom_mine_list, dom_external_list, handleSaveListName, handleMe
   }
   const handleMove = (event: { to: HTMLElement, related?: HTMLElement | null }) => {
     const group = event.to.dataset.group as LX.List.UserListGroup
-    if ((group != 'mine' && group != 'external') || !event.related?.matches('.my-list-group-heading')) {
+    const isHeadingDrop = event.related == event.to || event.related?.closest?.('.my-list-group-heading') != null
+    if ((group != 'mine' && group != 'external') || !isHeadingDrop) {
       clearHeadingState()
       return true
     }
@@ -77,14 +79,25 @@ export default ({ dom_mine_list, dom_external_list, handleSaveListName, handleMe
     clearHeadingState()
     const id = event.item.dataset.listId
     if (!id || (toGroup != 'mine' && toGroup != 'external')) return
+    if (pendingDrop) {
+      restoreItem(event)
+      return
+    }
     const toIndex = wasCollapsed && isGroupCollapsed(toGroup)
       ? getGroupListLength(toGroup)
       : event.newDraggableIndex
     const request = { id, toGroup, toIndex }
-    void moveUserList(request).then(() => requestUserListReveal(request.id)).catch(() => {
-      restoreItem(event)
-      void dialog(t('lists__move_group_failed'))
-    })
+    const movement = moveUserList(request)
+    pendingDrop = movement
+    void movement
+      .then(() => requestUserListReveal(request.id))
+      .catch(() => {
+        restoreItem(event)
+        void dialog(t('lists__move_group_failed'))
+      })
+      .finally(() => {
+        if (pendingDrop == movement) pendingDrop = null
+      })
   }
   const mineDrag = createGroupDrag(dom_mine_list)
   const externalDrag = createGroupDrag(dom_external_list)

@@ -164,7 +164,7 @@ export const moveListMusics = async(fromId: string, toId: string, musicInfos: LX
   })
 }
 
-export const createUserList = async({ name, id = `userlist_${Date.now()}`, list = [], source, sourceListId, position = -1, group }: {
+export const createUserList = async({ name, id = `userlist_${Date.now()}`, list = [], source, sourceListId, position = -1, group, strictGroupPersistence = false }: {
   name?: string
   id?: string
   list?: LX.Music.MusicInfo[]
@@ -172,6 +172,7 @@ export const createUserList = async({ name, id = `userlist_${Date.now()}`, list 
   sourceListId?: string
   position?: number
   group?: LX.List.UserListGroup
+  strictGroupPersistence?: boolean
 }): Promise<string> => {
   const listInfo: LX.List.UserListInfo = {
     id,
@@ -185,10 +186,14 @@ export const createUserList = async({ name, id = `userlist_${Date.now()}`, list 
     listInfos: [listInfo],
   })
   const assignedGroup = resolveUserListGroup(listInfo, group)
-  cacheUserListGroup(id, assignedGroup)
-  await setUserListGroup(id, assignedGroup).catch(error => {
-    log.error(error)
-  })
+  if (strictGroupPersistence) {
+    await setUserListGroup(id, assignedGroup)
+  } else {
+    cacheUserListGroup(id, assignedGroup)
+    await setUserListGroup(id, assignedGroup).catch(error => {
+      log.error(error)
+    })
+  }
   if (list.length) await addListMusics(id, list)
   requestUserListReveal(id)
   return id

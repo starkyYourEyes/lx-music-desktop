@@ -13,6 +13,15 @@ const useDragPath = path.join(root, 'src/renderer/utils/compositions/useDrag.js'
 const myListPath = path.join(root, 'src/renderer/views/List/MyList/index.vue')
 
 const moveList = id => ({ id, name: id })
+const deferred = () => {
+  let resolveDeferred
+  let rejectDeferred
+  const promise = new Promise((resolve, reject) => {
+    resolveDeferred = resolve
+    rejectDeferred = reject
+  })
+  return { promise, resolve: resolveDeferred, reject: rejectDeferred }
+}
 const buildMoveOrder = (lists, groups, id, toGroup, toIndex) => {
   const moved = lists.find(item => item.id == id)
   const remaining = lists.filter(item => item.id != id)
@@ -334,6 +343,90 @@ test('failed rollbacks both run, reload, and preserve the original order error',
   ])
 })
 
+test('overlapping move transactions take the second snapshot after the first commits', async() => {
+  const lists = [moveList('A'), moveList('B'), moveList('C')]
+  const groups = { A: 'mine', B: 'mine', C: 'external' }
+  const firstOrder = deferred()
+  const calls = []
+  let orderAttempt = 0
+  const move = createMoveHarness({
+    readLists: () => lists,
+    getGroup: item => groups[item.id],
+    setGroup: async(id, group) => {
+      calls.push(['group', id, group])
+      groups[id] = group
+    },
+    setOrder: async ids => {
+      calls.push(['order', [...ids]])
+      if (++orderAttempt == 1) await firstOrder.promise
+      lists.splice(0, lists.length, ...ids.map(id => moveList(id)))
+    },
+  })
+
+  const first = move({ id: 'C', toGroup: 'mine', toIndex: 0 })
+  await new Promise(resolve => setImmediate(resolve))
+  const second = move({ id: 'B', toGroup: 'external', toIndex: 0 })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(calls, [
+    ['group', 'C', 'mine'],
+    ['order', ['C', 'A', 'B']],
+  ])
+
+  firstOrder.resolve()
+  await Promise.all([first, second])
+  assert.deepEqual(calls, [
+    ['group', 'C', 'mine'],
+    ['order', ['C', 'A', 'B']],
+    ['group', 'B', 'external'],
+    ['order', ['C', 'A', 'B']],
+  ])
+  assert.deepEqual(lists.map(item => item.id), ['C', 'A', 'B'])
+})
+
+test('a queued move starts only after the failed move finishes rollback', async() => {
+  const lists = [moveList('A'), moveList('B'), moveList('C')]
+  const groups = { A: 'mine', B: 'mine', C: 'external' }
+  const firstOrder = deferred()
+  const calls = []
+  let orderAttempt = 0
+  const move = createMoveHarness({
+    readLists: () => lists,
+    getGroup: item => groups[item.id],
+    setGroup: async(id, group) => {
+      calls.push(['group', id, group])
+      groups[id] = group
+    },
+    setOrder: async ids => {
+      calls.push(['order', [...ids]])
+      if (++orderAttempt == 1) await firstOrder.promise
+      lists.splice(0, lists.length, ...ids.map(id => moveList(id)))
+    },
+  })
+
+  const first = move({ id: 'C', toGroup: 'mine', toIndex: 0 })
+  const firstResult = assert.rejects(first, /first order failed/)
+  await new Promise(resolve => setImmediate(resolve))
+  const second = move({ id: 'B', toGroup: 'external', toIndex: 0 })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(calls, [
+    ['group', 'C', 'mine'],
+    ['order', ['C', 'A', 'B']],
+  ])
+
+  firstOrder.reject(new Error('first order failed'))
+  await firstResult
+  await second
+  assert.deepEqual(calls, [
+    ['group', 'C', 'mine'],
+    ['order', ['C', 'A', 'B']],
+    ['group', 'C', 'external'],
+    ['order', ['A', 'B', 'C']],
+    ['group', 'B', 'external'],
+    ['order', ['A', 'B', 'C']],
+  ])
+  assert.deepEqual(lists.map(item => item.id), ['A', 'B', 'C'])
+})
+
 test('revealing an eligible id expands its group then scrolls by stable id', async() => {
   const lists = [{ id: 'local' }, { id: 'external', source: 'wy', sourceListId: '42' }]
   const persisted = []
@@ -354,6 +447,11 @@ test('revealing an eligible id expands its group then scrolls by stable id', asy
       },
     },
     '@renderer/store/list/group': {
+      consumeUserListRevealRequest: request => {
+        if (revealRequest.value?.token != request.token) return false
+        revealRequest.value = null
+        return true
+      },
       ensureUserListGroups: async() => {},
       getUserListGroup: list => list.source ? 'external' : 'mine',
       userListRevealRequest: revealRequest,
@@ -396,6 +494,55 @@ test('revealing an eligible id expands its group then scrolls by stable id', asy
   watches[1].callback(revealRequest.value)
   await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(scrolls, ['external', 'local', 'love', 'external', 'external'])
+})
+
+test('a consumed reveal does not override later collapse and navigation after remount', async() => {
+  const lists = [{ id: 'local' }, { id: 'external', source: 'wy', sourceListId: '42' }]
+  const revealRequest = { value: { id: 'local', token: 1 } }
+  const collapseState = { mine: false, external: true }
+  const scrolls = []
+  const mount = activeId => {
+    const { default: useGroups } = loadTsModule(useGroupsPath, {
+      '@common/listGroup': {
+        partitionUserLists: (items, getGroup) => ({ mine: items.filter(item => getGroup(item) == 'mine'), external: items.filter(item => getGroup(item) == 'external') }),
+      },
+      '@common/utils/vueTools': {
+        computed: getter => ({ get value() { return getter() } }),
+        nextTick: async() => {},
+        ref: value => ({ value }),
+        watch: (source, callback, options) => {
+          if (options?.immediate) callback(source())
+        },
+      },
+      '@renderer/store/list/group': {
+        consumeUserListRevealRequest: request => {
+          if (revealRequest.value?.token != request.token) return false
+          revealRequest.value = null
+          return true
+        },
+        ensureUserListGroups: async() => {},
+        getUserListGroup: item => item.source ? 'external' : 'mine',
+        userListRevealRequest: revealRequest,
+      },
+      './groupState': {
+        loadMyListGroupCollapsed: () => ({ ...collapseState }),
+        saveMyListGroupCollapsed: (_, state) => Object.assign(collapseState, state),
+      },
+    })
+    return useGroups({ userLists: lists, activeListId: () => activeId, scrollToList: id => scrolls.push(id) })
+  }
+
+  const firstMount = mount('')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(revealRequest.value, null)
+  assert.deepEqual(scrolls, ['local'])
+  firstMount.toggle('mine')
+  assert.equal(collapseState.mine, true)
+
+  mount('external')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(collapseState, { mine: true, external: false })
+  assert.deepEqual(scrolls, ['local', 'external'])
 })
 
 test('a rejected drag restores C after A and B at its old draggable index', async() => {
@@ -516,6 +663,70 @@ test('a rejected cross-group drag restores the item to its source root', async()
   assert.deepEqual(dialogs, ['lists__move_group_failed'])
 })
 
+test('a second drag mutation is restored while the first move is pending', async() => {
+  const sortableOptions = []
+  const moveCalls = []
+  const dialogs = []
+  const pendingMove = deferred()
+  const root = { dataset: { group: 'mine' }, children: [] }
+  const createRow = id => ({
+    dataset: { listId: id },
+    classList: { contains: className => className == 'user-list' },
+    remove: () => root.children.splice(root.children.findIndex(item => item.dataset.listId == id), 1),
+  })
+  const [a, b, c] = ['A', 'B', 'C'].map(createRow)
+  root.querySelectorAll = selector => selector == '.user-list'
+    ? root.children.filter(item => item.classList.contains('user-list'))
+    : []
+  root.querySelector = () => null
+  root.insertBefore = (item, target) => {
+    const itemIndex = root.children.indexOf(item)
+    if (itemIndex >= 0) root.children.splice(itemIndex, 1)
+    const targetIndex = target ? root.children.indexOf(target) : root.children.length
+    root.children.splice(targetIndex < 0 ? root.children.length : targetIndex, 0, item)
+  }
+  global.window = {
+    app_event: { on: () => {}, off: () => {} },
+    key_event: { on: () => {}, off: () => {} },
+  }
+  loadTsModule(useDargPath, {
+    '@common/utils/vueTools': { onBeforeUnmount: () => {}, ref: value => ({ value }), useCssModule: () => ({ dragingItem: 'dragging' }) },
+    '@renderer/utils/compositions/useDrag': options => {
+      sortableOptions.push(options)
+      return { setDisabled: () => {}, destroy: () => {} }
+    },
+    './groupActions': {
+      moveUserList: request => {
+        moveCalls.push(request)
+        return pendingMove.promise
+      },
+    },
+    '@renderer/store/list/group': { requestUserListReveal: () => {} },
+    '@renderer/plugins/Dialog': { dialog: message => dialogs.push(message) },
+    '@renderer/plugins/i18n': { useI18n: () => key => key },
+  }).default({
+    dom_mine_list: { value: root },
+    dom_external_list: { value: { dataset: { group: 'external' } } },
+    handleSaveListName: () => {},
+    handleMenuClick: () => {},
+    expand: () => {},
+    isGroupCollapsed: () => false,
+    getGroupListLength: () => 0,
+  })
+
+  root.children = [c, a, b]
+  sortableOptions[0].onUpdate({ item: c, from: root, to: root, newDraggableIndex: 0, oldDraggableIndex: 2 })
+  root.children = [b, c, a]
+  sortableOptions[0].onUpdate({ item: b, from: root, to: root, newDraggableIndex: 0, oldDraggableIndex: 2 })
+  assert.deepEqual(moveCalls, [{ id: 'C', toGroup: 'mine', toIndex: 0 }])
+  assert.deepEqual(root.children.map(item => item.dataset.listId), ['C', 'A', 'B'])
+
+  pendingMove.reject(new Error('write failed'))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(root.children.map(item => item.dataset.listId), ['A', 'B', 'C'])
+  assert.deepEqual(dialogs, ['lists__move_group_failed'])
+})
+
 test('an early-return drop clears a collapsed-heading marker before the next drag', async() => {
   const sortableOptions = []
   const moves = []
@@ -547,7 +758,7 @@ test('an early-return drop clears a collapsed-heading marker before the next dra
       getGroupListLength: () => 3,
     })
 
-    sortableOptions[0].onMove({ to: mineRoot, related: { matches: () => true } })
+    sortableOptions[0].onMove({ to: mineRoot, related: { closest: () => ({}) } })
     sortableOptions[0].onAdd({ item: { dataset: {} }, from: mineRoot, to: mineRoot, newDraggableIndex: 0, oldDraggableIndex: 0 })
     sortableOptions[0].onAdd({ item: { dataset: { listId: 'external' } }, from: mineRoot, to: mineRoot, newDraggableIndex: 0, oldDraggableIndex: 0 })
     await new Promise(resolve => setImmediate(resolve))
@@ -572,7 +783,10 @@ test('group drag uses shared Sortable roots, stable ids, heading expansion, and 
   const mineRoot = { dataset: { group: 'mine' } }
   const externalRoot = { dataset: { group: 'external' } }
   const row = { dataset: { listId: 'external' } }
-  const heading = { matches: selector => selector == '.my-list-group-heading' }
+  const heading = {
+    matches: () => false,
+    closest: selector => selector == '.my-list-group-heading' ? {} : null,
+  }
   global.window = {
     app_event: { on: () => {}, off: () => {} },
     key_event: {
@@ -703,7 +917,7 @@ test('unmount cancels a pending heading expansion before it can run', () => {
       getGroupListLength: () => 0,
     })
 
-    sortableOptions[0].onMove({ to: mineRoot, related: { matches: () => true } })
+    sortableOptions[0].onMove({ to: mineRoot, related: { closest: () => ({}) } })
     assert.equal(timers.size, 1)
     cleanups.forEach(cleanup => cleanup())
     for (const callback of timers.values()) callback()
@@ -713,6 +927,83 @@ test('unmount cancels a pending heading expansion before it can run', () => {
     global.setTimeout = originalSetTimeout
     global.clearTimeout = originalClearTimeout
   }
+})
+
+test('a collapsed-heading marker survives unchoose until add reads the append index', async() => {
+  const sortableOptions = []
+  const wrapperCleanups = []
+  const dragCleanups = []
+  const moves = []
+  let clearDownKeysCalls = 0
+  let dragEndCalls = 0
+  const mineRoot = {
+    dataset: { group: 'mine' },
+    matches: () => false,
+    closest: () => null,
+  }
+  const externalRoot = { dataset: { group: 'external' } }
+  const row = { dataset: { listId: 'external' } }
+  const Sortable = {
+    mount: () => {},
+    create: (_, options) => {
+      sortableOptions.push(options)
+      return { option: () => {}, destroy: () => {} }
+    },
+  }
+  Sortable.AutoScroll = class {}
+  global.window = {
+    app_event: {
+      dragStart: () => {},
+      dragEnd: () => { dragEndCalls++ },
+    },
+    key_event: { on: () => {}, off: () => {} },
+  }
+  const useDrag = loadTsModule(useDragPath, {
+    'sortablejs/modular/sortable.core.esm': Sortable,
+    '@common/utils/vueTools': {
+      onMounted: callback => callback(),
+      onBeforeUnmount: callback => wrapperCleanups.push(callback),
+    },
+    '@renderer/event': { clearDownKeys: () => { clearDownKeysCalls++ } },
+  }).default
+  loadTsModule(useDargPath, {
+    '@common/utils/vueTools': {
+      onBeforeUnmount: callback => dragCleanups.push(callback),
+      ref: value => ({ value }),
+      useCssModule: () => ({ dragingItem: 'dragging' }),
+    },
+    '@renderer/utils/compositions/useDrag': useDrag,
+    './groupActions': { moveUserList: async request => moves.push(request) },
+    '@renderer/store/list/group': { requestUserListReveal: () => {} },
+    '@renderer/plugins/Dialog': { dialog: () => {} },
+    '@renderer/plugins/i18n': { useI18n: () => key => key },
+  }).default({
+    dom_mine_list: { value: mineRoot },
+    dom_external_list: { value: externalRoot },
+    handleSaveListName: () => {},
+    handleMenuClick: () => {},
+    expand: () => {},
+    isGroupCollapsed: group => group == 'mine',
+    getGroupListLength: group => group == 'mine' ? 3 : 1,
+  })
+
+  sortableOptions[0].onMove({ to: mineRoot, related: mineRoot })
+  sortableOptions[0].onUnchoose()
+  sortableOptions[0].onAdd({
+    item: row,
+    from: externalRoot,
+    to: mineRoot,
+    newDraggableIndex: 0,
+    oldDraggableIndex: 0,
+  })
+  sortableOptions[0].onEnd({ item: row })
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.deepEqual(moves, [{ id: 'external', toGroup: 'mine', toIndex: 3 }])
+  assert.equal(clearDownKeysCalls, 1)
+  assert.equal(dragEndCalls, 1)
+  dragCleanups.forEach(cleanup => cleanup())
+  wrapperCleanups.forEach(cleanup => cleanup())
 })
 
 test('the shared drag composition forwards shared-group events and consumer move results', () => {
@@ -757,8 +1048,10 @@ test('the shared drag composition forwards shared-group events and consumer move
   assert.strictEqual(receivedAdd, event)
   assert.equal(sortableOptions.onMove({ related: null }), false)
   sortableOptions.onUnchoose()
-  assert.equal(endCalls, 1)
+  assert.equal(endCalls, 0)
   assert.equal(clearDownKeysCalls, 1)
+  sortableOptions.onEnd(event)
+  assert.equal(endCalls, 1)
   cleanups.forEach(cleanup => cleanup())
   assert.equal(destroyed, 1)
 })

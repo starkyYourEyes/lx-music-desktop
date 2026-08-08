@@ -32,7 +32,6 @@ export default ({ dom_list, dragingItemClassName, group, draggable, filter, onAd
         onStart()
       },
       onUnchoose() {
-        onEnd()
         // 处于拖动状态期间，键盘事件无法监听，拖动结束手动清理按下的键
         // window.app_event.emit(eventBaseName.setClearDownKeys)
         clearDownKeys()
@@ -42,6 +41,7 @@ export default ({ dom_list, dragingItemClassName, group, draggable, filter, onAd
       },
       onEnd(event) {
         window.app_event.dragEnd()
+        onEnd(event)
       },
     })
   })

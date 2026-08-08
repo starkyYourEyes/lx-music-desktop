@@ -330,15 +330,14 @@ const restoreHarness = async(lists, type) => {
   return writes
 }
 
-const loadShare = ({ targetExists = false, currentGroup = 'mine' } = {}) => {
+const loadShare = ({ targetExists = false, currentGroup = 'mine', sourceLess = false } = {}) => {
   const imported = {
     id: 'incoming',
     name: 'Incoming',
-    source: 'wy',
-    sourceListId: '7',
     locationUpdateTime: null,
     group: 'mine',
     list: [{ id: 'track' }],
+    ...(sourceLess ? {} : { source: 'wy', sourceListId: '7' }),
   }
   const target = { ...imported, name: 'Current' }
   delete target.group
@@ -435,8 +434,9 @@ test('restore applies saved groups and derives groups for old records', async() 
 })
 
 test('single-list import assigns external only for a new target', async() => {
-  const created = await importSingleHarness({ targetExists: false })
+  const created = await importSingleHarness({ targetExists: false, sourceLess: true })
   assert.equal(created.created?.group, 'external')
+  assert.equal(created.created?.strictGroupPersistence, true)
   assert.deepEqual(created.created?.list, [{ id: 'track' }])
   assert.equal(Object.hasOwn(created.created, 'position'), false)
   assert.deepEqual(created.sequence, [])

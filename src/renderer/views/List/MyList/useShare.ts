@@ -102,6 +102,7 @@ export default () => {
       source: (listData as LX.List.UserListInfo).source,
       sourceListId: (listData as LX.List.UserListInfo).sourceListId,
       group: 'external',
+      strictGroupPersistence: true,
       list: normalizedMusic,
     })
   }

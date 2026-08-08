@@ -111,6 +111,19 @@ test('a failed legacy backfill keeps the derived in-memory group', async() => {
   assert.equal(module.getUserListGroup(list('online', 'wy', '42')), 'external')
 })
 
+test('reveal request consumption clears only the token it was given', () => {
+  const module = loadGroupStore()
+  module.requestUserListReveal('first')
+  const first = module.userListRevealRequest.value
+  module.requestUserListReveal('second')
+  const second = module.userListRevealRequest.value
+
+  assert.equal(module.consumeUserListRevealRequest?.(first), false)
+  assert.deepEqual(module.userListRevealRequest.value, second)
+  assert.equal(module.consumeUserListRevealRequest?.(second), true)
+  assert.equal(module.userListRevealRequest.value, null)
+})
+
 test('creation persists derived and explicit groups without adding group to list payloads', async() => {
   const writes = []
   const { action, groupStore, lowLevelCreates } = loadListAction({
@@ -135,7 +148,7 @@ test('creation persists derived and explicit groups without adding group to list
   assert.deepEqual(groupStore.userListRevealRequest.value, { id: 'single-import', token: 3 })
 })
 
-test('creation survives profile persistence failure and reveals after music writes', async() => {
+test('ordinary creation survives profile persistence failure and reveals after music writes', async() => {
   const errors = []
   const sequence = []
   const { action, groupStore } = loadListAction({
@@ -158,6 +171,26 @@ test('creation survives profile persistence failure and reveals after music writ
   assert.deepEqual(groupStore.userListRevealRequest.value, { id: 'with-music', token: 2 })
   assert.deepEqual(sequence.slice(0, 2), ['music', 'reveal:with-music'])
   groupStore.requestUserListReveal = originalRequestReveal
+})
+
+test('strict source-less import rejects a group write failure before music and reveal', async() => {
+  const profileError = new Error('profile write failed')
+  const sequence = []
+  const { action, groupStore, lowLevelCreates } = loadListAction({
+    setProfile: async() => { throw profileError },
+    addMusic: async() => { sequence.push('music') },
+  })
+
+  await assert.rejects(() => action.createUserList({
+    id: 'source-less-import',
+    group: 'external',
+    strictGroupPersistence: true,
+    list: [{ id: 'track' }],
+  }), error => error === profileError)
+
+  assert.equal(lowLevelCreates.length, 1)
+  assert.deepEqual(sequence, [])
+  assert.equal(groupStore.userListRevealRequest.value, null)
 })
 
 test('ensure derives newly synced groups, retains manual assignments, removes stale cache, and never requests reveal', async() => {

@@ -1,6 +1,6 @@
 import { partitionUserLists } from '@common/listGroup'
 import { computed, nextTick, ref, watch } from '@common/utils/vueTools'
-import { ensureUserListGroups, getUserListGroup, userListRevealRequest } from '@renderer/store/list/group'
+import { consumeUserListRevealRequest, ensureUserListGroups, getUserListGroup, userListRevealRequest } from '@renderer/store/list/group'
 import { loadMyListGroupCollapsed, saveMyListGroupCollapsed, type MyListGroupCollapsed } from './groupState'
 
 const groupKeys: LX.List.UserListGroup[] = ['mine', 'external']
@@ -51,7 +51,7 @@ export default ({
 
   watch(activeListId, id => { void reveal(id) }, { immediate: true })
   watch(() => userListRevealRequest.value, request => {
-    if (request) void reveal(request.id)
+    if (request && consumeUserListRevealRequest(request)) void reveal(request.id)
   }, { immediate: true })
   watch(() => userLists.map(list => `${list.id}:${list.source ?? ''}:${list.sourceListId ?? ''}`).join(','), () => {
     void ensureUserListGroups(userLists)

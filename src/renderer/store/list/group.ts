@@ -49,3 +49,9 @@ export const setUserListGroup = async(id: string, group: LX.List.UserListGroup) 
 export const requestUserListReveal = (id: string) => {
   userListRevealRequest.value = { id, token: ++revealToken }
 }
+
+export const consumeUserListRevealRequest = (request: { id: string, token: number }) => {
+  if (userListRevealRequest.value?.token != request.token) return false
+  userListRevealRequest.value = null
+  return true
+}

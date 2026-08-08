@@ -13,6 +13,9 @@ import { setMusicList } from '@renderer/store/list/listManage/action'
 import { toRaw } from '@common/utils/vueTools'
 import { LIST_IDS } from '@common/constants'
 import { likeNeteaseMusic, likeQQMusic, listWebDAVMusics, uploadLocalMusicToWebDAV } from '@renderer/utils/ipc'
+import { log } from '@common/utils'
+import { resolveUserListGroup } from '@common/listGroup'
+import { cacheUserListGroup, requestUserListReveal, setUserListGroup } from './group'
 
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
 
@@ -161,27 +164,34 @@ export const moveListMusics = async(fromId: string, toId: string, musicInfos: LX
   })
 }
 
-export const createUserList = async({ name, id = `userlist_${Date.now()}`, list = [], source, sourceListId, position = -1 }: {
+export const createUserList = async({ name, id = `userlist_${Date.now()}`, list = [], source, sourceListId, position = -1, group }: {
   name?: string
   id?: string
   list?: LX.Music.MusicInfo[]
   source?: LX.OnlineSource
   sourceListId?: string
   position?: number
-}) => {
+  group?: LX.List.UserListGroup
+}): Promise<string> => {
+  const listInfo: LX.List.UserListInfo = {
+    id,
+    name: name ?? 'list',
+    source,
+    sourceListId,
+    locationUpdateTime: position < 0 ? null : Date.now(),
+  }
   await createUserListAction({
     position: position < 0 ? userLists.length : position,
-    listInfos: [
-      {
-        id,
-        name: name ?? 'list',
-        source,
-        sourceListId,
-        locationUpdateTime: position < 0 ? null : Date.now(),
-      },
-    ],
+    listInfos: [listInfo],
   })
-  if (list) await addListMusics(id, list)
+  const assignedGroup = resolveUserListGroup(listInfo, group)
+  cacheUserListGroup(id, assignedGroup)
+  await setUserListGroup(id, assignedGroup).catch(error => {
+    log.error(error)
+  })
+  if (list.length) await addListMusics(id, list)
+  requestUserListReveal(id)
+  return id
 }
 
 

@@ -11,6 +11,7 @@ import { onBeforeUnmount } from '@common/utils/vueTools'
 import { appSetting } from '@renderer/store/setting'
 import { playMusicInfo } from '@renderer/store/player/state'
 import { initDislikeInfo, registerRemoteDislikeAction } from '@renderer/core/dislikeList'
+import { initializeUserListGroups } from '@renderer/store/list/group'
 
 const getMusicIdentity = (music: LX.Music.MusicInfo | LX.Download.ListItem) => {
   const musicInfo = 'progress' in music ? music.metadata.musicInfo : music
@@ -85,6 +86,7 @@ export default () => {
       window.app_event.myListUpdate(ids)
     })
     window.lxData.userLists = await getUserLists() // 获取用户列表
+    await initializeUserListGroups(window.lxData.userLists)
     if (appSetting['webdav.autoRefresh']) {
       void refreshWebDAVList().catch(err => {
         log.error(err)

@@ -17,9 +17,9 @@
     </div>
     <ul ref="dom_lists_list" class="scroll" :class="[$style.listsContent, { [$style.sortable]: isModDown }]">
       <li
-        class="default-list" :class="[$style.listsItem, {[$style.active]: loveList.id == listId}, {[$style.clicked]: rightClickItemIndex == -1}, {[$style.fetching]: fetchingListStatus[loveList.id]}]"
+        class="default-list" :class="[$style.listsItem, {[$style.active]: loveList.id == listId}, {[$style.clicked]: rightClickItemId == loveList.id}, {[$style.fetching]: fetchingListStatus[loveList.id]}]"
         :aria-label="$t(loveList.name)" :aria-selected="loveList.id == listId"
-        @contextmenu="handleListsItemRigthClick($event, -1)" @click="handleListToggle(loveList.id)"
+        @contextmenu="handleListsItemRigthClick($event, loveList)" @click="handleListToggle(loveList.id)"
       >
         <span :class="$style.listsLabel">
           <span :class="$style.coverBox">
@@ -32,10 +32,10 @@
         </span>
       </li>
       <li
-        v-for="(item, index) in userLists"
+        v-for="item in userLists"
         :key="item.id" class="user-list"
-        :class="[$style.listsItem, {[$style.active]: item.id == listId}, {[$style.clicked]: rightClickItemIndex == index}, {[$style.fetching]: fetchingListStatus[item.id]}]"
-        :data-index="index" :aria-label="item.name" :aria-selected="item.id == listId" @contextmenu="handleListsItemRigthClick($event, index)"
+        :class="[$style.listsItem, {[$style.active]: item.id == listId}, {[$style.clicked]: rightClickItemId == item.id}, {[$style.fetching]: fetchingListStatus[item.id]}]"
+        :data-list-id="item.id" :aria-label="item.name" :aria-selected="item.id == listId" @contextmenu="handleListsItemRigthClick($event, item)"
       >
         <span :class="$style.listsLabel" @click="handleListToggle(item.id)">
           <span :class="$style.coverBox">
@@ -48,7 +48,7 @@
         </span>
         <base-input
           :class="$style.listsInput" type="text" :value="item.name"
-          :placeholder="item.name" @keyup.enter="handleSaveListName(index, $event)" @blur="handleSaveListName(index, $event)"
+          :placeholder="item.name" @keyup.enter="handleSaveListName" @blur="handleSaveListName"
         />
       </li>
       <transition enter-active-class="animated-fast slideInLeft" leave-active-class="animated-fast fadeOut" @after-leave="isNewListLeave = false" @after-enter="$refs.dom_listsNewInput.focus()">
@@ -128,7 +128,7 @@ export default {
     const t = useI18n()
 
     const dom_lists_list = ref(null)
-    const rightClickItemIndex = ref(-10)
+    const rightClickItemId = ref(null)
     const coverVersion = ref(0)
     const userListProfiles = ref({})
     const listSidebarStyle = computed(() => {
@@ -204,9 +204,9 @@ export default {
       handleRemove,
     })
 
-    const handleListsItemRigthClick = (event, index) => {
-      rightClickItemIndex.value = index
-      showMenu(event, index)
+    const handleListsItemRigthClick = (event, listInfo) => {
+      rightClickItemId.value = listInfo.id
+      showMenu(event, listInfo)
     }
 
     const handleListToggle = (id) => {
@@ -218,10 +218,13 @@ export default {
     }
 
     const handleMenuClick = (action) => {
-      if (rightClickItemIndex.value < -1) return
-      let index = rightClickItemIndex.value
-      rightClickItemIndex.value = -10
-      menuClick(action, index)
+      if (!rightClickItemId.value) return
+      const listInfo = rightClickItemId.value == loveList.id
+        ? loveList
+        : userLists.find(item => item.id == rightClickItemId.value)
+      rightClickItemId.value = null
+      if (!listInfo) return
+      menuClick(action, listInfo)
     }
 
     const { isModDown } = useDarg({ dom_lists_list, handleMenuClick, handleSaveListName })
@@ -283,7 +286,7 @@ export default {
     })
 
     return {
-      rightClickItemIndex,
+      rightClickItemId,
       loveList,
       userLists,
       fetchingListStatus,

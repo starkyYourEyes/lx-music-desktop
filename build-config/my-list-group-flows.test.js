@@ -10,6 +10,9 @@ const root = path.resolve(__dirname, '..')
 // eslint-disable-next-line no-unused-vars
 const read = relativePath => fs.readFileSync(path.join(root, relativePath), 'utf8')
 const settingBackupPath = path.join(root, 'src/renderer/views/Setting/components/SettingBackup.vue')
+const myListPath = path.join(root, 'src/renderer/views/List/MyList/index.vue')
+const useEditListPath = path.join(root, 'src/renderer/views/List/MyList/useEditList.ts')
+const useMenuPath = path.join(root, 'src/renderer/views/List/MyList/useMenu.js')
 const useSharePath = path.join(root, 'src/renderer/views/List/MyList/useShare.ts')
 const listEventPath = path.join(root, 'src/main/modules/sync/listEvent.ts')
 
@@ -27,6 +30,207 @@ const identityMusicUtils = {
   filterMusicList: value => value,
   fixNewMusicInfoQuality: value => value,
   toNewMusicInfo: value => value,
+}
+
+const createListRow = (id, name) => {
+  const classes = new Set()
+  const input = { value: name, focus: () => {} }
+  return {
+    dataset: { listId: id },
+    input,
+    classList: {
+      add: className => classes.add(className),
+      remove: className => classes.delete(className),
+      contains: className => classes.has(className),
+    },
+    querySelector: selector => selector == 'input' || selector == '.listsInput' ? input : null,
+  }
+}
+
+const loadEditList = () => {
+  const userLists = [
+    { id: 'first', name: 'First' },
+    { id: 'second', name: 'Second' },
+  ]
+  const renderedRows = [
+    createListRow('second', 'Second'),
+    createListRow('first', 'First'),
+  ]
+  const updates = []
+  const useEditList = loadTsModule(useEditListPath, {
+    '@common/utils/vueTools': {
+      ref: value => ({ value }),
+      nextTick: callback => callback(),
+      useCssModule: () => ({ editing: 'editing', listsInput: 'listsInput' }),
+    },
+    '@renderer/store/list/state': { userLists },
+    '@renderer/store/list/action': {
+      updateUserList: async lists => updates.push(lists),
+      createUserList: async() => {},
+    },
+    '@renderer/plugins/Dialog': { dialog: { confirm: async() => true } },
+  }).default
+  const dom_lists_list = {
+    value: {
+      querySelectorAll: selector => selector == '.user-list' ? renderedRows : [],
+      querySelector: selector => selector == '.editing'
+        ? renderedRows.find(row => row.classList.contains('editing')) ?? null
+        : null,
+    },
+  }
+  return { handlers: useEditList({ dom_lists_list }), renderedRows, updates }
+}
+
+const loadMenu = () => {
+  const local = { id: 'local', name: 'Local' }
+  const collected = { id: 'collected', name: 'Collected', source: 'wy', sourceListId: '42' }
+  const calls = {
+    rename: [],
+    sourceDetail: [],
+    import: [],
+    export: [],
+    sync: [],
+  }
+  const useMenu = loadTsModule(useMenuPath, {
+    '@common/utils/vueTools': {
+      computed: getter => ({ get value() { return getter() } }),
+      ref: value => ({ value }),
+      reactive: value => value,
+      nextTick: callback => callback(),
+    },
+    '@renderer/plugins/i18n': { useI18n: () => key => key },
+    '@renderer/store/list/state': {
+      userLists: [local, collected],
+      defaultList,
+      loveList,
+      webDAVList: { id: 'webdav', name: 'WebDAV' },
+    },
+    '@renderer/utils/musicSdk': {
+      wy: { songList: { getDetailPageUrl: () => 'https://example.test/playlist/42' } },
+    },
+    './actions': {
+      addLocalFile: () => {},
+      addWebDAVMusics: () => {},
+      refreshWebDAVMusics: () => {},
+    },
+  }).default
+  const menu = useMenu({
+    emit: () => {},
+    handleRename: id => calls.rename.push(id),
+    handleDuplicateList: () => {},
+    handleSortList: () => {},
+    handleOpenSourceDetailPage: listInfo => calls.sourceDetail.push(listInfo),
+    handleImportList: (...args) => calls.import.push(args),
+    handleExportList: listInfo => calls.export.push(listInfo),
+    handleUpdateSourceList: listInfo => calls.sync.push(listInfo),
+    handleRemove: () => {},
+  })
+  return { menu, local, collected, calls }
+}
+
+const normalizeClass = value => {
+  if (Array.isArray(value)) return value.map(normalizeClass).filter(Boolean).join(' ')
+  if (value && typeof value == 'object') return Object.entries(value).filter(([, enabled]) => enabled).map(([name]) => name).join(' ')
+  return value || ''
+}
+
+const renderVueRuntime = {
+  Fragment: Symbol('Fragment'),
+  Transition: Symbol('Transition'),
+  createCommentVNode: () => null,
+  createElementBlock: (type, props, children) => ({ type, props, children }),
+  createElementVNode: (type, props, children) => ({ type, props, children }),
+  createVNode: (type, props, children) => ({ type, props, children }),
+  normalizeClass,
+  normalizeStyle: value => value,
+  openBlock: () => {},
+  renderList: (values, render) => values.map(render),
+  resolveComponent: name => name,
+  toDisplayString: value => String(value),
+  withCtx: callback => callback,
+  withKeys: callback => callback,
+}
+
+const loadMyListRender = () => loadVueSfc(myListPath, {
+  vue: renderVueRuntime,
+  '@common/utils/electron': { openUrl: () => {} },
+  '@common/utils/common': { encodePath: value => value },
+  '@renderer/utils/musicSdk': {},
+  './components/DuplicateMusicModal.vue': {},
+  './components/ListSortModal.vue': {},
+  './components/ListUpdateModal.vue': {},
+  '@renderer/store/list/state': {
+    allMusicList: new Map(),
+    loveList,
+    userLists: [],
+    fetchingListStatus: {},
+  },
+  '@renderer/store/list/action': { getListMusics: async() => [], removeUserList: async() => {} },
+  '@renderer/store/setting': { appSetting: {} },
+  '@common/utils/vueTools': {
+    computed: () => ({ value: {} }),
+    onBeforeUnmount: () => {},
+    ref: value => ({ value }),
+    watch: () => {},
+  },
+  '@common/utils/vueRouter': { useRouter: () => ({ replace: async() => {} }) },
+  '@common/constants': { LIST_IDS: { LOVE: 'love' } },
+  '@renderer/plugins/Dialog': { dialog: { confirm: async() => false } },
+  '@renderer/utils/data': { getListUpdateInfo: async() => ({}), saveListPrevSelectId: () => {} },
+  '@renderer/plugins/i18n': { useI18n: () => key => key },
+  './useShare': () => ({}),
+  './useMenu': () => ({}),
+  './useListUpdate': () => ({}),
+  './useSort': () => ({}),
+  './useDarg': () => ({}),
+  './useEditList': () => ({}),
+  './useListScroll': () => {},
+  './useDuplicate': () => ({}),
+}).default
+
+const renderUserListRows = (userLists, handleListsItemRigthClick = () => {}) => {
+  const component = loadMyListRender()
+  const style = new Proxy({}, { get: (_, key) => String(key) })
+  const context = {
+    $style: style,
+    $t: key => key,
+    $refs: {},
+    listSidebarStyle: {},
+    isModDown: false,
+    loveList,
+    listId: '',
+    rightClickItemId: null,
+    fetchingListStatus: {},
+    getListCover: () => '',
+    userLists,
+    handleListsItemRigthClick,
+    handleListToggle: () => {},
+    handleSaveListName: () => {},
+    isShowNewList: false,
+    isNewListLeave: false,
+    handleCreateList: () => {},
+    isShowListUpdateModal: false,
+    isShowListSortModal: false,
+    sortListInfo: null,
+    isShowDuplicateMusicModal: false,
+    duplicateListInfo: null,
+    isShowMenu: false,
+    menus: [],
+    menuLocation: { x: 0, y: 0 },
+    handleMenuClick: () => {},
+  }
+  const rows = []
+  const visit = node => {
+    if (Array.isArray(node)) {
+      node.forEach(visit)
+      return
+    }
+    if (!node || typeof node != 'object') return
+    if (node.type == 'li' && String(node.props?.class).split(' ').includes('user-list')) rows.push(node)
+    visit(node.children)
+  }
+  visit(component.render(context, [], {}, context, {}, {}))
+  return rows
 }
 
 const loadSettingBackup = ({ backupData, groups = {}, importedData, setGroup = async() => {} } = {}) => {
@@ -220,6 +424,7 @@ test('single-list import assigns external only for a new target', async() => {
   const created = await importSingleHarness({ targetExists: false })
   assert.equal(created.created?.group, 'external')
   assert.deepEqual(created.created?.list, [{ id: 'track' }])
+  assert.equal(Object.hasOwn(created.created, 'position'), false)
   assert.deepEqual(created.sequence, [])
   const overwrite = await importSingleHarness({ targetExists: true, currentGroup: 'mine' })
   assert.equal(overwrite.created, null)
@@ -234,6 +439,56 @@ test('single-list exports include user groups but exclude groups from favorites'
   await loaded.useShare.handleExportList(loveList)
   assert.equal(loaded.exported[0].data.group, 'external')
   assert.equal(Object.hasOwn(loaded.exported[1].data, 'group'), false)
+})
+
+test('rendered playlist rows expose and emit their stable playlist identity', () => {
+  const renderedLists = [
+    { id: 'second', name: 'Second' },
+    { id: 'first', name: 'First' },
+  ]
+  const contextMenuTargets = []
+  const rows = renderUserListRows(renderedLists, (event, listInfo) => contextMenuTargets.push(listInfo))
+
+  assert.deepEqual(rows.map(row => row.props['data-list-id']), ['second', 'first'])
+  rows[0].props.onContextmenu({ pageX: 10, pageY: 20 })
+  assert.strictEqual(contextMenuTargets[0], renderedLists[0])
+})
+
+test('rename saves the playlist selected by stable id when DOM order differs', async() => {
+  const loaded = loadEditList()
+
+  loaded.handlers.handleRename('first')
+  assert.equal(loaded.renderedRows[0].classList.contains('editing'), false)
+  assert.equal(loaded.renderedRows[1].classList.contains('editing'), true)
+  loaded.renderedRows[1].input.value = 'Renamed First'
+  await loaded.handlers.handleSaveListName()
+
+  assert.deepEqual(loaded.updates, [[{ id: 'first', name: 'Renamed First' }]])
+})
+
+test('menu source capabilities derive from the passed playlist', () => {
+  const loaded = loadMenu()
+
+  assert.doesNotThrow(() => loaded.menu.showMenu({ pageX: 10, pageY: 20 }, loaded.collected))
+  const disabledByAction = Object.fromEntries(loaded.menu.menus.value.map(item => [item.action, item.disabled]))
+  assert.equal(disabledByAction.sync, false)
+  assert.equal(disabledByAction.sourceDetail, false)
+})
+
+test('menu actions keep the passed playlist as their target', () => {
+  const loaded = loadMenu()
+
+  loaded.menu.menuClick({ action: 'sourceDetail' }, loaded.collected)
+  loaded.menu.menuClick({ action: 'sync' }, loaded.collected)
+  loaded.menu.menuClick({ action: 'export' }, loaded.collected)
+  loaded.menu.menuClick({ action: 'import' }, loaded.collected)
+  loaded.menu.menuClick({ action: 'rename' }, loaded.collected)
+
+  assert.strictEqual(loaded.calls.sourceDetail[0], loaded.collected)
+  assert.strictEqual(loaded.calls.sync[0], loaded.collected)
+  assert.strictEqual(loaded.calls.export[0], loaded.collected)
+  assert.deepEqual(loaded.calls.import[0], [loaded.collected])
+  assert.deepEqual(loaded.calls.rename, ['collected'])
 })
 
 test('sync list snapshots omit config-only group metadata', () => {

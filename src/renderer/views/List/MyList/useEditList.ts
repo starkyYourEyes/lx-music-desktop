@@ -11,9 +11,9 @@ export default ({ dom_lists_list }: {
   const editIndex = ref(-1)
   const styles = useCssModule()
 
-  const handleRename = (index: number) => {
-    // console.log(index)
-    const dom = dom_lists_list.value?.querySelectorAll('.user-list')[index]
+  const handleRename = (id: string) => {
+    const dom = Array.from(dom_lists_list.value?.querySelectorAll<HTMLElement>('.user-list') ?? [])
+      .find(element => element.dataset.listId == id)
     if (!dom) return
     void nextTick(() => {
       dom.classList.add(styles.editing)
@@ -27,8 +27,9 @@ export default ({ dom_lists_list }: {
     const dom_input: HTMLInputElement = dom_target.querySelector('.' + styles.listsInput)!
     if (!dom_input) return
     let name = dom_input.value.trim()
-    if (dom_target.dataset.index == null) return
-    const targetList = userLists[parseInt(dom_target.dataset.index)]
+    if (dom_target.dataset.listId == null) return
+    const targetList = userLists.find(item => item.id == dom_target.dataset.listId)
+    if (!targetList) return
     if (name.length) await updateUserList([{ ...targetList, name }])
     dom_input.value = targetList.name
     dom_target.classList.remove(styles.editing)

@@ -1,6 +1,6 @@
 import { computed, ref, reactive, nextTick } from '@common/utils/vueTools'
 import { useI18n } from '@renderer/plugins/i18n'
-import { userLists, defaultList, loveList, webDAVList } from '@renderer/store/list/state'
+import { defaultList, loveList, webDAVList } from '@renderer/store/list/state'
 import musicSdk from '@renderer/utils/musicSdk'
 import { addLocalFile, addWebDAVMusics, refreshWebDAVMusics } from './actions'
 
@@ -93,9 +93,9 @@ export default ({
     ]
   })
 
-  const assertSupportDetail = (source, index) => {
+  const assertSupportDetail = (listInfo) => {
+    const { source, sourceListId } = listInfo
     if (source) {
-      const { sourceListId } = userLists[index]
       if (sourceListId) {
         if (/board__/.test(sourceListId)) {
           // const id = sourceListId.replace(/board__/, '')
@@ -108,10 +108,10 @@ export default ({
     return false
   }
 
-  const showMenu = (event, index) => {
-    let source
-    switch (index) {
-      case -3:
+  const showMenu = (event, listInfo) => {
+    const { source } = listInfo
+    switch (listInfo.id) {
+      case webDAVList.id:
         menuControl.rename = false
         menuControl.remove = false
         menuControl.sync = false
@@ -119,8 +119,8 @@ export default ({
         menuControl.webdav_file = false
         menuControl.webdav_refresh = true
         break
-      case -1:
-      case -2:
+      case loveList.id:
+      case defaultList.id:
         menuControl.rename = false
         menuControl.remove = false
         menuControl.sync = false
@@ -134,12 +134,11 @@ export default ({
         menuControl.local_file = true
         menuControl.webdav_file = true
         menuControl.webdav_refresh = false
-        source = userLists[index].source
         menuControl.sync = !!source && !!musicSdk[source]?.songList
         break
     }
-    // menuControl.sort = !!getList(this.getTargetListInfo(index)?.id).length
-    menuControl.sourceDetail = assertSupportDetail(source, index)
+    // menuControl.sort = !!getList(listInfo.id).length
+    menuControl.sourceDetail = assertSupportDetail(listInfo)
 
     menuLocation.x = event.pageX
     menuLocation.y = event.pageY
@@ -155,34 +154,13 @@ export default ({
     isShowMenu.value = false
   }
 
-  const getListInfo = (index) => {
-    let list
-    switch (index) {
-      case -3:
-        list = webDAVList
-        break
-      case -2:
-        list = defaultList
-        break
-      case -1:
-        list = loveList
-        break
-      default:
-        list = userLists[index]
-        if (!list) return null
-        break
-    }
-    return list
-  }
-
-  const menuClick = (action, index) => {
+  const menuClick = (action, listInfo) => {
     // console.log(action)
     hideMenu()
     if (!action) return
-    const listInfo = getListInfo(index)
     switch (action.action) {
       case 'rename':
-        handleRename(index)
+        handleRename(listInfo.id)
         break
       case 'duplicate':
         handleDuplicateList(listInfo)
@@ -203,7 +181,7 @@ export default ({
         handleOpenSourceDetailPage(listInfo)
         break
       case 'import':
-        handleImportList(listInfo, index)
+        handleImportList(listInfo)
         break
       case 'export':
         handleExportList(listInfo)

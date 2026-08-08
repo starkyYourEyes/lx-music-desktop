@@ -57,7 +57,6 @@ Load playlist metadata during application data initialization before the grouped
 | Operation | Resulting group | Source binding |
 | --- | --- | --- |
 | Create a playlist | `mine` | None |
-| Duplicate any playlist | `mine` | Removed from the duplicate |
 | Collect an online playlist or leaderboard | `external` | Preserved |
 | Import a new single-playlist file | `external` | Preserved when present in the file |
 | Import a single-playlist file over an existing ID | Keep the target's current group | Follow the existing metadata overwrite rules |
@@ -102,7 +101,7 @@ Add one move command to each normal playlist's context menu. The command names t
 
 Keep the existing drag activation behavior. Support sorting inside a group and dragging across groups. When the pointer rests over a collapsed target heading, expand that group. Dropping on the heading before expansion moves the playlist to the target group's end. A drop inside an expanded group uses the indicated position.
 
-Move commands update `profile.group` and list position as one user operation. A moved online playlist keeps source-detail and source-update actions. Duplicating it creates a local, unbound playlist in `mine`.
+Move commands update `profile.group` and list position as one user operation. A moved online playlist keeps source-detail and source-update actions.
 
 The current sidebar code uses visible DOM indexes to read `userLists[index]`. Grouping and collapse break that assumption. Refactor menu, rename, import, and drag handlers to pass stable playlist IDs or playlist objects. Resolve the current list by ID at the action boundary.
 
@@ -146,7 +145,7 @@ Write focused tests before production changes for:
 
 - explicit group resolution, source-based fallback, and invalid-value recovery;
 - metadata validation, persistence, retention, and deletion;
-- default assignments for create, duplicate, online collect, single import, restore, and current sync;
+- default assignments for create, online collect, single import, restore, and current sync;
 - same-ID single import preserving the target group;
 - old backup migration and backup round trips;
 - current sync snapshots and incremental actions excluding `group`;
@@ -164,5 +163,6 @@ Run the focused renderer and storage tests, lint touched files, and build the re
 - Nested groups or folders.
 - Group-specific header actions.
 - Group synchronization in the current protocol.
+- A new playlist-copy command. If a later version adds one, its copies default to `mine` and omit source binding.
 - Changes to online source binding when a playlist moves.
 - Changes to playlist contents, song sorting, playback, or the detail pane.

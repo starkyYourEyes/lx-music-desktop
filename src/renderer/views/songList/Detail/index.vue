@@ -1,31 +1,5 @@
 <template>
   <div :class="$style.container">
-    <div :class="$style.songListHeader">
-      <div :class="$style.songListHeaderLeft" :style="{ backgroundImage: 'url('+coverPicUrl+')' }">
-        <!-- <span v-if="listDetailInfo.info.play_count" :class="$style.playNum">{{ listDetailInfo.info.play_count }}</span> -->
-      </div>
-      <div :class="$style.songListHeaderMiddle">
-        <h3 :title="listDetailInfo.info.name">{{ listDetailInfo.info.name }}</h3>
-        <p :title="listDetailInfo.info.desc">{{ listDetailInfo.info.desc }}</p>
-      </div>
-      <div :class="$style.songListHeaderRight">
-        <base-btn
-          :class="$style.headerRightBtn"
-          :disabled="!!listDetailInfo.noItemLabel"
-          @click="playSongListDetail(listDetailInfo.id, listDetailInfo.source, listDetailInfo.list)"
-        >
-          {{ $t('list__play') }}
-        </base-btn>
-        <base-btn
-          :class="$style.headerRightBtn"
-          :disabled="!!listDetailInfo.noItemLabel"
-          @click="addSongListDetail(listDetailInfo.id, listDetailInfo.source, listDetailInfo.info.name)"
-        >
-          {{ $t('list__collect') }}
-        </base-btn>
-        <base-btn :class="$style.headerRightBtn" @click="handleBack">{{ $t('back') }}</base-btn>
-      </div>
-    </div>
     <div :class="$style.list">
       <material-online-list
         ref="listRef"
@@ -37,7 +11,36 @@
         :list-context-id="listContextId"
         @play-list="handlePlayList"
         @toggle-page="togglePage"
-      />
+      >
+        <template #header>
+          <div :class="$style.songListHeader">
+            <div :class="$style.songListHeaderLeft" :style="{ backgroundImage: 'url('+coverPicUrl+')' }">
+              <!-- <span v-if="listDetailInfo.info.play_count" :class="$style.playNum">{{ listDetailInfo.info.play_count }}</span> -->
+            </div>
+            <div :class="$style.songListHeaderMiddle">
+              <h3 :title="listDetailInfo.info.name">{{ listDetailInfo.info.name }}</h3>
+              <p :title="listDetailInfo.info.desc">{{ listDetailInfo.info.desc }}</p>
+            </div>
+            <div :class="$style.songListHeaderRight">
+              <base-btn
+                :class="$style.headerRightBtn"
+                :disabled="!!listDetailInfo.noItemLabel"
+                @click="playSongListDetail(listDetailInfo.id, listDetailInfo.source, listDetailInfo.list)"
+              >
+                {{ $t('list__play') }}
+              </base-btn>
+              <base-btn
+                :class="$style.headerRightBtn"
+                :disabled="!!listDetailInfo.noItemLabel"
+                @click="addSongListDetail(listDetailInfo.id, listDetailInfo.source, listDetailInfo.info.name)"
+              >
+                {{ $t('list__collect') }}
+              </base-btn>
+              <base-btn :class="$style.headerRightBtn" @click="handleBack">{{ $t('back') }}</base-btn>
+            </div>
+          </div>
+        </template>
+      </material-online-list>
     </div>
   </div>
 </template>

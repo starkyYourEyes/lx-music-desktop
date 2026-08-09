@@ -2,28 +2,21 @@
   <div :class="$style.songList">
     <!-- <transition enter-active-class="animated-fast fadeIn" leave-active-class="animated-fast fadeOut"> -->
     <div :class="$style.list">
-      <div class="thead">
-        <table>
-          <thead>
-            <tr v-if="actionButtonsVisible">
-              <th class="num" style="width: 5%;">#</th>
-              <th class="nobreak"><span :style="{ marginLeft: `${artworkSize + 10}px` }">{{ $t('music_title') }}</span></th>
-              <th class="nobreak" style="width: 22%;">{{ $t('music_album') }}</th>
-              <th class="nobreak" style="width: 9%;">{{ $t('music_time') }}</th>
-              <th class="nobreak" style="width: 16%;">{{ $t('action') }}</th>
-            </tr>
-            <tr v-else>
-              <th class="num" style="width: 5%;">#</th>
-              <th class="nobreak"><span :style="{ marginLeft: `${artworkSize + 10}px` }">{{ $t('music_title') }}</span></th>
-              <th class="nobreak" style="width: 27%;">{{ $t('music_album') }}</th>
-              <th class="nobreak" style="width: 10%;">{{ $t('music_time') }}</th>
-            </tr>
-          </thead>
-        </table>
-      </div>
+      <online-list-header
+        v-if="!$slots.header"
+        :action-buttons-visible="actionButtonsVisible"
+        :artwork-size="artworkSize"
+      />
       <div :class="$style.content">
-        <div v-show="!noItem" ref="dom_listContent" :class="$style.content">
-          <base-virtualized-list v-if="actionButtonsVisible" ref="listRef" :list="list" key-name="id" :item-height="listItemHeight" container-class="scroll" content-class="list" @contextmenu.capture="handleListRightClick">
+        <div v-show="!noItem || $slots.header" ref="dom_listContent" :class="$style.content">
+          <base-virtualized-list v-if="actionButtonsVisible" ref="listRef" :list="virtualList" key-name="id" :item-height="listItemHeight" container-class="scroll" content-class="list" @contextmenu.capture="handleListRightClick">
+            <template v-if="$slots.header" #header>
+              <slot name="header" />
+              <online-list-header
+                :action-buttons-visible="actionButtonsVisible"
+                :artwork-size="artworkSize"
+              />
+            </template>
             <template #default="{ item, index }">
               <div
                 class="list-item" :class="[{ selected: rightClickSelectedIndex == index }, { active: selectedList.includes(item) }]"
@@ -53,12 +46,22 @@
               </div>
             </template>
             <template #footer>
-              <div :class="$style.pagination">
+              <div v-if="$slots.header && noItem" :class="$style.scrollNoitem">
+                <p v-text="noItem" />
+              </div>
+              <div v-else :class="$style.pagination">
                 <material-pagination :count="total" :limit="limit" :page="page" @btn-click="$emit('togglePage', $event)" />
               </div>
             </template>
           </base-virtualized-list>
-          <base-virtualized-list v-else ref="listRef" :list="list" key-name="id" :item-height="listItemHeight" container-class="scroll" content-class="list" @contextmenu.capture="handleListRightClick">
+          <base-virtualized-list v-else ref="listRef" :list="virtualList" key-name="id" :item-height="listItemHeight" container-class="scroll" content-class="list" @contextmenu.capture="handleListRightClick">
+            <template v-if="$slots.header" #header>
+              <slot name="header" />
+              <online-list-header
+                :action-buttons-visible="actionButtonsVisible"
+                :artwork-size="artworkSize"
+              />
+            </template>
             <template #default="{ item, index }">
               <div
                 class="list-item" :class="[{ selected: rightClickSelectedIndex == index }, { active: selectedList.includes(item) }]"
@@ -85,14 +88,17 @@
               </div>
             </template>
             <template #footer>
-              <div :class="$style.pagination">
+              <div v-if="$slots.header && noItem" :class="$style.scrollNoitem">
+                <p v-text="noItem" />
+              </div>
+              <div v-else :class="$style.pagination">
                 <material-pagination :count="total" :limit="limit" :page="page" @btn-click="$emit('togglePage', $event)" />
               </div>
             </template>
           </base-virtualized-list>
         </div>
         <transition enter-active-class="animated fadeIn" leave-active-class="animated fadeOut">
-          <div v-show="noItem" :class="$style.noitem">
+          <div v-show="noItem && !$slots.header" :class="$style.noitem">
             <p v-text="noItem" />
           </div>
         </transition>
@@ -124,6 +130,7 @@ import { appSetting } from '@renderer/store/setting'
 import { playInfo, playMusicInfo } from '@renderer/store/player/state'
 import { tempListMeta } from '@renderer/store/list/state'
 import { LIST_IDS } from '@common/constants'
+import OnlineListHeader from './Header.vue'
 
 const createMusicIdentity = musicInfo => {
   if (!musicInfo) return ''
@@ -133,6 +140,9 @@ const createMusicIdentity = musicInfo => {
 
 export default {
   name: 'MaterialOnlineList',
+  components: {
+    OnlineListHeader,
+  },
   props: {
     list: {
       type: Array,
@@ -187,6 +197,7 @@ export default {
     const rightClickSelectedIndex = ref(-1)
     const dom_listContent = ref(null)
     const listRef = ref(null)
+    const virtualList = computed(() => props.noItem ? [] : props.list)
     const currentMusicIdentity = computed(() => createMusicIdentity(playMusicInfo.musicInfo))
     const isCurrentTempList = computed(() => {
       return playInfo.playerListId == LIST_IDS.TEMP &&
@@ -329,6 +340,7 @@ export default {
       rightClickSelectedIndex,
       dom_listContent,
       listRef,
+      virtualList,
 
       menus,
       isShowItemMenu,
@@ -401,6 +413,17 @@ export default {
   justify-content: center;
   align-items: center;
   // background-color: var(--color-000);
+
+  p {
+    font-size: 24px;
+    color: var(--color-font-label);
+  }
+}
+.scrollNoitem {
+  min-height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 
   p {
     font-size: 24px;

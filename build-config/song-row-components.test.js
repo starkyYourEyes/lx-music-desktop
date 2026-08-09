@@ -13,6 +13,7 @@ const root = path.resolve(__dirname, '..')
 const artworkPath = path.join(root, 'src/renderer/components/common/TrackArtwork/index.vue')
 const titleCellPath = path.join(root, 'src/renderer/components/material/MusicTitleCell.vue')
 const onlineListPath = path.join(root, 'src/renderer/components/material/OnlineList/index.vue')
+const onlineListHeaderPath = path.join(root, 'src/renderer/components/material/OnlineList/Header.vue')
 const musicListPath = path.join(root, 'src/renderer/views/List/MusicList/index.vue')
 const recentPlayPath = path.join(root, 'src/renderer/views/RecentPlay/index.vue')
 const playQueuePath = path.join(root, 'src/renderer/components/layout/PlayQueue.vue')
@@ -115,7 +116,7 @@ const renderTitleCell = async(props, slots = {}) => {
   return renderToString(app)
 }
 
-const createOnlineListHarness = async(actionButtonsVisible) => {
+const createOnlineListHarness = async(actionButtonsVisible, options = {}) => {
   const item = {
     ...music('online'),
     name: 'Online Song',
@@ -138,6 +139,7 @@ const createOnlineListHarness = async(actionButtonsVisible) => {
   }
   const value = initialValue => ref(initialValue)
   const noop = () => {}
+  const OnlineListHeader = loadVueSfc(onlineListHeaderPath).default
   const OnlineList = loadVueSfc(onlineListPath, {
     '@common/utils/electron': { clipboardWriteText: noop },
     '@renderer/store/utils': {
@@ -192,16 +194,19 @@ const createOnlineListHarness = async(actionButtonsVisible) => {
     },
     '@renderer/store/list/state': { tempListMeta: { id: '' } },
     '@common/constants': { LIST_IDS: { TEMP: 'temp' } },
+    './Header.vue': OnlineListHeader,
   }).default
 
   const VirtualizedList = defineComponent({
     props: { list: { type: Array, required: true } },
     setup(props, { slots }) {
       return () => {
-        const renderedRow = slots.default?.({ item: props.list[0], index: 0 })
+        const renderedRow = props.list.length
+          ? slots.default?.({ item: props.list[0], index: 0 })
+          : null
         const row = Array.isArray(renderedRow) ? renderedRow[0] : renderedRow
         if (row) observed.rows.push(row)
-        return h('div', { class: 'virtualized-list' }, [row, slots.footer?.()])
+        return h('div', { class: 'virtualized-list' }, [slots.header?.(), row, slots.footer?.()])
       }
     },
   })
@@ -239,12 +244,15 @@ const createOnlineListHarness = async(actionButtonsVisible) => {
   const EmptyStub = defineComponent({ setup: () => () => h('div') })
   const app = createSSRApp({
     render: () => h(OnlineList, {
-      list: [item],
+      list: options.noItem ? [] : [item],
       page: 1,
       limit: 30,
-      total: 1,
+      total: options.noItem ? 0 : 1,
+      noItem: options.noItem ?? '',
       sourceTag: true,
-    }),
+    }, options.scrollHeader
+      ? { header: () => h('section', { class: 'playlist-header-marker' }, 'Playlist Header') }
+      : {}),
   })
   app.config.globalProperties.$style = styleProxy
   app.config.globalProperties.$t = key => key
@@ -1196,6 +1204,40 @@ test('OnlineList compiles compact action spacing through the measured unsafe wid
 
 test('OnlineList renders artwork title cells and preserves interactive rows without action buttons', async() => {
   await assertOnlineListMode(false)
+})
+
+test('OnlineList puts opted-in playlist and column headers before rows in one scroll area', async() => {
+  const { html } = await createOnlineListHarness(true, { scrollHeader: true })
+  const scrollStart = html.indexOf('class="virtualized-list"')
+  const playlistHeader = html.indexOf('Playlist Header')
+  const columnHeader = html.indexOf('music_title')
+  const songRow = html.indexOf('Online Song')
+
+  assert.ok(scrollStart > -1)
+  assert.ok(scrollStart < playlistHeader)
+  assert.ok(playlistHeader < columnHeader)
+  assert.ok(columnHeader < songRow)
+})
+
+test('OnlineList keeps column headers outside scrolling for existing callers', async() => {
+  const { html } = await createOnlineListHarness(true)
+
+  assert.ok(html.indexOf('music_title') < html.indexOf('class="virtualized-list"'))
+})
+
+test('OnlineList keeps an opted-in header above its empty message', async() => {
+  const { html } = await createOnlineListHarness(true, {
+    scrollHeader: true,
+    noItem: 'No songs',
+  })
+  const scrollStart = html.indexOf('class="virtualized-list"')
+  const playlistHeader = html.indexOf('Playlist Header')
+  const emptyMessage = html.indexOf('No songs')
+
+  assert.ok(scrollStart > -1)
+  assert.ok(scrollStart < playlistHeader)
+  assert.ok(playlistHeader < emptyMessage)
+  assert.equal(html.includes('Online Song'), false)
 })
 
 test('My Lists renders artwork title cells and preserves interactive rows with action buttons', async() => {

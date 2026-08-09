@@ -6,6 +6,9 @@
     tabindex="0"
     style="outline: none; height: 100%; overflow-y: auto; position: relative; display: block; contain: strict;"
   >
+    <div v-if="$slots.header" ref="dom_header">
+      <slot name="header" />
+    </div>
     <component :is="contentEl" :class="contentClass" :style="contentStyle">
       <div v-for="item in views" :key="item.key" :style="item.style">
         <slot name="default" v-bind="{ item: item.item, index: item.index }" />
@@ -129,6 +132,8 @@ export default {
   setup(props, { emit }) {
     const views = ref([])
     const dom_scrollContainer = ref(null)
+    const dom_header = ref(null)
+    const headerHeight = ref(0)
     let isListScrolling = false
     const isListScrollingRef = ref(false)
     let startIndex = -1
@@ -138,6 +143,7 @@ export default {
     let cancelScroll = null
     let isAutoScrolling = false
     let scrollToValue = 0
+    let headerResizeObserver = null
 
     const createList = (startIndex, endIndex) => {
       const cache = cachedList.slice(startIndex, endIndex)
@@ -160,7 +166,8 @@ export default {
       if (!dom_scrollContainer.value) return
       // const currentScrollTop = this.$refs.dom_scrollContainer.scrollTop
       const itemHeight = props.itemHeight
-      const currentStartIndex = Math.floor(currentScrollTop / itemHeight)
+      const rowScrollTop = Math.max(currentScrollTop - headerHeight.value, 0)
+      const currentStartIndex = Math.floor(rowScrollTop / itemHeight)
       const scrollContainerHeight = dom_scrollContainer.value.clientHeight
       const currentEndIndex = currentStartIndex + Math.ceil(scrollContainerHeight / itemHeight)
       const continuous = currentStartIndex <= endIndex && currentEndIndex >= startIndex
@@ -247,7 +254,7 @@ export default {
     }
 
     const scrollToIndex = (index, offset = 0, animate = false, onScrollEnd) => {
-      scrollTo(Math.max(index * props.itemHeight + offset, 0), animate, onScrollEnd)
+      scrollTo(Math.max(headerHeight.value + index * props.itemHeight + offset, 0), animate, onScrollEnd)
     }
 
     const getScrollTop = () => {
@@ -261,6 +268,7 @@ export default {
     const contentStyle = computed(() => {
       const style = {
         display: 'block',
+        position: 'relative',
         height: props.list.length * props.itemHeight + 'px',
       }
       if (isListScrollingRef.value) style['pointer-events'] = 'none'
@@ -273,6 +281,14 @@ export default {
           updateView()
         })
       })
+    }
+
+    const updateHeaderHeight = () => {
+      const nextHeight = dom_header.value?.offsetHeight ?? 0
+      if (nextHeight == headerHeight.value) return
+      headerHeight.value = nextHeight
+      scrollTop = -1
+      scheduleUpdateView()
     }
 
     const handleReset = list => {
@@ -304,6 +320,12 @@ export default {
       cachedList = Array(props.list.length)
       startIndex = -1
       endIndex = -1
+      updateHeaderHeight()
+
+      if (dom_header.value && window.ResizeObserver) {
+        headerResizeObserver = new window.ResizeObserver(updateHeaderHeight)
+        headerResizeObserver.observe(dom_header.value)
+      }
 
       if (props.list.length) {
         scheduleUpdateView()
@@ -313,12 +335,14 @@ export default {
     onBeforeUnmount(() => {
       dom_scrollContainer.value.removeEventListener('scroll', onScroll)
       window.removeEventListener('resize', handleResize)
+      if (headerResizeObserver) headerResizeObserver.disconnect()
       if (cancelScroll) cancelScroll()
     })
 
     return {
       views,
       dom_scrollContainer,
+      dom_header,
       contentStyle,
       scrollTo,
       scrollToIndex,

@@ -151,13 +151,18 @@ export const importApi = async(script: string): Promise<LX.UserApi.ImportUserApi
   }))
 }
 
+export interface GitHubUserApiReplacement {
+  apiList: LX.UserApi.UserApiInfo[]
+  skipped: string[]
+}
+
 export const replaceApisFromGitHub = async(
   items: LX.UserApi.GitHubImportItem[],
-): Promise<LX.UserApi.UserApiInfo[]> => {
+): Promise<GitHubUserApiReplacement> => {
   return runUserApiTask(async() => {
     const previousState = cloneUserApiState(getUserApiState())
     const previousIds = new Set(previousState.apiList.map(api => api.id))
-    const nextState = await prepareApisFromGitHub(items)
+    const { state: nextState, skipped } = await prepareApisFromGitHub(items)
     const apiList = commitUserApiState(nextState)
     const failureApiList = cloneUserApiList(apiList)
     const removedIds = getRemovedUserApiIds(previousIds, apiList)
@@ -186,7 +191,7 @@ export const replaceApisFromGitHub = async(
       removedIds,
       'cleanup playback fallbacks after GitHub config failure:',
     )
-    return apiList
+    return { apiList, skipped }
   })
 }
 

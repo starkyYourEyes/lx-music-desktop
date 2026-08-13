@@ -78,7 +78,10 @@ const createHarness = (options = {}) => {
       getUserApiSyncData: async() => ({ apis: [] }),
       importApi: async() => api('imported'),
       notifyUserApiChanged: () => { notifications++ },
-      prepareApisFromGitHub: async() => cloneState(nextState),
+      prepareApisFromGitHub: async() => ({
+        state: cloneState(nextState),
+        skipped: [],
+      }),
       prepareUserApisFromSync: async() => cloneState(nextState),
       setAllowShowUpdateAlert() {},
       commitUserApiState(next) {

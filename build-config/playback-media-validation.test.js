@@ -87,7 +87,10 @@ test('matched tx fallback persists only the matched track captured authorization
   await session.flush()
   assert.deepEqual(session.cacheSaveCalls, [{
     key: musicUrlKey(matchedTx, '128k', txAuthorization),
-    url: 'https://matched/tx',
+    value: {
+      url: 'https://matched/tx',
+      reportedQuality: null,
+    },
   }])
 })
 
@@ -834,7 +837,7 @@ test('post-commit recovery discards a matching validated preload before fresh pr
 
 test('playback cache looks from requested quality downward', async () => {
   const cache = createCacheHarness({
-    rows: new Map([['song_flac', 'https://cached/flac']]),
+    rows: new Map([['song_flac', { url: 'https://cached/flac', reportedQuality: null }]]),
   })
   assert.deepEqual(cache.getPlaybackQualityOrder('flac24bit'), ['flac24bit', 'flac', '320k', '128k'])
   assert.deepEqual(await cache.lookup(musicUrlKey(onlineMusic, 'flac24bit')), {
@@ -844,7 +847,10 @@ test('playback cache looks from requested quality downward', async () => {
 
 test('bad provisional cache is tombstoned before asynchronous deletion', async () => {
   const gate = deferred()
-  const cache = createCacheHarness({ rows: new Map([['song_320k', 'https://bad']]), remove: () => gate.promise })
+  const cache = createCacheHarness({
+    rows: new Map([['song_320k', { url: 'https://bad', reportedQuality: null }]]),
+    remove: () => gate.promise,
+  })
   const key = musicUrlKey(onlineMusic, '320k')
   const hit = await cache.lookup(key)
   const deleting = cache.tombstoneKey(hit.key)
@@ -947,10 +953,10 @@ test('per-key persistence cannot resurrect an old URL or delete a newer commit',
   let saveCount = 0
   const cache = createCacheHarness({
     rows: durableRows,
-    save: async(key, url) => {
+    save: async(key, value) => {
       saveCount++
       if (saveCount == 1) await firstSave.promise
-      durableRows.set(`${key.sourceTrackId}_${key.quality}`, url)
+      durableRows.set(`${key.sourceTrackId}_${key.quality}`, value)
     },
     remove: async key => { durableRows.delete(`${key.sourceTrackId}_${key.quality}`) },
   })
@@ -963,7 +969,10 @@ test('per-key persistence cannot resurrect an old URL or delete a newer commit',
   assert.equal(saveCount, 1)
   firstSave.resolve()
   await Promise.all([oldWrite, deleting, newWrite])
-  assert.equal(durableRows.get('song_320k'), 'https://primary')
+  assert.deepEqual(durableRows.get('song_320k'), {
+    url: 'https://primary',
+    reportedQuality: null,
+  })
   assert.deepEqual(cache.persistenceMutations, [
     'save:song_320k:https://fallback',
     'remove:song_320k',
@@ -1035,13 +1044,13 @@ test('a post-adoption lookup waits for stale same-key save cleanup before readin
   const cache = createCacheHarness({
     rows: durableRows,
     read: async readKey => {
-      const url = durableRows.get(`${readKey.sourceTrackId}_${readKey.quality}`) ?? null
-      events.push(`read:${url ?? 'miss'}`)
-      return url
+      const value = durableRows.get(`${readKey.sourceTrackId}_${readKey.quality}`) ?? null
+      events.push(`read:${value?.url ?? 'miss'}`)
+      return value
     },
-    save: async(saveKey, url) => {
-      durableRows.set(`${saveKey.sourceTrackId}_${saveKey.quality}`, url)
-      events.push(`save:${url}`)
+    save: async(saveKey, value) => {
+      durableRows.set(`${saveKey.sourceTrackId}_${saveKey.quality}`, value)
+      events.push(`save:${value.url}`)
       saveVisible.resolve()
       await saveMayReturn.promise
     },
@@ -1080,13 +1089,13 @@ test('stale in-flight commit cleanup cannot delete a newer current-generation co
   let saveCount = 0
   const cache = createCacheHarness({
     rows: durableRows,
-    save: async(key, url) => {
+    save: async(key, value) => {
       saveCount++
       if (saveCount == 1) {
         saveStarted.resolve()
         await saveGate.promise
       }
-      durableRows.set(`${key.sourceTrackId}_${key.quality}`, url)
+      durableRows.set(`${key.sourceTrackId}_${key.quality}`, value)
     },
   })
   const key = musicUrlKey(onlineMusic, '320k')
@@ -1105,7 +1114,10 @@ test('stale in-flight commit cleanup cannot delete a newer current-generation co
     url: currentUrl,
     provisional: false,
   })
-  assert.equal(durableRows.get('song_320k'), currentUrl)
+  assert.deepEqual(durableRows.get('song_320k'), {
+    url: currentUrl,
+    reportedQuality: null,
+  })
   assert.deepEqual(cache.persistenceMutations, [
     'save:song_320k:https://commit/pre-generation',
     'remove:song_320k',

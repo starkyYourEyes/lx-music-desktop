@@ -695,7 +695,8 @@ describe('scoped cache ownership callsites', () => {
       signal: controller.signal,
     }), {
       url: 'https://audio/custom',
-      quality: '320k',
+      resolvedQuality: '320k',
+      reportedQuality: '320k',
     })
     assert.equal(authorizationRequests, 0)
   })

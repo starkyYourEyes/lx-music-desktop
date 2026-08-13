@@ -110,11 +110,13 @@ const createReplacementHarness = items => {
     apiList: structuredClone(utilsHarness.utils.getUserApiState().apiList),
     scripts: new Map(utilsHarness.utils.getUserApiState().scripts),
   }
+  const previousSettings = structuredClone(global.lx.appSetting)
 
   return {
     items,
     module,
     previousState,
+    previousSettings,
     runtimeActions,
     get commitCount() { return utilsHarness.getStoreSetCount() },
     get currentState() {
@@ -124,6 +126,7 @@ const createReplacementHarness = items => {
         scripts: new Map(state.scripts),
       }
     },
+    get currentSettings() { return structuredClone(global.lx.appSetting) },
     restore() { global.lx = originalLx },
   }
 }
@@ -177,6 +180,7 @@ test('all-invalid GitHub batch rejects before replacement commits', async() => {
     )
     assert.equal(harness.commitCount, 0)
     assert.deepEqual(harness.currentState, harness.previousState)
+    assert.deepEqual(harness.currentSettings, harness.previousSettings)
     assert.deepEqual(harness.runtimeActions, [])
   } finally {
     harness.restore()

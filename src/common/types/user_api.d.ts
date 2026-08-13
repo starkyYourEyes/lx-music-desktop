@@ -24,10 +24,14 @@ declare namespace LX {
       detail?: string
     }
 
-    type GitHubReplaceResult = {
-      success: true
+    interface GitHubReplaceSuccess {
       apiList: UserApiInfo[]
-    } | {
+      skipped: string[]
+    }
+
+    type GitHubReplaceResult = ({
+      success: true
+    } & GitHubReplaceSuccess) | {
       success: false
       apiList?: UserApiInfo[]
       error: GitHubReplaceError

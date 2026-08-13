@@ -6,6 +6,7 @@ const { createPoolHarness } = require('../test-utils/playback-fallback-harness')
 
 const removeEventName = 'remove_user_api'
 const ensureEventName = 'ensure_user_api'
+const replaceEventName = 'replace_user_api_from_github'
 const createIpcNames = values => new Proxy(values, {
   get(target, property) {
     return Reflect.has(target, property) ? Reflect.get(target, property) : String(property)
@@ -14,6 +15,7 @@ const createIpcNames = values => new Proxy(values, {
 const winMainEventNames = createIpcNames({
   remove_user_api: removeEventName,
   ensure_user_api: ensureEventName,
+  replace_user_api_from_github: replaceEventName,
 })
 const emptyEventNames = createIpcNames({})
 const hotKeyGroup = new Proxy({}, {
@@ -128,6 +130,53 @@ const createRendererRemoveHarness = rendererInvoke => loadTsModule(
   },
 )
 
+const createMainReplaceHarness = replaceImplementation => {
+  const registeredHandlers = new Map()
+  const runtimePool = {
+    async releaseOwner() {},
+    getStatus() {},
+    request() {},
+    async ensure() {},
+    cancel() {},
+    acquireLease() {},
+    async releaseLease() {},
+  }
+  const runtime = loadTsModule(
+    path.join(__dirname, '../../src/main/modules/winMain/rendererEvent/userApi.ts'),
+    {
+      '@common/ipcNames': { WIN_MAIN_RENDERER_EVENT_NAME: winMainEventNames },
+      '@common/mainIpc': {
+        mainHandle(name, handler) { registeredHandlers.set(name, handler) },
+        mainOn() {},
+      },
+      '@common/utils': { log: { error() {} } },
+      '@main/modules/userApi': {
+        createReplacementFailureApiListCarrier: () => ({}),
+        getApiList() {},
+        importApi() {},
+        replaceApisFromGitHub: replaceImplementation,
+        removeApi() {},
+        setApi() {},
+        setAllowShowUpdateAlert() {},
+        takeReplacementFailureApiList() {},
+      },
+      '@main/modules/userApi/runtimeError': { normalizeRuntimeFailure: error => error },
+      '@main/modules/userApi/runtimePool': { getUserApiRuntimePool: () => runtimePool },
+      '@main/modules/userApi/ipcValidation': {
+        parseUserApiCancellationPayload: value => value,
+        parseUserApiEnsurePayload: value => value,
+        parseUserApiRequestPayload: value => value,
+        parseUserApiRuntimeLeasePayload: value => value,
+      },
+      '@main/modules/winMain/main': { sendEvent() {} },
+    },
+  )
+  runtime.default()
+  const replaceHandler = registeredHandlers.get(replaceEventName)
+  assert.equal(typeof replaceHandler, 'function')
+  return items => replaceHandler({ params: items })
+}
+
 const createMainEnsureHarness = ensureImplementation => {
   const registeredHandlers = new Map()
   const runtimePool = {
@@ -185,6 +234,16 @@ const retainedApiList = [{
   description: 'Committed after lifecycle failure',
   allowShowUpdateAlert: false,
 }]
+
+const replaceSuccess = {
+  apiList: [{
+    id: 'github-source',
+    name: 'GitHub source',
+    description: 'Imported remote source',
+    allowShowUpdateAlert: true,
+  }],
+  skipped: ['v260813/group/invalid.js'],
+}
 
 test('payload API identity cannot impersonate the bound sender', async() => {
   const harness = createPoolHarness()
@@ -396,4 +455,26 @@ test('direct delete renderer helper preserves an ordinary invoke rejection witho
     error => error === failure,
   )
   assert.equal(published, false)
+})
+
+test('GitHub replacement main handler preserves skipped paths in its success result', async() => {
+  const invoke = createMainReplaceHarness(async() => replaceSuccess)
+
+  assert.deepEqual(await invoke([]), {
+    success: true,
+    ...replaceSuccess,
+  })
+})
+
+test('GitHub replacement renderer helper returns the full success result', async() => {
+  const runtime = createRendererRemoveHarness(async(channel, items) => {
+    assert.equal(channel, replaceEventName)
+    assert.deepEqual(items, [])
+    return { success: true, ...replaceSuccess }
+  })
+
+  assert.deepEqual(
+    await runtime.replaceUserApisFromGitHub([]),
+    replaceSuccess,
+  )
 })

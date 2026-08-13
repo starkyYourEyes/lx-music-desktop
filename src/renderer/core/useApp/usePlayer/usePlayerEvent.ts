@@ -24,6 +24,7 @@ import {
   type PlaybackUrlCache,
 } from '@renderer/core/music/playback/cache'
 import { setLoadedMusicIdentity } from '@renderer/core/player'
+import { currentPlaybackQuality } from '@renderer/store/player/state'
 
 export interface PlayerMediaEventHandlers {
   canplay: (event: ResourceMediaEvent) => void
@@ -39,6 +40,7 @@ export type CreatePlayerMediaEventHandlers = (deps: {
   cache: PlaybackUrlCache
   getErrorCode: () => number | undefined
   setLoadedMusicIdentity: (identity: string) => void
+  setPlaybackQuality: (value: LX.Quality | null) => void
   appEvent: Pick<typeof window.app_event,
   'error' | 'playerError' | 'playerCanplay' | 'playerLoadstart' |
   'playerLoadeddata' | 'playerWaiting'>
@@ -48,6 +50,7 @@ export type CreatePlayerMediaEventHandlers = (deps: {
 export const createPlayerMediaEventHandlers: CreatePlayerMediaEventHandlers = deps => ({
   error({ resource, currentSrc }) {
     if (!deps.resource.isCurrentResourceEvent(resource, currentSrc)) return
+    deps.setPlaybackQuality(null)
     if (resource.kind == 'candidate') {
       deps.coordinator.handleForegroundError(resource)
       return
@@ -71,8 +74,10 @@ export const createPlayerMediaEventHandlers: CreatePlayerMediaEventHandlers = de
       if (result.status != 'accepted') return
       if (!deps.resource.replaceResourceContext(resource, result.resource)) return
       acceptedResource = { ...result.resource, resourceGeneration: resource.resourceGeneration }
+      deps.appEvent.playerLoadeddata()
     }
     deps.setLoadedMusicIdentity(acceptedResource.songIdentity)
+    deps.setPlaybackQuality(acceptedResource.reportedQuality ?? null)
     deps.appEvent.playerCanplay()
   },
   loadstart({ resource, currentSrc }) {
@@ -96,6 +101,7 @@ export default () => {
     cache: playbackUrlCache,
     getErrorCode,
     setLoadedMusicIdentity,
+    setPlaybackQuality: value => { currentPlaybackQuality.value = value },
     appEvent: window.app_event,
     reportPersistenceFailure: value => log.error('playback cache persistence failure', value),
   })

@@ -2358,6 +2358,7 @@ const createPlayerHarness = (options = {}) => {
   let coordinatorDisposeCount = 0
   let sessionOrdinal = 0
   let candidateOrdinal = 0
+  let playbackQuality = null
 
   const mainAudio = new FakePlayerAudio(audioOperations, currentTimeWrites)
   const preloadAudio = new FakeCoordinatorPreloadAudio()
@@ -2458,6 +2459,7 @@ const createPlayerHarness = (options = {}) => {
         }
         const url = urls[index] ?? `https://fallback-${id}-${index}`
         const quality = options.winnerQuality ?? '128k'
+        const reportedQuality = options.sourceReportedQualities?.[index]
         const apiId = options.winner ?? input.sourceIds[Math.min(index, input.sourceIds.length - 1)]
         const candidateMusicInfo = options.winnerMusicInfo ?? (
           options.winnerPlatform == 'tx' ? matchedTx : input.musicInfo
@@ -2470,6 +2472,7 @@ const createPlayerHarness = (options = {}) => {
           apiId,
           ...(options.winnerPlatform ? { platform: options.winnerPlatform } : {}),
           quality,
+          ...(reportedQuality == null ? {} : { reportedQuality }),
           url,
           cacheKey: musicUrlKey(candidateMusicInfo, quality),
           deadlineAt: clock.now() + 10_000,
@@ -2546,7 +2549,7 @@ const createPlayerHarness = (options = {}) => {
     createLocalCandidateProvider: musicInfo => ({ musicInfo }),
   })
   const facade = factories.playback.createPlaybackMusicFacade({
-    getDownloadFilePath: async() => null,
+    getDownloadFilePath: async() => options.directDownloadUrl ?? null,
     buildSavePath: () => '',
     getLocalFilePath: async musicInfo => musicInfo.source == 'local'
       ? options.directPreloadUrl ?? null
@@ -2604,6 +2607,7 @@ const createPlayerHarness = (options = {}) => {
     emitVisibleError: () => { visibleErrorCount++ },
     scheduleAutoSkip: () => { autoSkipCalls++ },
     clearLoadTimeout() {},
+    setPlaybackQuality: value => { playbackQuality = value },
   })
   const pendingRefreshes = []
   const playHandlers = createValidationAwarePlayEventHandlers({
@@ -2646,6 +2650,7 @@ const createPlayerHarness = (options = {}) => {
     cache: playerCache,
     getErrorCode: () => mainAudio.error?.code,
     setLoadedMusicIdentity: identity => action.setLoadedMusicIdentity(identity),
+    setPlaybackQuality: value => { playbackQuality = value },
     appEvent,
     reportPersistenceFailure,
   })
@@ -2714,8 +2719,10 @@ const createPlayerHarness = (options = {}) => {
     },
     waitForBoundCandidate,
     currentResource: () => resource.getResourceContext(),
+    currentPlaybackQuality: () => playbackQuality,
     isValidating: () => coordinator.isForegroundValidating(),
     async startDirectPreload(info) { return realCoordinator.startPreload(info) },
+    async startPreload(info) { return realCoordinator.startPreload(info) },
     async promotePreloadToPlayer(info) {
       await setMusicUrl(info, { reason: 'initial' })
       return resource.getResourceContext()
@@ -3202,6 +3209,7 @@ const createIntegrationHarness = (options = {}) => {
     emitVisibleError: () => { visibleErrorCount++ },
     scheduleAutoSkip: () => { autoSkipCalls++ },
     clearLoadTimeout() {},
+    setPlaybackQuality() {},
   })
   const mediaHandlers = factories.player.media.createPlayerMediaEventHandlers({
     resource,
@@ -3209,6 +3217,7 @@ const createIntegrationHarness = (options = {}) => {
     cache,
     getErrorCode: () => mainAudio.error?.code,
     setLoadedMusicIdentity: identity => action.setLoadedMusicIdentity(identity),
+    setPlaybackQuality() {},
     appEvent: {
       error() { visibleErrorCount++ },
       playerError(code) { playHandlers?.error(code) },

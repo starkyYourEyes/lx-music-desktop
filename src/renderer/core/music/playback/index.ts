@@ -169,7 +169,15 @@ export const createPlaybackMusicFacade: CreatePlaybackMusicFacade = deps => {
     if ('progress' in musicInfo) {
       const path = await deps.getDownloadFilePath(musicInfo, deps.buildSavePath(musicInfo))
       return path
-        ? { kind: 'direct', resource: { kind: 'direct', songIdentity, url: deps.encodePath(path) } }
+        ? {
+            kind: 'direct',
+            resource: {
+              kind: 'direct',
+              songIdentity,
+              url: deps.encodePath(path),
+              reportedQuality: musicInfo.metadata.quality,
+            },
+          }
         : {
             kind: 'session',
             session: await deps.createOnlinePlaybackSession({

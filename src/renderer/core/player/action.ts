@@ -5,7 +5,15 @@ import {
   setPlay,
   type PlayerResourceController,
 } from '@renderer/plugins/player'
-import { isPlay, playedList, playInfo, playMusicInfo, tempPlayList, musicInfo as _musicInfo } from '@renderer/store/player/state'
+import {
+  currentPlaybackQuality,
+  isPlay,
+  playedList,
+  playInfo,
+  playMusicInfo,
+  tempPlayList,
+  musicInfo as _musicInfo,
+} from '@renderer/store/player/state'
 import {
   getList,
   clearPlayedList,
@@ -176,6 +184,7 @@ export type CreatePlaybackActionController = (deps: {
   reportPlaybackError?: () => void
   scheduleAutoSkip: () => void
   clearLoadTimeout: () => void
+  setPlaybackQuality: (value: LX.Quality | null) => void
 }) => PlaybackActionController
 
 export const createPlaybackActionController: CreatePlaybackActionController = deps => {
@@ -206,6 +215,7 @@ export const createPlaybackActionController: CreatePlaybackActionController = de
     if (!isCurrent(binding) || binding.terminalFailureEmitted ||
         (error.scope == 'session' && error.kind == 'cancelled')) return
     binding.terminalFailureEmitted = true
+    deps.setPlaybackQuality(null)
     deps.clearLoadTimeout()
     deps.setAllStatus(error.message)
     deps.reportPlaybackError?.()
@@ -215,6 +225,7 @@ export const createPlaybackActionController: CreatePlaybackActionController = de
   const clearActiveResource = () => {
     active = null
     loadedMusicIdentity = ''
+    deps.setPlaybackQuality(null)
     deps.resource.setStop()
   }
   const cancelInternal = (reason: ForegroundCancelReason) => {
@@ -235,6 +246,7 @@ export const createPlaybackActionController: CreatePlaybackActionController = de
 
   return {
     async setMusicUrl(info, options = {}) {
+      deps.setPlaybackQuality(null)
       const normalized = normalizeSetMusicUrlOptions(options)
       const binding: ActiveForegroundBinding = {
         token: ++nextToken,
@@ -291,6 +303,7 @@ export const initializePlaybackActionController = (): PlaybackActionController =
     }),
     scheduleAutoSkip: addDelayNextTimeout,
     clearLoadTimeout,
+    setPlaybackQuality: value => { currentPlaybackQuality.value = value },
   })
   return actionControllerInstance
 }

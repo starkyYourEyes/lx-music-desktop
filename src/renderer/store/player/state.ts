@@ -30,6 +30,8 @@ export const musicInfo = window.lxData.musicInfo = reactive<PlayerMusicInfo>({
 
 export const isPlay = ref(false)
 
+export const currentPlaybackQuality = ref<LX.Quality | null>(null)
+
 export const status = window.lxData.status = ref('')
 
 export const statusText = ref('')

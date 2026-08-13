@@ -207,19 +207,65 @@ test('player reasons flow through production playback session factories', async(
   ])
 })
 
-test('direct local WebDAV and downloaded resources commit identity on canplay', async() => {
+test('direct local WebDAV and downloaded resources publish quality only on canplay', async() => {
   const harness = createPlayerHarness()
   const resources = [
-    { kind: 'direct', songIdentity: 'local:local-song', url: 'file:///local.mp3' },
-    { kind: 'direct', songIdentity: 'webdav:webdav-song', url: 'https://webdav/song.mp3' },
-    { kind: 'direct', songIdentity: 'wy:song', url: 'file:///downloaded.mp3' },
+    [{ kind: 'direct', songIdentity: 'local:local-song', url: 'file:///local.mp3' }, null],
+    [{ kind: 'direct', songIdentity: 'webdav:webdav-song', url: 'https://webdav/song.mp3' }, null],
+    [{ kind: 'direct', songIdentity: 'wy:song', url: 'file:///downloaded.mp3', reportedQuality: '320k' }, '320k'],
   ]
-  for (const resource of resources) {
+  for (const [resource, expectedQuality] of resources) {
     const event = harness.bindResource(resource)
     assert.notEqual(harness.loadedMusicIdentity, resource.songIdentity)
+    assert.equal(harness.currentPlaybackQuality(), null)
     harness.emitCanplay(event)
     assert.equal(harness.loadedMusicIdentity, resource.songIdentity)
+    assert.equal(harness.currentPlaybackQuality(), expectedQuality)
   }
+})
+
+test('candidate quality stays hidden until current canplay accepts it', async() => {
+  const harness = createPlayerHarness({ sourceReportedQualities: ['flac'] })
+  const candidate = await harness.bindCandidate('https://audio/current')
+  assert.equal(harness.currentPlaybackQuality(), null)
+  harness.emitLoadeddata(candidate)
+  assert.equal(harness.currentPlaybackQuality(), null)
+  harness.emitCanplay(candidate)
+  assert.equal(harness.currentPlaybackQuality(), 'flac')
+})
+
+test('fallback rejection never publishes failed quality', async() => {
+  const harness = createPlayerHarness({
+    sourceUrls: ['https://audio/bad', 'https://audio/good'],
+    sourceReportedQualities: ['flac24bit', '192k'],
+  })
+  const failed = await harness.bindCandidate('https://audio/bad')
+  harness.emitError(failed)
+  assert.equal(harness.currentPlaybackQuality(), null)
+  const accepted = await harness.waitForBoundCandidate('https://audio/good')
+  harness.emitCanplay(accepted)
+  assert.equal(harness.currentPlaybackQuality(), '192k')
+})
+
+test('replacement clears quality and stale canplay cannot restore it', async() => {
+  const harness = createPlayerHarness({
+    deferredForeground: true,
+    sourceReportedQualities: ['320k', 'ape'],
+  })
+  const oldEvent = harness.bindResource({
+    kind: 'direct', songIdentity: 'local:old', url: 'file:///old', reportedQuality: '320k',
+  })
+  harness.emitCanplay(oldEvent)
+  assert.equal(harness.currentPlaybackQuality(), '320k')
+  const call = harness.deferNextForeground()
+  const replacing = harness.setMusicUrl(songB, { reason: 'initial' })
+  assert.equal(harness.currentPlaybackQuality(), null)
+  harness.emitCanplay(oldEvent)
+  assert.equal(harness.currentPlaybackQuality(), null)
+  harness.resolveForeground(call, {
+    kind: 'direct', songIdentity: 'wy:song-b', url: 'https://new', reportedQuality: 'ape',
+  })
+  await replacing
 })
 
 test('stale direct canplay cannot commit an old song identity', () => {
@@ -230,6 +276,20 @@ test('stale direct canplay cannot commit an old song identity', () => {
   assert.notEqual(harness.loadedMusicIdentity, 'local:old')
   harness.emitCanplay(currentEvent)
   assert.equal(harness.loadedMusicIdentity, 'local:new')
+})
+
+test('accepted candidate replays loadeddata before canplay after media validation', async() => {
+  const harness = createPlayerHarness()
+  const candidate = await harness.bindCandidate('https://audio')
+
+  harness.emitLoadeddata(candidate)
+  assert.equal(harness.playerLoadeddataEvents, 0)
+  harness.emitCanplay(candidate)
+
+  assert.equal(harness.playerLoadeddataEvents, 1)
+  assert.deepEqual(harness.playerMediaEvents, ['loadeddata', 'canplay'])
+  harness.emitCanplay(candidate)
+  assert.equal(harness.playerLoadeddataEvents, 1)
 })
 
 test('resource binding disables autoplay and pauses when shouldPlay is false', () => {
@@ -263,12 +323,17 @@ test('loadedmetadata seek is one-shot and generation guarded across replacement'
 
 test('playback cancellation clears the resource context before late media events', async() => {
   const harness = createPlayerHarness()
-  const oldEvent = await harness.bindCandidate('https://old')
+  const oldEvent = harness.bindResource({
+    kind: 'direct', songIdentity: 'local:old', url: 'file:///old', reportedQuality: 'flac',
+  })
+  harness.emitCanplay(oldEvent)
+  assert.equal(harness.currentPlaybackQuality(), 'flac')
   harness.cancelPlayback('stop')
   assert.equal(harness.currentResource(), null)
+  assert.equal(harness.currentPlaybackQuality(), null)
   harness.emitCanplay(oldEvent)
   await harness.emitError(oldEvent, 4)
-  assert.equal(harness.playerCanplayEvents, 0)
+  assert.equal(harness.playerCanplayEvents, 1)
   assert.equal(harness.playerErrorEvents, 0)
   assert.equal(harness.coordinatorMediaErrors, 0)
   assert.equal(harness.loadedMusicIdentity, '')
@@ -296,12 +361,15 @@ test('starting replacement work clears the previous resource before its request 
 test('disposing playback clears the resource and shuts the coordinator down once', async() => {
   const harness = createPlayerHarness()
   const oldEvent = harness.bindResource({
-    kind: 'direct', songIdentity: 'local:old', url: 'file:///old',
+    kind: 'direct', songIdentity: 'local:old', url: 'file:///old', reportedQuality: 'flac',
   })
+  harness.emitCanplay(oldEvent)
+  assert.equal(harness.currentPlaybackQuality(), 'flac')
   harness.disposePlayback()
   assert.equal(harness.currentResource(), null)
+  assert.equal(harness.currentPlaybackQuality(), null)
   harness.emitCanplay(oldEvent)
-  assert.equal(harness.playerCanplayEvents, 0)
+  assert.equal(harness.playerCanplayEvents, 1)
   assert.equal(harness.coordinatorDisposeCount, 1)
 })
 
@@ -331,10 +399,16 @@ test('candidate deadline publishes and binds the fallback resource', async() => 
 })
 
 test('post-bind session exhaustion uses the one final failure path once', async() => {
-  const harness = createPlayerHarness({ sourceUrls: ['https://bad'], exhaustAfterMediaError: true, autoSkip: true })
+  const harness = createPlayerHarness({
+    sourceUrls: ['https://bad'],
+    sourceReportedQualities: ['flac'],
+    exhaustAfterMediaError: true,
+    autoSkip: true,
+  })
   const bound = await harness.bindCandidate('https://bad')
   harness.emitError(bound, 4)
   await harness.flush()
+  assert.equal(harness.currentPlaybackQuality(), null)
   assert.equal(harness.visibleErrorCount, 1)
   assert.equal(harness.finalResolutionFailureCount, 1)
   assert.equal(harness.playerErrorEvents, 0)
@@ -352,6 +426,18 @@ test('promoted direct preload commits identity only on real-player canplay', asy
   harness.emitCanplay(foregroundListener)
   assert.equal(harness.loadedMusicIdentity, 'local:local-song')
   assert.equal(harness.createRequestCount, 1)
+})
+
+test('promoted validated preload publishes quality only on real-player canplay', async() => {
+  const harness = createPlayerHarness({ sourceReportedQualities: ['flac'] })
+  const preloadListener = await harness.startPreload(onlineMusic)
+  assert.equal(harness.emitPreloadCanplay(preloadListener), 'accepted')
+  assert.equal(harness.currentPlaybackQuality(), null)
+  const foregroundListener = await harness.promotePreloadToPlayer(onlineMusic)
+  assert.equal(foregroundListener.kind, 'validated')
+  assert.equal(harness.currentPlaybackQuality(), null)
+  harness.emitCanplay(foregroundListener)
+  assert.equal(harness.currentPlaybackQuality(), 'flac')
 })
 
 test('database save failure after canplay is logged without reversing playback success', async() => {
@@ -376,6 +462,21 @@ test('post-commit delete and throwing persistence reporter cannot escape observa
   assert.equal(harness.persistenceErrorCount, 1)
   assert.equal(harness.playerErrorEvents, 1)
   assert.deepEqual(harness.refreshRequests, [{ reason: 'postCommitError' }])
+})
+
+test('post-commit error clears old quality before retry publishes the replacement', async() => {
+  const harness = createPlayerHarness({
+    sourceUrls: ['https://initial'], sourceReportedQualities: ['flac', '128k'],
+  })
+  const initial = await harness.bindCandidate('https://initial')
+  harness.emitCanplay(initial)
+  assert.equal(harness.currentPlaybackQuality(), 'flac')
+  await harness.emitError(initial, 3)
+  assert.equal(harness.currentPlaybackQuality(), null)
+  await harness.flush()
+  const replacement = harness.currentResource()
+  harness.emitCanplay(replacement)
+  assert.equal(harness.currentPlaybackQuality(), 'flac')
 })
 
 test('all-source failure emits once and applies the configured auto-skip policy', async() => {

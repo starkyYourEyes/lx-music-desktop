@@ -18,6 +18,7 @@ export interface DirectPlaybackResource {
   kind: 'direct'
   songIdentity: string
   url: string
+  reportedQuality?: LX.Quality
 }
 
 export interface CandidatePlaybackResource {
@@ -30,6 +31,7 @@ export interface CandidatePlaybackResource {
   apiId?: string
   platform?: LX.OnlineSource
   quality: LX.Quality
+  reportedQuality?: LX.Quality
   cacheKey?: AuthorizedMusicUrlKeyV1
   deadlineAt: number
 }
@@ -42,6 +44,7 @@ export interface ValidatedPlaybackResource {
   apiId?: string
   platform?: LX.OnlineSource
   quality?: LX.Quality
+  reportedQuality?: LX.Quality
   cacheKey?: AuthorizedMusicUrlKeyV1
 }
 
@@ -162,6 +165,7 @@ const toCandidateResource = (
   ...(candidate.apiId ? { apiId: candidate.apiId } : {}),
   ...(candidate.platform ? { platform: candidate.platform } : {}),
   quality: candidate.quality,
+  ...(candidate.reportedQuality == null ? {} : { reportedQuality: candidate.reportedQuality }),
   cacheKey: candidate.cacheKey,
   deadlineAt: candidate.deadlineAt,
 })
@@ -176,6 +180,7 @@ const toValidatedCandidate = (
   ...(resource.apiId ? { apiId: resource.apiId } : {}),
   ...(resource.platform ? { platform: resource.platform } : {}),
   quality: resource.quality,
+  ...(resource.reportedQuality == null ? {} : { reportedQuality: resource.reportedQuality }),
   cacheKey: resource.cacheKey,
 })
 
@@ -319,6 +324,7 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
         origin: 'direct',
         songIdentity: resource.songIdentity,
         url: resource.url,
+        ...(resource.reportedQuality == null ? {} : { reportedQuality: resource.reportedQuality }),
       }
       record.phase = 'validated'
       return 'accepted'

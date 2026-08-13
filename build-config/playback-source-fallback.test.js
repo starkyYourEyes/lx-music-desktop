@@ -360,6 +360,22 @@ test('missing and invalid custom quality use only the requested resolved quality
   }
 })
 
+test('downloaded resource carries trusted download metadata quality', async() => {
+  const harness = createMusicFacadeHarness()
+  const result = await harness.createPlaybackRequest({ musicInfo: downloadItem, reason: 'initial' })
+  assert.equal(result.kind, 'direct')
+  assert.equal(result.resource.reportedQuality, downloadItem.metadata.quality)
+})
+
+test('direct local and WebDAV resources omit reported quality', async() => {
+  const harness = createMusicFacadeHarness()
+  for (const info of [localMusic, webdavMusic]) {
+    const result = await harness.createPlaybackRequest({ musicInfo: info, reason: 'initial' })
+    assert.equal(result.kind, 'direct')
+    assert.equal(Object.hasOwn(result.resource, 'reportedQuality'), false)
+  }
+})
+
 test('custom local playback keeps the existing 128k cache-bucket convention', async() => {
   const calls = []
   const adapter = createAdapterHarness({

@@ -151,14 +151,22 @@ test('Basic settings exposes a bounded localized play bar height control', () =>
   assert.match(html, /PLAY_BAR_HEIGHT_MAX/)
   assert.match(html, /type="number"/)
   assert.match(html, />px</)
+  assert.equal((html.match(/aria-labelledby="basic_playbar_height"/g) ?? []).length, 2)
 
   const updates = []
   const component = loadSettingBasic({ updateSetting: setting => updates.push(setting) })
-  const { handlePlayBarHeightChange } = component.setup()
+  const { handlePlayBarHeightChange, playBarHeightInput } = component.setup()
+  assert.equal(playBarHeightInput.value, 74)
+  handlePlayBarHeightChange('80')
+  assert.equal(playBarHeightInput.value, 74)
   handlePlayBarHeightChange({ target: { value: '55' } })
+  assert.equal(playBarHeightInput.value, 56)
   handlePlayBarHeightChange('65.6')
+  assert.equal(playBarHeightInput.value, 66)
   handlePlayBarHeightChange('invalid')
+  assert.equal(playBarHeightInput.value, 74)
   assert.deepEqual(updates, [
+    { 'common.playBarHeight': 74 },
     { 'common.playBarHeight': 56 },
     { 'common.playBarHeight': 66 },
     { 'common.playBarHeight': 74 },

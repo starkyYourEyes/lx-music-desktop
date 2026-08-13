@@ -115,11 +115,13 @@ dd
     .p(:class="$style.playBarHeightControl")
       input(
         :class="$style.playBarHeightRange" type="range" :min="PLAY_BAR_HEIGHT_MIN" :max="PLAY_BAR_HEIGHT_MAX" step="1"
+        aria-labelledby="basic_playbar_height"
         :value="appSetting['common.playBarHeight']"
         @input="handlePlayBarHeightChange")
       base-input.gap-left(
-        :class="$style.playBarHeightInput" type="number"
-        :model-value="appSetting['common.playBarHeight']"
+        :class="$style.playBarHeightInput" type="number" :min="PLAY_BAR_HEIGHT_MIN" :max="PLAY_BAR_HEIGHT_MAX" step="1"
+        aria-labelledby="basic_playbar_height"
+        :model-value="playBarHeightInput"
         @change="handlePlayBarHeightChange")
       span(:class="$style.playBarHeightUnit") px
 dd
@@ -375,10 +377,16 @@ export default {
       ]
     })
 
+    const playBarHeightInput = ref(normalizePlayBarHeight(appSetting['common.playBarHeight']))
     const handlePlayBarHeightChange = value => {
       const nextValue = value?.target ? value.target.value : value
-      updateSetting({ 'common.playBarHeight': normalizePlayBarHeight(nextValue) })
+      const height = normalizePlayBarHeight(nextValue)
+      playBarHeightInput.value = height
+      updateSetting({ 'common.playBarHeight': height })
     }
+    watch(() => appSetting['common.playBarHeight'], value => {
+      playBarHeightInput.value = normalizePlayBarHeight(value)
+    })
 
     const systemFontList = ref([])
     const fontList = computed(() => {
@@ -440,6 +448,7 @@ export default {
       controlBtnPositionList,
       PLAY_BAR_HEIGHT_MIN,
       PLAY_BAR_HEIGHT_MAX,
+      playBarHeightInput,
       handlePlayBarHeightChange,
       fontList,
       isFullscreen,

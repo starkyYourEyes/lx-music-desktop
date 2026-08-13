@@ -86,6 +86,9 @@ test('play bar height normalization defaults, clamps, and rounds user input', ()
   assert.equal(normalizePlayBarHeight(null), 74)
   assert.equal(normalizePlayBarHeight(''), 74)
   assert.equal(normalizePlayBarHeight('invalid'), 74)
+  assert.equal(normalizePlayBarHeight(false), 74)
+  assert.equal(normalizePlayBarHeight(true), 74)
+  assert.equal(normalizePlayBarHeight([]), 74)
   assert.equal(normalizePlayBarHeight(55), 56)
   assert.equal(normalizePlayBarHeight(65.6), 66)
   assert.equal(normalizePlayBarHeight(75), 74)
@@ -144,4 +147,20 @@ test('ModernBar compiled styles consume the responsive layout variables', async(
   const artwork = declarationsFor('picContent')
   assert.equal(artwork.width, 'var(--play-bar-artwork-size)')
   assert.equal(artwork.height, 'var(--play-bar-artwork-size)')
+})
+
+test('all progress styles continue to use the shared ModernBar layout', () => {
+  const variants = [
+    ['MiniWidthProgress.vue', 'mini'],
+    ['MiddleWidthProgress.vue', 'middle'],
+    ['FullWidthProgress.vue', 'full'],
+  ]
+
+  for (const [file, progressStyle] of variants) {
+    const source = fs.readFileSync(
+      path.join(root, 'src/renderer/components/layout/PlayBar', file),
+      'utf8',
+    )
+    assert.match(source, new RegExp(`<modern-bar progress-style="${progressStyle}"`))
+  }
 })

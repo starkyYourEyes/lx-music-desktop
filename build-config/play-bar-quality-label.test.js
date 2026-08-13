@@ -7,12 +7,14 @@ const { createRenderer, createSSRApp, h, ref } = require('vue')
 const { renderToString } = require('@vue/server-renderer')
 const less = require('less')
 const postcss = require('postcss')
+const loadTsModule = require('../scripts/test-utils/load-ts-module')
 const { loadVueSfc } = require('../scripts/test-utils/load-vue-sfc')
 
 const root = path.resolve(__dirname, '..')
 const modernBarPath = path.join(root, 'src/renderer/components/layout/PlayBar/ModernBar.vue')
 const styleProxy = new Proxy({}, { get: (_, property) => String(property) })
 const emptyComponent = { render: () => null }
+const loadPlayBarLayout = () => loadTsModule(path.join(root, 'src/common/utils/playBarLayout.ts'))
 
 const createState = ({ quality = null } = {}) => ({
   musicInfo: ref({ name: 'Copyable Song', singer: 'Copyable Singer', pic: null }),
@@ -39,12 +41,14 @@ const loadModernBar = (state, clipboardCalls) => loadVueSfc(modernBarPath, {
     handleTransitionEnd() {},
   }),
   '@renderer/store/player/state': state,
+  '@renderer/store/setting': { appSetting: { 'common.playBarHeight': 74 } },
   '@renderer/store/player/action': { setMusicInfo() {}, setShowPlayerDetail() {} },
   '@renderer/core/player': { togglePlay() {}, playNext() {}, playPrev() {} },
   '@common/constants': { LIST_IDS: { DOWNLOAD: 'download' } },
   '@renderer/store/party': { party: { room: null, isShowModal: false } },
   '@renderer/store/privateFm/state': { isPrivateFmMode: ref(false) },
   '@renderer/utils/ipc': { trashNeteasePrivateFmMusic: async() => {} },
+  '@common/utils/playBarLayout': loadPlayBarLayout(),
 }).default
 
 const configureApp = app => {
@@ -197,6 +201,6 @@ test('play bar compiles flex title and passive quality label styling', async() =
   stylesheet.walkAtRules('media', mediaRule => {
     mediaRule.walkRules(rule => assert.equal(rule.selector.includes(`.${modules.quality}`), false, 'media queries must not hide quality'))
   })
-  const player = assertDeclarations(stylesheet, `.${modules.player}`, { height: '74px' })
-  assert.equal(player.height, '74px', 'quality styling must not change player height')
+  const player = assertDeclarations(stylesheet, `.${modules.player}`, { height: 'var(--play-bar-height)' })
+  assert.equal(player.height, 'var(--play-bar-height)', 'quality styling must preserve configurable player height')
 })

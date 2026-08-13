@@ -10,8 +10,17 @@
         <div v-else :class="$style.emptyPic">L<span>X</span></div>
       </div>
       <div :class="$style.infoContent">
-        <div :class="$style.title" :aria-label="musicInfo.name + $t('copy_tip')" @click="handleCopy(musicInfo.name)">
-          {{ musicInfo.name || 'LX Music' }}
+        <div :class="$style.titleRow">
+          <div
+            :class="$style.title"
+            :aria-label="musicInfo.name + $t('copy_tip')"
+            @click="handleCopy(musicInfo.name)"
+          >
+            {{ musicInfo.name || 'LX Music' }}
+          </div>
+          <span v-if="currentPlaybackQuality" :class="$style.quality">
+            {{ currentPlaybackQuality }}
+          </span>
         </div>
         <div :class="$style.singer" :aria-label="musicInfo.singer + $t('copy_tip')" @click="handleCopy(musicInfo.singer)">
           {{ musicInfo.singer || statusText }}
@@ -96,6 +105,7 @@ import {
   isPlay,
   playInfo,
   playMusicInfo,
+  currentPlaybackQuality,
 } from '@renderer/store/player/state'
 import {
   setMusicInfo,
@@ -187,6 +197,7 @@ export default {
 
     return {
       musicInfo,
+      currentPlaybackQuality,
       playMusicInfo,
       nowPlayTimeStr,
       maxPlayTimeStr,
@@ -336,12 +347,29 @@ export default {
   line-height: 1.4;
 }
 
+.titleRow {
+  display: flex;
+  align-items: baseline;
+  width: 100%;
+  min-width: 0;
+}
+
 .title {
-  max-width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 14px;
   color: var(--color-font);
   .mixin-ellipsis-1();
   cursor: default;
+}
+
+.quality {
+  flex: none;
+  padding: 0 5px;
+  color: var(--color-primary);
+  font-size: .8em;
+  opacity: .75;
+  white-space: nowrap;
 }
 
 .singer {

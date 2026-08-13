@@ -2,6 +2,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { RECOMMEND_HOME_SECTION_IDS } from './constants'
 import { PROJECT_IDENTITY } from './projectIdentity'
+import { PLAY_BAR_HEIGHT_DEFAULT } from './utils/playBarLayout'
 
 const isMac = process.platform == 'darwin'
 const isWin = process.platform == 'win32'
@@ -22,6 +23,7 @@ const defaultSetting: LX.AppSetting = {
   'common.randomAnimate': true,
   'common.isAgreePact': false,
   'common.controlBtnPosition': isMac ? 'left' : 'right',
+  'common.playBarHeight': PLAY_BAR_HEIGHT_DEFAULT,
   'common.playBarProgressStyle': 'mini',
   'common.transparentWindow': !isMac,
 

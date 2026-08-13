@@ -69,6 +69,11 @@ declare global {
       'common.controlBtnPosition': 'left' | 'right'
 
       /**
+       * Main window play bar height in pixels.
+       */
+      'common.playBarHeight': number
+
+      /**
        * 播放栏进度条样式
        */
       'common.playBarProgressStyle': 'mini' | 'full' | 'middle'

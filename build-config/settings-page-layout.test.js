@@ -6,6 +6,8 @@ const test = require('node:test')
 const babel = require('@babel/core')
 const pug = require('pug')
 const { parse } = require('@vue/compiler-sfc')
+const vue = require('vue')
+const loadTsModule = require('../scripts/test-utils/load-ts-module')
 
 const root = path.resolve(__dirname, '..')
 
@@ -82,18 +84,45 @@ const getSettingCardRoots = html => html
   })
   .filter(tagName => tagName == 'dd' || tagName.startsWith('Setting'))
 
-const loadSettingBasic = () => loadVueComponent(
+const loadSettingBasic = (settingStore = {}) => loadVueComponent(
   'src/renderer/views/Setting/components/SettingBasic.vue',
   {
-    '@common/utils/vueTools': {},
-    '@renderer/store': {},
-    '@root/lang': {},
-    '@renderer/utils/ipc': {},
+    '@common/utils/vueTools': vue,
+    '@common/utils/playBarLayout': loadTsModule(path.join(root, 'src/common/utils/playBarLayout.ts')),
+    '@renderer/store': {
+      windowSizeList: [],
+      userApi: { list: [], status: false, message: '' },
+      isFullscreen: vue.ref(false),
+      themeId: vue.ref('green'),
+    },
+    '@root/lang': { langList: [], useI18n: () => key => key },
+    '@renderer/utils/ipc': {
+      getSystemFonts: async() => [],
+      getUserApiList: async() => [],
+      sendSyncAction: async() => ({}),
+    },
     '@renderer/utils/musicSdk/api-source-info': { __esModule: true, default: [] },
-    '@renderer/core/player/timeoutStop': {},
-    '@renderer/plugins/Dialog': {},
-    '@renderer/store/setting': {},
-    '@renderer/store/utils': {},
+    '@renderer/core/player/timeoutStop': { useTimeout: () => ({ timeLabel: vue.ref('') }) },
+    '@renderer/plugins/Dialog': { dialog: Object.assign(() => {}, { confirm: async() => false }) },
+    '@renderer/store/setting': {
+      appSetting: {
+        'common.apiSource': '',
+        'common.font': '',
+        'common.playBarHeight': 74,
+        'theme.lightId': 'green',
+        'theme.darkId': 'black',
+        ...settingStore.appSetting,
+      },
+      updateSetting() {},
+      setApiSource() {},
+      ...settingStore,
+    },
+    '@renderer/store/utils': {
+      getThemes() {},
+      applyTheme() {},
+      findTheme: () => undefined,
+      buildBgUrl: value => value,
+    },
   },
 )
 
@@ -111,6 +140,47 @@ test('search controls are the final visible card in Basic settings, not a top-le
     'Search controls must follow the last existing Basic settings card',
   )
   assert.equal(getSettingCardRoots(basicHtml).at(-1), 'SettingSearch')
+})
+
+test('Basic settings exposes a bounded localized play bar height control', () => {
+  const html = renderPugTemplate('src/renderer/views/Setting/components/SettingBasic.vue')
+  assert.match(html, /id="basic_playbar_height"/)
+  assert.match(html, /type="range"/)
+  assert.match(html, /step="1"/)
+  assert.match(html, /PLAY_BAR_HEIGHT_MIN/)
+  assert.match(html, /PLAY_BAR_HEIGHT_MAX/)
+  assert.match(html, /type="number"/)
+  assert.match(html, />px</)
+  assert.equal((html.match(/aria-labelledby="basic_playbar_height"/g) ?? []).length, 2)
+
+  const updates = []
+  const component = loadSettingBasic({ updateSetting: setting => updates.push(setting) })
+  const { handlePlayBarHeightChange, playBarHeightInput } = component.setup()
+  assert.equal(playBarHeightInput.value, 74)
+  handlePlayBarHeightChange('80')
+  assert.equal(playBarHeightInput.value, 74)
+  handlePlayBarHeightChange({ target: { value: '55' } })
+  assert.equal(playBarHeightInput.value, 56)
+  handlePlayBarHeightChange('65.6')
+  assert.equal(playBarHeightInput.value, 66)
+  handlePlayBarHeightChange('invalid')
+  assert.equal(playBarHeightInput.value, 74)
+  assert.deepEqual(updates, [
+    { 'common.playBarHeight': 74 },
+    { 'common.playBarHeight': 56 },
+    { 'common.playBarHeight': 66 },
+    { 'common.playBarHeight': 74 },
+  ])
+
+  const labels = {
+    'zh-cn.json': '播放栏高度',
+    'zh-tw.json': '播放欄高度',
+    'en-us.json': 'Playbar Height',
+  }
+  for (const [file, label] of Object.entries(labels)) {
+    const messages = JSON.parse(fs.readFileSync(path.join(root, 'src/lang', file), 'utf8'))
+    assert.equal(messages.setting__basic_playbar_height, label)
+  }
 })
 
 const loadSettingOther = () => loadVueComponent(

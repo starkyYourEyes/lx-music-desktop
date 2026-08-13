@@ -378,6 +378,7 @@
   "setting__basic_lang": "語言",
   "setting__basic_lang_title": "軟體顯示的語言",
   "setting__basic_playbar_progress_style": "播放欄進度條樣式",
+  "setting__basic_playbar_height": "播放欄高度",
   "setting__basic_playbar_progress_style_full": "全寬",
   "setting__basic_playbar_progress_style_middle": "中等",
   "setting__basic_playbar_progress_style_mini": "迷你",

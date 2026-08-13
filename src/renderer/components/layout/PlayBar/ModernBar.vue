@@ -1,5 +1,5 @@
 <template>
-  <div :class="$style.player">
+  <div :class="$style.player" :style="playBarStyle">
     <div v-if="progressStyle == 'full'" :class="$style.progressTop">
       <common-progress-bar v-if="!isShowPlayerDetail" :class-name="$style.progressBar" :progress="progress" :handle-transition-end="handleTransitionEnd" :is-active-transition="isActiveTransition" />
     </div>
@@ -91,7 +91,7 @@
 </template>
 
 <script>
-import { ref, watch } from '@common/utils/vueTools'
+import { computed, ref, watch } from '@common/utils/vueTools'
 import { useRouter } from '@common/utils/vueRouter'
 import { clipboardWriteText } from '@common/utils/electron'
 import ControlBtns from './ControlBtns.vue'
@@ -116,6 +116,8 @@ import { LIST_IDS } from '@common/constants'
 import { party } from '@renderer/store/party'
 import { isPrivateFmMode } from '@renderer/store/privateFm/state'
 import { trashNeteasePrivateFmMusic } from '@renderer/utils/ipc'
+import { appSetting } from '@renderer/store/setting'
+import { getPlayBarLayout } from '@common/utils/playBarLayout'
 
 export default {
   name: 'ModernPlayBar',
@@ -134,6 +136,14 @@ export default {
     const router = useRouter()
     const isShowPlayQueue = ref(false)
     const isTrashingPrivateFm = ref(false)
+    const playBarStyle = computed(() => {
+      const { height, artworkSize, paddingY } = getPlayBarLayout(appSetting['common.playBarHeight'])
+      return {
+        '--play-bar-height': `${height}px`,
+        '--play-bar-artwork-size': `${artworkSize}px`,
+        '--play-bar-padding-y': `${paddingY}px`,
+      }
+    })
     const {
       nowPlayTimeStr,
       maxPlayTimeStr,
@@ -219,6 +229,7 @@ export default {
       isTrashingPrivateFm,
       handleTrashPrivateFmMusic,
       party,
+      playBarStyle,
     }
   },
 }
@@ -229,14 +240,14 @@ export default {
 
 .player {
   position: relative;
-  height: @height-player;
+  height: var(--play-bar-height);
   box-sizing: border-box;
   display: grid;
   grid-template-columns: minmax(250px, 1fr) minmax(260px, auto) minmax(250px, 1fr);
   align-items: center;
   gap: 18px;
   contain: strict;
-  padding: 9px 24px 9px;
+  padding: var(--play-bar-padding-y) 24px;
   z-index: 2;
 
   * {
@@ -296,8 +307,8 @@ export default {
 
 .picContent {
   flex: none;
-  width: 54px;
-  height: 54px;
+  width: var(--play-bar-artwork-size);
+  height: var(--play-bar-artwork-size);
   display: flex;
   justify-content: center;
   cursor: pointer;

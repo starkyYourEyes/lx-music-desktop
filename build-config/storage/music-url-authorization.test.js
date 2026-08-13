@@ -64,13 +64,18 @@ const createAuthorizationFixture = () => {
   let blockNextPut = false
   let workerPutCalls = 0
   let workerDeleteCalls = 0
+  const workerPutInputs = []
   const worker = {
     async musicUrlGet(input) {
       events.push({ get: structuredClone(input) })
-      return { status: 'miss' }
+      return {
+        status: 'hit',
+        value: { url: 'https://media.invalid/cached', reportedQuality: '192k' },
+      }
     },
     async musicUrlPut(input) {
       workerPutCalls++
+      workerPutInputs.push(structuredClone(input))
       events.push('put')
       if (blockNextPut) {
         blockNextPut = false
@@ -117,6 +122,7 @@ const createAuthorizationFixture = () => {
     service,
     storedProviders,
     worker,
+    workerPutInputs,
     get workerPutCalls() { return workerPutCalls },
     get workerDeleteCalls() { return workerDeleteCalls },
     blockNextPut() { blockNextPut = true },
@@ -183,6 +189,35 @@ describe('music URL authorization wire contracts', () => {
 })
 
 describe('main-owned music URL account generations', () => {
+  it('preserves structured reads and forwards optional reported quality without changing the cache key', async() => {
+    const fixture = createAuthorizationFixture()
+    const authorization = await fixture.service.authorize('tx')
+    const key = {
+      authorization,
+      sourceTrackId: 'track',
+      quality: '320k',
+      nowMs: 1,
+    }
+    assert.deepEqual(await fixture.service.read(key), {
+      status: 'hit',
+      value: { url: 'https://media.invalid/cached', reportedQuality: '192k' },
+    })
+    await fixture.service.write({
+      ...key,
+      url: 'https://media.invalid/audio',
+      reportedQuality: '192k',
+    })
+    assert.deepEqual(fixture.workerPutInputs[0], {
+      provider: 'tx',
+      accountScope: 'profile-v1:uin:8',
+      sourceTrackId: 'track',
+      quality: '320k',
+      url: 'https://media.invalid/audio',
+      nowMs: 1,
+      reportedQuality: '192k',
+    })
+  })
+
   it('forwards an exact delete only while its authorization generation is current', async() => {
     const fixture = createAuthorizationFixture()
     assert.equal(typeof fixture.service.delete, 'function')

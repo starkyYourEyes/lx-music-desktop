@@ -45,7 +45,7 @@ const createUrlRaceHarness = ({
   musicSdk,
   findMusic = async() => [],
   getOtherSourcesFromCache = async() => [],
-  getCachedMusicUrl = async() => '',
+  getCachedMusicUrl = async() => null,
   localMusicApi = {},
   onAuthorize = () => {},
 }) => {
@@ -179,7 +179,7 @@ describe('scoped cache ownership callsites', () => {
     }
     try {
       const { ipc } = loadMusicUrlIpcBoundary(global.lx.musicUrlAuthorization)
-      assert.equal(await ipc.getMusicUrl(authorizedKey), '')
+      assert.equal(await ipc.getMusicUrl(authorizedKey), null)
       assert.equal(reads.length, 1)
     } finally {
       global.lx = previousLx
@@ -197,9 +197,62 @@ describe('scoped cache ownership callsites', () => {
     try {
       const { ipc } = loadMusicUrlIpcBoundary(global.lx.musicUrlAuthorization)
       await assert.rejects(
-        ipc.saveMusicUrl(authorizedKey, 'https://media.invalid/rejected'),
+        ipc.saveMusicUrl(authorizedKey, {
+          url: 'https://media.invalid/rejected', reportedQuality: '192k',
+        }),
         error => error?.name == 'Error' && error?.code == 'cache_operation_failed',
       )
+    } finally {
+      global.lx = previousLx
+    }
+  })
+
+  it('returns structured authorized values while legacy key reads unwrap only the URL', async() => {
+    const previousLx = global.lx
+    global.lx = {
+      musicUrlAuthorization: {
+        async authorize(provider) {
+          return { version: 1, provider, accountScope: 'profile-v1:user-id:7', generation: 1 }
+        },
+        async read() {
+          return {
+            status: 'hit',
+            value: { url: 'https://media.invalid/cached', reportedQuality: '192k' },
+          }
+        },
+      },
+      worker: { dbService: {} },
+    }
+    try {
+      const { ipc } = loadMusicUrlIpcBoundary(global.lx.musicUrlAuthorization)
+      assert.deepEqual(await ipc.getMusicUrl(authorizedKey), {
+        url: 'https://media.invalid/cached', reportedQuality: '192k',
+      })
+      assert.equal(await ipc.getMusicUrlByKey('wy_track_320k'), 'https://media.invalid/cached')
+    } finally {
+      global.lx = previousLx
+    }
+  })
+
+  it('maps stale authorization to null for structured reads and empty text for legacy reads', async() => {
+    const previousLx = global.lx
+    global.lx = {
+      musicUrlAuthorization: {
+        async authorize(provider) {
+          return { version: 1, provider, accountScope: 'profile-v1:user-id:7', generation: 1 }
+        },
+        async read() {
+          throw Object.assign(new Error('music_url_authorization_stale'), {
+            code: 'music_url_authorization_stale',
+          })
+        },
+      },
+      worker: { dbService: {} },
+    }
+    try {
+      const { ipc } = loadMusicUrlIpcBoundary(global.lx.musicUrlAuthorization)
+      assert.equal(await ipc.getMusicUrl(authorizedKey), null)
+      assert.equal(await ipc.getMusicUrlByKey('wy_track_320k'), '')
     } finally {
       global.lx = previousLx
     }
@@ -390,6 +443,29 @@ describe('scoped cache ownership callsites', () => {
         sourceTrackId: 'wy-track',
         quality: '320k',
       }])
+    } finally {
+      global.window = previousWindow
+    }
+  })
+
+  it('unwraps structured cache values for direct and local legacy URL results', async() => {
+    const previousWindow = global.window
+    global.window = { lx: { apiInitPromise: [Promise.resolve(true)] }, i18n: { t: value => value } }
+    try {
+      const harness = createUrlRaceHarness({
+        getCachedMusicUrl: async() => ({
+          url: 'https://media.invalid/cached', reportedQuality: '192k',
+        }),
+      })
+      assert.equal((await harness.online.getMusicUrl({
+        musicInfo: music('wy-cached', 'wy'), quality: '320k', isRefresh: false,
+      })).url, 'https://media.invalid/cached')
+      assert.equal((await harness.utils.getOnlineOtherSourceMusicUrlByLocal({
+        ...music('tx-local-cache', 'tx'),
+        meta: {
+          songId: 'tx-local-cache', albumName: 'local', filePath: 'C:\\music\\missing.mp3', ext: 'mp3',
+        },
+      }, false)).url, 'https://media.invalid/cached')
     } finally {
       global.window = previousWindow
     }
@@ -630,6 +706,28 @@ describe('scoped cache ownership callsites', () => {
         quality: '320k',
       })
       assert.deepEqual(harness.requestEvents, ['authorize:tx', 'cache:tx'])
+    } finally {
+      global.window = previousWindow
+    }
+  })
+
+  it('unwraps structured cache values for fallback legacy URL results', async() => {
+    const previousWindow = global.window
+    global.window = { lx: { apiInitPromise: [Promise.resolve(true)] }, i18n: { t: value => value } }
+    try {
+      const harness = createUrlRaceHarness({
+        getCachedMusicUrl: async() => ({
+          url: 'https://media.invalid/fallback-cache', reportedQuality: '192k',
+        }),
+      })
+      const result = await harness.utils.getOnlineOtherSourceMusicUrl({
+        musicInfos: [music('tx-fallback-cache', 'tx')],
+        quality: '320k',
+        onToggleSource() {},
+        isRefresh: false,
+      })
+      assert.equal(result.url, 'https://media.invalid/fallback-cache')
+      assert.equal(typeof result.url, 'string')
     } finally {
       global.window = previousWindow
     }

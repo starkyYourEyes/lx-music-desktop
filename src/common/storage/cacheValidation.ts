@@ -18,7 +18,10 @@ type PlainData = Record<string, unknown>
 const textBytes = (value: string): number => new TextEncoder().encode(value).byteLength
 // eslint-disable-next-line no-control-regex -- Cache keys must reject all ASCII control characters.
 const controlCharacters = /[\u0000-\u001f\u007f]/
-const musicUrlQualities = new Set(['128k', '320k', 'flac', 'flac24bit', '192k', 'ape', 'wav'])
+const musicUrlQualities = new Set<LX.Quality>(['128k', '320k', 'flac', 'flac24bit', '192k', 'ape', 'wav'])
+
+export const isMusicUrlQuality = (value: unknown): value is LX.Quality =>
+  typeof value == 'string' && musicUrlQualities.has(value as LX.Quality)
 
 const fixedError = <C extends string>(code: C): Error & { code: C } => Object.assign(new Error(code), { code })
 const invalidMusicUrl = (): Error & { code: 'music_url_input_invalid' } => fixedError('music_url_input_invalid')
@@ -95,7 +98,7 @@ const parseAuthorizedMusicUrlKey = (value: PlainData): AuthorizedMusicUrlDeleteI
     return null
   }
   if (!validText(value.sourceTrackId) ||
-    typeof value.quality != 'string' || !musicUrlQualities.has(value.quality)) return null
+    !isMusicUrlQuality(value.quality)) return null
   return {
     authorization,
     sourceTrackId: value.sourceTrackId,
@@ -121,22 +124,24 @@ export const parseAuthorizedMusicUrlPutInput = (value: unknown): AuthorizedMusic
   const data = readPlainData(
     value,
     ['authorization', 'sourceTrackId', 'quality', 'url', 'nowMs'],
-    ['providerExpiresAtMs'],
+    ['reportedQuality', 'providerExpiresAtMs'],
   )
   const key = data == null ? null : parseAuthorizedMusicUrlKey(data)
   if (data == null || key == null || !validNow(data.nowMs) || !validText(data.url, 8192) ||
+    (Object.hasOwn(data, 'reportedQuality') && !isMusicUrlQuality(data.reportedQuality)) ||
     (data.providerExpiresAtMs != null && !validNow(data.providerExpiresAtMs))) throw invalidMusicUrl()
   return {
     ...key,
     url: data.url,
     nowMs: data.nowMs,
+    ...(Object.hasOwn(data, 'reportedQuality') ? { reportedQuality: data.reportedQuality as LX.Quality } : {}),
     ...(data.providerExpiresAtMs == null ? {} : { providerExpiresAtMs: data.providerExpiresAtMs }),
   }
 }
 
 const parseMusicUrlKey = (value: PlainData): MusicUrlDeleteInputV1 | null => {
   if (!validProviderAccountScope(value.provider, value.accountScope) ||
-    !validText(value.sourceTrackId) || typeof value.quality != 'string' || !musicUrlQualities.has(value.quality)) return null
+    !validText(value.sourceTrackId) || !isMusicUrlQuality(value.quality)) return null
   return {
     provider: value.provider,
     accountScope: value.accountScope as string,
@@ -163,16 +168,18 @@ export const parseMusicUrlPutInput = (value: unknown): MusicUrlPutInputV1 => {
   const data = readPlainData(
     value,
     ['provider', 'accountScope', 'sourceTrackId', 'quality', 'url', 'nowMs'],
-    ['providerExpiresAtMs'],
+    ['reportedQuality', 'providerExpiresAtMs'],
   )
   const key = data == null ? null : parseMusicUrlKey(data)
   if (data == null || key == null || !validNow(data.nowMs) || typeof data.url != 'string' ||
     data.url.length == 0 || textBytes(data.url) > 8192 ||
+    (Object.hasOwn(data, 'reportedQuality') && !isMusicUrlQuality(data.reportedQuality)) ||
     (data.providerExpiresAtMs != null && !validNow(data.providerExpiresAtMs))) throw invalidMusicUrl()
   return {
     ...key,
     url: data.url,
     nowMs: data.nowMs,
+    ...(Object.hasOwn(data, 'reportedQuality') ? { reportedQuality: data.reportedQuality as LX.Quality } : {}),
     ...(data.providerExpiresAtMs == null ? {} : { providerExpiresAtMs: data.providerExpiresAtMs }),
   }
 }

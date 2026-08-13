@@ -17,6 +17,7 @@ import {
   type CacheReadResultV1,
   type CacheWriteResultV1,
   type MusicUrlAuthorizationV1,
+  type MusicUrlCacheValueV1,
   type PersistentMusicUrlProviderV1,
   type StorageCacheGenerationV1,
   type TrackIdentityV1,
@@ -647,15 +648,15 @@ const isStaleMusicUrlAuthorization = (error: unknown): boolean => {
     (typeof value?.message == 'string' && value.message.endsWith('music_url_authorization_stale'))
 }
 
-export const getMusicUrl = async(key: AuthorizedMusicUrlKeyV1): Promise<string> => {
+export const getMusicUrl = async(key: AuthorizedMusicUrlKeyV1): Promise<MusicUrlCacheValueV1 | null> => {
   try {
-    const result = await rendererInvoke<LX.Music.AuthorizedMusicUrlGetInputV1, CacheReadResultV1<string>>(
+    const result = await rendererInvoke<LX.Music.AuthorizedMusicUrlGetInputV1, CacheReadResultV1<MusicUrlCacheValueV1>>(
       WIN_MAIN_RENDERER_EVENT_NAME.music_url_get,
       { ...key, nowMs: Date.now() },
     )
-    return result.status == 'hit' ? result.value : ''
+    return result.status == 'hit' ? result.value : null
   } catch (error) {
-    if (isStaleMusicUrlAuthorization(error)) return ''
+    if (isStaleMusicUrlAuthorization(error)) return null
     throw error
   }
 }
@@ -722,15 +723,20 @@ const getAuthorizedMusicUrlKey = async(
 
 export const getMusicUrlByKey = async(key: string): Promise<string> => {
   const authorizedKey = await getAuthorizedMusicUrlKeyByLegacyKey(key)
-  return authorizedKey == null ? '' : getMusicUrl(authorizedKey)
+  return authorizedKey == null ? '' : (await getMusicUrl(authorizedKey))?.url ?? ''
 }
 
-const putMusicUrl = async(key: AuthorizedMusicUrlKeyV1, url: string, providerExpiresAtMs?: number) => {
+const putMusicUrl = async(
+  key: AuthorizedMusicUrlKeyV1,
+  value: MusicUrlCacheValueV1,
+  providerExpiresAtMs?: number,
+) => {
   try {
     const result = await rendererInvoke<LX.Music.AuthorizedMusicUrlPutInputV1, CacheWriteResultV1>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_put, {
       ...key,
-      url,
+      url: value.url,
       nowMs: Date.now(),
+      ...(value.reportedQuality == null ? {} : { reportedQuality: value.reportedQuality }),
       ...(providerExpiresAtMs == null ? {} : { providerExpiresAtMs }),
     })
     requireCacheStored(result)
@@ -751,24 +757,28 @@ const deleteMusicUrl = async(key: AuthorizedMusicUrlKeyV1): Promise<void> => {
   }
 }
 
-export function saveMusicUrl(key: AuthorizedMusicUrlKeyV1, url: string, providerExpiresAtMs?: number): Promise<void>
+export function saveMusicUrl(
+  key: AuthorizedMusicUrlKeyV1,
+  value: MusicUrlCacheValueV1,
+  providerExpiresAtMs?: number,
+): Promise<void>
 export function saveMusicUrl(musicInfo: LX.Music.MusicInfo, quality: LX.Quality, url: string): Promise<void>
 export async function saveMusicUrl(
   keyOrMusicInfo: AuthorizedMusicUrlKeyV1 | LX.Music.MusicInfo,
-  urlOrQuality: string,
+  valueOrQuality: MusicUrlCacheValueV1 | LX.Quality,
   providerExpiresAtMsOrUrl?: number | string,
 ): Promise<void> {
   if ('authorization' in keyOrMusicInfo) {
     await putMusicUrl(
       keyOrMusicInfo,
-      urlOrQuality,
+      valueOrQuality as MusicUrlCacheValueV1,
       typeof providerExpiresAtMsOrUrl == 'number' ? providerExpiresAtMsOrUrl : undefined,
     )
     return
   }
   if (typeof providerExpiresAtMsOrUrl != 'string') throw new TypeError('Music URL is required')
-  const key = await getAuthorizedMusicUrlKey(keyOrMusicInfo, urlOrQuality as LX.Quality)
-  if (key != null) await putMusicUrl(key, providerExpiresAtMsOrUrl)
+  const key = await getAuthorizedMusicUrlKey(keyOrMusicInfo, valueOrQuality as LX.Quality)
+  if (key != null) await putMusicUrl(key, { url: providerExpiresAtMsOrUrl, reportedQuality: null })
 }
 
 export const removeMusicUrlByKey = async(key: string) => {

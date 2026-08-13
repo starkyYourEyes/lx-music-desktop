@@ -235,7 +235,7 @@ export const getOnlineOtherSourceMusicUrlByLocal = async(musicInfo: LX.Music.Mus
   let cachedUrl: string
   try {
     cacheKey = await getMusicUrlCacheKey(musicInfo, quality)
-    cachedUrl = cacheKey == null ? '' : await getStoreMusicUrl(cacheKey)
+    cachedUrl = cacheKey == null ? '' : (await getStoreMusicUrl(cacheKey))?.url ?? ''
   } catch (error) {
     reserved.provide(async() => { throw error })
     return reserved.result
@@ -356,7 +356,7 @@ export const getOnlineOtherSourceMusicUrl = async({ musicInfos, quality, onToggl
   if (!musicInfo || !itemQuality) throw new Error(window.i18n.t('toggle_source_failed'))
 
   const cacheKey = await getMusicUrlCacheKey(musicInfo, itemQuality)
-  const cachedUrl = cacheKey == null ? '' : await getStoreMusicUrl(cacheKey)
+  const cachedUrl = cacheKey == null ? '' : (await getStoreMusicUrl(cacheKey))?.url ?? ''
   if (cachedUrl && !isRefresh) {
     return { url: cachedUrl, musicInfo, quality: itemQuality, isFromCache: true, persistentCache: true, cacheKey }
   }

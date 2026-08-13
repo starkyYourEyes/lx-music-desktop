@@ -1187,7 +1187,12 @@ const createResolveSessionHarness = (options, musicInfo, candidateProvider) => {
   }
 
   const rows = new Map()
-  if (options.cachedUrl) rows.set(`${musicInfo.id}_${options.requestedQuality ?? '128k'}`, options.cachedUrl)
+  if (options.cachedValue || options.cachedUrl) {
+    rows.set(`${musicInfo.id}_${options.requestedQuality ?? '128k'}`, options.cachedValue ?? {
+      url: options.cachedUrl,
+      reportedQuality: null,
+    })
+  }
   const cache = createCacheHarness({
     rows,
     read: options.cacheRead,
@@ -1211,7 +1216,7 @@ const createResolveSessionHarness = (options, musicInfo, candidateProvider) => {
     musicInfo,
     sourceIds,
     requestedQuality: options.requestedQuality ?? '128k',
-    cacheMode: options.cacheMode ?? (options.cachedUrl ? 'lookup' : 'bypass'),
+    cacheMode: options.cacheMode ?? (options.cachedValue || options.cachedUrl ? 'lookup' : 'bypass'),
     adapter,
     cache: observedCache,
     candidateProvider,
@@ -3396,21 +3401,21 @@ const createCacheHarness = ({ rows = new Map(), read, save, remove } = {}) => {
     path.join(__dirname, '../../src/renderer/core/music/playback/cache.ts'),
     {
       '@renderer/utils/ipc': {
-        getMusicUrl: async key => durableRows.get(musicUrlKeyLabel(key)) ?? '',
-        saveMusicUrl: async(key, url) => { durableRows.set(musicUrlKeyLabel(key), url) },
+        getMusicUrl: async key => durableRows.get(musicUrlKeyLabel(key)) ?? null,
+        saveMusicUrl: async(key, value) => { durableRows.set(musicUrlKeyLabel(key), value) },
         removeMusicUrl: async key => { durableRows.delete(musicUrlKeyLabel(key)) },
       },
     },
   )
   const cache = cacheModule.createPlaybackUrlCache({
-    read: async key => read ? read(key) : durableRows.get(musicUrlKeyLabel(key)) ?? '',
-    save: async(key, url) => {
+    read: async key => read ? read(key) : durableRows.get(musicUrlKeyLabel(key)) ?? null,
+    save: async(key, value) => {
       const label = musicUrlKeyLabel(key)
-      saveCalls.push({ key: structuredClone(key), url })
-      persistenceMutations.push(`save:${label}:${url}`)
+      saveCalls.push({ key: structuredClone(key), value: structuredClone(value) })
+      persistenceMutations.push(`save:${label}:${value.url}`)
       try {
-        if (save) return await save(key, url)
-        durableRows.set(label, url)
+        if (save) return await save(key, value)
+        durableRows.set(label, value)
       } catch (error) {
         persistenceErrors.push(error)
         throw error
@@ -3431,7 +3436,7 @@ const createCacheHarness = ({ rows = new Map(), read, save, remove } = {}) => {
     memory: memoryRows,
   })
 
-  const legacyCacheApi = cache.commit.length >= 3
+  const legacyCacheApi = cache.lookup.length >= 2
   const keyMusicInfo = key => ({
     id: key.sourceTrackId,
     source: key.authorization.provider,

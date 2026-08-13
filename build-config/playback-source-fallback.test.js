@@ -14,7 +14,9 @@ const {
   deferred,
   playbackError,
   createFakeClock,
+  createCacheHarness,
   createSessionHarness,
+  musicUrlKey,
   createLocalSessionHarness,
   createMusicFacadeHarness,
   resolvePolicyForReason,
@@ -929,6 +931,43 @@ test('a retained cache commit is observed without delaying accepted playback', a
     operation: 'commit', errorName: 'Error', errorCode: 'SQLITE_BUSY',
   })
   assert.equal(JSON.stringify(session.persistenceFailures).includes('private details'), false)
+})
+
+test('playback cache preserves reported metadata without changing lookup order', async() => {
+  const reads = []
+  const cache = createCacheHarness({
+    read: async key => {
+      reads.push(key.quality)
+      return key.quality == '320k'
+        ? { url: 'https://cache/320', reportedQuality: '192k' }
+        : null
+    },
+  })
+  const hit = await cache.lookup(musicUrlKey(onlineMusic, 'flac'))
+  assert.deepEqual(reads, ['flac', '320k'])
+  assert.equal(hit.quality, '320k')
+  assert.equal(hit.reportedQuality, '192k')
+})
+
+test('accepted source candidate commits its optional reported quality', async() => {
+  const harness = createSessionHarness({
+    request: async() => ({
+      url: 'https://source/value', resolvedQuality: '320k', reportedQuality: '192k',
+    }),
+  })
+  const candidate = await harness.nextCandidate()
+  assert.equal(harness.accept(candidate.candidateId), 'accepted')
+  await harness.flush()
+  assert.deepEqual(harness.cacheCommits[0], [candidate.cacheKey, candidate.url, '192k'])
+})
+
+test('legacy cache hit carries no reported quality', async() => {
+  const harness = createSessionHarness({
+    cachedValue: { url: 'https://cache/legacy', reportedQuality: null },
+  })
+  const candidate = await harness.nextCandidate()
+  assert.equal(candidate.origin, 'cache')
+  assert.equal(Object.hasOwn(candidate, 'reportedQuality'), false)
 })
 
 test('a throwing persistence reporter cannot escape the retained commit observer', async() => {

@@ -4,6 +4,7 @@ import type {
   MusicUrlDeleteInputV1,
   MusicUrlGetInputV1,
   MusicUrlInvalidationResultV1,
+  MusicUrlCacheValueV1,
   MusicUrlPutInputV1,
   MusicUrlSourceInvalidationV1,
 } from '../../../../../common/storage/cache'
@@ -13,6 +14,7 @@ import {
   parseMusicUrlGetInput,
   parseMusicUrlPutInput,
   parseMusicUrlSourceInvalidation,
+  isMusicUrlQuality,
 } from '../../../../../common/storage/cacheValidation'
 import { runCacheImmediate, runCacheRead, runCacheWrite, type CacheReadResult, type CacheWriteResult } from '../../cacheDb'
 import { scheduleCachePruneAfterWrite } from '../cacheLifecycle/prune'
@@ -30,14 +32,21 @@ const expiryFor = (input: MusicUrlPutInputV1): number => {
   return expiry
 }
 
-export const musicUrlGetSync = (db: Database.Database, input: MusicUrlGetInputV1): string | null => {
+interface MusicUrlRow {
+  url: string
+  reportedQuality: LX.Quality | null
+  expiresAtMs: number
+}
+
+export const musicUrlGetSync = (db: Database.Database, input: MusicUrlGetInputV1): MusicUrlCacheValueV1 | null => {
   const parsed = parseMusicUrlGetInput(input)
   const row = db.prepare(`
-    SELECT url, expires_at_ms AS expiresAtMs FROM music_urls
+    SELECT url, reported_quality AS reportedQuality, expires_at_ms AS expiresAtMs FROM music_urls
     WHERE provider = ? AND account_scope = ? AND source_track_id = ? AND quality = ?
-  `).get(parsed.provider, parsed.accountScope, parsed.sourceTrackId, parsed.quality) as { url: string, expiresAtMs: number } | undefined
+  `).get(parsed.provider, parsed.accountScope, parsed.sourceTrackId, parsed.quality) as MusicUrlRow | undefined
   if (row == null) return null
   if (typeof row.url != 'string' || row.url.length == 0 ||
+    (row.reportedQuality != null && !isMusicUrlQuality(row.reportedQuality)) ||
     !Number.isSafeInteger(row.expiresAtMs) || row.expiresAtMs < 0) {
     throw new Error('music_url_cache_invalid')
   }
@@ -47,10 +56,10 @@ export const musicUrlGetSync = (db: Database.Database, input: MusicUrlGetInputV1
     SET last_accessed_at_ms = CASE WHEN last_accessed_at_ms > ? THEN last_accessed_at_ms ELSE ? END
     WHERE provider = ? AND account_scope = ? AND source_track_id = ? AND quality = ?
   `).run(parsed.nowMs, parsed.nowMs, parsed.provider, parsed.accountScope, parsed.sourceTrackId, parsed.quality)
-  return row.url
+  return { url: row.url, reportedQuality: row.reportedQuality }
 }
 
-export const musicUrlGet = async(input: MusicUrlGetInputV1): Promise<CacheReadResult<string>> => {
+export const musicUrlGet = async(input: MusicUrlGetInputV1): Promise<CacheReadResult<MusicUrlCacheValueV1>> => {
   parseMusicUrlGetInput(input)
   return runCacheRead(db => musicUrlGetSync(db, input))
 }
@@ -60,16 +69,17 @@ export const musicUrlPutSync = (db: Database.Database, input: MusicUrlPutInputV1
   const expiresAtMs = expiryFor(parsed)
   db.prepare(`
     INSERT INTO music_urls(
-      provider, account_scope, source_track_id, quality, url,
+      provider, account_scope, source_track_id, quality, url, reported_quality,
       expires_at_ms, created_at_ms, last_accessed_at_ms
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(provider, account_scope, source_track_id, quality) DO UPDATE SET
       url = excluded.url,
+      reported_quality = excluded.reported_quality,
       expires_at_ms = excluded.expires_at_ms,
       created_at_ms = excluded.created_at_ms,
       last_accessed_at_ms = excluded.last_accessed_at_ms
   `).run(
-    parsed.provider, parsed.accountScope, parsed.sourceTrackId, parsed.quality, parsed.url,
+    parsed.provider, parsed.accountScope, parsed.sourceTrackId, parsed.quality, parsed.url, parsed.reportedQuality ?? null,
     expiresAtMs, parsed.nowMs, parsed.nowMs,
   )
 }

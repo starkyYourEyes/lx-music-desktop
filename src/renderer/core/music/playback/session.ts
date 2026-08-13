@@ -347,6 +347,7 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
         origin: 'cache',
         quality: hit.quality,
         url: hit.url,
+        ...(hit.reportedQuality == null ? {} : { reportedQuality: hit.reportedQuality }),
         cacheKey: hit.key,
         deadlineAt: options.clock.now() + SOURCE_TIMEOUT,
       })
@@ -614,7 +615,7 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
       if (!candidate.cacheKey) return 'accepted'
       let committing: Promise<void>
       try {
-        committing = options.cache.commit(candidate.cacheKey, candidate.url)
+        committing = options.cache.commit(candidate.cacheKey, candidate.url, candidate.reportedQuality)
       } catch (error) {
         committing = Promise.reject(error)
       }

@@ -29,7 +29,7 @@ export const getPrimaryMusicUrl = async({ musicInfo, quality, isRefresh, allowTo
   // }
   const targetQuality = quality ?? getPlayQuality(appSetting['player.playQuality'], musicInfo)
   const cacheKey = await getMusicUrlCacheKey(musicInfo, targetQuality)
-  const cachedUrl = cacheKey == null ? '' : await getStoreMusicUrl(cacheKey)
+  const cachedUrl = cacheKey == null ? '' : (await getStoreMusicUrl(cacheKey))?.url ?? ''
   if (cachedUrl && !isRefresh) return { url: cachedUrl, quality: targetQuality, musicInfo }
 
   return handleGetOnlineMusicUrl({

@@ -358,7 +358,7 @@ const executeTypedSmoke = (db: Database.Database): TypedSmokeEvidence => {
       expiredReadMiss: expiredUrl == null,
       expiryGetNowMs: 1,
       freshGetNowMs: 0,
-      freshReadMatched: freshUrl == urlInput.url,
+      freshReadMatched: freshUrl?.url == urlInput.url,
       identity: {
         accountScope: urlInput.accountScope,
         provider: urlInput.provider,

@@ -25,8 +25,14 @@ export interface AuthorizedMusicUrlGetInputV1 extends AuthorizedMusicUrlKeyV1 {
   nowMs: number
 }
 
+export interface MusicUrlCacheValueV1 {
+  url: string
+  reportedQuality: LX.Quality | null
+}
+
 export interface AuthorizedMusicUrlPutInputV1 extends AuthorizedMusicUrlGetInputV1 {
   url: string
+  reportedQuality?: LX.Quality
   providerExpiresAtMs?: number
 }
 
@@ -45,6 +51,7 @@ export interface MusicUrlGetInputV1 extends MusicUrlKeyV1 {
 
 export interface MusicUrlPutInputV1 extends MusicUrlGetInputV1 {
   url: string
+  reportedQuality?: LX.Quality
   providerExpiresAtMs?: number
 }
 

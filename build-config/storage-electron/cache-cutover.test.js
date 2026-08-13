@@ -461,6 +461,14 @@ const otherEvidence = {
 }
 
 describe('typed cache ownership and guarded schema-7 cutover', () => {
+  it('accepts the structured music URL value in the typed cache smoke', async() => {
+    await createSchema6Fixture('cache-cutover-structured-url-smoke')
+    assert.equal((await cacheDb.openCacheDatabase()).status, 'created')
+    const result = await require('../../src/main/migration/cache/cutover.ts').runTypedCacheSmoke()
+    assert.equal(result.status, 'completed')
+    assert.equal(result.value.some(check => check.name == 'music-url-write-read-expiry'), true)
+  })
+
   it('refuses direct target 7 before creating or mutating the authoritative database', async() => {
     const fixture = createTestStorageRoot('cache-cutover-direct-target')
     fixtures.push(fixture)

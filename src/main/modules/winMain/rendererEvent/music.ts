@@ -12,6 +12,7 @@ import type {
   CacheReadResultV1,
   CacheWriteResultV1,
   MusicUrlAuthorizationV1,
+  MusicUrlCacheValueV1,
 } from '@common/storage/cache'
 
 
@@ -64,7 +65,7 @@ export default () => {
     if (authorization == null) throw new Error('Music URL authorization has not been initialized')
     return authorization.authorize(provider)
   })
-  mainHandle<unknown, CacheReadResultV1<string>>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_get, async({ params }) => {
+  mainHandle<unknown, CacheReadResultV1<MusicUrlCacheValueV1>>(WIN_MAIN_RENDERER_EVENT_NAME.music_url_get, async({ params }) => {
     const authorization = global.lx.musicUrlAuthorization
     if (authorization == null) throw new Error('Music URL authorization has not been initialized')
     return authorization.read(parseAuthorizedMusicUrlGetInput(params))

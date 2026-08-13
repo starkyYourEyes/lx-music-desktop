@@ -132,7 +132,9 @@ describe('scoped URL cache repository', () => {
       SELECT last_accessed_at_ms AS lastAccessedAtMs FROM music_urls
       WHERE provider = 'tx' AND account_scope = 'profile-v1:uin:10001'
     `).get()), { status: 'hit', value: { lastAccessedAtMs: 1 } })
-    assert.deepEqual(await get(urlKey('profile-v1:uin:10001', 99)), { status: 'hit', value: 'https://media.invalid/a' })
+    assert.deepEqual(await get(urlKey('profile-v1:uin:10001', 99)), {
+      status: 'hit', value: { url: 'https://media.invalid/a', reportedQuality: null },
+    })
     assert.deepEqual(await cacheDb.runCacheRead(db => db.prepare(`
       SELECT last_accessed_at_ms AS lastAccessedAtMs FROM music_urls
       WHERE provider = 'tx' AND account_scope = 'profile-v1:uin:10001'
@@ -155,6 +157,61 @@ describe('scoped URL cache repository', () => {
         { sourceTrackId: 'track-1', expiresAtMs: 900123 },
       ],
     })
+  })
+
+  it('round-trips nullable reported quality independently from key quality', async() => {
+    await createFixture()
+    const put = repositoryFunction('../../src/main/worker/dbService/modules/music_url/index.ts', 'musicUrlPut')
+    const get = repositoryFunction('../../src/main/worker/dbService/modules/music_url/index.ts', 'musicUrlGet')
+    const base = urlKey('profile-v1:uin:10001', 1)
+
+    await put({ ...base, url: 'https://media.invalid/reported', reportedQuality: '192k' })
+    assert.deepEqual(await get({ ...base, nowMs: 2 }), {
+      status: 'hit',
+      value: { url: 'https://media.invalid/reported', reportedQuality: '192k' },
+    })
+
+    await put({ ...base, sourceTrackId: 'missing', url: 'https://media.invalid/missing' })
+    assert.deepEqual((await get({ ...base, sourceTrackId: 'missing', nowMs: 2 })).value, {
+      url: 'https://media.invalid/missing', reportedQuality: null,
+    })
+  })
+
+  it('accepts only exact optional reported-quality data properties', async() => {
+    await createFixture()
+    const put = repositoryFunction('../../src/main/worker/dbService/modules/music_url/index.ts', 'musicUrlPut')
+    const qualities = ['128k', '320k', 'flac', 'flac24bit', '192k', 'ape', 'wav']
+    for (const reportedQuality of qualities) {
+      assert.deepEqual(await put({
+        ...urlKey('profile-v1:uin:10001', 1, { sourceTrackId: `valid-${reportedQuality}` }),
+        url: `https://media.invalid/${reportedQuality}`,
+        reportedQuality,
+      }), { status: 'stored' })
+    }
+    assert.deepEqual(await put({
+      ...urlKey('profile-v1:uin:10001', 1, { sourceTrackId: 'omitted' }),
+      url: 'https://media.invalid/omitted',
+    }), { status: 'stored' })
+    assert.deepEqual(await cacheDb.runCacheRead(db => db.prepare(`
+      SELECT reported_quality AS reportedQuality FROM music_urls WHERE source_track_id = 'omitted'
+    `).get()), { status: 'hit', value: { reportedQuality: null } })
+
+    const accessor = { ...urlKey('profile-v1:uin:10001', 1), url: 'https://media.invalid/accessor' }
+    Object.defineProperty(accessor, 'reportedQuality', { enumerable: true, get: () => '192k' })
+    for (const input of [
+      { ...urlKey('profile-v1:uin:10001', 1), url: 'https://media.invalid/undefined', reportedQuality: undefined },
+      { ...urlKey('profile-v1:uin:10001', 1), url: 'https://media.invalid/null', reportedQuality: null },
+      { ...urlKey('profile-v1:uin:10001', 1), url: 'https://media.invalid/FLAC', reportedQuality: 'FLAC' },
+      { ...urlKey('profile-v1:uin:10001', 1), url: 'https://media.invalid/hires', reportedQuality: 'hires' },
+      { ...urlKey('profile-v1:uin:10001', 1), url: 'https://media.invalid/number', reportedQuality: 320 },
+      Object.assign(Object.create({ reportedQuality: '192k' }), {
+        ...urlKey('profile-v1:uin:10001', 1), url: 'https://media.invalid/inherited',
+      }),
+      accessor,
+      { ...urlKey('profile-v1:uin:10001', 1), url: 'https://media.invalid/extra', reportedQuality: '192k', extra: true },
+    ]) {
+      await assert.rejects(put(input), error => error?.code == 'music_url_input_invalid')
+    }
   })
 
   it('invalidates only the requested account or provider without exposing URL values', async() => {

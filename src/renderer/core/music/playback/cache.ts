@@ -1,10 +1,11 @@
-import type { AuthorizedMusicUrlKeyV1 } from '@common/storage/cache'
+import type { AuthorizedMusicUrlKeyV1, MusicUrlCacheValueV1 } from '@common/storage/cache'
 import { getMusicUrl, removeMusicUrl, saveMusicUrl } from '@renderer/utils/ipc'
 
 export interface PlaybackCacheHit {
   key: AuthorizedMusicUrlKeyV1
   quality: LX.Quality
   url: string
+  reportedQuality?: LX.Quality
   provisional: boolean
 }
 
@@ -68,16 +69,16 @@ export interface PlaybackUrlCache {
   adoptCacheGeneration: (generation: number) => void
   lookup: (key: AuthorizedMusicUrlKeyV1) => Promise<PlaybackCacheHit | null>
   tombstoneKey: (key: AuthorizedMusicUrlKeyV1) => Promise<void>
-  commit: (key: AuthorizedMusicUrlKeyV1, url: string) => Promise<void>
+  commit: (key: AuthorizedMusicUrlKeyV1, url: string, reportedQuality?: LX.Quality) => Promise<void>
   invalidateQualityRange: (key: AuthorizedMusicUrlKeyV1) => Promise<void>
   getPlaybackQualityOrder: (requested: LX.Quality) => LX.Quality[]
 }
 
 interface PlaybackUrlCacheDependencies {
-  read: (key: AuthorizedMusicUrlKeyV1) => Promise<string | null | undefined>
-  save: (key: AuthorizedMusicUrlKeyV1, url: string) => Promise<void>
+  read: (key: AuthorizedMusicUrlKeyV1) => Promise<MusicUrlCacheValueV1 | null | undefined>
+  save: (key: AuthorizedMusicUrlKeyV1, value: MusicUrlCacheValueV1) => Promise<void>
   remove: (key: AuthorizedMusicUrlKeyV1) => Promise<void>
-  memory?: Map<string, string>
+  memory?: Map<string, MusicUrlCacheValueV1>
 }
 
 const ORDERED_PLAYBACK_QUALITIES: LX.Quality[] = ['flac24bit', 'flac', '320k', '128k']
@@ -103,7 +104,7 @@ const withQuality = (key: AuthorizedMusicUrlKeyV1, quality: LX.Quality): Authori
 })
 
 export const createPlaybackUrlCache = (deps: PlaybackUrlCacheDependencies): PlaybackUrlCache => {
-  const validatedMemory = deps.memory ?? new Map<string, string>()
+  const validatedMemory = deps.memory ?? new Map<string, MusicUrlCacheValueV1>()
   const tombstones = new Set<string>()
   const revisions = new Map<string, number>()
   const persistenceTails = new Map<string, Promise<void>>()
@@ -122,8 +123,17 @@ export const createPlaybackUrlCache = (deps: PlaybackUrlCacheDependencies): Play
     })
     return current
   }
-  const hit = (key: AuthorizedMusicUrlKeyV1, quality: LX.Quality, url: string, provisional: boolean): PlaybackCacheHit => ({
-    key, quality, url, provisional,
+  const hit = (
+    key: AuthorizedMusicUrlKeyV1,
+    quality: LX.Quality,
+    value: MusicUrlCacheValueV1,
+    provisional: boolean,
+  ): PlaybackCacheHit => ({
+    key: { ...key, authorization: { ...key.authorization } },
+    quality,
+    url: value.url,
+    ...(value.reportedQuality == null ? {} : { reportedQuality: value.reportedQuality }),
+    provisional,
   })
 
   const adoptCacheGeneration = (generation: number): void => {
@@ -142,28 +152,31 @@ export const createPlaybackUrlCache = (deps: PlaybackUrlCacheDependencies): Play
       const keyId = getKeyId(candidateKey)
       if (tombstones.has(keyId)) continue
       const revision = revisions.get(keyId) ?? 0
-      const memoryUrl = validatedMemory.get(keyId)
-      if (memoryUrl != null) {
+      const memoryValue = validatedMemory.get(keyId)
+      if (memoryValue != null) {
         await Promise.resolve()
         if (startingGeneration != cacheGeneration) return null
         if (tombstones.has(keyId)) continue
-        const currentMemoryUrl = validatedMemory.get(keyId)
-        if ((revisions.get(keyId) ?? 0) != revision || currentMemoryUrl != memoryUrl) {
-          if (currentMemoryUrl != null) return hit(candidateKey, quality, currentMemoryUrl, false)
+        const currentMemoryValue = validatedMemory.get(keyId)
+        if ((revisions.get(keyId) ?? 0) != revision || currentMemoryValue != memoryValue) {
+          if (currentMemoryValue != null) return hit(candidateKey, quality, { ...currentMemoryValue }, false)
           continue
         }
-        return hit(candidateKey, quality, memoryUrl, false)
+        return hit(candidateKey, quality, { ...memoryValue }, false)
       }
 
-      const url = await enqueueKeyOperation(keyId, async() => deps.read(candidateKey))
+      const value = await enqueueKeyOperation(keyId, async() => {
+        const persisted = await deps.read(candidateKey)
+        return persisted == null ? null : { ...persisted }
+      })
       if (startingGeneration != cacheGeneration) return null
       if (tombstones.has(keyId)) continue
       if ((revisions.get(keyId) ?? 0) != revision) {
-        const currentMemoryUrl = validatedMemory.get(keyId)
-        if (currentMemoryUrl != null) return hit(candidateKey, quality, currentMemoryUrl, false)
+        const currentMemoryValue = validatedMemory.get(keyId)
+        if (currentMemoryValue != null) return hit(candidateKey, quality, { ...currentMemoryValue }, false)
         continue
       }
-      if (url) return hit(candidateKey, quality, url, true)
+      if (value) return hit(candidateKey, quality, { ...value }, true)
     }
     return null
   }
@@ -174,15 +187,16 @@ export const createPlaybackUrlCache = (deps: PlaybackUrlCacheDependencies): Play
     validatedMemory.delete(keyId)
     await enqueueKeyOperation(keyId, async() => deps.remove(key))
   }
-  const commit = async(key: AuthorizedMusicUrlKeyV1, url: string): Promise<void> => {
+  const commit = async(key: AuthorizedMusicUrlKeyV1, url: string, reportedQuality?: LX.Quality): Promise<void> => {
     const startingGeneration = cacheGeneration
     const keyId = getKeyId(key)
     incrementRevision(keyId)
     tombstones.delete(keyId)
-    validatedMemory.set(keyId, url)
+    const value: MusicUrlCacheValueV1 = { url, reportedQuality: reportedQuality ?? null }
+    validatedMemory.set(keyId, { ...value })
     await enqueueKeyOperation(keyId, async() => {
       if (startingGeneration != cacheGeneration) return
-      await deps.save(key, url)
+      await deps.save(key, { ...value })
       if (startingGeneration != cacheGeneration) await deps.remove(key)
     })
   }

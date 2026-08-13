@@ -15,6 +15,7 @@ import type {
   MusicUrlAuthorizationV1,
   MusicUrlGetInputV1,
   MusicUrlInvalidationResultV1,
+  MusicUrlCacheValueV1,
   MusicUrlPutInputV1,
   PersistentMusicUrlProviderV1,
 } from '@common/storage/cache'
@@ -25,7 +26,7 @@ export type AccountTransitionDecision<T> =
 
 export interface MusicUrlAuthorizationService {
   authorize: (provider: PersistentMusicUrlProviderV1) => Promise<MusicUrlAuthorizationV1 | null>
-  read: (input: AuthorizedMusicUrlGetInputV1) => Promise<CacheReadResultV1<string>>
+  read: (input: AuthorizedMusicUrlGetInputV1) => Promise<CacheReadResultV1<MusicUrlCacheValueV1>>
   write: (input: AuthorizedMusicUrlPutInputV1) => Promise<CacheWriteResultV1>
   delete: (input: AuthorizedMusicUrlDeleteInputV1) => Promise<CacheWriteResultV1>
   transition: <T>(
@@ -36,7 +37,7 @@ export interface MusicUrlAuthorizationService {
 }
 
 export interface MusicUrlAuthorizationWorker {
-  musicUrlGet: (input: MusicUrlGetInputV1) => Promise<CacheReadResultV1<string>>
+  musicUrlGet: (input: MusicUrlGetInputV1) => Promise<CacheReadResultV1<MusicUrlCacheValueV1>>
   musicUrlPut: (input: MusicUrlPutInputV1) => Promise<CacheWriteResultV1>
   musicUrlDelete: (input: MusicUrlDeleteInputV1) => Promise<CacheWriteResultV1>
   musicUrlInvalidateAccount: (
@@ -142,6 +143,7 @@ export const createMusicUrlAuthorizationService = ({
       quality: input.quality,
       url: input.url,
       nowMs: input.nowMs,
+      ...(input.reportedQuality == null ? {} : { reportedQuality: input.reportedQuality }),
       ...(input.providerExpiresAtMs == null ? {} : { providerExpiresAtMs: input.providerExpiresAtMs }),
     })
   })

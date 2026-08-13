@@ -127,7 +127,9 @@ export const replaceUserApisFromGitHub = async(items: LX.UserApi.GitHubImportIte
     WIN_MAIN_RENDERER_EVENT_NAME.replace_user_api_from_github,
     items,
   )
-  if (result.success) return result.apiList
+  if (result.success) {
+    return { apiList: result.apiList, skipped: result.skipped }
+  }
 
   const error = new Error(result.error.message) as Error & {
     code?: string

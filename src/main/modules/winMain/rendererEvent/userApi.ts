@@ -111,7 +111,7 @@ export default () => {
     WIN_MAIN_RENDERER_EVENT_NAME.replace_user_api_from_github,
     async({ params: items }) => {
       try {
-        return { success: true, apiList: await replaceApisFromGitHub(items) }
+        return { success: true, ...await replaceApisFromGitHub(items) }
       } catch (err) {
         const apiList = takeReplacementFailureApiList(err)
         return {

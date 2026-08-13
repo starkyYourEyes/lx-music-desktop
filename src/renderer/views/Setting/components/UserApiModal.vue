@@ -53,6 +53,8 @@ import { PROJECT_IDENTITY } from '@common/projectIdentity'
 
 import UserApiOnlineImportModal from './UserApiOnlineImportModal.vue'
 
+const skippedPathLimits = Object.freeze({ count: 20, path: 96, total: 2_000 })
+
 export default {
   components: {
     UserApiOnlineImportModal,
@@ -137,6 +139,12 @@ export default {
         message: detail,
       })
     },
+    formatSkippedGitHubScripts(paths) {
+      return paths.slice(0, skippedPathLimits.count)
+        .map(path => String(path).split(/\r?\n/, 1)[0].substring(0, skippedPathLimits.path))
+        .join('\n')
+        .substring(0, skippedPathLimits.total)
+    },
     reconcileApiList(apiList, previousCustomIds) {
       userApi.list = apiList
       const selectedId = appSetting['common.apiSource']
@@ -197,13 +205,19 @@ export default {
 
         const items = await downloadGitHubUserApiSnapshot(snapshot)
         if (!this.isGitHubViewCurrent(viewGeneration)) return
-        const apiList = await replaceUserApisFromGitHub(items)
+        const { apiList, skipped } = await replaceUserApisFromGitHub(items)
         this.reconcileApiList(apiList, oldCustomIds)
         if (!this.isGitHubViewCurrent(viewGeneration)) return
         this.githubStatus = this.$t('user_api__github_import_success', {
           version: snapshot.version,
           count: apiList.length,
         })
+        if (skipped.length) {
+          void dialog(this.$t('user_api__github_skipped_invalid_scripts', {
+            count: skipped.length,
+            paths: this.formatSkippedGitHubScripts(skipped),
+          }))
+        }
       } catch (err) {
         if (err instanceof Error && 'apiList' in err && Array.isArray(err.apiList)) {
           this.reconcileApiList(err.apiList, oldCustomIds)

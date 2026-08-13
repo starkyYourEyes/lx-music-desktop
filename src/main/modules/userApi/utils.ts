@@ -15,6 +15,11 @@ export interface UserApiState {
   scripts: Map<string, string>
 }
 
+export interface PreparedGitHubUserApis {
+  state: UserApiState
+  skipped: string[]
+}
+
 const serializeUserApis = (apis: LX.UserApi.UserApiInfo[], apiScripts: Map<string, string>) => {
   return apis.map(api => {
     const { sources: _sources, ...persistentInfo } = api
@@ -283,17 +288,19 @@ const createGitHubUserApiId = (remotePath: string) => {
 
 export const prepareApisFromGitHub = async(
   items: LX.UserApi.GitHubImportItem[],
-): Promise<UserApiState> => {
+): Promise<PreparedGitHubUserApis> => {
   const snapshots = validateGitHubImportItems(items)
 
   const nextUserApis: LX.UserApi.UserApiInfo[] = []
   const nextScripts = new Map<string, string>()
+  const skipped: string[] = []
   for (const { id, script, remote } of snapshots) {
     let scriptInfo: ReturnType<typeof parseScriptInfo>
     try {
       scriptInfo = parseScriptInfo(script)
     } catch {
-      throw createGitHubUserApiError('GITHUB_INVALID_SCRIPT', remote.path)
+      skipped.push(remote.path)
+      continue
     }
     nextUserApis.push({
       id,
@@ -304,9 +311,15 @@ export const prepareApisFromGitHub = async(
     nextScripts.set(id, await deflateScript(script))
   }
 
+  if (!nextUserApis.length) {
+    throw createGitHubUserApiError('GITHUB_INVALID_SCRIPT', skipped.join(', '))
+  }
   return {
-    apiList: nextUserApis,
-    scripts: nextScripts,
+    state: {
+      apiList: nextUserApis,
+      scripts: nextScripts,
+    },
+    skipped,
   }
 }
 export const importApi = async(scriptRaw: string): Promise<LX.UserApi.UserApiInfo> => {

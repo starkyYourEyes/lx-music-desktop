@@ -85,7 +85,7 @@ const createHarness = () => {
     },
     './utils': {
       ...utils,
-      prepareApisFromGitHub: async() => nextState,
+      prepareApisFromGitHub: async() => ({ state: nextState, skipped: [] }),
     },
   })
 

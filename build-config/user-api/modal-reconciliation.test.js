@@ -34,7 +34,7 @@ const loadUserApiModal = mocks => {
   return loadedModule.exports.default
 }
 
-const createHarness = () => {
+const createHarness = (options = {}) => {
   const removed = { id: 'removed', name: 'Removed source' }
   const retainedList = [{ id: 'retained', name: 'Retained source' }]
   const userApi = { list: [removed] }
@@ -47,12 +47,15 @@ const createHarness = () => {
   const retainedFailure = Object.assign(new Error('runtime close failed after commit'), {
     apiList: retainedList,
   })
+  const replaceImplementation = options.replaceResult != null
+    ? async() => options.replaceResult
+    : async() => { throw options.replaceError ?? retainedFailure }
   let removeImplementation = async() => retainedList
   const component = loadUserApiModal({
     '@renderer/utils/ipc': {
       importUserApi() {},
       removeUserApi: (...args) => removeImplementation(...args),
-      replaceUserApisFromGitHub: async() => { throw retainedFailure },
+      replaceUserApisFromGitHub: replaceImplementation,
       showSelectDialog() {},
       setAllowShowUserApiUpdateAlert() {},
     },
@@ -89,11 +92,12 @@ const createHarness = () => {
     githubViewGeneration: 1,
     apiList: userApi.list,
     $dialog: { confirm: async() => true },
-    $t: key => key,
+    $t: (key, params = {}) => ({ key, params }),
   }
   vm.isGitHubViewCurrent = (...args) => component.methods.isGitHubViewCurrent.call(vm, ...args)
   vm.formatGitHubError = (...args) => component.methods.formatGitHubError.call(vm, ...args)
   vm.reconcileApiList = (...args) => component.methods.reconcileApiList.call(vm, ...args)
+  vm.formatSkippedGitHubScripts = (...args) => component.methods.formatSkippedGitHubScripts.call(vm, ...args)
 
   return {
     appSetting,
@@ -116,7 +120,10 @@ test('retained GitHub failure publishes its committed list and replaces a remove
   assert.equal(harness.userApi.list, harness.retainedList)
   assert.deepEqual(harness.sourceChanges, ['builtin'])
   assert.equal(harness.appSetting['common.apiSource'], 'builtin')
-  assert.deepEqual(harness.dialogs, ['user_api__github_error_generic'])
+  assert.deepEqual(harness.dialogs, [{
+    key: 'user_api__github_error_generic',
+    params: { message: 'runtime close failed after commit' },
+  }])
 })
 
 test('delete modal applies the committed callback list before surfacing cleanup failure', async() => {
@@ -132,4 +139,59 @@ test('delete modal applies the committed callback list before surfacing cleanup 
   )
   assert.equal(harness.userApi.list, harness.retainedList)
   assert.deepEqual(harness.sourceChanges, ['builtin'])
+})
+
+test('mixed GitHub import reconciles valid sources and shows one skipped summary', async() => {
+  const validList = [{ id: 'valid', name: 'Valid source' }]
+  const harness = createHarness({
+    replaceResult: {
+      apiList: validList,
+      skipped: ['v260813/group/bad-a.js', 'v260813/group/bad-b.js'],
+    },
+  })
+
+  await harness.component.methods.handleGitHubImport.call(harness.vm)
+
+  assert.equal(harness.userApi.list, validList)
+  assert.deepEqual(harness.vm.githubStatus, {
+    key: 'user_api__github_import_success',
+    params: { version: 'v1', count: 1 },
+  })
+  assert.deepEqual(harness.dialogs, [{
+    key: 'user_api__github_skipped_invalid_scripts',
+    params: {
+      count: 2,
+      paths: 'v260813/group/bad-a.js\nv260813/group/bad-b.js',
+    },
+  }])
+})
+
+test('skipped summary bounds untrusted remote paths', () => {
+  const harness = createHarness()
+  const paths = Array.from({ length: 25 }, (_, index) =>
+    `v260813/group/${index}-${'x'.repeat(200)}\nsecret`,
+  )
+
+  const formatted = harness.component.methods.formatSkippedGitHubScripts.call(harness.vm, paths)
+
+  assert.equal(formatted.split('\n').length, 20)
+  assert.ok(formatted.length <= 2_000)
+  assert.doesNotMatch(formatted, /secret/)
+})
+
+test('all-invalid GitHub failure keeps the current list and shows only the error dialog', async() => {
+  const error = Object.assign(new Error('invalid scripts'), {
+    code: 'GITHUB_INVALID_SCRIPT',
+    detail: 'v260813/group/bad.js',
+  })
+  const harness = createHarness({ replaceError: error })
+  const previous = harness.userApi.list
+
+  await harness.component.methods.handleGitHubImport.call(harness.vm)
+
+  assert.equal(harness.userApi.list, previous)
+  assert.deepEqual(harness.dialogs, [{
+    key: 'user_api__github_error_invalid_script',
+    params: { message: 'v260813/group/bad.js' },
+  }])
 })

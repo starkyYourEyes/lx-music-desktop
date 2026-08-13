@@ -35,6 +35,7 @@ declare namespace LX {
       apiId?: string
       platform?: LX.OnlineSource
       quality: LX.Quality
+      reportedQuality?: LX.Quality
       url: string
       cacheKey?: LX.Music.AuthorizedMusicUrlKeyV1
       deadlineAt: number

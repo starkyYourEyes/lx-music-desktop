@@ -1,5 +1,6 @@
 import { QUALITYS } from '@common/constants'
 import type { AuthorizedMusicUrlKeyV1 } from '@common/storage/cache'
+import { toOldMusicInfo } from '@common/utils/tools'
 import { createPlaybackSourceError, isPlaybackSourceError, toPlaybackSourceError } from '@common/utils/playbackSourceError'
 import {
   acquireUserApiRuntime,
@@ -28,13 +29,19 @@ export interface PlaybackSourceAdapter {
     musicInfo: LX.Music.MusicInfoOnline
     quality: LX.Quality
     signal: AbortSignal
-  }) => Promise<{ url: string, quality: LX.Quality }>
+  }) => Promise<PlaybackSourceResult>
   getLocalMusicUrl: (request: {
     apiId: string
     requestId: string
     musicInfo: LX.Music.MusicInfoLocal
     signal: AbortSignal
-  }) => Promise<{ url: string, quality: LX.Quality }>
+  }) => Promise<PlaybackSourceResult>
+}
+
+export interface PlaybackSourceResult {
+  url: string
+  resolvedQuality: LX.Quality
+  reportedQuality?: LX.Quality
 }
 
 export interface PlaybackSourceAdapterDependencies {
@@ -46,7 +53,7 @@ export interface PlaybackSourceAdapterDependencies {
   releaseRuntime: (params: LX.UserApi.UserApiRuntimeLeaseParams) => void
   getBuiltinCapabilities: (apiId: string) => LX.Playback.SourceCapabilities | undefined
   getBuiltinApi: (apiId: string, platform: LX.OnlineSource) => {
-    getMusicUrl: (info: LX.Music.MusicInfo, quality: LX.Quality | null) => unknown
+    getMusicUrl: (info: ReturnType<typeof toOldMusicInfo>, quality: LX.Quality | null) => unknown
   }
   getMusicUrlCacheKey: (
     musicInfo: LX.Music.MusicInfo,
@@ -92,6 +99,14 @@ const validateUrl = (apiId: string, platform: LX.OnlineSource | undefined, resul
 const isPlaybackQuality = (value: unknown): value is LX.Quality => (
   typeof value == 'string' && (QUALITYS as readonly string[]).includes(value)
 )
+
+const toQualityResult = (
+  url: string,
+  value: unknown,
+  fallback: LX.Quality,
+): PlaybackSourceResult => isPlaybackQuality(value)
+  ? { url, resolvedQuality: value, reportedQuality: value }
+  : { url, resolvedQuality: fallback }
 
 export const createPlaybackSourceAdapter = (
   deps: PlaybackSourceAdapterDependencies,
@@ -154,7 +169,7 @@ export const createPlaybackSourceAdapter = (
         data: {
           source: request.musicInfo.source,
           action: 'musicUrl',
-          info: { type: quality, musicInfo: request.musicInfo },
+          info: { type: quality, musicInfo: toOldMusicInfo(request.musicInfo) },
         },
       })
       if (!result.ok) throw toPlaybackSourceError(result.error)
@@ -163,10 +178,11 @@ export const createPlaybackSourceAdapter = (
     try {
       const result = await Promise.race([invoking, aborted])
       const data = result.data as { type?: unknown }
-      return {
-        url: validateUrl(request.apiId, request.musicInfo.source == 'local' ? undefined : request.musicInfo.source, data),
-        quality: isPlaybackQuality(data.type) ? data.type : quality,
-      }
+      return toQualityResult(
+        validateUrl(request.apiId, request.musicInfo.source == 'local' ? undefined : request.musicInfo.source, data),
+        data.type,
+        quality ?? '128k',
+      )
     } catch (error) {
       if (isPlaybackSourceError(error)) throw error
       throw normalize(error, request.apiId, request.musicInfo.source == 'local' ? undefined : request.musicInfo.source)
@@ -184,10 +200,10 @@ export const createPlaybackSourceAdapter = (
     if (request.signal.aborted) throw failureFromAbort(request.apiId, request.signal)
     try {
       const returned = deps.getBuiltinApi(request.apiId, request.musicInfo.source)
-        .getMusicUrl(request.musicInfo, request.quality) as Promise<unknown> | { promise: Promise<unknown> }
+        .getMusicUrl(toOldMusicInfo(request.musicInfo), request.quality) as Promise<unknown> | { promise: Promise<unknown> }
       const result = await ('promise' in Object(returned) ? (returned as { promise: Promise<unknown> }).promise : returned)
       const url = validateUrl(request.apiId, request.musicInfo.source, result)
-      return { url, quality: ((result as { type?: LX.Quality }).type ?? request.quality) }
+      return toQualityResult(url, (result as { type?: unknown }).type, request.quality)
     } catch (error) {
       throw normalize(error, request.apiId, request.musicInfo.source)
     }
@@ -250,12 +266,10 @@ export const createPlaybackSourceAdapter = (
     },
     async getMusicUrl(request) {
       if (!deps.isCustomApi(request.apiId)) return builtInRequest(request)
-      const result = await customRequest(request, request.quality)
-      return { url: result.url, quality: result.quality ?? request.quality }
+      return customRequest(request, request.quality)
     },
     async getLocalMusicUrl(request) {
-      const result = await customRequest(request, null)
-      return { url: result.url, quality: '128k' }
+      return customRequest(request, null)
     },
   }
 }

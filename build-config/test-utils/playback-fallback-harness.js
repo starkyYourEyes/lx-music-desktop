@@ -15,10 +15,10 @@ const onlineMusic = {
   name: 'Song',
   singer: 'Artist',
   interval: '03:00',
-  meta: { albumName: 'Album', _qualitys: { '128k': {}, '320k': {}, flac: {} } },
+  meta: { songId: 'song', albumName: 'Album', _qualitys: { '128k': {}, '320k': {}, flac: {} } },
 }
-const matchedTx = { ...onlineMusic, id: 'song-tx', source: 'tx' }
-const matchedKg = { ...onlineMusic, id: 'song-kg', source: 'kg' }
+const matchedTx = { ...onlineMusic, id: 'song-tx', source: 'tx', meta: { ...onlineMusic.meta, songId: 'song-tx' } }
+const matchedKg = { ...onlineMusic, id: 'song-kg', source: 'kg', meta: { ...onlineMusic.meta, songId: 'song-kg' } }
 const flacMusic = onlineMusic
 const no128Music = { ...onlineMusic, id: 'no-128', meta: { ...onlineMusic.meta, _qualitys: { flac: {} } } }
 const localMusic = {
@@ -27,7 +27,7 @@ const localMusic = {
   name: 'Song',
   singer: 'Artist',
   interval: '03:00',
-  meta: { albumName: 'Album', filePath: 'C:\\Music\\Song.mp3', _qualitys: {} },
+  meta: { songId: 'C:\\Music\\Song.mp3', albumName: 'Album', filePath: 'C:\\Music\\Song.mp3', _qualitys: {} },
 }
 const webdavMusic = {
   id: 'webdav-song', source: 'webdav', name: 'Song', singer: 'Artist', interval: '03:00',
@@ -41,7 +41,7 @@ const downloadItem = {
 }
 const song = onlineMusic
 const songA = onlineMusic
-const songB = { ...onlineMusic, id: 'song-b' }
+const songB = { ...onlineMusic, id: 'song-b', meta: { ...onlineMusic.meta, songId: 'song-b' } }
 
 const musicUrlAuthorization = (provider = 'wy', accountScope = `test:${provider}`, generation = 1) => ({
   version: 1,
@@ -696,6 +696,9 @@ const createAdapterHarness = (options = {}) => {
       '@common/utils/playbackSourceError': loadTsModule(
         path.join(__dirname, '../../src/common/utils/playbackSourceError.ts'),
       ),
+      '@common/utils/tools': loadTsModule(
+        path.join(__dirname, '../../src/common/utils/tools.ts'),
+      ),
       '@renderer/utils/ipc': {},
       '@renderer/utils/message': { requestMsg: {} },
       '@renderer/utils/musicSdk/api-source': {},
@@ -1033,6 +1036,9 @@ const loadPlaybackSourceAdapter = () => {
       '@common/utils/playbackSourceError': loadTsModule(
         path.join(__dirname, '../../src/common/utils/playbackSourceError.ts'),
       ),
+      '@common/utils/tools': loadTsModule(
+        path.join(__dirname, '../../src/common/utils/tools.ts'),
+      ),
       '@renderer/utils/ipc': {},
       '@renderer/utils/message': { requestMsg: {} },
       '@renderer/utils/musicSdk/api-source': {},
@@ -1094,16 +1100,20 @@ const createResolveSessionHarness = (options, musicInfo, candidateProvider) => {
   }
   const requestDirect = request => {
     markSourceRequested(request.apiId)
-    if (options.request) return options.request(request)
+    if (options.request) return Promise.resolve(options.request(request)).then(result => (
+      Object.hasOwn(result, 'resolvedQuality')
+        ? result
+        : { ...result, resolvedQuality: result.quality ?? request.quality ?? '128k' }
+    ))
     if (Object.prototype.hasOwnProperty.call(options.urls ?? {}, request.apiId)) {
       return Promise.resolve({
         url: options.urls[request.apiId],
-        quality: request.quality ?? '128k',
+        resolvedQuality: request.quality ?? '128k',
       })
     }
     return getSourceGate(request.apiId).promise.then(url => ({
       url,
-      quality: request.quality ?? '128k',
+      resolvedQuality: request.quality ?? '128k',
     }))
   }
 
@@ -2308,6 +2318,7 @@ const createPlayerHarness = (options = {}) => {
   const currentTimeWrites = []
   const setResourceUrls = []
   const dispatchedResourceKinds = []
+  const playerMediaEvents = []
   const committedCacheKeys = []
   const tombstonedKeys = []
   const refreshRequests = []
@@ -2335,6 +2346,7 @@ const createPlayerHarness = (options = {}) => {
   let legacyRefreshCalls = 0
   let playerErrorEvents = 0
   let playerCanplayEvents = 0
+  let playerLoadeddataEvents = 0
   let autoSkipCalls = 0
   let loadingWatchdogCount = 0
   let preloadFailureRecords = 0
@@ -2618,9 +2630,9 @@ const createPlayerHarness = (options = {}) => {
   const appEvent = {
     error() { visibleErrorCount++ },
     playerError(code) { playerErrorEvents++; playHandlers.error(code) },
-    playerCanplay() { playerCanplayEvents++ },
+    playerCanplay() { playerCanplayEvents++; playerMediaEvents.push('canplay') },
     playerLoadstart() { playHandlers.loadstart() },
-    playerLoadeddata() { playHandlers.loadeddata() },
+    playerLoadeddata() { playerLoadeddataEvents++; playerMediaEvents.push('loadeddata'); playHandlers.loadeddata() },
     playerWaiting() { playHandlers.waiting() },
   }
   const mediaHandlers = createPlayerMediaEventHandlers({
@@ -2683,6 +2695,7 @@ const createPlayerHarness = (options = {}) => {
     cancelPlayback(reason) { action.cancel(reason) },
     disposePlayback() { action.dispose() },
     emitCanplay(listener) { mainAudio.emitFor(listener, 'canplay') },
+    emitLoadeddata(listener) { mainAudio.emitFor(listener, 'loadeddata') },
     async emitError(listener, code) {
       if (resource.getResourceContext()?.kind == 'validated') {
         sessionCreationGates.push({ ...deferred(), used: false })
@@ -2719,6 +2732,7 @@ const createPlayerHarness = (options = {}) => {
     get legacyRefreshCalls() { return legacyRefreshCalls },
     get playerErrorEvents() { return playerErrorEvents },
     get playerCanplayEvents() { return playerCanplayEvents },
+    get playerLoadeddataEvents() { return playerLoadeddataEvents },
     get autoSkipCalls() { return autoSkipCalls },
     get loadingWatchdogCount() { return loadingWatchdogCount },
     get cacheCommitCount() { return cacheCommitCount },
@@ -2743,6 +2757,7 @@ const createPlayerHarness = (options = {}) => {
     get coordinatorDisposeCount() { return coordinatorDisposeCount },
     audioOperations,
     currentTimeWrites,
+    playerMediaEvents,
   }
 }
 
@@ -3032,7 +3047,7 @@ const createIntegrationHarness = (options = {}) => {
         const token = Object.freeze({
           apiId: payload.apiId,
           requestId: payload.requestId,
-          songIdentity: `${musicInfo.source}:${musicInfo.id}`,
+          songIdentity: `${musicInfo.source}:${musicInfo.songmid}`,
           platform: payload.data.source,
         })
         adapterRequestOrder.push(`${token.apiId}:${token.platform}`)

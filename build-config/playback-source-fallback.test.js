@@ -281,35 +281,81 @@ test('custom source requests carry explicit API and request IDs', async() => {
   })
   assert.equal(calls[0].apiId, 'user_api_a')
   assert.equal(calls[0].requestId, 'session:1')
-  assert.deepEqual(result, { url: 'https://audio/a', quality: '320k' })
+  assert.deepEqual(result, {
+    url: 'https://audio/a', resolvedQuality: '320k', reportedQuality: '320k',
+  })
 })
 
-test('custom source uses a trusted lower quality returned by its runtime', async() => {
+test('custom source requests preserve the legacy music-info contract', async() => {
+  const calls = []
+  const musicInfo = {
+    ...onlineMusic,
+    meta: {
+      ...onlineMusic.meta,
+      songId: 'provider-song-id',
+      albumId: 'provider-album-id',
+      picUrl: 'https://img/song.jpg',
+      qualitys: [{ type: '320k', size: '7M' }],
+    },
+  }
   const adapter = createAdapterHarness({
-    request: async() => ({
-      ok: true,
-      value: { data: { type: '128k', url: 'https://audio/lower' } },
-    }),
+    request: async params => {
+      calls.push(params)
+      return { ok: true, value: { data: { type: '320k', url: 'https://audio/legacy' } } }
+    },
   })
-  const result = await adapter.getMusicUrl({
-    apiId: 'user_api_a', requestId: 'session:lower', musicInfo: onlineMusic,
-    quality: 'flac', signal: new AbortController().signal,
+
+  await adapter.getMusicUrl({
+    apiId: 'user_api_a', requestId: 'session:legacy', musicInfo,
+    quality: '320k', signal: new AbortController().signal,
   })
-  assert.deepEqual(result, { url: 'https://audio/lower', quality: '128k' })
+
+  assert.deepEqual(calls[0].data.info.musicInfo, {
+    name: 'Song',
+    singer: 'Artist',
+    source: 'wy',
+    songmid: 'provider-song-id',
+    interval: '03:00',
+    albumName: 'Album',
+    img: 'https://img/song.jpg',
+    typeUrl: {},
+    albumId: 'provider-album-id',
+    types: [{ type: '320k', size: '7M' }],
+    _types: { '128k': {}, '320k': {}, flac: {} },
+  })
 })
 
-test('custom source ignores an untrusted runtime quality value', async() => {
-  const adapter = createAdapterHarness({
-    request: async() => ({
-      ok: true,
-      value: { data: { type: 'not-a-quality', url: 'https://audio/untrusted' } },
-    }),
+for (const reportedQuality of ['128k', '192k', '320k', 'flac', 'flac24bit', 'ape', 'wav']) {
+  test(`custom source preserves reported quality ${reportedQuality}`, async() => {
+    const adapter = createAdapterHarness({
+      request: async() => ({
+        ok: true,
+        value: { data: { type: reportedQuality, url: `https://audio/${reportedQuality}` } },
+      }),
+    })
+    assert.deepEqual(await adapter.getMusicUrl({
+      apiId: 'user_api_a', requestId: 'session:1', musicInfo: onlineMusic,
+      quality: 'flac', signal: new AbortController().signal,
+    }), {
+      url: `https://audio/${reportedQuality}`,
+      resolvedQuality: reportedQuality,
+      reportedQuality,
+    })
   })
-  const result = await adapter.getMusicUrl({
-    apiId: 'user_api_a', requestId: 'session:untrusted', musicInfo: onlineMusic,
-    quality: 'flac', signal: new AbortController().signal,
-  })
-  assert.deepEqual(result, { url: 'https://audio/untrusted', quality: 'flac' })
+}
+
+test('missing and invalid custom quality use only the requested resolved quality', async() => {
+  for (const data of [
+    { url: 'https://audio/missing' },
+    { type: 'FLAC', url: 'https://audio/case-changed' },
+    { type: 'not-a-quality', url: 'https://audio/invalid' },
+  ]) {
+    const adapter = createAdapterHarness({ request: async() => ({ ok: true, value: { data } }) })
+    assert.deepEqual(await adapter.getMusicUrl({
+      apiId: 'user_api_a', requestId: 'session:1', musicInfo: onlineMusic,
+      quality: '320k', signal: new AbortController().signal,
+    }), { url: data.url, resolvedQuality: '320k' })
+  }
 })
 
 test('custom local playback keeps the existing 128k cache-bucket convention', async() => {
@@ -317,7 +363,7 @@ test('custom local playback keeps the existing 128k cache-bucket convention', as
   const adapter = createAdapterHarness({
     request: async params => {
       calls.push(params)
-      return { ok: true, value: { data: { type: null, url: 'https://audio/local' } } }
+      return { ok: true, value: { data: { type: '128k', url: 'https://audio/local' } } }
     },
   })
   const result = await adapter.getLocalMusicUrl({
@@ -325,7 +371,22 @@ test('custom local playback keeps the existing 128k cache-bucket convention', as
     signal: new AbortController().signal,
   })
   assert.equal(calls[0].data.info.type, null)
-  assert.deepEqual(result, { url: 'https://audio/local', quality: '128k' })
+  assert.deepEqual(result, {
+    url: 'https://audio/local', resolvedQuality: '128k', reportedQuality: '128k',
+  })
+})
+
+test('custom local playback omits missing and invalid reported quality', async() => {
+  for (const data of [
+    { url: 'https://audio/local-missing' },
+    { type: 'invalid', url: 'https://audio/local-invalid' },
+  ]) {
+    const adapter = createAdapterHarness({ request: async() => ({ ok: true, value: { data } }) })
+    assert.deepEqual(await adapter.getLocalMusicUrl({
+      apiId: 'user_api_a', requestId: 'session:local', musicInfo: localMusic,
+      signal: new AbortController().signal,
+    }), { url: data.url, resolvedQuality: '128k' })
+  }
 })
 
 test('built-in request selects API implementation by explicit ID', async() => {
@@ -335,6 +396,72 @@ test('built-in request selects API implementation by explicit ID', async() => {
     quality: '128k', signal: new AbortController().signal,
   })
   assert.deepEqual(adapter.builtinLookups, [{ apiId: 'explicit-fallback', platform: 'wy' }])
+})
+
+test('built-in source requests preserve the legacy music-info contract', async() => {
+  let receivedMusicInfo
+  const musicInfo = {
+    ...onlineMusic,
+    meta: {
+      ...onlineMusic.meta,
+      songId: 'builtin-song-id',
+      albumId: 'builtin-album-id',
+      qualitys: [{ type: '128k', size: '3M' }],
+    },
+  }
+  const adapter = createAdapterHarness({
+    builtinRequest: async(info, quality) => {
+      receivedMusicInfo = info
+      return { type: quality, url: 'https://audio/builtin-legacy' }
+    },
+  })
+
+  await adapter.getMusicUrl({
+    apiId: 'explicit-fallback', requestId: 'r', musicInfo,
+    quality: '128k', signal: new AbortController().signal,
+  })
+
+  assert.equal(receivedMusicInfo.songmid, 'builtin-song-id')
+  assert.equal(receivedMusicInfo.albumId, 'builtin-album-id')
+  assert.equal(Object.hasOwn(receivedMusicInfo, 'meta'), false)
+})
+
+test('built-in source validates reported type instead of casting it', async() => {
+  const valid = createAdapterHarness({
+    builtinRequest: async() => ({ type: 'ape', url: 'https://audio/valid' }),
+  })
+  assert.deepEqual(await valid.getMusicUrl({
+    apiId: 'builtin', requestId: 'r1', musicInfo: onlineMusic,
+    quality: 'flac', signal: new AbortController().signal,
+  }), { url: 'https://audio/valid', resolvedQuality: 'ape', reportedQuality: 'ape' })
+
+  const invalid = createAdapterHarness({
+    builtinRequest: async() => ({ type: 'hires', url: 'https://audio/invalid' }),
+  })
+  assert.deepEqual(await invalid.getMusicUrl({
+    apiId: 'builtin', requestId: 'r2', musicInfo: onlineMusic,
+    quality: 'flac', signal: new AbortController().signal,
+  }), { url: 'https://audio/invalid', resolvedQuality: 'flac' })
+})
+
+test('source candidate carries reported quality independently from resolved quality', async() => {
+  const harness = createSessionHarness({
+    request: async() => ({
+      url: 'https://audio/source', resolvedQuality: '320k', reportedQuality: '192k',
+    }),
+  })
+  const candidate = await harness.nextCandidate()
+  assert.equal(candidate.quality, '320k')
+  assert.equal(candidate.reportedQuality, '192k')
+})
+
+test('source candidate omits unreported quality while retaining its resolved key quality', async() => {
+  const harness = createSessionHarness({
+    request: async() => ({ url: 'https://audio/source', resolvedQuality: '320k' }),
+  })
+  const candidate = await harness.nextCandidate()
+  assert.equal(candidate.quality, '320k')
+  assert.equal(Object.hasOwn(candidate, 'reportedQuality'), false)
 })
 
 test('custom and built-in capabilities retain the SourceCapabilities wrapper', async() => {

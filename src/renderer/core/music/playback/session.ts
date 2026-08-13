@@ -454,11 +454,12 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
               options.clock,
               sessionController.signal,
             )
-            attempt.resolvedQuality = resolved.quality
+            attempt.resolvedQuality = resolved.resolvedQuality
             return makeCandidate({
               origin: 'source',
               apiId: attempt.apiId,
-              quality: resolved.quality,
+              quality: resolved.resolvedQuality,
+              ...(resolved.reportedQuality == null ? {} : { reportedQuality: resolved.reportedQuality }),
               url: resolved.url,
               deadlineAt: attempt.deadlineAt,
             })
@@ -510,16 +511,17 @@ export const createPlaybackResolveSession: CreatePlaybackResolveSession = option
             options.clock,
             sessionController.signal,
           )
-          attempt.resolvedQuality = resolved.quality
+          attempt.resolvedQuality = resolved.resolvedQuality
           return makeCandidate({
             origin: 'source',
             apiId: attempt.apiId,
             platform: musicInfo.source,
-            quality: resolved.quality,
+            quality: resolved.resolvedQuality,
+            ...(resolved.reportedQuality == null ? {} : { reportedQuality: resolved.reportedQuality }),
             url: resolved.url,
             ...(authorizedKey == null
               ? {}
-              : { cacheKey: { ...authorizedKey, quality: resolved.quality } satisfies AuthorizedMusicUrlKeyV1 }),
+              : { cacheKey: { ...authorizedKey, quality: resolved.resolvedQuality } satisfies AuthorizedMusicUrlKeyV1 }),
             deadlineAt: attempt.deadlineAt,
           })
         } catch (error) {

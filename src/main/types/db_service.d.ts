@@ -40,7 +40,7 @@ declare namespace LX {
 
     interface CacheOpenResult {
       status: 'ready' | 'created' | 'recreated' | 'unavailable'
-      schemaVersion: 1 | null
+      schemaVersion: 2 | null
       diagnostic: CacheDiagnosticCode | null
     }
 

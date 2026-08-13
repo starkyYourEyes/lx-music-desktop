@@ -1,4 +1,4 @@
-export const CACHE_SCHEMA_SOURCE = `CREATE TABLE cache_schema_migrations (
+export const CACHE_SCHEMA_V1_SOURCE = `CREATE TABLE cache_schema_migrations (
   version INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   checksum TEXT NOT NULL CHECK(length(checksum) = 64),
@@ -78,5 +78,16 @@ ON other_source_groups(expires_at_ms, original_provider COLLATE BINARY, original
 CREATE INDEX other_source_groups_lru
 ON other_source_groups(last_accessed_at_ms, created_at_ms,
   original_provider COLLATE BINARY, original_track_id COLLATE BINARY);`
+
+export const CACHE_SCHEMA_SOURCE = CACHE_SCHEMA_V1_SOURCE.replace(
+  `  url TEXT NOT NULL,
+  expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms >= 0),`,
+  `  url TEXT NOT NULL,
+  reported_quality TEXT CHECK(
+    reported_quality IS NULL OR
+    reported_quality IN ('128k','192k','320k','flac','flac24bit','ape','wav')
+  ),
+  expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms >= 0),`,
+)
 
 export default CACHE_SCHEMA_SOURCE

@@ -2,9 +2,12 @@ import type Database from 'better-sqlite3'
 import {
   CACHE_MIGRATION_CHECKSUM,
   CACHE_MIGRATION_NAME,
+  CACHE_MIGRATION_V1_CHECKSUM,
+  CACHE_MIGRATION_V1_NAME,
+  CACHE_SCHEMA_V1_VERSION,
   CACHE_SCHEMA_VERSION,
 } from './cacheMigrate'
-import { CACHE_SCHEMA_SOURCE } from './cacheTables'
+import { CACHE_SCHEMA_SOURCE, CACHE_SCHEMA_V1_SOURCE } from './cacheTables'
 import type { SchemaContract } from './schemaContract'
 import { verifyDatabaseAgainstContract } from './verifyDB'
 
@@ -12,6 +15,10 @@ export type CacheSchemaDiagnostic = 'cache_schema_invalid' | 'cache_integrity_fa
 
 export type CacheSchemaVerification =
   | { ok: true }
+  | { ok: false, diagnostic: CacheSchemaDiagnostic }
+
+export type CacheSchemaInspection =
+  | { ok: true, version: 1 | 2 }
   | { ok: false, diagnostic: CacheSchemaDiagnostic }
 
 interface ColumnRow {
@@ -61,7 +68,7 @@ interface SchemaSqlRow {
 
 type ColumnContract = readonly [name: string, type: string, notNull: boolean, primaryKeyPosition: number]
 
-const columns = new Map<string, readonly ColumnContract[]>([
+const v1Columns = new Map<string, readonly ColumnContract[]>([
   ['cache_schema_migrations', [
     ['version', 'INTEGER', false, 1],
     ['name', 'TEXT', true, 0],
@@ -109,6 +116,19 @@ const columns = new Map<string, readonly ColumnContract[]>([
     ['candidate_json', 'TEXT', true, 0],
     ['byte_size', 'INTEGER', true, 0],
   ]],
+])
+
+const v2Columns = new Map(v1Columns)
+v2Columns.set('music_urls', [
+  ['provider', 'TEXT', true, 1],
+  ['account_scope', 'TEXT', true, 2],
+  ['source_track_id', 'TEXT', true, 3],
+  ['quality', 'TEXT', true, 4],
+  ['url', 'TEXT', true, 0],
+  ['reported_quality', 'TEXT', false, 0],
+  ['expires_at_ms', 'INTEGER', true, 0],
+  ['created_at_ms', 'INTEGER', true, 0],
+  ['last_accessed_at_ms', 'INTEGER', true, 0],
 ])
 
 const indexSignature = (
@@ -199,7 +219,7 @@ const expectedForeignKeys = new Map<string, readonly string[]>([
   )]],
 ])
 
-const cacheCheckContract: SchemaContract = {
+const createCacheCheckContract = (includeReportedQuality: boolean): SchemaContract => ({
   tables: [
     {
       name: 'cache_schema_migrations',
@@ -238,6 +258,10 @@ const cacheCheckContract: SchemaContract = {
       indexes: [],
       foreignKeys: [],
       checks: [
+        ...(includeReportedQuality ? [{
+          name: 'reported_quality.enum',
+          expression: "reported_quality IS NULL OR reported_quality IN ('128k','192k','320k','flac','flac24bit','ape','wav')",
+        }] : []),
         { name: 'expires_at_ms.nonnegative', expression: 'expires_at_ms >= 0' },
         { name: 'created_at_ms.nonnegative', expression: 'created_at_ms >= 0' },
         { name: 'last_accessed_at_ms.order', expression: 'last_accessed_at_ms >= created_at_ms' },
@@ -267,7 +291,7 @@ const cacheCheckContract: SchemaContract = {
       ],
     },
   ],
-}
+})
 
 const quoteIdentifier = (value: string): string => `"${value.replace(/"/g, '""')}"`
 
@@ -368,10 +392,13 @@ const normalizeTableSql = (sql: string): string => {
   return tokens.join(' ')
 }
 
-const expectedTableSql = new Map<string, string>()
-for (const statement of splitSqlStatements(CACHE_SCHEMA_SOURCE)) {
-  const table = /^CREATE\s+TABLE\s+([a-z_][a-z0-9_]*)/i.exec(statement)?.[1]
-  if (table != null) expectedTableSql.set(table, normalizeTableSql(statement))
+const expectedTableSql = (source: string): Map<string, string> => {
+  const tables = new Map<string, string>()
+  for (const statement of splitSqlStatements(source)) {
+    const table = /^CREATE\s+TABLE\s+([a-z_][a-z0-9_]*)/i.exec(statement)?.[1]
+    if (table != null) tables.set(table, normalizeTableSql(statement))
+  }
+  return tables
 }
 
 const countCheckExpressions = (sql: string): number => {
@@ -444,7 +471,37 @@ const errorCode = (error: unknown): string =>
 const isIntegrityError = (error: unknown): boolean =>
   /^(SQLITE_CORRUPT|SQLITE_NOTADB)(?:_|$)/.test(errorCode(error))
 
-export const verifyCacheSchema = (db: Database.Database): CacheSchemaVerification => {
+interface CacheSchemaContract {
+  version: 1 | 2
+  columns: Map<string, readonly ColumnContract[]>
+  checks: SchemaContract
+  tableSql: Map<string, string>
+  ledger: ReadonlyArray<readonly [version: 1 | 2, name: string, checksum: string]>
+}
+
+const v1Contract: CacheSchemaContract = {
+  version: CACHE_SCHEMA_V1_VERSION,
+  columns: v1Columns,
+  checks: createCacheCheckContract(false),
+  tableSql: expectedTableSql(CACHE_SCHEMA_V1_SOURCE),
+  ledger: [[CACHE_SCHEMA_V1_VERSION, CACHE_MIGRATION_V1_NAME, CACHE_MIGRATION_V1_CHECKSUM]],
+}
+
+const v2Contract: CacheSchemaContract = {
+  version: CACHE_SCHEMA_VERSION,
+  columns: v2Columns,
+  checks: createCacheCheckContract(true),
+  tableSql: expectedTableSql(CACHE_SCHEMA_SOURCE),
+  ledger: [
+    [CACHE_SCHEMA_V1_VERSION, CACHE_MIGRATION_V1_NAME, CACHE_MIGRATION_V1_CHECKSUM],
+    [CACHE_SCHEMA_VERSION, CACHE_MIGRATION_NAME, CACHE_MIGRATION_CHECKSUM],
+  ],
+}
+
+const verifyCacheSchemaVersion = (
+  db: Database.Database,
+  contract: CacheSchemaContract,
+): CacheSchemaVerification => {
   try {
     if (db.pragma('quick_check', { simple: true }) != 'ok') {
       return { ok: false, diagnostic: 'cache_integrity_failed' }
@@ -454,7 +511,7 @@ export const verifyCacheSchema = (db: Database.Database): CacheSchemaVerificatio
   }
 
   try {
-    if (db.pragma('user_version', { simple: true }) != CACHE_SCHEMA_VERSION) {
+    if (db.pragma('user_version', { simple: true }) != contract.version) {
       return { ok: false, diagnostic: 'cache_schema_invalid' }
     }
     const actualTables = (db.prepare(`
@@ -462,7 +519,7 @@ export const verifyCacheSchema = (db: Database.Database): CacheSchemaVerificatio
       WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
       ORDER BY name
     `).all() as Array<{ name: string }>).map(row => row.name)
-    if (!sameSorted(actualTables, [...columns.keys()])) {
+    if (!sameSorted(actualTables, [...contract.columns.keys()])) {
       return { ok: false, diagnostic: 'cache_schema_invalid' }
     }
     const unexpectedObjects = db.prepare(`
@@ -471,7 +528,7 @@ export const verifyCacheSchema = (db: Database.Database): CacheSchemaVerificatio
     `).all() as Array<{ name: string }>
     if (unexpectedObjects.length != 0) return { ok: false, diagnostic: 'cache_schema_invalid' }
 
-    for (const [table, expectedColumnsForTable] of columns) {
+    for (const [table, expectedColumnsForTable] of contract.columns) {
       const actual = db.pragma(`table_xinfo(${quoteIdentifier(table)})`) as ColumnRow[]
       if (actual.length != expectedColumnsForTable.length || !actual.every((row, index) => {
         const expected = expectedColumnsForTable[index]
@@ -488,12 +545,12 @@ export const verifyCacheSchema = (db: Database.Database): CacheSchemaVerificatio
       const tableSql = (db.prepare(`
         SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?
       `).get(table) as SchemaSqlRow | undefined)?.sql
-      if (tableSql == null || normalizeTableSql(tableSql) != expectedTableSql.get(table) ||
-        countCheckExpressions(tableSql) != (cacheCheckContract.tables.find(value => value.name == table)?.checks?.length ?? 0)) {
+      if (tableSql == null || normalizeTableSql(tableSql) != contract.tableSql.get(table) ||
+        countCheckExpressions(tableSql) != (contract.checks.tables.find(value => value.name == table)?.checks?.length ?? 0)) {
         return { ok: false, diagnostic: 'cache_schema_invalid' }
       }
     }
-    if (!verifyDatabaseAgainstContract(db, cacheCheckContract, {
+    if (!verifyDatabaseAgainstContract(db, contract.checks, {
       runQuickCheck: false,
       runForeignKeyCheck: false,
     }).ok) return { ok: false, diagnostic: 'cache_schema_invalid' }
@@ -502,9 +559,11 @@ export const verifyCacheSchema = (db: Database.Database): CacheSchemaVerificatio
       SELECT version, name, checksum, applied_at_ms
       FROM cache_schema_migrations ORDER BY version
     `).all() as MigrationRow[]
-    if (ledger.length != 1 || ledger[0].version !== CACHE_SCHEMA_VERSION ||
-      ledger[0].name !== CACHE_MIGRATION_NAME || ledger[0].checksum !== CACHE_MIGRATION_CHECKSUM ||
-      !Number.isSafeInteger(ledger[0].applied_at_ms) || (ledger[0].applied_at_ms as number) < 0) {
+    if (ledger.length != contract.ledger.length || !ledger.every((row, index) => {
+      const expected = contract.ledger[index]
+      return row.version === expected[0] && row.name === expected[1] && row.checksum === expected[2] &&
+        Number.isSafeInteger(row.applied_at_ms) && (row.applied_at_ms as number) >= 0
+    })) {
       return { ok: false, diagnostic: 'cache_schema_invalid' }
     }
     if ((db.pragma('foreign_key_check') as unknown[]).length != 0) {
@@ -517,6 +576,23 @@ export const verifyCacheSchema = (db: Database.Database): CacheSchemaVerificatio
       diagnostic: isIntegrityError(error) ? 'cache_integrity_failed' : 'cache_schema_invalid',
     }
   }
+}
+
+export const verifyCacheSchemaV1 = (db: Database.Database): CacheSchemaVerification =>
+  verifyCacheSchemaVersion(db, v1Contract)
+
+export const verifyCacheSchema = (db: Database.Database): CacheSchemaVerification =>
+  verifyCacheSchemaVersion(db, v2Contract)
+
+export const inspectCacheSchema = (db: Database.Database): CacheSchemaInspection => {
+  const version = db.pragma('user_version', { simple: true })
+  if (version !== CACHE_SCHEMA_V1_VERSION && version !== CACHE_SCHEMA_VERSION) {
+    return { ok: false, diagnostic: 'cache_schema_invalid' }
+  }
+  const verification = version == CACHE_SCHEMA_V1_VERSION
+    ? verifyCacheSchemaV1(db)
+    : verifyCacheSchema(db)
+  return verification.ok ? { ok: true, version } : verification
 }
 
 export default verifyCacheSchema

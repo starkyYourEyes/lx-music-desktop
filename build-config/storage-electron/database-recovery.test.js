@@ -1153,7 +1153,7 @@ describe('database startup orchestration', () => {
       cacheDb = require('../../src/main/worker/dbService/cacheDb.ts')
       assert.deepEqual(await cacheDb.openCacheDatabase(), {
         status: 'created',
-        schemaVersion: 1,
+        schemaVersion: 2,
         diagnostic: null,
       })
       const emptySha256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'

@@ -25,9 +25,13 @@ const dbService = require('../../src/main/worker/dbService/db.ts')
 const {
   CACHE_MIGRATION_CHECKSUM,
   CACHE_MIGRATION_NAME,
+  CACHE_MIGRATION_V1_CHECKSUM,
+  CACHE_MIGRATION_V1_NAME,
   CACHE_SCHEMA_VERSION,
+  migrateCacheSchemaV1ToV2,
 } = require('../../src/main/worker/dbService/cacheMigrate.ts')
 const { CACHE_SCHEMA_SOURCE } = require('../../src/main/worker/dbService/cacheTables.ts')
+const { verifyCacheSchema } = require('../../src/main/worker/dbService/cacheSchemaContract.ts')
 const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const cacheModulePath = '../../src/main/worker/dbService/cacheDb.ts'
@@ -213,6 +217,7 @@ const expectedColumns = {
   raw_lyrics: ['provider', 'source_track_id', 'lyric_type', 'text', 'byte_size'],
   music_urls: [
     'provider', 'account_scope', 'source_track_id', 'quality', 'url',
+    'reported_quality',
     'expires_at_ms', 'created_at_ms', 'last_accessed_at_ms',
   ],
   other_source_groups: [
@@ -223,6 +228,118 @@ const expectedColumns = {
     'original_provider', 'original_track_id', 'rank', 'candidate_provider',
     'candidate_track_id', 'candidate_json', 'byte_size',
   ],
+}
+
+const EXACT_CACHE_SCHEMA_V1_SOURCE = `CREATE TABLE cache_schema_migrations (
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  checksum TEXT NOT NULL CHECK(length(checksum) = 64),
+  applied_at_ms INTEGER NOT NULL CHECK(applied_at_ms >= 0)
+);
+
+CREATE TABLE raw_lyric_groups (
+  provider TEXT NOT NULL,
+  source_track_id TEXT NOT NULL,
+  byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+  created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+  last_accessed_at_ms INTEGER NOT NULL CHECK(last_accessed_at_ms >= created_at_ms),
+  PRIMARY KEY(provider, source_track_id)
+);
+
+CREATE TABLE raw_lyrics (
+  provider TEXT NOT NULL,
+  source_track_id TEXT NOT NULL,
+  lyric_type TEXT NOT NULL CHECK(lyric_type IN ('lyric','tlyric','rlyric','lxlyric')),
+  text TEXT NOT NULL,
+  byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+  PRIMARY KEY(provider, source_track_id, lyric_type),
+  FOREIGN KEY(provider, source_track_id)
+    REFERENCES raw_lyric_groups(provider, source_track_id) ON DELETE CASCADE
+);
+
+CREATE TABLE music_urls (
+  provider TEXT NOT NULL,
+  account_scope TEXT NOT NULL,
+  source_track_id TEXT NOT NULL,
+  quality TEXT NOT NULL,
+  url TEXT NOT NULL,
+  expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms >= 0),
+  created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+  last_accessed_at_ms INTEGER NOT NULL CHECK(last_accessed_at_ms >= created_at_ms),
+  PRIMARY KEY(provider, account_scope, source_track_id, quality)
+);
+
+CREATE TABLE other_source_groups (
+  original_provider TEXT NOT NULL,
+  original_track_id TEXT NOT NULL,
+  byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+  expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms >= 0),
+  created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+  last_accessed_at_ms INTEGER NOT NULL CHECK(last_accessed_at_ms >= created_at_ms),
+  PRIMARY KEY(original_provider, original_track_id)
+);
+
+CREATE TABLE other_sources (
+  original_provider TEXT NOT NULL,
+  original_track_id TEXT NOT NULL,
+  rank INTEGER NOT NULL CHECK(rank >= 0),
+  candidate_provider TEXT NOT NULL,
+  candidate_track_id TEXT NOT NULL,
+  candidate_json TEXT NOT NULL CHECK(json_valid(candidate_json)),
+  byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+  PRIMARY KEY(original_provider, original_track_id, rank),
+  UNIQUE(original_provider, original_track_id, candidate_provider, candidate_track_id),
+  FOREIGN KEY(original_provider, original_track_id)
+    REFERENCES other_source_groups(original_provider, original_track_id) ON DELETE CASCADE
+);
+
+CREATE INDEX raw_lyric_groups_lru
+ON raw_lyric_groups(last_accessed_at_ms, created_at_ms, provider COLLATE BINARY, source_track_id COLLATE BINARY);
+
+CREATE INDEX music_urls_expiry
+ON music_urls(expires_at_ms, provider COLLATE BINARY, account_scope COLLATE BINARY,
+  source_track_id COLLATE BINARY, quality COLLATE BINARY);
+
+CREATE INDEX music_urls_lru
+ON music_urls(last_accessed_at_ms, created_at_ms, provider COLLATE BINARY,
+  account_scope COLLATE BINARY, source_track_id COLLATE BINARY, quality COLLATE BINARY);
+
+CREATE INDEX other_source_groups_expiry
+ON other_source_groups(expires_at_ms, original_provider COLLATE BINARY, original_track_id COLLATE BINARY);
+
+CREATE INDEX other_source_groups_lru
+ON other_source_groups(last_accessed_at_ms, created_at_ms,
+  original_provider COLLATE BINARY, original_track_id COLLATE BINARY);`
+
+const CACHE_SCHEMA_V1_CHECKSUM = sha256Text(EXACT_CACHE_SCHEMA_V1_SOURCE)
+
+const createExactV1Cache = (cachePath, { withRows = false, schemaSource = EXACT_CACHE_SCHEMA_V1_SOURCE,
+  checksum = CACHE_SCHEMA_V1_CHECKSUM, userVersion = 1 } = {}) => {
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true })
+  const db = new Database(cachePath)
+  try {
+    db.pragma('foreign_keys = ON')
+    db.exec(schemaSource)
+    db.prepare(`
+      INSERT INTO cache_schema_migrations(version, name, checksum, applied_at_ms)
+      VALUES (1, 'cache_schema_v1', ?, 111)
+    `).run(checksum)
+    if (withRows) {
+      db.exec(`
+        INSERT INTO raw_lyric_groups VALUES ('tx', 'legacy', 6, 1, 2);
+        INSERT INTO raw_lyrics VALUES ('tx', 'legacy', 'lyric', '[00:00]legacy', 6);
+        INSERT INTO music_urls VALUES (
+          'tx', 'profile-v1:uin:1', 'legacy', '320k',
+          'https://media.invalid/legacy', 10, 1, 2
+        );
+        INSERT INTO other_source_groups VALUES ('tx', 'legacy', 12, 10, 1, 2);
+        INSERT INTO other_sources VALUES ('tx', 'legacy', 0, 'wy', 'candidate', '{}', 12);
+      `)
+    }
+    db.pragma(`user_version = ${userVersion}`)
+  } finally {
+    db.close()
+  }
 }
 
 const rewriteTableSql = (db, table, from, to) => {
@@ -250,6 +367,10 @@ const createCacheFromSchemaSource = (cachePath, schemaSource) => {
     db.prepare(`
       INSERT INTO cache_schema_migrations(version, name, checksum, applied_at_ms)
       VALUES (?, ?, ?, ?)
+    `).run(1, CACHE_MIGRATION_V1_NAME, CACHE_MIGRATION_V1_CHECKSUM, 1)
+    db.prepare(`
+      INSERT INTO cache_schema_migrations(version, name, checksum, applied_at_ms)
+      VALUES (?, ?, ?, ?)
     `).run(CACHE_SCHEMA_VERSION, CACHE_MIGRATION_NAME, CACHE_MIGRATION_CHECKSUM, 1)
     db.pragma(`user_version = ${CACHE_SCHEMA_VERSION}`)
   } finally {
@@ -258,6 +379,132 @@ const createCacheFromSchemaSource = (cachePath, schemaSource) => {
 }
 
 describe('guarded cache database', () => {
+  it('creates schema version 2 with nullable checked reported quality', async() => {
+    const { cacheRoot } = await createAppFixture()
+    const service = createCacheService({ now: () => 1234 })
+    assert.deepEqual(await service.openCacheDatabase(), {
+      status: 'created', schemaVersion: 2, diagnostic: null,
+    })
+    assert.deepEqual(await service.openCacheDatabase(), {
+      status: 'ready', schemaVersion: 2, diagnostic: null,
+    })
+    const db = new Database(path.join(cacheRoot, 'cache.db'), { readonly: true })
+    try {
+      const column = db.pragma('table_info("music_urls")').find(row => row.name == 'reported_quality')
+      assert.deepEqual({ type: column.type, notnull: column.notnull }, { type: 'TEXT', notnull: 0 })
+      assert.throws(() => db.prepare(`INSERT INTO music_urls(
+        provider, account_scope, source_track_id, quality, url, reported_quality,
+        expires_at_ms, created_at_ms, last_accessed_at_ms
+      ) VALUES ('tx','profile-v1:uin:1','x','320k','https://audio','hires',10,1,1)`).run())
+    } finally {
+      db.close()
+    }
+  })
+
+  it('atomically migrates exact schema v1 rows to v2 with null reported quality', async() => {
+    const { cacheRoot } = await createAppFixture()
+    createExactV1Cache(path.join(cacheRoot, 'cache.db'), { withRows: true })
+    const service = createCacheService({ now: () => 5678 })
+    assert.deepEqual(await service.openCacheDatabase(), {
+      status: 'ready', schemaVersion: 2, diagnostic: null,
+    })
+    const db = new Database(path.join(cacheRoot, 'cache.db'), { readonly: true })
+    try {
+      assert.equal(db.pragma('user_version', { simple: true }), 2)
+      assert.deepEqual(db.prepare(`SELECT url, reported_quality AS reportedQuality FROM music_urls`).get(), {
+        url: 'https://media.invalid/legacy', reportedQuality: null,
+      })
+      assert.equal(db.prepare('SELECT count(*) AS count FROM raw_lyrics').get().count, 1)
+      assert.equal(db.prepare('SELECT count(*) AS count FROM other_sources').get().count, 1)
+      assert.deepEqual(db.prepare(`SELECT version, name FROM cache_schema_migrations ORDER BY version`).all(), [
+        { version: 1, name: 'cache_schema_v1' },
+        { version: 2, name: 'cache_schema_v2_reported_quality' },
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('rolls back schema v2 when migration failure is injected before commit', async() => {
+    const { cacheRoot } = await createAppFixture()
+    const cachePath = path.join(cacheRoot, 'cache.db')
+    createExactV1Cache(cachePath, { withRows: true })
+    const before = sha256File(cachePath)
+    const db = new Database(cachePath)
+    assert.throws(() => migrateCacheSchemaV1ToV2(
+      db,
+      5678,
+      candidate => verifyCacheSchema(candidate).ok,
+      { beforeCommitV2() { throw new Error('injected migration failure') } },
+    ), /injected migration failure/)
+    db.close()
+    assert.equal(sha256File(cachePath), before)
+    const check = new Database(cachePath, { readonly: true })
+    try {
+      assert.equal(check.pragma('user_version', { simple: true }), 1)
+      assert.equal(check.prepare('SELECT count(*) AS count FROM cache_schema_migrations').get().count, 1)
+      assert.equal(check.prepare("SELECT count(*) AS count FROM sqlite_master WHERE name = 'music_urls_v2'").get().count, 0)
+      assert.equal(check.prepare('SELECT url FROM music_urls').get().url, 'https://media.invalid/legacy')
+    } finally {
+      check.close()
+    }
+  })
+
+  it('rejects malformed schema v1 without changing its artifact fingerprint', async(t) => {
+    const cases = [
+      {
+        name: 'ledger checksum',
+        create(cachePath) { createExactV1Cache(cachePath, { checksum: 'f'.repeat(64) }) },
+      },
+      {
+        name: 'URL column definition',
+        create(cachePath) {
+          createExactV1Cache(cachePath, {
+            schemaSource: EXACT_CACHE_SCHEMA_V1_SOURCE.replace('url TEXT NOT NULL,', 'url TEXT,'),
+          })
+        },
+      },
+      {
+        name: 'index definition',
+        create(cachePath) {
+          createExactV1Cache(cachePath, {
+            schemaSource: EXACT_CACHE_SCHEMA_V1_SOURCE.replace(
+              'source_track_id COLLATE BINARY, quality COLLATE BINARY);',
+              'source_track_id COLLATE NOCASE, quality COLLATE BINARY);',
+            ),
+          })
+        },
+      },
+      {
+        name: 'check constraint',
+        create(cachePath) {
+          createExactV1Cache(cachePath, {
+            schemaSource: EXACT_CACHE_SCHEMA_V1_SOURCE.replace('expires_at_ms >= 0', 'expires_at_ms > 0'),
+          })
+        },
+      },
+      {
+        name: 'user_version',
+        create(cachePath) { createExactV1Cache(cachePath, { userVersion: 3 }) },
+      },
+    ]
+    for (const testCase of cases) {
+      await t.test(testCase.name, async() => {
+        const { cacheRoot } = await createAppFixture({ prefix: 'malformed-schema-v1' })
+        const cachePath = path.join(cacheRoot, 'cache.db')
+        testCase.create(cachePath)
+        const before = sha256File(cachePath)
+        const service = createCacheService({ now: () => 5678 })
+        assert.deepEqual(await service.openCacheDatabase(), {
+          status: 'unavailable', schemaVersion: null, diagnostic: 'cache_schema_invalid',
+        })
+        assert.equal(sha256File(cachePath), before)
+        await closeService(service)
+        dbService.close()
+      })
+    }
+  })
+
   it('creates a missing cache root only after re-reading the phase-3 prerequisite', async() => {
     const { cacheParent, cacheRoot, appDbPath } = await createAppFixture({ withPrerequisite: false })
     const before = appFingerprint(appDbPath)
@@ -323,18 +570,18 @@ describe('guarded cache database', () => {
     const service = createCacheService({ fileSystem })
 
     assert.deepEqual(await service.openCacheDatabase(), {
-      status: 'created', schemaVersion: 1, diagnostic: null,
+      status: 'created', schemaVersion: 2, diagnostic: null,
     })
     assert.equal(swapped, false)
   })
 
-  it('creates schema version 1 with the exact ownership tables, indexes, foreign keys, and ledger', async() => {
+  it('creates schema version 2 with the exact ownership tables, indexes, foreign keys, and ledger', async() => {
     const { cacheRoot, appDbPath } = await createAppFixture()
     const before = appFingerprint(appDbPath)
     const service = createCacheService({ now: () => 1234 })
 
     assert.deepEqual(await service.openCacheDatabase(), {
-      status: 'created', schemaVersion: 1, diagnostic: null,
+      status: 'created', schemaVersion: 2, diagnostic: null,
     })
 
     const cachePath = path.join(cacheRoot, 'cache.db')
@@ -374,12 +621,15 @@ describe('guarded cache database', () => {
       ])
       const ledger = inspection.prepare(`
         SELECT version, name, checksum, applied_at_ms FROM cache_schema_migrations
-      `).get()
-      assert.equal(ledger.version, 1)
-      assert.equal(ledger.name, 'cache_schema_v1')
-      assert.match(ledger.checksum, /^[a-f0-9]{64}$/)
-      assert.equal(ledger.applied_at_ms, 1234)
-      assert.equal(inspection.pragma('user_version', { simple: true }), 1)
+        ORDER BY version
+      `).all()
+      assert.deepEqual(ledger.map(row => ({ version: row.version, name: row.name })), [
+        { version: 1, name: 'cache_schema_v1' },
+        { version: 2, name: 'cache_schema_v2_reported_quality' },
+      ])
+      assert.equal(ledger.every(row => /^[a-f0-9]{64}$/.test(row.checksum)), true)
+      assert.equal(ledger.every(row => row.applied_at_ms == 1234), true)
+      assert.equal(inspection.pragma('user_version', { simple: true }), 2)
       assert.equal(inspection.pragma('quick_check', { simple: true }), 'ok')
       assert.deepEqual(inspection.pragma('foreign_key_check'), [])
     } finally {
@@ -403,7 +653,7 @@ describe('guarded cache database', () => {
     const service = createCacheService({ fileSystem: guardedModeFs })
 
     assert.deepEqual(await service.openCacheDatabase(), {
-      status: 'created', schemaVersion: 1, diagnostic: null,
+      status: 'created', schemaVersion: 2, diagnostic: null,
     })
     assert.equal(pathModeCalls, 0)
     assert.deepEqual(appFingerprint(appDbPath), before)
@@ -678,7 +928,7 @@ describe('guarded cache database', () => {
     const service = createCacheService()
 
     assert.deepEqual(await service.openCacheDatabase(), {
-      status: 'ready', schemaVersion: 1, diagnostic: null,
+      status: 'ready', schemaVersion: 2, diagnostic: null,
     })
     assert.deepEqual(await service.runCacheRead(db => db.prepare(`
       SELECT provider FROM raw_lyric_groups WHERE source_track_id = 'wal-only'
@@ -779,7 +1029,7 @@ describe('guarded cache database', () => {
     const service = createCacheService()
 
     assert.deepEqual(await service.openCacheDatabase(), {
-      status: 'ready', schemaVersion: 1, diagnostic: null,
+      status: 'ready', schemaVersion: 2, diagnostic: null,
     })
     assert.deepEqual(await service.runCacheRead(db => db.prepare(`
       SELECT provider FROM raw_lyric_groups WHERE source_track_id = 'not-committed'
@@ -818,7 +1068,7 @@ describe('guarded cache database', () => {
     const service = createCacheService()
 
     assert.deepEqual(await service.openCacheDatabase(), {
-      status: 'ready', schemaVersion: 1, diagnostic: null,
+      status: 'ready', schemaVersion: 2, diagnostic: null,
     })
     assert.deepEqual(await service.runCacheRead(db => db.prepare(`
       SELECT provider FROM raw_lyric_groups WHERE source_track_id = 'committed-prefix'
@@ -839,6 +1089,10 @@ describe('guarded cache database', () => {
       writer.pragma('auto_vacuum = FULL')
       writer.pragma('foreign_keys = ON')
       writer.exec(CACHE_SCHEMA_SOURCE)
+      writer.prepare(`
+        INSERT INTO cache_schema_migrations(version, name, checksum, applied_at_ms)
+        VALUES (?, ?, ?, ?)
+      `).run(1, CACHE_MIGRATION_V1_NAME, CACHE_MIGRATION_V1_CHECKSUM, 1)
       writer.prepare(`
         INSERT INTO cache_schema_migrations(version, name, checksum, applied_at_ms)
         VALUES (?, ?, ?, ?)
@@ -893,7 +1147,7 @@ describe('guarded cache database', () => {
     const service = createCacheService()
 
     assert.deepEqual(await service.openCacheDatabase(), {
-      status: 'ready', schemaVersion: 1, diagnostic: null,
+      status: 'ready', schemaVersion: 2, diagnostic: null,
     })
     assert.deepEqual(await service.runCacheRead(db => db.prepare(`
       SELECT count(*) FROM raw_lyric_groups
@@ -926,7 +1180,7 @@ describe('guarded cache database', () => {
     const service = createCacheService()
 
     assert.deepEqual(await service.openCacheDatabase(), {
-      status: 'ready', schemaVersion: 1, diagnostic: null,
+      status: 'ready', schemaVersion: 2, diagnostic: null,
     })
     assert.deepEqual(await service.runCacheRead(db => db.prepare(`
       SELECT provider FROM raw_lyric_groups WHERE source_track_id = 'crash-tail'
@@ -960,7 +1214,7 @@ describe('guarded cache database', () => {
     const service = createCacheService()
 
     assert.deepEqual(await service.openCacheDatabase(), {
-      status: 'ready', schemaVersion: 1, diagnostic: null,
+      status: 'ready', schemaVersion: 2, diagnostic: null,
     })
     assert.deepEqual(await service.runCacheRead(db => db.prepare(`
       SELECT provider FROM raw_lyric_groups WHERE source_track_id = 'reuse-tail'
@@ -1154,7 +1408,7 @@ describe('guarded cache database', () => {
     }
   })
 
-  it('rejects table-level semantics outside the canonical cache v1 DDL', async(t) => {
+  it('rejects table-level semantics outside the canonical cache v2 DDL', async(t) => {
     const cases = [
       {
         name: 'deferred foreign key',
@@ -1257,7 +1511,7 @@ describe('guarded cache database', () => {
     }
     const service = createCacheService()
     assert.deepEqual(await service.openCacheDatabase(), {
-      status: 'ready', schemaVersion: 1, diagnostic: null,
+      status: 'ready', schemaVersion: 2, diagnostic: null,
     })
   })
 

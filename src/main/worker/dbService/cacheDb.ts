@@ -3,8 +3,8 @@ import { randomUUID as createRandomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import { endianness } from 'node:os'
 import path from 'node:path'
-import { bootstrapCacheSchema } from './cacheMigrate'
-import { verifyCacheSchema } from './cacheSchemaContract'
+import { bootstrapCacheSchema, migrateCacheSchemaV1ToV2 } from './cacheMigrate'
+import { inspectCacheSchema, verifyCacheSchema, verifyCacheSchemaV1 } from './cacheSchemaContract'
 import { getDatabaseInitialization } from './db'
 import { getCachePhasePrerequisite } from './modules/phase3'
 import {
@@ -56,7 +56,7 @@ export type CacheExecutionResult<T> =
 
 export interface CacheOpenResult {
   status: 'ready' | 'created' | 'recreated' | 'unavailable'
-  schemaVersion: 1 | null
+  schemaVersion: 2 | null
   diagnostic: CacheDiagnosticCode | null
 }
 
@@ -782,17 +782,19 @@ export const createCacheDatabaseService = (
   const verifyExistingCandidateInMemory = (
     snapshots: Map<CacheArtifactName, CacheArtifactSnapshot>,
     prepared: Extract<ReturnType<typeof prepareSqliteTarget>, { ok: true }>,
-  ): void => {
+  ): 1 | 2 => {
     let verificationDb: Database.Database | null = null
     let verificationError: Error | null = null
+    let recognizedVersion: 1 | 2 | null = null
     try {
       const image = materializeExistingDatabase(snapshots, prepared, fileSystem)
       verificationDb = new Database(image, {
         ...getNativeOptions(fileSystem, pathModule),
         readonly: true,
       })
-      const verification = verifyCacheSchema(verificationDb)
+      const verification = inspectCacheSchema(verificationDb)
       if (!verification.ok) throw fixedError(verification.diagnostic)
+      recognizedVersion = verification.version
     } catch (error) {
       verificationError = fixedError(classifyCacheError(error, 'cache_integrity_failed'))
     }
@@ -801,6 +803,8 @@ export const createCacheDatabaseService = (
     if (!closeAttempt.closed) retainedHandle = verificationDb
     if (closeAttempt.error != null || !closeAttempt.closed) throw fixedError('cache_close_failed')
     if (verificationError != null) throw verificationError
+    if (recognizedVersion == null) throw fixedError('cache_schema_invalid')
+    return recognizedVersion
   }
 
   const openCandidate = (
@@ -831,13 +835,14 @@ export const createCacheDatabaseService = (
     }
     let db: Database.Database | null = null
     let snapshots: Map<CacheArtifactName, CacheArtifactSnapshot> | null = null
+    let recognizedVersion: 1 | 2 | null = null
     try {
       if (!validateCacheRoot(root, fileSystem) || prepared.realRoot != root.realPath) {
         throw fixedError('cache_target_invalid')
       }
       snapshots = captureArtifacts(root, databasePath, target, fileSystem, pathModule, true)
       if (prepared.existed) {
-        verifyExistingCandidateInMemory(snapshots, prepared)
+        recognizedVersion = verifyExistingCandidateInMemory(snapshots, prepared)
         validateArtifactOwnership(root, databasePath, target, snapshots, fileSystem, pathModule, true)
         if (!validatePreparedSqliteTarget(databasePath, prepared, { fileSystem, pathModule }) ||
           !validateCacheRoot(root, fileSystem)) {
@@ -863,18 +868,24 @@ export const createCacheDatabaseService = (
       }
       closeSqliteGuardDescriptor(fileSystem, prepared.guardDescriptor)
       if (prepared.existed) {
-        const verification = verifyCacheSchema(db)
+        const verification = recognizedVersion == 1 ? verifyCacheSchemaV1(db) : verifyCacheSchema(db)
         if (!verification.ok) throw fixedError(verification.diagnostic)
       }
       db.pragma('foreign_keys = ON')
       if (db.pragma('foreign_keys', { simple: true }) != 1) throw fixedError('cache_open_failed')
-      if (String(db.pragma('journal_mode = WAL', { simple: true })).toLowerCase() != 'wal') {
+      if (!prepared.existed && String(db.pragma('journal_mode = WAL', { simple: true })).toLowerCase() != 'wal') {
         throw fixedError('cache_open_failed')
       }
+      if (prepared.existed && recognizedVersion == 1) {
+        migrateCacheSchemaV1ToV2(db, now(), candidate => verifyCacheSchema(candidate).ok)
+      }
       if (!prepared.existed) bootstrapCacheSchema(db, now())
-      if (!prepared.existed) {
+      if (!prepared.existed || recognizedVersion == 1) {
         const verification = verifyCacheSchema(db)
         if (!verification.ok) throw fixedError(verification.diagnostic)
+      }
+      if (prepared.existed && String(db.pragma('journal_mode = WAL', { simple: true })).toLowerCase() != 'wal') {
+        throw fixedError('cache_open_failed')
       }
       applyPrivateFileModes(root, fileSystem, pathModule)
       snapshots = captureArtifacts(root, databasePath, target, fileSystem, pathModule, true)
@@ -908,7 +919,7 @@ export const createCacheDatabaseService = (
     connection = active
     state = 'ready'
     unavailableDiagnostic = null
-    return { status, schemaVersion: 1, diagnostic: null }
+    return { status, schemaVersion: 2, diagnostic: null }
   }
 
   const closeRetainedHandle = (): CacheDiagnosticCode | null => {
@@ -922,7 +933,7 @@ export const createCacheDatabaseService = (
     if (!reopening && state == 'ready' && connection != null) {
       try {
         validateConnectionOwnership(connection, fileSystem, pathModule)
-        return { status: 'ready', schemaVersion: 1, diagnostic: null }
+        return { status: 'ready', schemaVersion: 2, diagnostic: null }
       } catch (error) {
         const diagnostic = transitionAfterOperationFailure(error)
         return { status: 'unavailable', schemaVersion: null, diagnostic }

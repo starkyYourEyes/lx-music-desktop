@@ -378,6 +378,7 @@
   "setting__basic_lang": "Language",
   "setting__basic_lang_title": "The language displayed in the app",
   "setting__basic_playbar_progress_style": "Playbar Progress Bar Style",
+  "setting__basic_playbar_height": "Playbar Height",
   "setting__basic_playbar_progress_style_full": "Full-width",
   "setting__basic_playbar_progress_style_middle": "Medium",
   "setting__basic_playbar_progress_style_mini": "Mini",

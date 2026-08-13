@@ -110,6 +110,19 @@ dd
       v-for="item in controlBtnPositionList" :id="`setting_basic_control_btn_position_${item.id}`" :key="item.id"
       name="setting_basic_control_btn_position" need :model-value="appSetting['common.controlBtnPosition']" :value="item.id" :label="item.name" @update:model-value="updateSetting({'common.controlBtnPosition': $event})")
 dd
+  h3#basic_playbar_height {{ $t('setting__basic_playbar_height') }}
+  div
+    .p(:class="$style.playBarHeightControl")
+      input(
+        :class="$style.playBarHeightRange" type="range" :min="PLAY_BAR_HEIGHT_MIN" :max="PLAY_BAR_HEIGHT_MAX" step="1"
+        :value="appSetting['common.playBarHeight']"
+        @input="handlePlayBarHeightChange")
+      base-input.gap-left(
+        :class="$style.playBarHeightInput" type="number"
+        :model-value="appSetting['common.playBarHeight']"
+        @change="handlePlayBarHeightChange")
+      span(:class="$style.playBarHeightUnit") px
+dd
   h3#basic_playbar_progress_style {{ $t('setting__basic_playbar_progress_style') }}
   div
     base-checkbox.gap-left(
@@ -147,6 +160,11 @@ import ApiFallbackSources from './ApiFallbackSources.vue'
 import SettingSearch from './SettingSearch.vue'
 import { appSetting, updateSetting, setApiSource } from '@renderer/store/setting'
 import { getThemes, applyTheme, findTheme, buildBgUrl } from '@renderer/store/utils'
+import {
+  PLAY_BAR_HEIGHT_MAX,
+  PLAY_BAR_HEIGHT_MIN,
+  normalizePlayBarHeight,
+} from '@common/utils/playBarLayout'
 
 export default {
   name: 'SettingBasic',
@@ -357,6 +375,11 @@ export default {
       ]
     })
 
+    const handlePlayBarHeightChange = value => {
+      const nextValue = value?.target ? value.target.value : value
+      updateSetting({ 'common.playBarHeight': normalizePlayBarHeight(nextValue) })
+    }
+
     const systemFontList = ref([])
     const fontList = computed(() => {
       return [{ id: '', label: t('setting__desktop_lyric_font_default') }, ...systemFontList.value]
@@ -415,6 +438,9 @@ export default {
       langList,
       sourceNameTypes,
       controlBtnPositionList,
+      PLAY_BAR_HEIGHT_MIN,
+      PLAY_BAR_HEIGHT_MAX,
+      handlePlayBarHeightChange,
       fontList,
       isFullscreen,
       toggleTheme,
@@ -630,6 +656,28 @@ export default {
   color: var(--color-500);
   font-size: 12px;
   line-height: 1.4;
+}
+
+.playBarHeightControl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.playBarHeightRange {
+  width: 180px;
+  max-width: 36vw;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+}
+
+.playBarHeightInput {
+  width: 62px;
+  text-align: center;
+}
+
+.playBarHeightUnit {
+  color: var(--color-label);
 }
 
 </style>

@@ -809,6 +809,7 @@
   "user_api__github_test_success": "\u4ed3\u5e93\u8fde\u63a5\u6210\u529f\uff1a{version}\uff0c{count} \u4e2a\u97f3\u6e90\uff0c\u63d0\u4ea4 {commit}",
   "user_api__github_import_confirm": "\u5c06\u6e05\u7a7a\u73b0\u6709 {localCount} \u4e2a\u81ea\u5b9a\u4e49\u6e90\uff0c\u5e76\u5bfc\u5165 {version} \u7684 {remoteCount} \u4e2a\u97f3\u6e90\u3002\u662f\u5426\u7ee7\u7eed\uff1f",
   "user_api__github_import_success": "\u5df2\u5bfc\u5165 {version} \u7684 {count} \u4e2a\u97f3\u6e90",
+  "user_api__github_skipped_invalid_scripts": "\u5df2\u8df3\u8fc7 {count} \u4e2a\u65e0\u6548\u8fdc\u7a0b\u97f3\u6e90\u811a\u672c\uff1a\n{paths}",
   "user_api__github_error_rate_limit": "GitHub \u8bf7\u6c42\u6b21\u6570\u5df2\u8fbe\u4e0a\u9650\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5",
   "user_api__github_error_http": "GitHub \u8bf7\u6c42\u5931\u8d25\uff1a{message}",
   "user_api__github_error_tree": "\u4ed3\u5e93\u76ee\u5f55\u6570\u636e\u65e0\u6548\u6216\u4e0d\u5b8c\u6574",

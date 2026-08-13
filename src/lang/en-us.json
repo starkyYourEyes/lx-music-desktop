@@ -809,6 +809,7 @@
   "user_api__github_test_success": "Repository connected: {version}, {count} sources, commit {commit}",
   "user_api__github_import_confirm": "Replace all {localCount} custom sources with {remoteCount} sources from {version}?",
   "user_api__github_import_success": "Imported {count} sources from {version}",
+  "user_api__github_skipped_invalid_scripts": "Skipped {count} invalid remote source scripts:\n{paths}",
   "user_api__github_error_rate_limit": "GitHub rate limit reached. Try again later.",
   "user_api__github_error_http": "GitHub request failed: {message}",
   "user_api__github_error_tree": "Repository tree data is invalid or incomplete.",

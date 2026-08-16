@@ -1,6 +1,6 @@
 <template>
   <div :class="$style.menu">
-    <ul :class="$style.list" role="toolbar">
+    <ul class="scroll" :class="[$style.list, $style.mainMenus, { [$style.scrollbarHidden]: !appSetting['common.isShowSidebarScrollbar'] }]" role="toolbar">
       <li v-for="(item, index) in mainMenus" v-show="item.enable" :key="item.to" :class="[$style.navItem, { [$style.separator]: index == 2 }]" role="presentation">
         <router-link :class="[$style.link, {[$style.active]: $route.meta.name == item.name}]" role="tab" :aria-selected="$route.meta.name == item.name" :to="item.to" :aria-label="item.tips">
           <img v-if="item.logo" :class="$style.providerLogo" :src="item.logo" alt="" draggable="false">
@@ -10,7 +10,7 @@
         </router-link>
       </li>
     </ul>
-    <ul :class="[$style.list, $style.bottomMenus]" role="toolbar">
+    <ul v-if="!isSettingInAccountMenu" :class="[$style.list, $style.bottomMenus]" role="toolbar">
       <li v-for="item in bottomMenus" v-show="item.enable" :key="item.to" :class="$style.navItem" role="presentation">
         <router-link :class="[$style.link, {[$style.active]: $route.meta.name == item.name}]" role="tab" :aria-selected="$route.meta.name == item.name" :to="item.to" :aria-label="item.tips">
           <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" :viewBox="item.iconSize" :height="item.size" :width="item.size" space="preserve">
@@ -100,11 +100,13 @@ export default {
     })))
     const mainMenus = computed(() => menus.value.filter(item => item.name != 'Setting'))
     const bottomMenus = computed(() => menus.value.filter(item => item.name == 'Setting'))
+    const isSettingInAccountMenu = computed(() => appSetting['common.sidebarSettingLocation'] == 'accountMenu')
 
     return {
       appSetting,
       mainMenus,
       bottomMenus,
+      isSettingInAccountMenu,
     }
   },
 }
@@ -125,6 +127,17 @@ export default {
   width: 100%;
   &:last-child {
     margin-bottom: 0;
+  }
+}
+.mainMenus {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.scrollbarHidden {
+  &::-webkit-scrollbar {
+    width: 0;
+    height: 0;
   }
 }
 .navItem {
@@ -153,7 +166,7 @@ export default {
   }
 }
 .bottomMenus {
-  margin-top: auto;
+  flex: none;
 }
 .link {
   position: absolute;

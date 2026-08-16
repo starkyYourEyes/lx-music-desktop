@@ -23,6 +23,8 @@ const defaultSetting: LX.AppSetting = {
   'common.randomAnimate': true,
   'common.isAgreePact': false,
   'common.controlBtnPosition': isMac ? 'left' : 'right',
+  'common.isShowSidebarScrollbar': true,
+  'common.sidebarSettingLocation': 'bottom',
   'common.playBarHeight': PLAY_BAR_HEIGHT_DEFAULT,
   'common.playBarProgressStyle': 'mini',
   'common.transparentWindow': !isMac,

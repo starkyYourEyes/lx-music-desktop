@@ -68,6 +68,10 @@ declare global {
        */
       'common.controlBtnPosition': 'left' | 'right'
 
+      'common.isShowSidebarScrollbar': boolean
+
+      'common.sidebarSettingLocation': 'bottom' | 'accountMenu'
+
       /**
        * Main window play bar height in pixels.
        */

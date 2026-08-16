@@ -183,6 +183,41 @@ test('Basic settings exposes a bounded localized play bar height control', () =>
   }
 })
 
+test('Basic settings exposes persistent sidebar navigation preferences', () => {
+  const html = renderPugTemplate('src/renderer/views/Setting/components/SettingBasic.vue')
+  assert.match(html, /id="basic_sidebar"/)
+  assert.match(html, /id="setting_basic_sidebar_show_scrollbar"/)
+  assert.match(html, /common\.isShowSidebarScrollbar/)
+  assert.match(html, /common\.sidebarSettingLocation/)
+  assert.match(html, /value="bottom"/)
+  assert.match(html, /value="accountMenu"/)
+
+  const defaults = loadTsModule(path.join(root, 'src/common/defaultSetting.ts'), {
+    './constants': { RECOMMEND_HOME_SECTION_IDS: [] },
+    './projectIdentity': { PROJECT_IDENTITY: { defaultWebdavUrl: '' } },
+    './utils/playBarLayout': { PLAY_BAR_HEIGHT_DEFAULT: 74 },
+  }).default
+  assert.equal(defaults['common.isShowSidebarScrollbar'], true)
+  assert.equal(defaults['common.sidebarSettingLocation'], 'bottom')
+
+  const expectedLabels = {
+    'zh-cn.json': ['侧栏', '显示侧栏滚动条', '设置入口位置', '侧栏底部', '用户头像菜单'],
+    'zh-tw.json': ['側欄', '顯示側欄捲動列', '設定入口位置', '側欄底部', '使用者頭像選單'],
+    'en-us.json': ['Sidebar', 'Show sidebar scrollbar', 'Settings entry location', 'Sidebar bottom', 'Account menu'],
+  }
+  const keys = [
+    'setting__basic_sidebar',
+    'setting__basic_sidebar_show_scrollbar',
+    'setting__basic_sidebar_setting_location',
+    'setting__basic_sidebar_setting_location_bottom',
+    'setting__basic_sidebar_setting_location_account_menu',
+  ]
+  for (const [file, labels] of Object.entries(expectedLabels)) {
+    const messages = JSON.parse(fs.readFileSync(path.join(root, 'src/lang', file), 'utf8'))
+    assert.deepEqual(keys.map(key => messages[key]), labels)
+  }
+})
+
 const loadSettingOther = () => loadVueComponent(
   'src/renderer/views/Setting/components/SettingOther.vue',
   {

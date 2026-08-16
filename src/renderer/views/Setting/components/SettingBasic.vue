@@ -110,6 +110,25 @@ dd
       v-for="item in controlBtnPositionList" :id="`setting_basic_control_btn_position_${item.id}`" :key="item.id"
       name="setting_basic_control_btn_position" need :model-value="appSetting['common.controlBtnPosition']" :value="item.id" :label="item.name" @update:model-value="updateSetting({'common.controlBtnPosition': $event})")
 dd
+  h3#basic_sidebar {{ $t('setting__basic_sidebar') }}
+  div
+    base-checkbox(
+      id="setting_basic_sidebar_show_scrollbar"
+      :model-value="appSetting['common.isShowSidebarScrollbar']"
+      :label="$t('setting__basic_sidebar_show_scrollbar')"
+      @update:model-value="updateSetting({ 'common.isShowSidebarScrollbar': $event })")
+    .p.gap-top {{ $t('setting__basic_sidebar_setting_location') }}
+    base-checkbox.gap-left(
+      id="setting_basic_sidebar_setting_location_bottom" name="setting_basic_sidebar_setting_location"
+      need :model-value="appSetting['common.sidebarSettingLocation']" value="bottom"
+      :label="$t('setting__basic_sidebar_setting_location_bottom')"
+      @update:model-value="updateSetting({ 'common.sidebarSettingLocation': $event })")
+    base-checkbox.gap-left(
+      id="setting_basic_sidebar_setting_location_account_menu" name="setting_basic_sidebar_setting_location"
+      need :model-value="appSetting['common.sidebarSettingLocation']" value="accountMenu"
+      :label="$t('setting__basic_sidebar_setting_location_account_menu')"
+      @update:model-value="updateSetting({ 'common.sidebarSettingLocation': $event })")
+dd
   h3#basic_playbar_height {{ $t('setting__basic_playbar_height') }}
   div
     .p(:class="$style.playBarHeightControl")

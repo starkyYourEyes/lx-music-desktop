@@ -133,9 +133,8 @@ export default {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-}
-.scrollbarHidden {
-  &::-webkit-scrollbar {
+
+  &.scrollbarHidden::-webkit-scrollbar {
     width: 0;
     height: 0;
   }

@@ -118,8 +118,13 @@ test('main navigation scrolls while the bottom Settings region stays fixed', asy
   assert.equal(declarationsFor('bottomMenus').flex, 'none')
 
   const hiddenRule = stylesheet.nodes.find(node =>
-    node.type == 'rule' && node.selector == `.${modules.scrollbarHidden}::-webkit-scrollbar`)
+    node.type == 'rule' && node.selector.endsWith(`.${modules.scrollbarHidden}::-webkit-scrollbar`))
   assert.ok(hiddenRule)
+  assert.equal(
+    hiddenRule.selector,
+    `.${modules.mainMenus}.${modules.scrollbarHidden}::-webkit-scrollbar`,
+    'the hidden rule must outrank the later global .scroll scrollbar rule',
+  )
   assert.equal(
     Object.fromEntries(hiddenRule.nodes.map(node => [node.prop, node.value])).width,
     '0',

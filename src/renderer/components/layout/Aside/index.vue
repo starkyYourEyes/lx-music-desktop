@@ -1,7 +1,7 @@
 <template>
   <div :class="[$style.aside, { [$style.fullscreen]: isFullscreen }]">
     <ControlBtns v-if="appSetting['common.controlBtnPosition'] == 'left'" />
-    <div v-else :class="$style.account" data-account-popover>
+    <div :class="$style.account" data-account-popover>
       <button type="button" :class="[$style.logo, { [$style.logged]: !!logoProfile?.avatarUrl }]" :aria-label="logoProfile?.nickname || 'LX Music'" @click="handleLogoClick">
         <img v-if="logoProfile?.avatarUrl" :class="$style.avatar" :src="logoProfile.avatarUrl" draggable="false" @error="handleAvatarError">
         <span v-else>L X</span>
@@ -38,6 +38,18 @@
               @click="handleNeteaseAction"
             >{{ neteaseIsLoggedIn ? '退出' : '登录' }}</button>
           </div>
+          <button
+            v-if="isSettingInAccountMenu"
+            type="button"
+            :class="[$style.settingsAction, $style.settingsSeparator]"
+            :aria-label="$t('setting')"
+            @click="handleSettingClick"
+          >
+            <svg :class="$style.settingsActionIcon" version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 493.23 436.47" aria-hidden="true">
+              <use xlink:href="#icon-setting" />
+            </svg>
+            <span>{{ $t('setting') }}</span>
+          </button>
         </div>
       </transition>
     </div>
@@ -61,6 +73,7 @@ const router = useRouter()
 const isAvatarLoadFailed = ref(false)
 const isShowAccountPopover = ref(false)
 const logoProfile = computed(() => isAvatarLoadFailed.value ? null : neteaseProfile.value)
+const isSettingInAccountMenu = computed(() => appSetting['common.sidebarSettingLocation'] == 'accountMenu')
 
 watch(neteaseProfile, () => {
   isAvatarLoadFailed.value = false
@@ -102,6 +115,11 @@ const handleNeteaseAction = async() => {
       login: 'netease',
     },
   }).catch(_ => _)
+}
+
+const handleSettingClick = () => {
+  isShowAccountPopover.value = false
+  void router.push('/setting').catch(_ => _)
 }
 
 onMounted(() => {
@@ -294,6 +312,43 @@ onBeforeUnmount(() => {
   &:active {
     background-color: var(--color-button-background-active);
   }
+}
+
+.settingsAction {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 44px;
+  padding: 0 12px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 6px;
+  background-color: transparent;
+  color: var(--color-font);
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+  transition: background-color @transition-normal, color @transition-normal;
+
+  &:hover {
+    color: var(--color-primary);
+    background-color: var(--color-button-background-hover);
+  }
+
+  &:active {
+    background-color: var(--color-button-background-active);
+  }
+}
+
+.settingsSeparator {
+  border-top: 1px solid var(--color-button-background-hover);
+}
+
+.settingsActionIcon {
+  width: 20px;
+  height: 20px;
+  flex: none;
 }
 
 .avatar {

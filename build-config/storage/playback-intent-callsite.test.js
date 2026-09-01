@@ -183,6 +183,7 @@ const loadPlayerActions = ({
       setPlay() {},
     },
     '@renderer/store/player/state': {
+      currentPlaybackQuality: { value: null },
       isPlay: { value: false },
       playedList: [],
       playInfo,
@@ -1106,7 +1107,11 @@ describe('typed playback intent callsites', () => {
       const modernScript = modernSource.match(/<script>([\s\S]*?)<\/script>/)?.[1]
       assert.ok(modernScript, 'ModernBar.vue must contain a script block')
       const modernBar = loadSourceModule(modernScript, 'ModernBar.vue', {
-        '@common/utils/vueTools': { ref: value => ({ value }), watch() {} },
+        '@common/utils/vueTools': {
+          computed: getter => ({ get value() { return getter() } }),
+          ref: value => ({ value }),
+          watch() {},
+        },
         '@common/utils/vueRouter': { useRouter: () => ({ push: async() => {} }) },
         '@common/utils/electron': { clipboardWriteText() {} },
         './ControlBtns.vue': {},
@@ -1126,6 +1131,7 @@ describe('typed playback intent callsites', () => {
           isPlay: { value: false },
           playInfo: modernHarness.playInfo,
           playMusicInfo: modernHarness.playMusicInfo,
+          currentPlaybackQuality: { value: null },
         },
         '@renderer/store/player/action': { setMusicInfo() {}, setShowPlayerDetail() {} },
         '@renderer/core/player': modernHarness.actions,
@@ -1133,6 +1139,10 @@ describe('typed playback intent callsites', () => {
         '@renderer/store/party': { party: { room: null } },
         '@renderer/store/privateFm/state': { isPrivateFmMode: { value: true } },
         '@renderer/utils/ipc': { trashNeteasePrivateFmMusic: async() => {} },
+        '@renderer/store/setting': { appSetting: { 'common.playBarHeight': 80 } },
+        '@common/utils/playBarLayout': {
+          getPlayBarLayout: () => ({ height: 80, artworkSize: 64, paddingY: 8 }),
+        },
       }).default
       await modernBar.setup().handleTrashPrivateFmMusic()
 

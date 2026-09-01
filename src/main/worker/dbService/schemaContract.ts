@@ -615,6 +615,22 @@ export const databaseSchema7Contract: SchemaContract = {
     table.name != 'music_info_other_source' && table.name != 'music_url'),
 }
 
+export const databaseSchema8Contract: SchemaContract = {
+  tables: databaseSchema7Contract.tables.map(table => table.name == 'listening_tracks'
+    ? {
+        ...table,
+        columns: [
+          ...table.columns,
+          column('play_count', 'INTEGER', true, 0, '0'),
+        ],
+        checks: [
+          ...(table.checks ?? []),
+          safeInteger('play_count'),
+        ],
+      }
+    : table),
+}
+
 // Existing callers validate the transition schema explicitly through version 6.
 export const databaseSchemaContract = databaseSchema6Contract
 

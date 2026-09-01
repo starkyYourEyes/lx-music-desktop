@@ -759,6 +759,30 @@ describe('storage startup coordinator', () => {
     assert.ok(calls.indexOf('cache:prerequisite') < calls.indexOf('phase4:initialize'))
   })
 
+  it('finalizes schema 8 after Phase 4 and before settings or module initialization', async() => {
+    const { calls, deps } = createDeps({
+      initializePhase4: async() => {
+        calls.push('phase4:initialize')
+        return { schemaVersion: 7, typedOwnershipVerified: true }
+      },
+      finalizeDatabaseSchema: async() => {
+        calls.push('db:finalize')
+        return {
+          ...readyResult,
+          schemaVersion: 8,
+          migratedVersions: [8],
+        }
+      },
+    })
+
+    assert.deepEqual(await createCoordinator(deps).start(), { status: 'ready', schemaVersion: 8 })
+    assert.deepEqual(calls.filter(call => [
+      'phase4:initialize', 'db:finalize', 'settings:init', 'modules:register', 'app:inited',
+    ].includes(call)), [
+      'phase4:initialize', 'db:finalize', 'settings:init', 'modules:register', 'app:inited',
+    ])
+  })
+
   it('requires the exact Phase 4 result contract', async t => {
     const cases = [
       { name: 'missing ownership', value: { schemaVersion: 7 } },

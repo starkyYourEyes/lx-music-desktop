@@ -300,3 +300,20 @@ test('Local Music/WebDAV owns the connection card between folders and source set
     assert.equal(messages.setting__local_music_webdav, expected)
   }
 })
+
+test('Listening Time renders seven horizontal duration rows and a scrollable play-count ranking', () => {
+  const { descriptor } = readVue('src/renderer/views/Setting/components/SettingListeningTime.vue')
+  const template = descriptor.template.content
+  const styles = descriptor.styles.map(style => style.content).join('\n')
+
+  assert.match(template, /v-for="item in weekItems"/)
+  assert.match(template, /\$style\.weekRow/)
+  assert.match(template, /width:\s*`\$\{item\.width\}%`/)
+  assert.match(template, /item\.duration/)
+  assert.doesNotMatch(template, /height:\s*item\.height/)
+  assert.match(template, /song\.rank/)
+  assert.match(template, /播放.*song\.playCount.*次/)
+  assert.doesNotMatch(template, /song\.time/)
+  assert.match(styles, /\.songList\s*\{[^}]*height:\s*420px;/s)
+  assert.match(styles, /\.songList\s*\{[^}]*overflow-y:\s*auto;/s)
+})

@@ -20,7 +20,7 @@ declare namespace LX {
     }
 
     interface CachePhase4Result {
-      schemaVersion: 6 | 7
+      schemaVersion: 6 | 7 | 8
       typedOwnershipVerified: boolean
     }
 

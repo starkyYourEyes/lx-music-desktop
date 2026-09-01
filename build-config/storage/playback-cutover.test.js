@@ -745,6 +745,7 @@ describe('query-backed renderer state', () => {
       '@renderer/utils/musicSdk': {},
       '@common/utils': {},
       '@renderer/store/list/action': {},
+      '@renderer/store/list/group': { initializeUserListGroups: async() => {} },
       '@renderer/core/player': {},
       '@common/utils/vueTools': {},
       '@renderer/store/setting': {},

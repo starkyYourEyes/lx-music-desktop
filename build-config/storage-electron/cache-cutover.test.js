@@ -780,6 +780,115 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
     assert.equal(fs.existsSync(backupsRoot), false)
   })
 
+  it('advances a fresh schema-7 database to schema 8 and recognizes it on relaunch', async() => {
+    const fixture = createTestStorageRoot('cache-cutover-fresh-v8')
+    fixtures.push(fixture)
+    const profileRoot = path.join(fixture.path, 'profile')
+    const cacheRoot = path.join(fixture.path, 'cache')
+    const backupsRoot = path.join(fixture.path, 'backups-never-created')
+    await dbService.init({
+      dataPath: profileRoot,
+      cacheRoot,
+      backupsRoot,
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
+    putPhase3Marker(dbService.getAppDB())
+    assert.equal((await loadPhase4().initializePhase4()).schemaVersion, 7)
+
+    const advanced = await dbService.advanceAppDatabase({
+      targetSchemaVersion: 8,
+      backupsRoot,
+    })
+
+    assert.equal(advanced.schemaVersion, 8)
+    assert.deepEqual(advanced.migratedVersions, [8])
+    assert.equal(dbService.getDatabaseHealth().schemaVersion, 8)
+    assert.equal(dbService.getOpenAppDatabaseSchemaVersion(), 8)
+    assert.equal(
+      dbService.getAppDB().prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value,
+      '8',
+    )
+    assert.equal(
+      dbService.getAppDB().pragma('table_xinfo("listening_tracks")').at(-1).name,
+      'play_count',
+    )
+    assert.equal(fs.existsSync(backupsRoot), false)
+
+    const relaunched = await dbService.init({
+      dataPath: profileRoot,
+      cacheRoot,
+      backupsRoot,
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
+    assert.equal(relaunched.schemaVersion, 8)
+    assert.deepEqual(await loadPhase4().initializePhase4(), {
+      schemaVersion: 8,
+      typedOwnershipVerified: true,
+    })
+  })
+
+  it('backs up an existing schema-7 database before advancing it to schema 8', async() => {
+    const fixture = createTestStorageRoot('cache-cutover-existing-v8')
+    fixtures.push(fixture)
+    const profileRoot = path.join(fixture.path, 'profile')
+    const cacheRoot = path.join(fixture.path, 'cache')
+    const backupsRoot = path.join(fixture.path, 'backups')
+    await dbService.init({
+      dataPath: profileRoot,
+      cacheRoot,
+      backupsRoot,
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
+    putPhase3Marker(dbService.getAppDB())
+    assert.equal((await loadPhase4().initializePhase4()).schemaVersion, 7)
+    dbService.getAppDB().prepare(`
+      INSERT INTO track_snapshots(
+        source, source_track_id, name, singer, duration_ms, playable_payload_json, updated_at_ms
+      ) VALUES ('test', 'existing', 'Existing', 'Singer', 1000, NULL, 10)
+    `).run()
+    dbService.close()
+
+    const relaunched = await dbService.init({
+      dataPath: profileRoot,
+      cacheRoot,
+      backupsRoot,
+      previousShutdownWasClean: true,
+      targetSchemaVersion: 6,
+    })
+    assert.equal(relaunched.schemaVersion, 7)
+
+    const advanced = await dbService.advanceAppDatabase({
+      targetSchemaVersion: 8,
+      backupsRoot,
+    })
+
+    assert.equal(advanced.schemaVersion, 8)
+    assert.deepEqual(advanced.migratedVersions, [8])
+    assert.match(path.basename(advanced.backupPath),
+      /^lx\.data\.db\.pre-migration-v7-to-v8\.[a-f0-9]{32}\.backup$/)
+    assert.deepEqual(fs.readdirSync(backupsRoot), [path.basename(advanced.backupPath)])
+    const backup = new Database(advanced.backupPath, { readonly: true })
+    try {
+      assert.equal(
+        backup.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value,
+        '7',
+      )
+      assert.equal(
+        backup.pragma('table_xinfo("listening_tracks")').some(column => column.name == 'play_count'),
+        false,
+      )
+      assert.equal(
+        backup.prepare("SELECT COUNT(*) AS count FROM track_snapshots WHERE source_track_id = 'existing'").get().count,
+        1,
+      )
+    } finally {
+      backup.close()
+    }
+  })
+
   it('requires backup evidence for an existing empty-looking schema-6 database', async() => {
     const paths = await createSchema6Fixture('cache-cutover-existing-empty')
     const db = dbService.getAppDB()

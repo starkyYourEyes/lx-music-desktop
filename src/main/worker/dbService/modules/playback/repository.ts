@@ -43,6 +43,7 @@ import {
   upsertTrack,
 } from './dbHelper'
 import {
+  incrementListeningPlayCount,
   readListeningStats,
   readRecentProjection,
   updateListeningProjections,
@@ -288,6 +289,9 @@ export const startInTransaction = (
     type: 'play_start',
     reason: input.startReason,
   })
+  if (input.consent.statsAllowed) {
+    incrementListeningPlayCount(db, trackId, row.sessionId, input.occurredAtMs)
+  }
   if (input.consent.recentAllowed) {
     updateRecentProjection(db, trackId, row.sessionId, input.occurredAtMs)
   }

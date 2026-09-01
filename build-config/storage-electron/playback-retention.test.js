@@ -17,15 +17,19 @@ require.extensions['.ts'] = (module, filename) => {
 process.env.TZ = 'UTC'
 
 const dbService = require('../../src/main/worker/dbService/db.ts')
+const cacheDb = require('../../src/main/worker/dbService/cacheDb.ts')
+const phase4 = require('../../src/main/worker/dbService/modules/phase4/index.ts')
 const repository = require('../../src/main/worker/dbService/modules/playback/index.ts')
 const { evaluateVacuumEligibility } = require('../../src/main/worker/dbService/modules/playback/retention.ts')
 const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
+const { putPhase3Marker } = require('../storage/helpers/phase4-durable-fixture.js')
 
 const tempDirs = []
 const yearMs = 365 * 24 * 60 * 60 * 1000
 const group = '11111111-1111-4111-8111-111111111111'
 
-afterEach(() => {
+afterEach(async() => {
+  try { await cacheDb.closeCacheDatabase() } catch {}
   try { dbService.close() } catch {}
   for (const fixture of tempDirs.splice(0)) fixture.cleanup()
 })
@@ -42,6 +46,12 @@ const createStore = async() => {
     targetSchemaVersion: 6,
   })
   assert.equal(result.status, 'ready')
+  putPhase3Marker(dbService.getAppDB())
+  assert.equal((await phase4.initializePhase4()).schemaVersion, 7)
+  assert.equal((await dbService.advanceAppDatabase({
+    targetSchemaVersion: 8,
+    backupsRoot: path.join(root, 'backups'),
+  })).schemaVersion, 8)
   return dbService.getAppDB()
 }
 
@@ -118,6 +128,7 @@ describe('playback retention', () => {
     start(db)
     commit({ fact: terminalFact })
     const before = { total: total(db), daily: daily(db), track: listeningTrack(db) }
+    assert.equal(db.prepare('SELECT play_count AS playCount FROM listening_tracks').get().playCount, 1)
 
     const result = repository.playbackCompact({ version: 1, nowMs: yearMs + 3000, batchSize: 500 })
 
@@ -136,6 +147,7 @@ describe('playback retention', () => {
     }
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM playback_sessions').get().count, 0)
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM playback_events').get().count, 0)
+    assert.equal(db.prepare('SELECT play_count AS playCount FROM listening_tracks').get().playCount, 1)
     assert.deepEqual(repository.playbackCompact({ version: 1, nowMs: yearMs + 3000, batchSize: 500 }), {
       version: 1,
       deleted: 0,

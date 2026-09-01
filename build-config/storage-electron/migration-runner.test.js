@@ -84,6 +84,7 @@ const migration4 = createMigration(4, 'test_four', db => db.exec('CREATE TABLE m
 const migration5 = createMigration(5, 'test_five', db => db.exec('CREATE TABLE migration_five (id INTEGER PRIMARY KEY)'))
 const migration6 = createMigration(6, 'test_six', db => db.exec('CREATE TABLE migration_six (id INTEGER PRIMARY KEY)'))
 const migration7 = createMigration(7, 'test_seven', db => db.exec('CREATE TABLE migration_seven (id INTEGER PRIMARY KEY)'))
+const migration8 = createMigration(8, 'test_eight', db => db.exec('CREATE TABLE migration_eight (id INTEGER PRIMARY KEY)'))
 
 const readLegacyVersion = db => db.prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value
 const readLedger = db => db.prepare('SELECT version, name, checksum, applied_at_ms FROM schema_migrations ORDER BY version').all()
@@ -371,6 +372,34 @@ describe('database migrations', () => {
     assert.equal(hasObject(db, 'schema_migrations'), false)
     assert.equal(hasObject(db, 'migration_seven'), false)
     assert.equal(readLegacyVersion(db), '2')
+  })
+
+  it('allows the ordinary schema-8 migration only after protected schema 7 is committed', () => {
+    const registry = [migration3, migration4, migration5, migration6, migration7, migration8]
+    const beforeCutover = createLegacyDatabase('2')
+    assert.throws(
+      () => runMigrations(beforeCutover, registry, { targetSchemaVersion: 8, now: () => 1000 }),
+      /target schema version 8/i,
+    )
+    assert.equal(hasObject(beforeCutover, 'schema_migrations'), false)
+
+    const afterCutover = createLegacyDatabase('2')
+    runMigrations(afterCutover, registry, { targetSchemaVersion: 6, now: () => 1000 })
+    afterCutover.exec('CREATE TABLE migration_seven (id INTEGER PRIMARY KEY)')
+    afterCutover.prepare(`
+      INSERT INTO schema_migrations(version, name, checksum, applied_at_ms)
+      VALUES(7, ?, ?, 2000)
+    `).run(migration7.name, migration7.checksum)
+    afterCutover.prepare("UPDATE db_info SET field_value = '7' WHERE field_name = 'version'").run()
+
+    assert.deepEqual(getPendingMigrations(afterCutover, registry).map(migration => migration.version), [8])
+    assert.deepEqual(runMigrations(afterCutover, registry, { targetSchemaVersion: 8, now: () => 3000 }), {
+      fromVersion: 7,
+      toVersion: 8,
+      applied: [8],
+    })
+    assert.equal(hasObject(afterCutover, 'migration_eight'), true)
+    assert.equal(readLegacyVersion(afterCutover), '8')
   })
 
   it('rejects migration targets outside an inclusive contiguous boundary', () => {

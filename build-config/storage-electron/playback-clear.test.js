@@ -19,6 +19,7 @@ process.env.TZ = 'UTC'
 const dbService = require('../../src/main/worker/dbService/db.ts')
 const playback = require('../../src/main/worker/dbService/modules/playback/index.ts')
 const appState = require('../../src/main/worker/dbService/modules/app_state/index.ts')
+const { migration8 } = require('../../src/main/worker/dbService/migrations/0008_listening_play_count.ts')
 const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const tempDirs = []
@@ -44,6 +45,8 @@ const createStore = async() => {
   assert.equal(result.status, 'ready')
   return dbService.getAppDB()
 }
+
+const enablePlayCount = db => migration8.up(db, { appliedAtMs: 0 })
 
 const track = id => ({
   source: 'test',
@@ -192,8 +195,10 @@ describe('recent clear', () => {
 describe('statistics clear handshake', () => {
   it('checkpoints and rotates an active segment, zeros statistics, and accepts the next checkpoint', async() => {
     const db = await createStore()
+    enablePlayCount(db)
     start()
     commit()
+    assert.equal(playback.playbackGetListeningStats().tracks[0].playCount, 1)
     const clearCheckpoint = checkpoint({ seq: 3, played: 800, active: 1000, at: 2000, position: 800 })
 
     const ack = playback.playbackClearStatistics({
@@ -267,6 +272,7 @@ describe('statistics clear handshake', () => {
       liveActiveMs: 300,
       updatedAtMs: 2200,
     })
+    assert.equal(playback.playbackGetListeningStats().tracks[0].playCount, 0)
   })
 
   it('preserves paused state and rejects an uncoordinated clear while a segment is open', async() => {

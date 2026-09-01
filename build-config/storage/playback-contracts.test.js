@@ -199,6 +199,7 @@ describe('playback activity contracts', () => {
         name: displayUtf8,
         singer: displayAscii,
         durationMs: null,
+        playCount: 0,
       }],
       updatedAtMs: 1,
     }
@@ -631,7 +632,7 @@ describe('playback activity contracts', () => {
       version: 1,
       total: { baselinePlayedMs: 0, livePlayedMs: 0, baselineActiveMs: 0, liveActiveMs: 0, playedMs: 0, activeMs: 0 },
       daily: [{ baselinePlayedMs: 0, livePlayedMs: 0, baselineActiveMs: 0, liveActiveMs: 0, playedMs: 0, activeMs: 0, localDay: '2026-07-29' }],
-      tracks: [{ baselinePlayedMs: 0, livePlayedMs: 0, baselineActiveMs: 0, liveActiveMs: 0, playedMs: 0, activeMs: 0, source: '', sourceTrackId: '', name: '', singer: '', durationMs: null }],
+      tracks: [{ baselinePlayedMs: 0, livePlayedMs: 0, baselineActiveMs: 0, liveActiveMs: 0, playedMs: 0, activeMs: 0, source: '', sourceTrackId: '', name: '', singer: '', durationMs: null, playCount: 0 }],
       updatedAtMs: 0,
     }
     assert.deepEqual(parseListeningStats(stats), stats)
@@ -645,6 +646,22 @@ describe('playback activity contracts', () => {
       { kind: 'unknown', request: {} },
       { ...recent, legacyRank: -1 },
       { ...stats, tracks: [{ ...stats.tracks[0], durationMs: MAX_MS + 1 }] },
+      { ...stats, tracks: [{ ...stats.tracks[0], playCount: -1 }] },
+      { ...stats, tracks: [{ ...stats.tracks[0], playCount: 1.5 }] },
+      { ...stats, tracks: [{ ...stats.tracks[0], playCount: Number.MAX_SAFE_INTEGER + 1 }] },
+      { ...stats, tracks: [{
+        baselinePlayedMs: 0,
+        livePlayedMs: 0,
+        baselineActiveMs: 0,
+        liveActiveMs: 0,
+        playedMs: 0,
+        activeMs: 0,
+        source: '',
+        sourceTrackId: '',
+        name: '',
+        singer: '',
+        durationMs: null,
+      }] },
       { ...resume, indexHint: -1 },
     ]) {
       assert.throws(() => {

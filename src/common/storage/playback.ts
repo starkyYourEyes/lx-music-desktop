@@ -157,7 +157,7 @@ export interface ListeningStatsV1 {
   version: 1
   total: ListeningBucketV1
   daily: Array<ListeningBucketV1 & { localDay: string }>
-  tracks: Array<ListeningBucketV1 & Omit<PlaybackTrackV1, 'playablePayload'>>
+  tracks: Array<ListeningBucketV1 & Omit<PlaybackTrackV1, 'playablePayload'> & { playCount: number }>
   updatedAtMs: number
 }
 

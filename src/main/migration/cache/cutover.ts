@@ -3,12 +3,18 @@ import { createHash } from 'node:crypto'
 import { canonicalJson, type JsonValue } from '../../../common/storage/canonicalJson'
 import { storageFramedSha256 } from '../../../common/storage/cachePhase'
 import { verifyDatabaseAgainstContract } from '../../worker/dbService/verifyDB'
-import { databaseSchema6Contract, databaseSchema7Contract, type SchemaContract } from '../../worker/dbService/schemaContract'
+import {
+  databaseSchema6Contract,
+  databaseSchema7Contract,
+  databaseSchema8Contract,
+  type SchemaContract,
+} from '../../worker/dbService/schemaContract'
 import { SCHEMA7_REMOVED_OBJECTS } from '../../worker/dbService/tables'
 import migration3 from '../../worker/dbService/migrations/0003_storage_foundation'
 import migration4 from '../../worker/dbService/migrations/0004_account_profiles'
 import migration5 from '../../worker/dbService/migrations/0005_non_activity_state'
 import migration6 from '../../worker/dbService/migrations/0006_playback_activity'
+import migration8 from '../../worker/dbService/migrations/0008_listening_play_count'
 import {
   parseRawLyricMarkerDetails,
   canonicalRawLyricHash,
@@ -524,9 +530,10 @@ const expectedMigrations = [
   migration5,
   migration6,
   { version: 7, name: CACHE_CLEANUP_MIGRATION_NAME, checksum: CACHE_CLEANUP_MIGRATION_CHECKSUM },
+  migration8,
 ]
 
-const verifyLedger = (db: Database.Database, schemaVersion: 6 | 7): void => {
+const verifyLedger = (db: Database.Database, schemaVersion: 6 | 7 | 8): void => {
   const rows = db.prepare(`
     SELECT version, name, checksum, applied_at_ms AS appliedAtMs
     FROM schema_migrations ORDER BY version
@@ -792,14 +799,20 @@ export const verifySchema6RollbackState = (db: Database.Database): boolean => {
   }
 }
 
-export const verifySchema7SteadyState = (db: Database.Database): {
+interface PostCutoverState {
   rawMarker: RawLyricMarkerRow
   readWriteMarker: StrictMarkerRow<typeof READ_WRITE_MARKER_NAME>
   cutoverMarker: StrictMarkerRow<typeof CUTOVER_MARKER_NAME>
   cutoverDetails: CutoverDetails
-} => {
-  verifyLedger(db, 7)
-  verifyExactStructure(db, databaseSchema7Contract, explicitSchema7Indexes)
+}
+
+const verifyPostCutoverSteadyState = (
+  db: Database.Database,
+  schemaVersion: 7 | 8,
+  contract: SchemaContract,
+): PostCutoverState => {
+  verifyLedger(db, schemaVersion)
+  verifyExactStructure(db, contract, explicitSchema7Indexes)
   if (countAuthoritativeRawRows(db) != 0) {
     throw failure('phase4_schema_invalid')
   }
@@ -821,6 +834,12 @@ export const verifySchema7SteadyState = (db: Database.Database): {
     cutoverDetails: cutover.details,
   }
 }
+
+export const verifySchema7SteadyState = (db: Database.Database): PostCutoverState =>
+  verifyPostCutoverSteadyState(db, 7, databaseSchema7Contract)
+
+export const verifySchema8SteadyState = (db: Database.Database): PostCutoverState =>
+  verifyPostCutoverSteadyState(db, 8, databaseSchema8Contract)
 
 const editedRows = (db: Database.Database): string[][] => {
   const rows = db.prepare("SELECT id, source, type, text FROM lyric WHERE source = 'edited'").all() as Array<Record<string, unknown>>
@@ -940,4 +959,8 @@ export const verifyCutoverBackup = (
 
 export const verifySchema7MarkersBeforeCache = (db: Database.Database): void => {
   verifySchema7SteadyState(db)
+}
+
+export const verifySchema8MarkersBeforeCache = (db: Database.Database): void => {
+  verifySchema8SteadyState(db)
 }

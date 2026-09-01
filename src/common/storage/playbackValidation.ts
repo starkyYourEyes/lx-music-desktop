@@ -746,9 +746,10 @@ export const parseListeningStats = (value: unknown): ListeningStatsV1 => {
     }
     for (const entry of value.tracks) {
       assertRecord(entry, 'tracks')
-      assertExactKeys(entry, 'tracks', ['baselinePlayedMs', 'livePlayedMs', 'baselineActiveMs', 'liveActiveMs', 'playedMs', 'activeMs', 'source', 'sourceTrackId', 'name', 'singer', 'durationMs'])
+      assertExactKeys(entry, 'tracks', ['baselinePlayedMs', 'livePlayedMs', 'baselineActiveMs', 'liveActiveMs', 'playedMs', 'activeMs', 'source', 'sourceTrackId', 'name', 'singer', 'durationMs', 'playCount'])
       assertBucket(entry, 'tracks')
       assertTrackScalars({ ...entry, playablePayload: null }, 'tracks')
+      assertInteger(entry.playCount, 'tracks.playCount', 0)
     }
     assertInteger(value.updatedAtMs, 'updatedAtMs', 0)
     return cloneJson(value as JsonValue) as unknown as ListeningStatsV1

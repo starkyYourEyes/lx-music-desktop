@@ -106,6 +106,7 @@ export interface StorageCoordinatorDependencies {
   }) => Promise<void> | void
   getCachePhasePrerequisite?: () => Promise<CachePhasePrerequisiteV1> | CachePhasePrerequisiteV1
   initializePhase4?: () => Promise<CachePhase4Result> | CachePhase4Result
+  finalizeDatabaseSchema?: () => Promise<DatabaseReadyResult> | DatabaseReadyResult
   portableProfileToken?: PortableProfileStartupToken
   acknowledgePortableProfileStartup?: (
     token: PortableProfileStartupToken,
@@ -393,7 +394,7 @@ const isValidPhase4Result = (value: unknown): value is CachePhase4Result => {
   const result = value as Record<string, unknown>
   const keys = Reflect.ownKeys(result)
   return keys.length == 2 && keys.includes('schemaVersion') && keys.includes('typedOwnershipVerified') &&
-    (result.schemaVersion == 6 || result.schemaVersion == 7) &&
+    (result.schemaVersion == 6 || result.schemaVersion == 7 || result.schemaVersion == 8) &&
     typeof result.typedOwnershipVerified == 'boolean' &&
     !(result.schemaVersion == 6 && result.typedOwnershipVerified)
 }
@@ -514,7 +515,7 @@ export const createStorageCoordinator = (
           if (!isValidPhase4Result(phase4)) {
             throw errorWithCode('cache_phase4_result_invalid')
           }
-          if (phase4.schemaVersion == 7 && phase4.typedOwnershipVerified &&
+          if (phase4.schemaVersion >= 7 && phase4.typedOwnershipVerified &&
             dependencies.portableProfileToken != null) {
             const token = dependencies.portableProfileToken
             const acknowledge = dependencies.acknowledgePortableProfileStartup
@@ -524,13 +525,21 @@ export const createStorageCoordinator = (
             acknowledgementToArm = async() => { await acknowledge(token) }
           }
         }
+        let finalSchemaVersion = phase4?.schemaVersion ?? database.schemaVersion
+        if (finalSchemaVersion >= 7 && dependencies.finalizeDatabaseSchema != null) {
+          const finalized = await dependencies.finalizeDatabaseSchema()
+          if (finalized.status != 'ready' || finalized.schemaVersion != 8) {
+            throw errorWithCode('database_schema_finalize_invalid')
+          }
+          finalSchemaVersion = finalized.schemaVersion
+        }
         await dependencies.initSettings()
         if (shutdownRequested) return startupCancelled()
         dependencies.registerModules()
         dependencies.appInited()
         startupReachedReady = true
         portableProfileAcknowledgement = acknowledgementToArm
-        return { status: 'ready', schemaVersion: phase4?.schemaVersion ?? database.schemaVersion }
+        return { status: 'ready', schemaVersion: finalSchemaVersion }
       } catch (error) {
         return { status: 'fatal', reason: failureCode(error, 'storage_startup_failed') }
       }

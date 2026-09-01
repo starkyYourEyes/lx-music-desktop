@@ -31,77 +31,60 @@ dd
 
 dd
   h3 最近 7 天
-  div(:class="$style.chart")
-    div(v-for="item in weekItems" :key="item.key" :class="$style.barItem")
-      div(:class="$style.barTrack")
-        div(:class="$style.barFill" :style="{ height: item.height }")
-      span {{ item.label }}
+  div(:class="$style.weekList")
+    div(v-for="item in weekItems" :key="item.key" :class="$style.weekRow")
+      span(:class="$style.weekLabel") {{ item.label }}
+      div(:class="$style.weekTrack" aria-hidden="true")
+        div(:class="$style.weekFill" :style="{ width: `${item.width}%` }")
+      span(:class="$style.weekDuration") {{ item.duration }}
 
 dd
   h3 最常听
-  div(v-if="topSongs.length" :class="$style.songList")
-    div(v-for="song in topSongs" :key="song.key" :class="$style.songItem")
+  div(v-if="topSongs.length" :class="$style.songList" role="list")
+    div(v-for="song in topSongs" :key="song.key" :class="$style.songItem" role="listitem")
+      span(:class="$style.songRank") {{ song.rank }}
       div(:class="$style.songMeta")
         strong {{ song.name }}
         span {{ song.singer || '未知歌手' }}
-      em {{ song.time }}
+      em 播放 {{ song.playCount }} 次
   div(v-else :class="$style.empty")
-    | 暂时还没有统计数据。播放几首歌后，这里会慢慢亮起来。
+    | 暂无播放记录
 </template>
 
 <script>
 import { computed } from '@common/utils/vueTools'
-import { getLocalDateKey, formatListeningTime } from '@common/utils/listeningTime'
+import {
+  buildListeningWeekRows,
+  formatListeningTime,
+  getLocalDateKey,
+  rankTracksByPlayCount,
+} from '@common/utils/listeningTime'
 import { listeningTimeStats } from '@renderer/store/listeningTime/state'
 
 const DAY_GOAL_SECONDS = 2 * 60 * 60
-
-const getDayLabel = date => `${date.getMonth() + 1}/${date.getDate()}`
 
 export default {
   name: 'SettingListeningTime',
   setup() {
     const todayKey = computed(() => getLocalDateKey())
     const todaySeconds = computed(() => (listeningTimeStats.daily.find(item => item.localDay == todayKey.value)?.playedMs ?? 0) / 1000)
-    const weekItems = computed(() => {
-      const days = Array.from({ length: 7 }, (_, index) => {
-        const date = new Date()
-        date.setDate(date.getDate() - (6 - index))
-        const key = getLocalDateKey(date)
-        const seconds = (listeningTimeStats.daily.find(item => item.localDay == key)?.playedMs ?? 0) / 1000
-        return {
-          key,
-          label: getDayLabel(date),
-          seconds,
-        }
-      })
-      const maxSeconds = Math.max(...days.map(item => item.seconds), 1)
-      return days.map(item => ({
-        ...item,
-        height: `${Math.max(item.seconds / maxSeconds * 100, item.seconds ? 12 : 4)}%`,
-      }))
+    const weekItems = computed(() => buildListeningWeekRows(listeningTimeStats.daily))
+    const weekSeconds = computed(() => {
+      const weekKeys = new Set(weekItems.value.map(item => item.key))
+      return listeningTimeStats.daily.reduce((sum, item) =>
+        sum + (weekKeys.has(item.localDay) ? item.playedMs / 1000 : 0), 0)
     })
-    const weekSeconds = computed(() => weekItems.value.reduce((sum, item) => sum + item.seconds, 0))
     const todayPercent = computed(() => Math.min(100, Math.round(todaySeconds.value / DAY_GOAL_SECONDS * 100)))
     const ringStyle = computed(() => ({
       '--progress': `${todayPercent.value * 3.6}deg`,
     }))
-    const topSongs = computed(() => listeningTimeStats.tracks
-      .map(song => ({
-        key: `${song.source}:${song.sourceTrackId}`,
-        name: song.name,
-        singer: song.singer,
-        seconds: song.playedMs / 1000,
-        time: formatListeningTime(song.playedMs / 1000),
-      }))
-      .sort((a, b) => b.seconds - a.seconds)
-      .slice(0, 5))
+    const topSongs = computed(() => rankTracksByPlayCount(listeningTimeStats.tracks, 100))
 
     return {
       totalLabel: computed(() => formatListeningTime(listeningTimeStats.total.playedMs / 1000)),
       todayLabel: computed(() => formatListeningTime(todaySeconds.value)),
       weekLabel: computed(() => formatListeningTime(weekSeconds.value)),
-      songCount: computed(() => listeningTimeStats.tracks.length),
+      songCount: computed(() => listeningTimeStats.tracks.filter(song => song.playCount > 0).length),
       todayPercent,
       ringStyle,
       weekItems,
@@ -194,53 +177,65 @@ export default {
   font-size: 18px;
   font-weight: 740;
 }
-.chart {
+.weekList {
   display: grid;
-  grid-template-columns: repeat(7, minmax(28px, 1fr));
-  align-items: end;
-  gap: 12px;
-  height: 154px;
+  gap: 10px;
 }
-.barItem {
-  display: flex;
-  flex-direction: column;
+.weekRow {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr) 92px;
   align-items: center;
-  height: 100%;
-  gap: 8px;
+  gap: 12px;
+  min-height: 28px;
 }
-.barTrack {
-  flex: 1;
+.weekLabel,
+.weekDuration {
+  color: var(--color-font-label);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.weekTrack {
   width: 100%;
-  max-width: 36px;
-  display: flex;
-  align-items: end;
-  border-radius: 999px;
+  height: 10px;
+  border-radius: 3px;
   background: var(--color-primary-alpha-900);
   overflow: hidden;
 }
-.barFill {
-  width: 100%;
-  min-height: 4px;
-  border-radius: 999px;
-  background: linear-gradient(180deg, var(--color-primary-light-200), var(--color-primary));
-  transition: height .25s ease;
+.weekFill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-primary);
+  transition: width .25s ease;
 }
-.barItem span {
-  color: var(--color-font-label);
-  font-size: 12px;
+.weekDuration {
+  color: var(--color-font);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 .songList {
-  display: grid;
-  gap: 9px;
+  height: 420px;
+  overflow-y: auto;
+  border-top: 1px solid var(--color-primary-alpha-900);
+  border-bottom: 1px solid var(--color-primary-alpha-900);
 }
 .songItem {
-  display: flex;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) minmax(88px, auto);
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 11px 13px;
-  border-radius: 8px;
-  background: var(--color-primary-alpha-900);
+  gap: 12px;
+  min-height: 54px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-primary-alpha-900);
+
+  &:last-child {
+    border-bottom: 0;
+  }
+}
+.songRank {
+  color: var(--color-font-label);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
 }
 .songMeta {
   min-width: 0;
@@ -263,10 +258,14 @@ export default {
   }
 }
 .songItem em {
-  flex: 0 0 auto;
+  min-width: 0;
+  max-width: min(180px, 40vw);
   color: var(--color-primary);
+  font-size: 12px;
   font-style: normal;
   font-weight: 650;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 .empty {
   padding: 22px;
@@ -281,6 +280,32 @@ export default {
   }
   .statsGrid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 520px) {
+  .hero {
+    gap: 12px;
+  }
+  .ring {
+    flex-basis: 88px;
+    width: 88px;
+    height: 88px;
+  }
+  .total {
+    font-size: 24px !important;
+  }
+  .weekRow {
+    grid-template-columns: 68px minmax(0, 1fr) 78px;
+    gap: 8px;
+  }
+  .songList {
+    height: 360px;
+  }
+  .songItem {
+    grid-template-columns: 30px minmax(0, 1fr) minmax(76px, auto);
+    gap: 8px;
+    padding-inline: 4px;
   }
 }
 </style>

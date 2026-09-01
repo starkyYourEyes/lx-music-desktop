@@ -20,6 +20,7 @@ process.env.TZ = 'America/New_York'
 
 const dbService = require('../../src/main/worker/dbService/db.ts')
 const repository = require('../../src/main/worker/dbService/modules/playback/index.ts')
+const { migration8 } = require('../../src/main/worker/dbService/migrations/0008_listening_play_count.ts')
 const { createTestStorageRoot } = require('../storage/helpers/test-storage-root.js')
 
 const tempDirs = []
@@ -48,6 +49,8 @@ const createStore = async() => {
   assert.equal(result.status, 'ready')
   return dbService.getAppDB()
 }
+
+const enablePlayCount = db => migration8.up(db, { appliedAtMs: startAt })
 
 const track = (id = 'one') => ({
   source: 'test',
@@ -330,6 +333,48 @@ describe('atomic playback repository', () => {
     assert.equal(repository.playbackGetResume().sourceTrackId, 'one')
   })
 
+  it('counts only the first statistics-enabled start for a playback group', async() => {
+    const db = await createStore()
+    enablePlayCount(db)
+    const request = startCommand({ recentAllowed: false, statsAllowed: true })
+
+    const first = repository.playbackStart(request)
+    assert.equal(repository.playbackGetListeningStats().tracks[0].playCount, 1)
+    assert.deepEqual(repository.playbackStart(request), first)
+    repository.playbackCommit(commitAt(2, 1000, pauseFact))
+    repository.playbackCommit(commitAt(3, 1000, {
+      version: 1,
+      type: 'resume',
+      reason: 'user',
+    }))
+    assert.equal(repository.playbackGetListeningStats().tracks[0].playCount, 1)
+
+    repository.playbackStart(startCommand(
+      { recentAllowed: true, statsAllowed: false },
+      { playbackGroupUuid: groupB, track: track('disabled'), occurredAtMs: startAt + 2000 },
+    ))
+    assert.deepEqual(
+      repository.playbackGetListeningStats().tracks.map(row => [row.sourceTrackId, row.playCount]),
+      [['one', 1]],
+    )
+  })
+
+  it('rolls back a new playback group when its track play count is exhausted', async() => {
+    const db = await createStore()
+    enablePlayCount(db)
+    repository.playbackStart(startCommand({ recentAllowed: false, statsAllowed: true }))
+    db.prepare('UPDATE listening_tracks SET play_count = ?').run(Number.MAX_SAFE_INTEGER)
+    const before = durableState(db)
+
+    assert.throws(() => repository.playbackStart(startCommand(
+      { recentAllowed: true, statsAllowed: true },
+      { playbackGroupUuid: groupB, occurredAtMs: startAt + 1000 },
+    )), /playback_play_count_overflow/)
+
+    assert.deepEqual(durableState(db), before)
+    assert.equal(repository.playbackGetListeningStats().tracks[0].playCount, Number.MAX_SAFE_INTEGER)
+  })
+
   it('acks duplicate and out-of-order checkpoints without a second delta or event', async() => {
     const db = await createStore()
     repository.playbackStart(startCommand())
@@ -375,6 +420,7 @@ describe('atomic playback repository', () => {
         name: 'Track one',
         singer: 'Singer one',
         durationMs: 240000,
+        playCount: 0,
       }],
       updatedAtMs: startAt + 1000,
     })
@@ -668,6 +714,7 @@ describe('atomic playback repository', () => {
 
   it('rotates a DST boundary without changing the group or duplicating delta', async() => {
     const db = await createStore()
+    enablePlayCount(db)
     repository.playbackStart(startCommand())
     const played = 23 * 60 * 60 * 1000
 
@@ -700,6 +747,7 @@ describe('atomic playback repository', () => {
     assert.deepEqual(repository.playbackCommit(request), ack)
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM playback_sessions').get().count, 2)
     assert.equal(total(db).livePlayedMs, played)
+    assert.equal(repository.playbackGetListeningStats().tracks[0].playCount, 1)
   })
 
   it('rejects a boundary whose local day or UTC offset does not match its occurrence', async() => {

@@ -78,6 +78,10 @@ const getStorageCoordinator = () => {
     runPlaybackTypedSmoke: () => global.lx.worker.dbService.playbackRunTypedSmoke(),
     getPhase3AttestationPrerequisites: () => global.lx.worker.dbService.getPhase3AttestationPrerequisites(),
     completePhase3Attestation: completePhase3StartupAttestation,
+    finalizeDatabaseSchema: () => global.lx.worker.dbService.advanceAppDatabase({
+      targetSchemaVersion: 8,
+      backupsRoot: global.storagePaths.backupsRoot,
+    }),
     ...(portableProfileStartup == null
       ? {}
       : {

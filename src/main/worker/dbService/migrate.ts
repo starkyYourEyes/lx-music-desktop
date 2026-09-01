@@ -5,7 +5,7 @@ import { migrations } from './migrations'
 import type { MigrationContext, MigrationMarker, MigrationRunResult, SchemaMigration } from './migrations/types'
 
 const FIRST_MIGRATION_VERSION = 3
-const MAX_ORDINARY_SCHEMA_VERSION = 6
+const MAX_PRE_CUTOVER_SCHEMA_VERSION = 6
 const checksumPattern = /^[0-9a-f]{64}$/
 
 const createLedgerSql = `CREATE TABLE schema_migrations (
@@ -89,10 +89,12 @@ const validateTarget = (
   requestedTarget: number | undefined,
 ): number => {
   const highestVersion = registry[registry.length - 1].version
-  if (requestedTarget != null && requestedTarget > MAX_ORDINARY_SCHEMA_VERSION) {
+  if (requestedTarget != null && currentVersion < 7 && requestedTarget > MAX_PRE_CUTOVER_SCHEMA_VERSION) {
     throw new Error(`Invalid target schema version ${String(requestedTarget)}`)
   }
-  const target = requestedTarget ?? Math.max(currentVersion, Math.min(highestVersion, MAX_ORDINARY_SCHEMA_VERSION))
+  const target = requestedTarget ?? (currentVersion < 7
+    ? Math.max(currentVersion, Math.min(highestVersion, MAX_PRE_CUTOVER_SCHEMA_VERSION))
+    : highestVersion)
   const isBoundary = target == currentVersion || registry.some(migration => migration.version == target)
   if (!Number.isSafeInteger(target) || target < currentVersion || target > highestVersion || !isBoundary) {
     throw new Error(`Invalid target schema version ${String(target)}`)

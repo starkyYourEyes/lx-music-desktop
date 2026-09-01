@@ -581,7 +581,7 @@ describe('serialized cache lifecycle', () => {
     allowClose = true
     const reopened = await service.openCacheDatabase()
     assert.equal(['ready', 'recreated'].includes(reopened.status), true)
-    assert.equal(reopened.schemaVersion, 1)
+    assert.equal(reopened.schemaVersion, 2)
     assert.equal(reopened.diagnostic, null)
   })
 

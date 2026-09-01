@@ -11,6 +11,10 @@ import {
 
 const MAX_RECENT_TRACKS = 520
 
+const hasListeningPlayCount = (db: Database.Database): boolean =>
+  (db.pragma('table_xinfo("listening_tracks")') as Array<{ name: unknown }>)
+    .some(column => column.name == 'play_count')
+
 const projectionCutoff = (
   db: Database.Database,
   name: 'recent' | 'statistics',
@@ -71,6 +75,37 @@ export interface ListeningDelta {
   playedMs: number
   activeMs: number
   occurredAtMs: number
+}
+
+export const incrementListeningPlayCount = (
+  db: Database.Database,
+  trackId: number,
+  sessionId: number,
+  startedAtMs: number,
+): void => {
+  if (!hasListeningPlayCount(db)) return
+  const session = db.prepare(`
+    SELECT track_id AS trackId
+    FROM playback_sessions
+    WHERE session_id = ? AND segment_no = 0 AND stats_allowed = 1 AND started_at_ms = ?
+  `).get(sessionId, startedAtMs) as { trackId: number } | undefined
+  if (session?.trackId != trackId) throw new Error('playback_play_count_session_invalid')
+  const cutoff = projectionCutoff(db, 'statistics')
+  if (cutoff != null && startedAtMs < cutoff) return
+  const current = db.prepare(`
+    SELECT play_count AS playCount FROM listening_tracks WHERE track_id = ?
+  `).get(trackId) as { playCount: number } | undefined
+  if (current?.playCount == Number.MAX_SAFE_INTEGER) {
+    throw new Error('playback_play_count_overflow')
+  }
+  db.prepare(`
+    INSERT INTO listening_tracks(track_id, last_played_at_ms, updated_at_ms, play_count)
+    VALUES(?, ?, ?, 1)
+    ON CONFLICT(track_id) DO UPDATE SET
+      play_count = play_count + 1,
+      last_played_at_ms = excluded.last_played_at_ms,
+      updated_at_ms = excluded.updated_at_ms
+  `).run(trackId, startedAtMs, startedAtMs)
 }
 
 interface StoredBucket {
@@ -217,6 +252,9 @@ const bucket = (row: Record<string, unknown>): ListeningBucketV1 => {
 }
 
 export const readListeningStats = (db: Database.Database): ListeningStatsV1 => {
+  const playCountColumn = hasListeningPlayCount(db)
+    ? 'listening.play_count AS playCount'
+    : '0 AS playCount'
   const total = db.prepare(`
     SELECT baseline_played_ms AS baselinePlayedMs, live_played_ms AS livePlayedMs,
       baseline_active_ms AS baselineActiveMs, live_active_ms AS liveActiveMs,
@@ -242,7 +280,8 @@ export const readListeningStats = (db: Database.Database): ListeningStatsV1 => {
       track.duration_ms AS durationMs, listening.baseline_played_ms AS baselinePlayedMs,
       listening.live_played_ms AS livePlayedMs,
       listening.baseline_active_ms AS baselineActiveMs,
-      listening.live_active_ms AS liveActiveMs
+      listening.live_active_ms AS liveActiveMs,
+      ${playCountColumn}
     FROM listening_tracks listening
     JOIN track_snapshots track ON track.track_id = listening.track_id
     WHERE (SELECT visible_after_ms FROM projection_state WHERE name = 'statistics') IS NULL
@@ -260,6 +299,7 @@ export const readListeningStats = (db: Database.Database): ListeningStatsV1 => {
     name: row.name as string,
     singer: row.singer as string,
     durationMs: row.durationMs as number | null,
+    playCount: row.playCount as number,
   }))
   return parseListeningStats({
     version: 1,

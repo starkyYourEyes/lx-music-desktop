@@ -929,6 +929,51 @@ export const dislikeQQMusic = async(musicInfo: LX.Music.MusicInfo_tx): Promise<v
   )
 }
 
+export const getKugouMusicAccountStatus = async() => {
+  return rendererInvoke<LX.KuGouMusic.AccountStatus>(WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_get_account_status)
+}
+
+export const createKugouMusicLoginQr = async(requestId: string) => {
+  return rendererInvoke<string, LX.KuGouMusic.LoginQr>(WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_login_qr_create, requestId)
+}
+
+export const checkKugouMusicLoginQr = async(requestId: string) => {
+  return rendererInvoke<string, LX.KuGouMusic.LoginQrCheck>(WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_login_qr_check, requestId)
+}
+
+export const cancelKugouMusicLoginQr = async(requestId: string): Promise<void> => {
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type
+  await rendererInvoke<string, void>(WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_login_qr_cancel, requestId)
+}
+
+export const logoutKugouMusic = async() => {
+  await rendererInvoke(WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_logout)
+}
+
+export const getKugouPublicRecommendation = async() => {
+  return rendererInvoke<LX.KuGouMusic.PublicRecommendation>(WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_get_public_recommendation)
+}
+
+export const getKugouDailyRecommendSongs = async() => {
+  return rendererInvoke<LX.Music.MusicInfo_kg[]>(WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_get_daily_recommend_songs)
+}
+
+export const getKugouStyleRecommendation = async() => {
+  return rendererInvoke<LX.Music.MusicInfo_kg[]>(WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_get_style_recommendation)
+}
+
+export const getKugouPrivateFmSongs = async() => {
+  return rendererInvoke<LX.Music.MusicInfo_kg[]>(WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_get_private_fm)
+}
+
+export const getKugouRankRecommendation = async() => {
+  return rendererInvoke<LX.KuGouMusic.RankRecommendation>(WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_get_rank_recommendation)
+}
+
+export const getKugouUserPlaylists = async(kinds?: readonly LX.PlatformPlaylistKind[]) => {
+  return rendererInvoke<readonly LX.PlatformPlaylistKind[] | undefined, LX.PlatformPlaylistSummary[]>(WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_get_user_playlist_summaries, kinds)
+}
+
 export const getNeteaseAccountStatus = async() => {
   return rendererInvoke<LX.Netease.AccountStatus>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_account_status)
 }
@@ -975,6 +1020,14 @@ export const getNeteaseDailySongCategories = async() => {
     WIN_MAIN_RENDERER_EVENT_NAME.netease_get_daily_song_categories,
     undefined,
   )
+}
+
+export const getQQMusicUserPlaylists = async(kinds?: readonly LX.PlatformPlaylistKind[]) => {
+  return rendererInvoke<readonly LX.PlatformPlaylistKind[] | undefined, LX.PlatformPlaylistSummary[]>(WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_user_playlist_summaries, kinds)
+}
+
+export const getNeteaseUserPlaylists = async(kinds?: readonly LX.PlatformPlaylistKind[]) => {
+  return rendererInvoke<readonly LX.PlatformPlaylistKind[] | undefined, LX.PlatformPlaylistSummary[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_user_playlist_summaries, kinds)
 }
 
 export const getNeteasePlaylistDetail = async(id: string, page = 1) => {

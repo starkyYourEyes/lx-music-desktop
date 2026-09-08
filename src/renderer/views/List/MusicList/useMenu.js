@@ -108,15 +108,16 @@ export default ({
 
   const showMenu = (event, musicInfo) => {
     const isWebDAVList = props.listId == LIST_IDS.WEBDAV
+    const isReadOnly = isWebDAVList || props.listId.startsWith('platform:')
     itemMenuControl.sourceDetail = !!musicSdk[musicInfo.source]?.getMusicDetailPageUrl
     // itemMenuControl.play =
     //   itemMenuControl.playLater =
     itemMenuControl.download = !isWebDAVList && canOpenPrimaryDownload(musicInfo.source)
     itemMenuControl.play = itemMenuControl.playLater = canStartPlayback(musicInfo.source)
-    itemMenuControl.moveTo = !isWebDAVList
-    itemMenuControl.sort = !isWebDAVList
-    itemMenuControl.toggleSource = !isWebDAVList
-    itemMenuControl.remove = !isWebDAVList
+    itemMenuControl.moveTo = !isReadOnly
+    itemMenuControl.sort = !isReadOnly
+    itemMenuControl.toggleSource = !isReadOnly
+    itemMenuControl.remove = !isReadOnly
 
     itemMenuControl.dislike = !hasDislike(musicInfo)
 
@@ -139,6 +140,7 @@ export default ({
     // console.log(action)
     hideMenu()
     if (!action) return
+    if (props.listId.startsWith('platform:') && ['moveTo', 'sort', 'toggleSource', 'remove'].includes(action.action)) return
     switch (action.action) {
       case 'play':
         handlePlayMusic(index)

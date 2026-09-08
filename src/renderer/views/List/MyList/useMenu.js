@@ -123,6 +123,20 @@ export default ({
 
   const showMenu = (event, listInfo) => {
     const { source } = listInfo
+    const isManaged = typeof listInfo.id == 'string' && listInfo.id.startsWith('platform:')
+    Object.assign(menuControl, {
+      rename: true,
+      duplicate: true,
+      sort: true,
+      local_file: true,
+      webdav_file: true,
+      webdav_refresh: true,
+      sourceDetail: true,
+      import: true,
+      export: true,
+      sync: false,
+      remove: true,
+    })
     switch (listInfo.id) {
       case webDAVList.id:
         menuControl.rename = false
@@ -142,15 +156,19 @@ export default ({
         menuControl.webdav_refresh = false
         break
       default:
-        menuControl.rename = true
-        menuControl.remove = true
-        menuControl.local_file = true
-        menuControl.webdav_file = true
+        menuControl.rename = !isManaged
+        menuControl.remove = !isManaged
+        menuControl.local_file = !isManaged
+        menuControl.webdav_file = !isManaged
         menuControl.webdav_refresh = false
         menuControl.sync = !!source && !!musicSdk[source]?.songList
+        menuControl.duplicate = !isManaged
+        menuControl.sort = !isManaged
+        menuControl.import = !isManaged
+        menuControl.export = !isManaged
         break
     }
-    moveGroup.value = userLists.some(item => item.id == listInfo.id)
+    moveGroup.value = isManaged ? null : userLists.some(item => item.id == listInfo.id)
       ? getUserListGroup(listInfo) == 'mine' ? 'external' : 'mine'
       : null
     // menuControl.sort = !!getList(listInfo.id).length

@@ -6,6 +6,7 @@ import {
 } from '@common/utils/neteaseDailySongCategory'
 import { createNeteaseAccountService } from './netease/account'
 import { filterPublicRecommendPlaylists, normalizePlaylistList } from './neteasePlaylist'
+import { createNeteaseUserPlaylistService } from './netease/userPlaylists'
 
 // @neteasecloudmusicapienhanced/api is CommonJS and dynamically loads module files internally.
 // Keep it as a runtime dependency instead of bundling it into the main process.
@@ -27,6 +28,7 @@ const neteaseApi = require('@neteasecloudmusicapienhanced/api') as {
   toplist_detail: (params: Record<string, any>) => Promise<any>
   album_songsaleboard: (params: Record<string, any>) => Promise<any>
   playlist_detail: (params: Record<string, any>) => Promise<any>
+  user_playlist: (params: Record<string, any>) => Promise<any>
   song_detail: (params: Record<string, any>) => Promise<any>
   like: (params: Record<string, any>) => Promise<any>
   fm_trash: (params: Record<string, any>) => Promise<any>
@@ -35,6 +37,7 @@ const neteaseApi = require('@neteasecloudmusicapienhanced/api') as {
 }
 
 let accountService: ReturnType<typeof createNeteaseAccountService> | undefined
+let userPlaylistService: ReturnType<typeof createNeteaseUserPlaylistService> | undefined
 
 const getAccountService = () => {
   if (accountService) return accountService
@@ -52,6 +55,17 @@ const getAccountService = () => {
 
 const getAccountCookie = () => getAccountService().getCookie()
 
+const getUserPlaylistService = () => {
+  if (userPlaylistService) return userPlaylistService
+  const account = getAccountService()
+  userPlaylistService = createNeteaseUserPlaylistService({
+    api: neteaseApi,
+    getCookie: account.getCookie,
+    getProfile: account.getProfile,
+  })
+  return userPlaylistService
+}
+
 export const getAccountStatus = async(): Promise<LX.Netease.AccountStatus> => {
   return getAccountService().getAccountStatus()
 }
@@ -63,6 +77,10 @@ export const checkLoginQr = async(key: string): Promise<LX.Netease.LoginQrCheck>
 }
 
 export const logout = async() => getAccountService().logout()
+
+export const getNeteaseUserPlaylists = async(kinds?: readonly LX.PlatformPlaylistKind[]): Promise<LX.PlatformPlaylistSummary[]> => {
+  return getUserPlaylistService().getUserPlaylists(kinds)
+}
 
 const getSinger = (singers: any[] | undefined): string => {
   return singers?.map(s => s.name).filter(Boolean).join('、') ?? ''
@@ -521,8 +539,12 @@ export const getRecommendPlaylistDetail = async(id: string, page = 1): Promise<L
     cookie,
     id,
     timestamp: Date.now(),
+  }).catch((error: unknown) => {
+    const failure = error as { body?: { message?: unknown, msg?: unknown }, message?: unknown } | null
+    const message = failure?.body?.message ?? failure?.body?.msg ?? failure?.message
+    throw new Error(typeof message == 'string' && message ? message : 'Failed to load playlist detail')
   })
-  if (result.body?.code != 200) throw new Error(result.body?.message ?? 'Failed to load playlist detail')
+  if (result.body?.code != 200) throw new Error(result.body?.message ?? result.body?.msg ?? 'Failed to load playlist detail')
 
   const playlist = result.body?.playlist
   if (!playlist) throw new Error('Playlist not found')

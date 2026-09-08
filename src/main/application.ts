@@ -79,7 +79,7 @@ const getStorageCoordinator = () => {
     getPhase3AttestationPrerequisites: () => global.lx.worker.dbService.getPhase3AttestationPrerequisites(),
     completePhase3Attestation: completePhase3StartupAttestation,
     finalizeDatabaseSchema: () => global.lx.worker.dbService.advanceAppDatabase({
-      targetSchemaVersion: 8,
+      targetSchemaVersion: 9,
       backupsRoot: global.storagePaths.backupsRoot,
     }),
     ...(portableProfileStartup == null

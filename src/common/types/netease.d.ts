@@ -68,6 +68,10 @@ declare namespace LX {
       total?: string
     }
 
+    interface UserPlaylistSummary extends LX.PlatformPlaylistSummary {
+      provider: 'netease'
+    }
+
     interface DailySongTag {
       categoryId: string
       categoryName: string

@@ -5,6 +5,7 @@ import {
   verifyExistingSchema6ReadWriteMarker,
   verifySchema7MarkersBeforeCache,
   verifySchema8MarkersBeforeCache,
+  verifySchema9MarkersBeforeCache,
 } from '../../../../migration/cache/cutover'
 import { migrateRawLyrics } from '../../../../migration/cache/rawLyrics'
 import { openCacheDatabase } from '../../cacheDb'
@@ -13,7 +14,7 @@ import * as appDatabase from '../../db'
 const failure = (code: string): Error & { code: string } => Object.assign(new Error(code), { code })
 
 const result = (
-  schemaVersion: 6 | 7 | 8,
+  schemaVersion: 6 | 7 | 8 | 9,
   typedOwnershipVerified: boolean,
 ): Readonly<CachePhase4Result> => Object.freeze({ schemaVersion, typedOwnershipVerified })
 
@@ -31,7 +32,8 @@ export const initializePhase4 = async(value?: unknown): Promise<Readonly<CachePh
     }
     initialization = appDatabase.getDatabaseInitialization()
   }
-  if (initialization.schemaVersion == 8) verifySchema8MarkersBeforeCache(appDatabase.getAppDB())
+  if (initialization.schemaVersion == 9) verifySchema9MarkersBeforeCache(appDatabase.getAppDB())
+  else if (initialization.schemaVersion == 8) verifySchema8MarkersBeforeCache(appDatabase.getAppDB())
   else if (initialization.schemaVersion == 7) verifySchema7MarkersBeforeCache(appDatabase.getAppDB())
   else verifyExistingSchema6ReadWriteMarker(appDatabase.getAppDB())
 

@@ -10,6 +10,7 @@ import {
   getGuessLikeSongs,
   getHomeRecommendation,
   getPlaylistDetail,
+  getQQMusicUserPlaylists,
   isQQMusicLoginRequestId,
   dislikeMusic,
   likeMusic,
@@ -76,6 +77,11 @@ export default () => {
   mainHandle<LX.QQMusic.PlaylistDetailParams, LX.QQMusic.PlaylistDetailInfo>(
     WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_playlist_detail,
     async({ params }) => getPlaylistDetail(params.id, params.page),
+  )
+
+  mainHandle<readonly LX.PlatformPlaylistKind[] | undefined, LX.PlatformPlaylistSummary[]>(
+    WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_user_playlist_summaries,
+    async({ params }) => getQQMusicUserPlaylists(params),
   )
 
   // eslint-disable-next-line @typescript-eslint/no-invalid-void-type

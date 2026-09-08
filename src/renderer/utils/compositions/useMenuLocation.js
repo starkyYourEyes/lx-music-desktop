@@ -72,10 +72,12 @@ export default ({ visible, location, onHide }) => {
 
   onMounted(() => {
     document.addEventListener('click', handleDocumentClick)
+    document.addEventListener('contextmenu', handleDocumentClick, true)
   })
 
   onBeforeUnmount(() => {
     document.removeEventListener('click', handleDocumentClick)
+    document.removeEventListener('contextmenu', handleDocumentClick, true)
   })
 
   return {

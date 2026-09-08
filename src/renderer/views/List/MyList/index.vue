@@ -1,5 +1,5 @@
 <template>
-  <div ref="dom_lists" :class="$style.lists" :style="listSidebarStyle">
+  <div ref="dom_lists" :class="$style.lists">
     <div :class="$style.listHeader">
       <h2 :class="$style.listsTitle">{{ $t('my_list') }}</h2>
       <div :class="$style.headerBtns">
@@ -15,7 +15,20 @@
         </button>
       </div>
     </div>
-    <div ref="dom_lists_list" class="scroll" :class="[$style.listsContent, { [$style.sortable]: isModDown }]">
+    <button
+      type="button" :class="[$style.listsItem, $style.favorites, { [$style.active]: listId == loveList.id, [$style.clicked]: rightClickItemId == loveList.id }]"
+      :data-list-id="loveList.id" :aria-label="$t('sidebar_favorites')" :aria-current="listId == loveList.id ? 'page' : undefined"
+      @click="handleListToggle(loveList.id)" @contextmenu="handleFavoritesRightClick"
+    >
+      <span :class="$style.listsLabel">
+        <span :class="$style.coverBox">
+          <img v-if="getListCover(loveList)" :class="$style.coverImg" :src="getListCover(loveList)" alt="" loading="lazy">
+          <svg v-else xmlns="http://www.w3.org/2000/svg" viewBox="0 0 247.498 247.498" aria-hidden="true"><use xlink:href="#icon-musicFolder" /></svg>
+        </span>
+        <span :class="$style.listName">{{ $t('sidebar_favorites') }}</span>
+      </span>
+    </button>
+    <div ref="dom_lists_list" class="scroll" :class="[$style.listsContent, { [$style.sortable]: isModDown, [$style.scrollbarHidden]: !appSetting['common.isShowSidebarScrollbar'] }]">
       <ul ref="dom_mine_list" class="my-list-group" :class="$style.groupRoot" data-group="mine">
         <li class="my-list-group-heading">
           <button type="button" :class="$style.groupHeading" :aria-expanded="String(!collapsed.mine)" @click="toggle('mine')">
@@ -25,19 +38,6 @@
           </button>
         </li>
         <template v-if="!collapsed.mine">
-          <li
-            class="default-list" :class="[$style.listsItem, {[$style.active]: loveList.id == listId}, {[$style.clicked]: rightClickItemId == loveList.id}, {[$style.fetching]: fetchingListStatus[loveList.id]}]"
-            :data-list-id="loveList.id" :aria-label="$t(loveList.name)" :aria-selected="loveList.id == listId"
-            @contextmenu="handleListsItemRigthClick($event, loveList)" @click="handleListToggle(loveList.id)"
-          >
-            <span :class="$style.listsLabel">
-              <span :class="$style.coverBox">
-                <img v-if="getListCover(loveList)" :class="$style.coverImg" :src="getListCover(loveList)" loading="lazy">
-                <svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 444.87 391.18" space="preserve"><use xlink:href="#icon-love" /></svg>
-              </span>
-              <span :class="$style.listName">{{ $t(loveList.name) }}</span>
-            </span>
-          </li>
           <li v-for="item in groups.mine.lists" :key="item.id" class="user-list" :class="[$style.listsItem, {[$style.active]: item.id == listId}, {[$style.clicked]: rightClickItemId == item.id}, {[$style.fetching]: fetchingListStatus[item.id]}]" :data-list-id="item.id" :aria-label="item.name" :aria-selected="item.id == listId" @contextmenu="handleListsItemRigthClick($event, item)">
             <span :class="$style.listsLabel" @click="handleListToggle(item.id)"><span :class="$style.coverBox"><img v-if="getListCover(item)" :class="$style.coverImg" :src="getListCover(item)" loading="lazy"><svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 247.498 247.498" space="preserve"><use xlink:href="#icon-musicFolder" /></svg></span><span :class="$style.listName">{{ item.name }}</span></span>
             <base-input :class="$style.listsInput" type="text" :value="item.name" :placeholder="item.name" @keyup.enter="handleSaveListName" @blur="handleSaveListName" />
@@ -62,11 +62,60 @@
           </li>
         </template>
       </ul>
+      <template v-for="provider in platformProviders" :key="provider">
+      <ul v-if="platformProviderVisible(provider)" class="my-list-group" :class="$style.groupRoot" :data-group="`platform-${provider}`">
+        <li class="my-list-group-heading">
+          <button type="button" :class="$style.groupHeading" :aria-expanded="String(!platformCollapsed[provider])" @click="togglePlatform(provider)">
+            <span :class="[$style.groupDisclosure, { [$style.groupCollapsed]: platformCollapsed[provider] }]">&#9662;</span>
+            <span :class="$style.groupName" :title="$t(`platform_playlist__import_${provider}`)">{{ $t(`platform_playlist__import_${provider}`) }}</span>
+            <span :class="$style.groupCount">{{ platformProviderCount(provider) }}</span>
+          </button>
+        </li>
+        <template v-if="!platformCollapsed[provider]">
+          <template v-for="kind in platformKinds" :key="`${provider}-${kind}`">
+            <li v-if="platformGroup(provider, kind)?.accountKey" :class="$style.platformSection">
+              <button type="button" :class="[$style.groupHeading, $style.platformKindHeading]" :data-platform-kind="`${provider}:${kind}`" :aria-expanded="String(!platformKindCollapsed[`${provider}:${kind}`])" @click="togglePlatformKind(provider, kind)">
+                <span :class="[$style.groupDisclosure, { [$style.groupCollapsed]: platformKindCollapsed[`${provider}:${kind}`] }]" aria-hidden="true">&#9662;</span>
+                <span :class="$style.groupName" :title="$t(`platform_playlist__kind_${kind}`)">{{ $t(`platform_playlist__kind_${kind}`) }}</span>
+                <span :class="$style.groupCount" aria-hidden="true">{{ platformGroup(provider, kind)?.lists.length || 0 }}</span>
+              </button>
+              <div v-if="!platformKindCollapsed[`${provider}:${kind}`] && (platformGroup(provider, kind)?.status != 'ready' || !platformGroup(provider, kind)?.lists.length)" :class="$style.platformStatusRow" role="status">
+                <span v-if="platformGroup(provider, kind)?.status == 'loading'" :class="$style.platformStatus" :title="$t('platform_playlist__loading')">{{ $t('platform_playlist__loading') }}</span>
+                <span v-else-if="platformGroup(provider, kind)?.status == 'syncing'" :class="$style.platformStatus">{{ $t('platform_playlist__syncing') }}</span>
+                <span v-else-if="platformGroup(provider, kind)?.status == 'partial'" :class="$style.platformStatus" :title="platformGroup(provider, kind)?.errorMessage">{{ $t('platform_playlist__partial', { count: platformGroup(provider, kind)?.failures?.length || 0 }) }}</span>
+                <span v-else-if="platformGroup(provider, kind)?.status == 'unsupported'" :class="$style.platformStatus" :title="platformGroup(provider, kind)?.errorMessage || $t('platform_playlist__unsupported')">{{ $t('platform_playlist__unsupported_short') }}</span>
+                <span v-else-if="platformGroup(provider, kind)?.status == 'error'" :class="$style.platformStatus" :title="platformGroup(provider, kind)?.errorMessage || $t('platform_playlist__error')">{{ $t(platformGroup(provider, kind)?.errorStage == 'songs' ? 'platform_playlist__sync_error' : 'platform_playlist__directory_error') }}</span>
+                <span v-else-if="platformGroup(provider, kind)?.status == 'ready'" :class="$style.platformStatus" :title="$t('platform_playlist__empty')">{{ $t('platform_playlist__empty') }}</span>
+                <button v-if="['partial', 'error', 'unsupported'].includes(platformGroup(provider, kind)?.status)" type="button" :class="$style.platformRetry" :aria-label="$t(platformGroup(provider, kind)?.status == 'partial' ? 'platform_playlist__retry_failed' : 'platform_playlist__retry')" :title="$t(platformGroup(provider, kind)?.status == 'partial' ? 'platform_playlist__retry_failed' : 'platform_playlist__retry')" @click="retryPlatformGroup(provider, kind)">
+                  <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24"><use xlink:href="#icon-refresh" /></svg>
+                </button>
+              </div>
+            </li>
+            <li v-for="item in platformKindCollapsed[`${provider}:${kind}`] ? [] : platformGroup(provider, kind)?.lists || []" :key="item.id" class="user-list" :class="[$style.listsItem, $style.platformPlaylistItem, {[$style.active]: item.id == listId}, {[$style.clicked]: rightClickItemId == item.id}, {[$style.fetching]: fetchingListStatus[item.id]}]" :data-list-id="item.id" :aria-label="item.name" :aria-selected="item.id == listId" @contextmenu="handleListsItemRigthClick($event, item)">
+              <span :class="$style.listsLabel" @click="handleListToggle(item.id)">
+                <span :class="$style.coverBox"><img v-if="getListCover(item)" :class="$style.coverImg" :src="getListCover(item)" loading="lazy"><svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 247.498 247.498"><use xlink:href="#icon-musicFolder" /></svg></span>
+                <span :class="$style.platformListText">
+                  <span :class="$style.listName">{{ item.name }}</span>
+                  <span v-if="getPlatformPlaylistFailure(item.id) && !getPlatformPlaylistFailure(item.id).hasCache" :class="$style.platformUnavailable">{{ $t('platform_playlist__songs_unavailable') }}</span>
+                </span>
+                <span
+                  v-if="getPlatformPlaylistFailure(item.id)" :class="$style.platformWarning" :data-playlist-sync-error="item.id" role="img" tabindex="0"
+                  :title="$t('platform_playlist__failure_detail', { name: item.name, message: getPlatformPlaylistFailure(item.id).message, id: item.sourceListId })"
+                  :aria-label="$t('platform_playlist__failure_detail', { name: item.name, message: getPlatformPlaylistFailure(item.id).message, id: item.sourceListId })"
+                ><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24"><use xlink:href="#icon-information-slab-circle-outline" /></svg></span>
+              </span>
+            </li>
+          </template>
+        </template>
+      </ul>
+      </template>
     </div>
     <base-menu v-model="isShowMenu" :menus="menus" :xy="menuLocation" item-name="name" @menu-click="handleMenuClick" />
-    <DuplicateMusicModal v-model:visible="isShowDuplicateMusicModal" :list-info="duplicateListInfo" />
-    <ListSortModal v-model:visible="isShowListSortModal" :list-info="sortListInfo" />
-    <ListUpdateModal v-model:visible="isShowListUpdateModal" />
+    <template v-if="isMounted">
+      <DuplicateMusicModal v-model:visible="isShowDuplicateMusicModal" :list-info="duplicateListInfo" />
+      <ListSortModal v-model:visible="isShowListSortModal" :list-info="sortListInfo" />
+      <ListUpdateModal v-model:visible="isShowListUpdateModal" />
+    </template>
   </div>
 </template>
 
@@ -83,7 +132,7 @@ import { allMusicList, loveList, userLists, fetchingListStatus } from '@renderer
 import { getListMusics, removeUserList } from '@renderer/store/list/action'
 import { appSetting } from '@renderer/store/setting'
 
-import { computed, onBeforeUnmount, ref, watch } from '@common/utils/vueTools'
+import { onBeforeUnmount, onMounted, ref, watch } from '@common/utils/vueTools'
 import { useRouter } from '@common/utils/vueRouter'
 import { LIST_IDS } from '@common/constants'
 
@@ -103,10 +152,9 @@ import useEditList from './useEditList'
 import useListScroll from './useListScroll'
 import useDuplicate from './useDuplicate'
 import useGroups from './useGroups'
+import { loadPlatformGroupCollapsed, savePlatformGroupCollapsed } from './groupState'
+import { getPlatformPlaylistGroups, getPlatformPlaylistFailure, retryPlatformUserPlaylistGroup } from '@renderer/store/platformPlaylists/action'
 
-const clampSidebarScale = scale => Math.min(130, Math.max(70, Number(scale) || 90))
-const toPx = value => `${Math.round(value)}px`
-const toFixedPx = value => `${Number(value.toFixed(2))}px`
 const buildCoverUrl = coverUrl => {
   if (!coverUrl) return ''
   if (/^(https?:|file:|data:)/.test(coverUrl)) return coverUrl
@@ -137,25 +185,15 @@ export default {
     const rightClickItemId = ref(null)
     const coverVersion = ref(0)
     const userListProfiles = ref({})
-    const listSidebarStyle = computed(() => {
-      const scale = clampSidebarScale(appSetting['list.myListSidebarScale']) / 100
-      return {
-        '--my-list-sidebar-width': `${22 * scale}%`,
-        '--my-list-sidebar-min-width': toPx(198 * scale),
-        '--my-list-sidebar-max-width': toPx(260 * scale),
-        '--my-list-item-min-height': toPx(58 * scale),
-        '--my-list-item-margin-y': toPx(Math.max(2, 4 * scale)),
-        '--my-list-item-margin-x': toPx(Math.max(5, 8 * scale)),
-        '--my-list-item-padding-y': toPx(Math.max(6, 8 * scale)),
-        '--my-list-item-padding-x': toPx(Math.max(7, 10 * scale)),
-        '--my-list-item-gap': toPx(Math.max(7, 10 * scale)),
-        '--my-list-cover-size': toPx(42 * scale),
-        '--my-list-cover-radius': toPx(Math.max(6, 8 * scale)),
-        '--my-list-name-font-size': toFixedPx(Math.max(11, 13 * scale)),
-        '--my-list-input-height': toPx(42 * scale),
-        '--my-list-input-padding-left': toPx(52 * scale),
-      }
-    })
+    const platformGroups = getPlatformPlaylistGroups()
+    const platformProviders = ['netease', 'qq_music', 'kugou']
+    const platformKinds = ['created', 'collected']
+    const savedPlatformCollapsed = loadPlatformGroupCollapsed()
+    const platformCollapsed = ref(savedPlatformCollapsed.providers)
+    const platformKindCollapsed = ref(savedPlatformCollapsed.kinds)
+    const isMounted = ref(false)
+    // Aside mounts before #view, the target of the playlist dialogs.
+    onMounted(() => { isMounted.value = true })
 
     const { handleImportList, handleExportList } = useShare()
     const { isShowListUpdateModal, handleUpdateSourceList } = useListUpdate()
@@ -172,6 +210,23 @@ export default {
       expand('mine')
       isShowNewList.value = true
     }
+
+    const savePlatformCollapsed = () => {
+      savePlatformGroupCollapsed(undefined, { providers: platformCollapsed.value, kinds: platformKindCollapsed.value })
+    }
+    const togglePlatform = provider => {
+      platformCollapsed.value[provider] = !platformCollapsed.value[provider]
+      savePlatformCollapsed()
+    }
+    const togglePlatformKind = (provider, kind) => {
+      const key = `${provider}:${kind}`
+      platformKindCollapsed.value[key] = !platformKindCollapsed.value[key]
+      savePlatformCollapsed()
+    }
+    const platformGroup = (provider, kind) => platformGroups.value.find(group => group.provider == provider && group.kind == kind)
+    const platformProviderCount = provider => platformGroups.value.filter(group => group.provider == provider).reduce((count, group) => count + group.lists.length, 0)
+    const platformProviderVisible = provider => platformGroups.value.some(group => group.provider == provider && !!group.accountKey)
+    const retryPlatformGroup = (provider, kind) => { void retryPlatformUserPlaylistGroup(provider, kind) }
 
     const handleOpenSourceDetailPage = async(listInfo) => {
       const { source, sourceListId } = listInfo
@@ -223,6 +278,9 @@ export default {
       rightClickItemId.value = listInfo.id
       showMenu(event, listInfo)
     }
+    const handleFavoritesRightClick = event => {
+      handleListsItemRigthClick(event, loveList)
+    }
 
     const handleListToggle = (id) => {
       if (id == props.listId) return
@@ -233,6 +291,7 @@ export default {
     }
 
     const handleMenuClick = (action) => {
+      isShowMenu.value = false
       if (!rightClickItemId.value) return
       const listInfo = rightClickItemId.value == loveList.id
         ? loveList
@@ -287,10 +346,12 @@ export default {
     }
 
     watch(() => props.listId, (listId) => {
+      handleMenuClick()
       if (listId == LIST_IDS.LOVE || userLists.some(l => l.id == listId)) saveListPrevSelectId(listId)
-    })
+    }, { immediate: true })
 
     watch(() => userLists.map(l => l.id).join(','), () => {
+      if (!props.listId) return
       if (props.listId == loveList.id || userLists.some(l => l.id == props.listId)) return
       void router.replace({
         path: '/list',
@@ -309,11 +370,12 @@ export default {
     })
 
     return {
+      appSetting,
+      isMounted,
       rightClickItemId,
       loveList,
       userLists,
       fetchingListStatus,
-      listSidebarStyle,
       getListCover,
       dom_lists_list,
       dom_mine_list,
@@ -331,7 +393,20 @@ export default {
       groups,
       collapsed,
       toggle,
+      platformGroups,
+      getPlatformPlaylistFailure,
+      platformProviders,
+      platformKinds,
+      platformCollapsed,
+      platformKindCollapsed,
+      togglePlatform,
+      togglePlatformKind,
+      platformGroup,
+      platformProviderCount,
+      platformProviderVisible,
+      retryPlatformGroup,
       handleListsItemRigthClick,
+      handleFavoritesRightClick,
       isShowMenu,
       handleMenuClick,
       menus,
@@ -347,16 +422,17 @@ export default {
 <style lang="less" module>
 @import '@renderer/assets/styles/layout.less';
 
-@lists-item-height: 58px;
+@lists-item-height: calc(46px * var(--sidebar-scale));
 .lists {
-  flex: none;
-  width: var(--my-list-sidebar-width, 19.8%);
-  min-width: var(--my-list-sidebar-min-width, 178px);
-  max-width: var(--my-list-sidebar-max-width, 234px);
+  flex: 1 0 calc(140px * var(--sidebar-scale));
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-flow: column nowrap;
 }
 .listHeader {
+  flex: none;
   position: relative;
   display: flex;
   flex-flow: row nowrap;
@@ -369,29 +445,46 @@ export default {
 }
 .listsTitle {
   flex: auto;
-  font-size: 12px;
-  line-height: 38px;
-  padding: 0 10px;
+  min-width: 0;
+  font-size: var(--sidebar-title-font-size);
+  line-height: max(calc(36px * var(--sidebar-scale)), calc(1.4 * var(--sidebar-title-font-size)));
+  padding: 0 var(--sidebar-gap);
   .mixin-ellipsis-1();
 }
 .headerBtns {
   flex: none;
   display: flex;
+  align-items: center;
+}
+.favorites {
+  flex: none;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 0;
+  border: 0;
+  color: var(--color-font);
+  text-align: left;
+  cursor: pointer;
+  &:focus-visible { outline: 1px solid var(--color-primary); outline-offset: -1px; }
 }
 .listsAdd {
   // position: absolute;
   // right: 0;
-  margin-top: 6px;
+  margin: 0;
+  padding: 0;
   background: none;
-  height: 30px;
+  width: var(--sidebar-tool-size);
+  height: var(--sidebar-tool-size);
   border: none;
   outline: none;
   border-radius: @radius-border;
   cursor: pointer;
-  opacity: .1;
+  opacity: .65;
   transition: opacity @transition-normal;
   color: var(--color-button-font);
   svg {
+    width: 70%;
     vertical-align: bottom;
   }
   &:active {
@@ -401,12 +494,58 @@ export default {
     opacity: .6 !important;
   }
 }
+.platformRetry {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--color-primary);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  &:hover { background-color: var(--color-primary-background-hover); }
+  &:focus-visible { outline: 1px solid var(--color-primary); outline-offset: -1px; }
+}
+.platformSection {
+  min-width: 0;
+  margin-left: calc(12px * var(--sidebar-scale));
+  padding: 0 0 4px;
+}
+.platformStatusRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 24px;
+  padding: 0 10px 0 28px;
+}
+.platformStatus {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  color: var(--color-font-label);
+  font-size: var(--sidebar-playlist-font-size);
+  line-height: 1.4;
+}
 .listsContent {
+  position: relative;
   flex: auto;
   min-width: 0;
-  overflow-y: scroll !important;
+  min-height: 0;
+  overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: rgba(128, 128, 128, .22) transparent;
+  &.scrollbarHidden {
+    scrollbar-width: none;
+    &::-webkit-scrollbar { width: 0; height: 0; }
+  }
   // border-right: 1px solid rgba(0, 0, 0, 0.12);
 
   &::-webkit-scrollbar {
@@ -451,8 +590,8 @@ export default {
 }
 .groupHeading {
   width: 100%;
-  min-height: 30px;
-  padding: 0 10px;
+  min-height: calc(30px * var(--sidebar-scale));
+  padding: calc(4px * var(--sidebar-scale)) var(--sidebar-gap);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -461,25 +600,56 @@ export default {
   color: var(--color-font);
   cursor: pointer;
   text-align: left;
+  font-size: var(--sidebar-playlist-font-size);
+  line-height: 1.35;
   &:hover { background-color: var(--color-primary-background-hover); }
   &:focus-visible { outline: 1px solid var(--color-primary); outline-offset: -1px; }
 }
 .groupDisclosure {
   flex: none;
   width: 12px;
+  font-size: 12px;
   text-align: center;
   transition: transform @transition-normal;
 }
 .groupCollapsed { transform: rotate(-90deg); }
-.groupName { flex: auto; min-width: 0; font-size: 12px; .mixin-ellipsis-1(); }
-.groupCount { flex: none; min-width: 20px; text-align: right; opacity: .6; font-size: 12px; }
+.platformKindHeading {
+  min-height: calc(28px * var(--sidebar-scale));
+  color: var(--color-font-label);
+}
+.listsItem.platformPlaylistItem {
+  margin-left: calc(24px * var(--sidebar-scale));
+}
+.platformListText {
+  flex: 1;
+  min-width: 0;
+}
+.platformUnavailable {
+  display: block;
+  margin-top: 3px;
+  color: var(--color-font-label);
+  font-size: var(--sidebar-playlist-font-size);
+  overflow-wrap: anywhere;
+}
+.platformWarning {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  color: var(--color-primary);
+  &:focus-visible { outline: 1px solid currentColor; outline-offset: 2px; }
+}
+.groupName { flex: auto; min-width: 0; font-size: var(--sidebar-playlist-font-size); .mixin-ellipsis-1(); }
+.groupCount { flex: none; min-width: 20px; text-align: right; opacity: .6; font-size: var(--sidebar-playlist-font-size); }
 .listsItem {
   position: relative;
   transition: .3s ease;
   transition-property: color, background-color, opacity;
   background-color: transparent;
   border-radius: 8px;
-  margin: var(--my-list-item-margin-y, 4px) var(--my-list-item-margin-x, 8px);
+  margin: calc(3px * var(--sidebar-scale)) 0;
   &:not(.active) {
     &:hover {
       background-color: var(--color-primary-background-hover);
@@ -512,20 +682,20 @@ export default {
   }
 }
 .listsLabel {
-  min-height: var(--my-list-item-min-height, @lists-item-height);
-  padding: var(--my-list-item-padding-y, 8px) var(--my-list-item-padding-x, 10px);
+  min-height: @lists-item-height;
+  padding: calc(6px * var(--sidebar-scale)) var(--sidebar-gap);
   box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: var(--my-list-item-gap, 10px);
-  font-size: var(--my-list-name-font-size, 13px);
+  gap: var(--sidebar-gap);
+  font-size: var(--sidebar-playlist-font-size);
   line-height: 1.25;
 }
 .coverBox {
   flex: none;
-  width: var(--my-list-cover-size, 42px);
-  height: var(--my-list-cover-size, 42px);
-  border-radius: var(--my-list-cover-radius, 8px);
+  width: calc(32px * var(--sidebar-scale));
+  height: calc(32px * var(--sidebar-scale));
+  border-radius: 6px;
   overflow: hidden;
   display: flex;
   align-items: center;
@@ -550,8 +720,8 @@ export default {
   flex: auto;
   min-width: 0;
   color: var(--color-font);
-  font-size: var(--my-list-name-font-size, 13px);
-  font-weight: 600;
+  font-size: var(--sidebar-playlist-font-size);
+  font-weight: 400;
   line-height: 1.25;
   .mixin-ellipsis-2();
 
@@ -561,15 +731,15 @@ export default {
 }
 .listsInput {
   width: 100%;
-  height: var(--my-list-input-height, 42px);
+  height: max(calc(36px * var(--sidebar-scale)), calc(1.5 * var(--sidebar-playlist-font-size)));
   // border: none;
-  padding: 0 0 0 var(--my-list-input-padding-left, 52px);
+  padding: 0 var(--sidebar-gap);
   // padding-bottom: 1px;
-  line-height: var(--my-list-input-height, 42px);
+  line-height: max(calc(36px * var(--sidebar-scale)), calc(1.5 * var(--sidebar-playlist-font-size)));
   background: none !important;
   border-radius: 0;
   // outline: none;
-  font-size: var(--my-list-name-font-size, 13px);
+  font-size: var(--sidebar-playlist-font-size);
   display: none;
   // font-family: inherit;
 }
@@ -582,7 +752,7 @@ export default {
   }
 }
 .newLeave {
-  margin-top: -@lists-item-height;
+  margin-top: calc(-46px * var(--sidebar-scale));
   z-index: -1;
 }
 

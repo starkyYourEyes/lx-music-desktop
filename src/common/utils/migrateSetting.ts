@@ -20,6 +20,13 @@ const oldThemeMap = {
 export default (setting: any): Partial<LX.AppSetting> => {
   setting = { ...setting }
 
+  for (const provider of ['netease', 'qq_music', 'kugou']) {
+    for (const kind of ['created', 'collected']) {
+      const key = `list.platformPlaylists.${provider}.${kind}`
+      if (setting[key] == null) setting[key] = true
+    }
+  }
+
   // 迁移 v2.0.0 之前的配置
   if (compareVer(setting.version, '2.0.0') < 0) {
     // 迁移列表滚动位置设置 ~0.18.3

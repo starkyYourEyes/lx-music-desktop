@@ -18,7 +18,7 @@
           >
             {{ musicInfo.name || 'LX Music' }}
           </div>
-          <span v-if="currentPlaybackQuality" :class="$style.quality">
+          <span v-if="currentPlaybackQuality" class="badge badge-theme-primary" :class="$style.quality">
             {{ currentPlaybackQuality }}
           </span>
         </div>
@@ -260,8 +260,6 @@ export default {
     top: 0;
     width: 100%;
     height: 100%;
-    background-color: var(--color-surface-background);
-    backdrop-filter: saturate(180%) blur(24px);
     border-top: 1px solid rgba(128, 128, 128, 0.12);
     z-index: -1;
   }
@@ -376,11 +374,8 @@ export default {
 
 .quality {
   flex: none;
-  padding: 0 5px;
-  color: var(--color-primary);
   font-size: .8em;
   opacity: .75;
-  white-space: nowrap;
 }
 
 .singer {
@@ -511,7 +506,7 @@ export default {
   box-shadow: 0 0 0 4px rgba(25, 195, 125, 0.14);
 }
 
-@media (max-width: 980px) {
+@container player-region (max-width: 980px) {
   .player {
     grid-template-columns: minmax(180px, 1fr) auto auto;
     gap: 12px;
@@ -529,7 +524,7 @@ export default {
   }
 }
 
-@media (max-width: 720px) {
+@container player-region (max-width: 720px) {
   .player {
     grid-template-columns: minmax(130px, 1fr) auto;
   }

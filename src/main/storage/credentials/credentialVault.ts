@@ -175,6 +175,7 @@ const normalizePayload = (ref: CredentialRef, value: unknown): JsonValue => {
   switch (ref.kind) {
     case 'netease-cookie':
     case 'qq-music-cookie':
+    case 'kugou-cookie':
       if (typeof value == 'string') return assertCookieCredential(value)
       if (!recordIsValid(value) || value.version != 1) throw new Error('Invalid cookie credential')
       return { version: 1, cookie: assertCookieCredential(value.cookie) }

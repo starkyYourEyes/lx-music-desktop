@@ -126,6 +126,7 @@ const PHASE2_MARKER_NAME = 'legacy_data_v1.phase2_complete' as const
 const credentialSourceIdentifiers = {
   'netease-cookie': 'legacy.data.netease-cookie',
   'qq-music-cookie': 'legacy.data.qq-music-cookie',
+  'kugou-cookie': 'legacy.data.kugou-cookie',
   'webdav-basic': 'legacy.config.webdav-basic',
   'sync-client': 'legacy.sync.client-key',
   'sync-server-device': 'legacy.sync.server-device-key',
@@ -139,6 +140,7 @@ const probeVault = (vault: CredentialStartupCheckOptions['vault']): boolean => {
   try {
     vault.read({ kind: 'netease-cookie' })
     vault.read({ kind: 'qq-music-cookie' })
+    vault.read({ kind: 'kugou-cookie' })
     vault.read({ kind: 'webdav-basic' })
     return true
   } catch {
@@ -151,6 +153,7 @@ const probeProfileRepository = (repository: CredentialStartupCheckOptions['profi
   try {
     repository.getStatus('netease')
     repository.getStatus('qq_music')
+    repository.getStatus('kugou')
     return true
   } catch {
     return false
@@ -394,7 +397,7 @@ const isValidPhase4Result = (value: unknown): value is CachePhase4Result => {
   const result = value as Record<string, unknown>
   const keys = Reflect.ownKeys(result)
   return keys.length == 2 && keys.includes('schemaVersion') && keys.includes('typedOwnershipVerified') &&
-    (result.schemaVersion == 6 || result.schemaVersion == 7 || result.schemaVersion == 8) &&
+    (result.schemaVersion == 6 || result.schemaVersion == 7 || result.schemaVersion == 8 || result.schemaVersion == 9) &&
     typeof result.typedOwnershipVerified == 'boolean' &&
     !(result.schemaVersion == 6 && result.typedOwnershipVerified)
 }
@@ -528,7 +531,7 @@ export const createStorageCoordinator = (
         let finalSchemaVersion = phase4?.schemaVersion ?? database.schemaVersion
         if (finalSchemaVersion >= 7 && dependencies.finalizeDatabaseSchema != null) {
           const finalized = await dependencies.finalizeDatabaseSchema()
-          if (finalized.status != 'ready' || finalized.schemaVersion != 8) {
+          if (finalized.status != 'ready' || finalized.schemaVersion != 9) {
             throw errorWithCode('database_schema_finalize_invalid')
           }
           finalSchemaVersion = finalized.schemaVersion

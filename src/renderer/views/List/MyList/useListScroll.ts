@@ -11,9 +11,11 @@ export default ({ dom_lists_list }: {
     let target = Array.from(dom_lists_list.value.querySelectorAll<HTMLElement>('[data-list-id]'))
       .find(element => element.dataset.listId == id)
     if (!target) return
-    let offsetTop = target.offsetTop
-    let location = offsetTop - 150
-    if (location > 0) dom_lists_list.value.scrollTop = location
+    const container = dom_lists_list.value
+    const viewport = container.getBoundingClientRect()
+    const row = target.getBoundingClientRect()
+    if (row.top >= viewport.top && row.bottom <= viewport.bottom) return
+    container.scrollTop = Math.max(0, container.scrollTop + row.top - viewport.top - Math.min(150, container.clientHeight / 3))
   }
 
   onMounted(() => {

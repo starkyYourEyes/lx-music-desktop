@@ -267,6 +267,7 @@
 
   --color-app-background: rgba(242, 247, 245, 0.9);
   --color-main-background: rgba(255, 255, 255, 0.82);
+  --layout-background-opacity: 0.6;
   --color-surface-background: rgba(255, 255, 255, 0.72);
   --color-surface-background-hover: rgba(255, 255, 255, 0.9);
   --color-glass-border: rgba(255, 255, 255, 0.72);
@@ -340,15 +341,17 @@ body, button, input, textarea {
 
 .badge {
   display: inline-block;
-  padding: 0.25em 0.4em;
+  padding: .05em .25em;
   font-size: .7em;
   // font-weight: 700;
-  line-height: 1.2;
+  line-height: 1.05;
   text-align: center;
   white-space: nowrap;
   // vertical-align: baseline;
   vertical-align: text-top;
-  // border-radius: 2px;
+  background-color: transparent;
+  border: 1Px solid currentColor;
+  border-radius: 3px;
 
   // &.badge-light {
   //   background-color: #f8f9fa;

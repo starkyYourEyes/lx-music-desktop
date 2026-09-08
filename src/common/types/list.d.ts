@@ -1,4 +1,17 @@
 declare namespace LX {
+  type PlatformPlaylistProvider = 'netease' | 'qq_music' | 'kugou'
+  type PlatformPlaylistKind = 'created' | 'collected'
+
+  interface PlatformPlaylistSummary {
+    provider: PlatformPlaylistProvider
+    kind: PlatformPlaylistKind
+    id: string
+    sourceListId: string
+    name: string
+    coverUrl: string
+    accountKey: string
+  }
+
   namespace List {
     interface UserListInfo {
       id: string
@@ -17,6 +30,11 @@ declare namespace LX {
       coverUrl?: string
       createdAt?: number
       group?: UserListGroup
+      managed?: boolean
+      provider?: PlatformPlaylistProvider
+      kind?: PlatformPlaylistKind
+      accountKey?: string
+      lastSyncAt?: number
     }
 
     interface MyDefaultListInfo {

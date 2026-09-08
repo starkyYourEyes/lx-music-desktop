@@ -3,6 +3,7 @@ import type { JsonValue } from '../../../common/storage/canonicalJson'
 export type CredentialRef =
   | { kind: 'netease-cookie' }
   | { kind: 'qq-music-cookie' }
+  | { kind: 'kugou-cookie' }
   | { kind: 'webdav-basic' }
   | { kind: 'sync-client', serverId: string }
   | { kind: 'sync-server-device', userName: string, clientId: string }
@@ -74,6 +75,7 @@ export const toCredentialEntryId = (reference: CredentialRef): string => {
   switch (reference.kind) {
     case 'netease-cookie':
     case 'qq-music-cookie':
+    case 'kugou-cookie':
     case 'webdav-basic':
       return reference.kind
     case 'sync-client':

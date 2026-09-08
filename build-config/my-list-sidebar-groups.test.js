@@ -74,7 +74,7 @@ const vueRuntime = {
   withKeys: callback => callback,
 }
 
-const loadSidebarRender = () => loadVueSfc(myListPath, {
+const loadSidebarRender = (overrides = {}) => loadVueSfc(myListPath, {
   vue: vueRuntime,
   '@common/utils/electron': { openUrl: () => {} },
   '@common/utils/common': { encodePath: value => value },
@@ -85,6 +85,7 @@ const loadSidebarRender = () => loadVueSfc(myListPath, {
   '@renderer/store/list/state': { allMusicList: new Map(), loveList: { id: 'love', name: 'Love' }, userLists: [], fetchingListStatus: {} },
   '@renderer/store/list/action': { getListMusics: async() => [], removeUserList: async() => {} },
   '@renderer/store/setting': { appSetting: {} },
+  '@renderer/store/platformPlaylists/action': { getPlatformPlaylistGroups: () => ({ value: [] }), retryPlatformUserPlaylistGroup: async() => {} },
   '@common/utils/vueTools': { computed: () => ({ value: {} }), onBeforeUnmount: () => {}, ref: value => ({ value }), watch: () => {} },
   '@common/utils/vueRouter': { useRouter: () => ({ replace: async() => {} }) },
   '@common/constants': { LIST_IDS: { LOVE: 'love' } },
@@ -99,7 +100,9 @@ const loadSidebarRender = () => loadVueSfc(myListPath, {
   './useEditList': () => ({}),
   './useListScroll': () => ({ scrollToList: () => {} }),
   './useGroups': () => ({}),
+  './groupState': loadTsModule(groupStatePath),
   './useDuplicate': () => ({}),
+  ...overrides,
 }).default
 
 const walkNodes = (node, predicate, matches = []) => {
@@ -116,27 +119,32 @@ const textContent = node => Array.isArray(node)
     ? textContent(node.children)
     : node ?? ''
 
-test('the real sidebar renders fixed translated group roots with counts, favorites, and collapse state', () => {
+test('Favorites is fixed before collapsible playlist groups and preserves its actions and selected state', () => {
   const component = loadSidebarRender()
   const styles = new Proxy({}, { get: (_, key) => String(key) })
   const collapsed = { mine: false, external: false }
   const mine = [{ id: 'local', name: 'Local' }]
   const external = [{ id: 'online', name: 'Online', source: 'wy' }]
+  const opened = []
+  const contextMenus = []
   const context = {
     $style: styles,
     $t: key => ({ lists__group_mine: 'My', lists__group_external: 'Imported / Collected', Love: 'Love' }[key] ?? key),
     $refs: {},
     listSidebarStyle: {},
+    appSetting: {},
+    platformProviders: [],
     isModDown: false,
     listId: '',
     rightClickItemId: null,
     fetchingListStatus: {},
     loveList: { id: 'love', name: 'Love' },
-    groups: { mine: { lists: mine, count: 2 }, external: { lists: external, count: 1 } },
+    groups: { mine: { lists: mine, count: 1 }, external: { lists: external, count: 1 } },
     collapsed,
     getListCover: () => '',
     handleListsItemRigthClick: () => {},
-    handleListToggle: () => {},
+    handleListToggle: id => opened.push(id),
+    handleFavoritesRightClick: event => contextMenus.push(event),
     handleSaveListName: () => {},
     isShowNewList: false,
     isNewListLeave: false,
@@ -153,19 +161,37 @@ test('the real sidebar renders fixed translated group roots with counts, favorit
     handleMenuClick: () => {},
     toggle: group => { collapsed[group] = !collapsed[group] },
   }
-  const render = () => component.render(context, [], {}, context, {}, {})
+  const render = () => component.render(context, [], { listId: context.listId }, context, {}, {})
   let tree = render()
+  const favorite = walkNodes(tree, node => node.type == 'button' && node.props?.['data-list-id'] == 'love')[0]
+  assert.ok(favorite)
+  const scroll = walkNodes(tree, node => node.props?.ref == 'dom_lists_list')[0]
+  assert.equal(walkNodes(scroll, node => node.props?.['data-list-id'] == 'love').length, 0)
+  assert.equal(tree.children.indexOf(favorite) < tree.children.indexOf(scroll), true)
+  favorite.props.onClick()
+  favorite.props.onContextmenu('context-event')
+  assert.deepEqual(opened, ['love'])
+  assert.deepEqual(contextMenus, ['context-event'])
+  assert.equal(favorite.props['aria-current'], undefined)
+  context.listId = 'love'
+  assert.equal(walkNodes(render(), node => node.type == 'button' && node.props?.['data-list-id'] == 'love')[0].props['aria-current'], 'page')
+  context.listId = ''
+  const dialogs = ['DuplicateMusicModal', 'ListSortModal', 'ListUpdateModal']
+  assert.deepEqual(walkNodes(tree, node => dialogs.includes(node.type)), [], 'hidden dialogs must not teleport before the main view mounts')
+  context.isMounted = true
+  assert.equal(walkNodes(render(), node => dialogs.includes(node.type)).length, 3, 'dialogs retain their show/hide lifecycle after mounting')
   const roots = walkNodes(tree, node => node.props?.['data-group'])
   assert.deepEqual(roots.map(root => root.props['data-group']), ['mine', 'external'])
   const headings = walkNodes(tree, node => node.type == 'button' && Object.hasOwn(node.props ?? {}, 'aria-expanded'))
-  assert.deepEqual(headings.map(textContent), ['▾My2', '▾Imported / Collected1'])
+  assert.deepEqual(headings.map(textContent), ['▾My1', '▾Imported / Collected1'])
   assert.deepEqual(headings.map(heading => heading.props['aria-expanded']), ['true', 'true'])
-  assert.deepEqual(walkNodes(roots[0], node => String(node.props?.class).includes('default-list')).map(node => node.props['data-list-id']), ['love'])
+  assert.deepEqual(walkNodes(roots[0], node => node.props?.['data-list-id'] == 'love'), [])
   assert.deepEqual(walkNodes(roots[0], node => String(node.props?.class).includes('user-list')).map(node => node.props['data-list-id']), ['local'])
   assert.deepEqual(walkNodes(roots[1], node => String(node.props?.class).includes('user-list')).map(node => node.props['data-list-id']), ['online'])
 
   headings[1].props.onClick()
   tree = render()
+  assert.equal(walkNodes(tree, node => node.type == 'button' && node.props?.['data-list-id'] == 'love').length, 1)
   const collapsedRoots = walkNodes(tree, node => node.props?.['data-group'])
   const collapsedHeadings = walkNodes(tree, node => node.type == 'button' && Object.hasOwn(node.props ?? {}, 'aria-expanded'))
   assert.deepEqual(collapsedHeadings.map(heading => heading.props['aria-expanded']), ['true', 'false'])
@@ -180,10 +206,134 @@ test('the real sidebar renders fixed translated group roots with counts, favorit
   assert.deepEqual(walkNodes(emptyExternalRoot, node => String(node.props?.class).includes('user-list')), [])
 })
 
+test('background playlists preload Favorites artwork without redirecting other pages and recover a deleted active playlist', async() => {
+  const watches = []
+  const navigations = []
+  const saved = []
+  const loaded = []
+  const allMusicList = new Map()
+  const userLists = [{ id: 'custom', name: 'Custom' }]
+  const props = { listId: '' }
+  global.window = { app_event: { on: () => {}, off: () => {} } }
+  const component = loadSidebarRender({
+    '@common/utils/vueTools': {
+      computed: getter => ({ get value() { return getter() } }),
+      onBeforeUnmount: () => {},
+      onMounted: () => {},
+      ref: value => ({ value }),
+      watch: (source, callback, options) => {
+        watches.push({ source, callback })
+        if (options?.immediate) callback(source())
+      },
+    },
+    '@common/utils/vueRouter': { useRouter: () => ({ replace: async route => navigations.push(route) }) },
+    '@renderer/store/list/state': { allMusicList, loveList: { id: 'love', name: 'Love' }, userLists, fetchingListStatus: {} },
+    '@renderer/store/list/action': {
+      getListMusics: async id => {
+        loaded.push(id)
+        const musics = [{ meta: { picUrl: `https://example.com/${id}.jpg` } }]
+        allMusicList.set(id, musics)
+        return musics
+      },
+      removeUserList: async() => {},
+    },
+    '@renderer/utils/data': { getListUpdateInfo: async() => ({}), saveListPrevSelectId: id => saved.push(id) },
+    './useGroups': () => ({ groups: { value: {} }, collapsed: { value: {} } }),
+    './useMenu': () => ({ isShowMenu: { value: false }, menuClick: () => {} }),
+  })
+  const sidebar = component.setup(props, { emit: () => {} })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(loaded, ['love', 'custom'])
+  assert.equal(sidebar.getListCover(sidebar.loveList), 'https://example.com/love.jpg')
+  const listChanges = watches.find(watch => watch.source() == 'custom')
+  listChanges.callback()
+  assert.deepEqual(navigations, [], 'list import on another page must not open Favorites')
+  sidebar.handleListToggle('custom')
+  assert.deepEqual(navigations, [{ path: '/list', query: { id: 'custom' } }])
+  props.listId = 'custom'
+  sidebar.handleListToggle('custom')
+  assert.equal(navigations.length, 1, 'selecting the active list does not navigate twice')
+  userLists.splice(0)
+  listChanges.callback()
+  assert.deepEqual(navigations.at(-1), { path: '/list', query: { id: 'love' } })
+  props.listId = ''
+  listChanges.callback()
+  assert.equal(navigations.length, 2)
+  const activeChanges = watches.find(watch => watch.source() === '')
+  activeChanges.callback('')
+  assert.deepEqual(saved, [])
+})
+
 const loadGroupState = value => loadTsModule(groupStatePath, {
   '@common/utils/vueTools': {},
 }).loadMyListGroupCollapsed({
   getItem: () => value,
+})
+
+test('platform parent and child collapse choices survive a new sidebar and delayed playlist loading', () => {
+  const previousStorage = global.localStorage
+  const previousWindow = global.window
+  const stored = new Map([['my-list-group-collapsed-v1', '{"mine":true,"external":false}']])
+  global.localStorage = {
+    getItem: key => stored.get(key) ?? null,
+    setItem: (key, value) => stored.set(key, value),
+  }
+  global.window = { app_event: { on() {}, off() {} } }
+  try {
+    const platformGroups = { value: [] }
+    const component = loadSidebarRender({
+      '@common/utils/vueTools': { onBeforeUnmount() {}, onMounted() {}, ref: value => ({ value }), watch() {} },
+      '@renderer/store/platformPlaylists/action': { getPlatformPlaylistGroups: () => platformGroups, retryPlatformUserPlaylistGroup: async() => {} },
+      './useGroups': () => ({ groups: { value: {} }, collapsed: { value: {} } }),
+    })
+    const createSidebar = () => component.setup({ listId: 'platform:netease:fixture:created:1' }, { emit() {} })
+    const first = createSidebar()
+    for (const provider of first.platformProviders) {
+      first.togglePlatformKind(provider, 'created')
+      first.togglePlatformKind(provider, 'collected')
+      first.togglePlatform(provider)
+    }
+    const restored = createSidebar()
+    assert.deepEqual(restored.platformCollapsed.value, { netease: true, qq_music: true, kugou: true })
+    assert.deepEqual(restored.platformKindCollapsed.value, first.platformKindCollapsed.value)
+    assert.equal(Object.values(restored.platformKindCollapsed.value).every(Boolean), true)
+    assert.equal(Object.keys(restored.platformKindCollapsed.value).length, 6)
+    platformGroups.value = [{ provider: 'netease', kind: 'created', accountKey: 'fixture', lists: [{ id: '1' }] }]
+    assert.equal(restored.platformProviderVisible('netease'), true)
+    assert.equal(restored.platformCollapsed.value.netease, true, 'loading data must not reopen the parent')
+    restored.togglePlatform('netease')
+    assert.equal(restored.platformKindCollapsed.value['netease:created'], true, 'opening the parent must retain child state')
+    restored.togglePlatformKind('netease', 'created')
+    const reopened = createSidebar()
+    assert.equal(reopened.platformCollapsed.value.netease, false)
+    assert.equal(reopened.platformKindCollapsed.value['netease:created'], false)
+    assert.equal(reopened.platformKindCollapsed.value['netease:collected'], true)
+    assert.equal(reopened.platformCollapsed.value.qq_music, true)
+    assert.equal(stored.get('my-list-group-collapsed-v1'), '{"mine":true,"external":false}')
+  } finally {
+    if (previousStorage === undefined) delete global.localStorage
+    else global.localStorage = previousStorage
+    global.window = previousWindow
+  }
+})
+
+test('platform collapse storage accepts known boolean choices and tolerates unavailable or damaged storage', () => {
+  const { loadPlatformGroupCollapsed, savePlatformGroupCollapsed } = loadTsModule(groupStatePath)
+  const defaults = { providers: { netease: false, qq_music: false, kugou: false }, kinds: {} }
+  for (const value of [null, '{', 'null', '[]', '42']) {
+    assert.deepEqual(loadPlatformGroupCollapsed({ getItem: () => value }), defaults)
+  }
+  assert.deepEqual(loadPlatformGroupCollapsed({
+    getItem: () => JSON.stringify({
+      providers: { netease: true, qq_music: 'false', extra: true },
+      kinds: { 'netease:created': true, 'qq_music:collected': false, 'kugou:created': 1, unknown: true },
+    }),
+  }), {
+    providers: { netease: true, qq_music: false, kugou: false },
+    kinds: { 'netease:created': true, 'qq_music:collected': false },
+  })
+  assert.deepEqual(loadPlatformGroupCollapsed({ getItem() { throw new Error('blocked') } }), defaults)
+  assert.doesNotThrow(() => savePlatformGroupCollapsed({ setItem() { throw new Error('full') } }, defaults))
 })
 
 test('collapse state accepts only a complete boolean object', () => {
@@ -462,6 +612,7 @@ test('revealing an eligible id expands its group then scrolls by stable id', asy
     },
   })
   const groups = useGroups({ userLists: lists, activeListId: () => '', scrollToList: id => scrolls.push(id) })
+  assert.equal(groups.groups.value.mine.count, 1)
 
   await groups.reveal('external')
   assert.equal(groups.collapsed.value.external, false)
@@ -482,10 +633,10 @@ test('revealing an eligible id expands its group then scrolls by stable id', asy
 
   groups.collapsed.value.mine = true
   await groups.reveal('love')
-  assert.equal(groups.collapsed.value.mine, false)
-  assert.deepEqual(scrolls, ['external', 'local', 'love'])
+  assert.equal(groups.collapsed.value.mine, true)
+  assert.deepEqual(scrolls, ['external', 'local'])
   for (const ignoredId of ['default', 'webdav', 'deleted', '']) await groups.reveal(ignoredId)
-  assert.deepEqual(scrolls, ['external', 'local', 'love'])
+  assert.deepEqual(scrolls, ['external', 'local'])
 
   revealRequest.value = { id: 'external', token: 1 }
   watches[1].callback(revealRequest.value)
@@ -493,7 +644,7 @@ test('revealing an eligible id expands its group then scrolls by stable id', asy
   revealRequest.value = { id: 'external', token: 2 }
   watches[1].callback(revealRequest.value)
   await new Promise(resolve => setImmediate(resolve))
-  assert.deepEqual(scrolls, ['external', 'local', 'love', 'external', 'external'])
+  assert.deepEqual(scrolls, ['external', 'local', 'external', 'external'])
 })
 
 test('a consumed reveal does not override later collapse and navigation after remount', async() => {

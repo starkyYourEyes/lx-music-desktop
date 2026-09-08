@@ -174,6 +174,40 @@ describe('non-activity storage contracts', () => {
     }).playlistIds.length, 10000)
   })
 
+  it('preserves existing managed platform playlist profiles', () => {
+    for (const provider of ['netease', 'qq_music', 'kugou']) {
+      for (const kind of ['created', 'collected']) {
+        const profile = { managed: true, provider, kind, accountKey: '42', lastSyncAt: 100, group: 'external' }
+        const command = {
+          version: 1, action: 'upsert', playlistId: 'platform-list',
+          value: { updateTime: 100, isAutoUpdate: false, profile }, updatedAtMs: 100,
+        }
+        const result = parsePlaylistMetadataCommand(command)
+        assert.deepEqual(result, command)
+        assert.notStrictEqual(result.value.profile, profile)
+      }
+    }
+  })
+
+  it('rejects incomplete or malformed platform playlist ownership metadata', () => {
+    const profile = { managed: true, provider: 'netease', kind: 'created', accountKey: '42', lastSyncAt: 100 }
+    const validate = profile => parsePlaylistMetadataCommand({
+      version: 1, action: 'upsert', playlistId: 'platform-list',
+      value: { updateTime: 100, isAutoUpdate: false, profile }, updatedAtMs: 100,
+    })
+    for (const fields of [
+      { managed: 'true' }, { provider: 'unknown' }, { kind: 'unknown' },
+      { accountKey: '' }, { accountKey: 42 }, { accountKey: 'x'.repeat(257) },
+      { lastSyncAt: -1 }, { lastSyncAt: 1.5 }, { lastSyncAt: Number.NaN },
+      { cookie: 'not-allowed' },
+    ]) assert.throws(() => validate({ ...profile, ...fields }), /Invalid/)
+    for (const field of ['provider', 'kind', 'accountKey']) {
+      const incomplete = { ...profile }
+      delete incomplete[field]
+      assert.throws(() => validate(incomplete), /Invalid/)
+    }
+  })
+
   it('enforces playlist metadata ID, profile, integer, and retain limits', () => {
     const upsert = {
       version: 1,

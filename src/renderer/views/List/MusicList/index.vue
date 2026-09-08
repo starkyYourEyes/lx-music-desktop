@@ -1,112 +1,90 @@
 <template>
   <div :class="$style.list" :style="playlistProfileStyle">
-    <section v-if="listInfo" :class="$style.profile">
-      <div :class="$style.profileCover">
-        <img v-if="listCover" :class="$style.profileCoverImg" :src="listCover" loading="lazy" decoding="async">
-        <svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 247.498 247.498" space="preserve">
-          <use xlink:href="#icon-musicFolder" />
-        </svg>
-      </div>
-      <div :class="$style.profileInfo">
-        <div :class="$style.profileTitleRow">
-          <h2 :class="$style.profileTitle">{{ listTitle }}</h2>
-          <button
-            v-if="canEditProfile"
-            type="button"
-            :class="$style.editBtn"
-            :aria-label="$t('list_profile__edit_title')"
-            @click="isShowProfileEditModal = true"
+    <div ref="dom_listContent" :class="$style.content">
+      <base-virtualized-list
+        ref="listRef" :list="list" key-name="id"
+        :item-height="listItemHeight" container-class="scroll" content-class="list"
+        @scroll="handleListScroll" @contextmenu.capture="handleListRightClick"
+      >
+        <template #header>
+          <section v-if="listInfo" :class="$style.profile">
+            <div :class="$style.profileCover">
+              <img v-if="listCover" :class="$style.profileCoverImg" :src="listCover" loading="lazy" decoding="async">
+              <svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" viewBox="0 0 247.498 247.498" space="preserve">
+                <use xlink:href="#icon-musicFolder" />
+              </svg>
+            </div>
+            <div :class="$style.profileInfo">
+              <div :class="$style.profileTitleRow">
+                <h2 :class="$style.profileTitle">{{ listTitle }}</h2>
+                <button
+                  v-if="canEditProfile"
+                  type="button"
+                  :class="$style.editBtn"
+                  :aria-label="$t('list_profile__edit_title')"
+                  @click="isShowProfileEditModal = true"
+                >
+                  <svg-icon name="pencil-outline" />
+                </button>
+              </div>
+              <p v-if="createdTime" :class="$style.profileMeta">{{ createdTime }}{{ $t('list_profile__created_at') }}</p>
+              <p :class="$style.profileDesc">{{ listProfile.description || '' }}</p>
+              <button type="button" :class="$style.playAllBtn" :disabled="!list.length" @click="handlePlayAll">
+                <svg-icon name="play-outline" />
+                <span>{{ $t('list_profile__play_all') }}</span>
+              </button>
+            </div>
+          </section>
+          <div class="thead">
+            <table>
+              <thead>
+                <tr>
+                  <th class="num" style="width: 5%;">#</th>
+                  <th class="nobreak"><span :style="{ marginLeft: `${artworkSize + 10}px` }">{{ $t('music_title') }}</span></th>
+                  <th class="nobreak" :style="{ width: actionButtonsVisible ? '22%' : '28%' }">{{ $t('music_album') }}</th>
+                  <th class="nobreak" :style="{ width: actionButtonsVisible ? '9%' : '10%' }">{{ $t('music_time') }}</th>
+                  <th v-if="actionButtonsVisible" class="nobreak" style="width: 16%;">{{ $t('action') }}</th>
+                </tr>
+              </thead>
+            </table>
+          </div>
+        </template>
+        <template #default="{ item, index }">
+          <div
+            class="list-item"
+            :class="[{ [$style.active]: playerInfo.isPlayList && playerInfo.playIndex === index }, { [$style.locatingCurrent]: locatingCurrentIndex === index }, { selected: selectedIndex == index || rightClickSelectedIndex == index }, { active: selectedList.includes(item) }, { disabled: !canStartPlayback(item.source) }]"
+            @click="handleListItemClick($event, index)" @contextmenu="handleListItemRightClick($event, index)"
           >
-            <svg-icon name="pencil-outline" />
-          </button>
-        </div>
-        <p v-if="createdTime" :class="$style.profileMeta">{{ createdTime }}{{ $t('list_profile__created_at') }}</p>
-        <p :class="$style.profileDesc">{{ listProfile.description || '' }}</p>
-        <button type="button" :class="$style.playAllBtn" :disabled="!list.length" @click="handlePlayAll">
-          <svg-icon name="play-outline" />
-          <span>{{ $t('list_profile__play_all') }}</span>
-        </button>
-      </div>
-    </section>
-    <div class="thead">
-      <table>
-        <thead>
-          <tr v-if="actionButtonsVisible">
-            <th class="num" style="width: 5%;">#</th>
-            <th class="nobreak"><span :style="{ marginLeft: `${artworkSize + 10}px` }">{{ $t('music_title') }}</span></th>
-            <th class="nobreak" style="width: 22%;">{{ $t('music_album') }}</th>
-            <th class="nobreak" style="width: 9%;">{{ $t('music_time') }}</th>
-            <th class="nobreak" style="width: 16%;">{{ $t('action') }}</th>
-          </tr>
-          <tr v-else>
-            <th class="num" style="width: 5%;">#</th>
-            <th class="nobreak"><span :style="{ marginLeft: `${artworkSize + 10}px` }">{{ $t('music_title') }}</span></th>
-            <th class="nobreak" style="width: 28%;">{{ $t('music_album') }}</th>
-            <th class="nobreak" style="width: 10%;">{{ $t('music_time') }}</th>
-          </tr>
-        </thead>
-      </table>
-    </div>
-    <div v-show="list.length" ref="dom_listContent" :class="$style.content">
-      <base-virtualized-list
-        v-if="actionButtonsVisible" ref="listRef" v-slot="{ item, index }" :list="list" key-name="id"
-        :item-height="listItemHeight" container-class="scroll" content-class="list"
-        @scroll="handleListScroll" @contextmenu.capture="handleListRightClick"
-      >
-        <div
-          class="list-item" :class="[{ [$style.active]: playerInfo.isPlayList && playerInfo.playIndex === index }, { [$style.locatingCurrent]: locatingCurrentIndex === index }, { selected: selectedIndex == index || rightClickSelectedIndex == index }, { active: selectedList.includes(item) }, { disabled: !canStartPlayback(item.source) }]"
-          @click="handleListItemClick($event, index)" @contextmenu="handleListItemRightClick($event, index)"
-        >
-          <div class="list-item-cell no-select" :class="$style.num" style="flex: 0 0 5%;">
-            <transition name="play-active">
-              <div v-if="playerInfo.isPlayList && playerInfo.playIndex === index" :class="$style.playIcon">
-                <svg-icon name="headphones" :class="$style.headphoneIcon" />
-              </div>
-              <div v-else class="num">{{ index + 1 }}</div>
-            </transition>
+            <div class="list-item-cell no-select" :class="$style.num" style="flex: 0 0 5%;">
+              <transition name="play-active">
+                <div v-if="playerInfo.isPlayList && playerInfo.playIndex === index" :class="$style.playIcon">
+                  <svg-icon name="headphones" :class="$style.headphoneIcon" />
+                </div>
+                <div v-else class="num">{{ index + 1 }}</div>
+              </transition>
+            </div>
+            <div class="list-item-cell auto name">
+              <material-music-title-cell :music-info="item" :title="item.name" :artist="item.singer" :artwork-size="artworkSize">
+                <span v-if="isShowSource" class="no-select badge badge-theme-tertiary">{{ item.source }}</span>
+              </material-music-title-cell>
+            </div>
+            <div class="list-item-cell" :style="{ flex: `0 0 ${actionButtonsVisible ? 22 : 28}%` }"><span class="select" :aria-label="item.meta.albumName">{{ item.meta.albumName }}</span></div>
+            <div class="list-item-cell" :style="{ flex: `0 0 ${actionButtonsVisible ? 9 : 10}%` }"><span class="no-select">{{ item.interval || '--/--' }}</span></div>
+            <div v-if="actionButtonsVisible" class="list-item-cell" style="flex: 0 0 16%; padding-left: 0; padding-right: 0;">
+              <material-list-buttons :index="index" :download-btn="canOpenPrimaryDownload(item.source)" @btn-click="handleListBtnClick" />
+            </div>
           </div>
-          <div class="list-item-cell auto name">
-            <material-music-title-cell :music-info="item" :title="item.name" :artist="item.singer" :artwork-size="artworkSize">
-              <span v-if="isShowSource" class="no-select label-source">{{ item.source }}</span>
-            </material-music-title-cell>
+        </template>
+        <template #footer>
+          <div v-if="!list.length" :class="$style.noItem">
+            <template v-if="platformPlaylistFailure">
+              <p>{{ $t('platform_playlist__songs_unavailable') }}</p>
+              <p :class="$style.platformFailureDetail">{{ $t('platform_playlist__failure_detail', { name: platformPlaylistFailure.name, message: platformPlaylistFailure.message, id: platformPlaylistFailure.sourceListId }) }}</p>
+            </template>
+            <p v-else v-text="$t('no_item')" />
           </div>
-          <div class="list-item-cell" style="flex: 0 0 22%;"><span class="select" :aria-label="item.meta.albumName">{{ item.meta.albumName }}</span></div>
-          <div class="list-item-cell" style="flex: 0 0 9%;"><span class="no-select">{{ item.interval || '--/--' }}</span></div>
-          <div class="list-item-cell" style="flex: 0 0 16%; padding-left: 0; padding-right: 0;">
-            <material-list-buttons :index="index" :download-btn="canOpenPrimaryDownload(item.source)" @btn-click="handleListBtnClick" />
-          </div>
-        </div>
+        </template>
       </base-virtualized-list>
-      <base-virtualized-list
-        v-else ref="listRef" v-slot="{ item, index }" :list="list" key-name="id"
-        :item-height="listItemHeight" container-class="scroll" content-class="list"
-        @scroll="handleListScroll" @contextmenu.capture="handleListRightClick"
-      >
-        <div
-          class="list-item"
-          :class="[{ [$style.active]: playerInfo.isPlayList && playerInfo.playIndex === index }, { [$style.locatingCurrent]: locatingCurrentIndex === index }, { selected: selectedIndex == index || rightClickSelectedIndex == index }, { active: selectedList.includes(item) }, { disabled: !canStartPlayback(item.source) }]"
-          @click="handleListItemClick($event, index)" @contextmenu="handleListItemRightClick($event, index)"
-        >
-          <div class="list-item-cell no-select" :class="$style.num" style="flex: 0 0 5%;">
-            <transition name="play-active">
-              <div v-if="playerInfo.isPlayList && playerInfo.playIndex === index" :class="$style.playIcon">
-                <svg-icon name="headphones" :class="$style.headphoneIcon" />
-              </div>
-              <div v-else class="num">{{ index + 1 }}</div>
-            </transition>
-          </div>
-          <div class="list-item-cell auto name">
-            <material-music-title-cell :music-info="item" :title="item.name" :artist="item.singer" :artwork-size="artworkSize">
-              <span v-if="isShowSource" class="no-select label-source">{{ item.source }}</span>
-            </material-music-title-cell>
-          </div>
-          <div class="list-item-cell" style="flex: 0 0 28%;"><span class="select" :aria-label="item.meta.albumName">{{ item.meta.albumName }}</span></div>
-          <div class="list-item-cell" style="flex: 0 0 10%;"><span class="no-select">{{ item.interval || '--/--' }}</span></div>
-        </div>
-      </base-virtualized-list>
-    </div>
-    <div v-show="!list.length" :class="$style.noItem">
-      <p v-text="$t('no_item')" />
     </div>
     <transition name="play-active">
       <button
@@ -170,6 +148,7 @@ import { updateUserList } from '@renderer/store/list/action'
 import { getListUpdateInfo, setUserListProfile } from '@renderer/utils/data'
 import { playList } from '@renderer/core/player'
 import { LIST_IDS } from '@common/constants'
+import { getPlatformPlaylistFailure } from '@renderer/store/platformPlaylists/action'
 
 const buildCoverUrl = coverUrl => {
   if (!coverUrl) return ''
@@ -350,7 +329,7 @@ export default {
       if (props.listId == LIST_IDS.LOVE) return loveList
       return userLists.find(l => l.id == props.listId) ?? null
     })
-    const canEditProfile = computed(() => !!listInfo.value && props.listId != LIST_IDS.LOVE)
+    const canEditProfile = computed(() => !!listInfo.value && props.listId != LIST_IDS.LOVE && !props.listId.startsWith('platform:'))
     const listProfile = computed(() => userListProfiles.value[props.listId] ?? {})
     const listTitle = computed(() => {
       if (!listInfo.value) return ''
@@ -542,6 +521,7 @@ export default {
 
       list,
       playerInfo,
+      platformPlaylistFailure: computed(() => getPlatformPlaylistFailure(props.listId)),
 
       saveListPosition,
       handleListScroll,
@@ -586,16 +566,6 @@ export default {
   :global(.list-item) {
     &.active {
       color: var(--color-button-font);
-    }
-  }
-  :global {
-    .label-source {
-      color: var(--color-primary);
-      padding: 5px;
-      font-size: .8em;
-      line-height: 1.2;
-      opacity: .75;
-      display: inline-block;
     }
   }
 }
@@ -749,6 +719,7 @@ export default {
   vertical-align: 0;
 }
 .content {
+  width: 100%;
   min-height: 0;
   font-size: 14px;
   display: flex;
@@ -795,9 +766,18 @@ export default {
   }
 }
 
+.noItem .platformFailureDetail {
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0 20px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.5;
+}
 .noItem {
   position: relative;
-  height: 100%;
+  min-height: 220px;
   display: flex;
   flex-flow: column nowrap;
   justify-content: center;

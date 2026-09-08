@@ -169,6 +169,7 @@ export const createNeteaseAccountService = ({
 
   return {
     getCookie: () => accounts.getCookie('netease') ?? '',
+    getProfile: () => getAccountData().profile,
     getAccountStatus,
     createLoginQr,
     checkLoginQr,

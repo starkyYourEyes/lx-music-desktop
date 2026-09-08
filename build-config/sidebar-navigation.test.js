@@ -9,6 +9,7 @@ const { renderToString } = require('@vue/server-renderer')
 const less = require('less')
 const postcss = require('postcss')
 const { loadVueSfc } = require('../scripts/test-utils/load-vue-sfc')
+const loadTsModule = require('../scripts/test-utils/load-ts-module')
 
 const root = path.resolve(__dirname, '..')
 const navBarPath = path.join(root, 'src/renderer/components/layout/Aside/NavBar.vue')
@@ -75,7 +76,7 @@ const compileNavBarStyle = async() => {
   return { modules: result.modules, stylesheet: postcss.parse(result.code) }
 }
 
-const renderNavBar = async(settingOverrides = {}) => {
+const renderNavBar = async(settingOverrides = {}, route = { path: '/recommend', meta: { name: 'Recommend' }, query: {} }) => {
   const appSetting = reactive({
     'download.enable': true,
     'common.isShowSidebarScrollbar': true,
@@ -86,8 +87,15 @@ const renderNavBar = async(settingOverrides = {}) => {
     '@renderer/store/setting': { appSetting },
     '@root/lang': { useI18n: () => key => key },
     '@common/utils/vueTools': require('vue'),
+    '@common/utils/vueRouter': { useRoute: () => route },
+    '@common/constants': { LIST_IDS: { LOVE: 'love' } },
     '@renderer/assets/images/providers/netease-music.svg': 'netease.svg',
     '@renderer/assets/images/providers/qq-music.svg': 'qq.svg',
+    '@renderer/assets/images/providers/kugou-music.svg': 'kugou.svg',
+    '@renderer/views/List/MyList/index.vue': {
+      props: ['listId'],
+      setup: props => () => h('div', { 'data-active-playlist': props.listId }),
+    },
   }).default
   const RouterLink = {
     props: ['to'],
@@ -95,7 +103,7 @@ const renderNavBar = async(settingOverrides = {}) => {
   }
   const app = createSSRApp({ render: () => h(NavBar) })
   app.config.globalProperties.$style = styleProxy
-  app.config.globalProperties.$route = { meta: { name: 'Recommend' } }
+  app.config.globalProperties.$route = route
   app.component('RouterLink', RouterLink)
   return renderToString(app)
 }
@@ -111,7 +119,7 @@ test('main navigation scrolls while the bottom Settings region stays fixed', asy
   }
 
   assert.deepEqual(declarationsFor('mainMenus'), {
-    flex: '1 1 auto',
+    flex: '0 1 auto',
     'min-height': '0',
     'overflow-y': 'auto',
   })
@@ -133,7 +141,7 @@ test('main navigation scrolls while the bottom Settings region stays fixed', asy
 
 test('navigation renders one Settings entry and toggles only scrollbar visuals', async() => {
   const bottom = await renderNavBar()
-  assert.match(bottom, /class="scroll list mainMenus"/)
+  assert.match(bottom, /class="scroll mainMenus"/)
   assert.match(bottom, /href="\/setting"/)
 
   const accountMenu = await renderNavBar({ 'common.sidebarSettingLocation': 'accountMenu' })
@@ -143,7 +151,19 @@ test('navigation renders one Settings entry and toggles only scrollbar visuals',
   assert.match(invalid, /href="\/setting"/)
 
   const hidden = await renderNavBar({ 'common.isShowSidebarScrollbar': false })
-  assert.match(hidden, /class="scroll list mainMenus scrollbarHidden"/)
+  assert.match(hidden, /class="scroll mainMenus scrollbarHidden"/)
+})
+
+test('navigation delegates playlist selection without duplicating the fixed Favorites entry', async() => {
+  const favorites = await renderNavBar({}, { path: '/list', meta: { name: 'List' }, query: { id: 'love' } })
+  assert.doesNotMatch(favorites, /href="\/list\?id=love"/)
+  assert.doesNotMatch(favorites, />sidebar_favorites<\/span>/)
+  assert.match(favorites, /data-active-playlist="love"/)
+  const custom = await renderNavBar({}, { path: '/list', meta: { name: 'List' }, query: { id: 'custom' } })
+  assert.doesNotMatch(custom, /href="\/list\?id=love"[^>]*class="[^"]*active[^"]*"/)
+  assert.match(custom, /data-active-playlist="custom"/)
+  const otherPage = await renderNavBar({}, { path: '/recommend', meta: { name: 'Recommend' }, query: { id: 'remote-list' } })
+  assert.match(otherPage, /data-active-playlist(?:="")?>/)
 })
 
 test('left window controls keep the avatar and account-menu Settings action navigates', async() => {
@@ -167,6 +187,8 @@ test('left window controls keep the avatar and account-menu Settings action navi
     setup: (props, { slots }) => () => slots.default?.(),
   }
   const Aside = loadVueSfc(asidePath, {
+    '@common/utils/sidebarFontSize': loadTsModule(path.join(root, 'src/common/utils/sidebarFontSize.ts')),
+    '@renderer/store/platformPlaylists/action': { refreshPlatformUserPlaylists: async() => {} },
     vue: { ...vue, Transition },
     '@common/utils/vueTools': vue,
     '@common/utils/vueRouter': {
@@ -187,6 +209,12 @@ test('left window controls keep the avatar and account-menu Settings action navi
       logoutQQMusicAccount: async() => {},
       profile: ref(null),
     },
+    '@renderer/store/kugouMusic': {
+      initKugouMusicAccount: async() => {},
+      isLoggedIn: ref(false),
+      logoutKugouMusicAccount: async() => {},
+      profile: ref(null),
+    },
     './ControlBtns.vue': ControlBtns,
     './NavBar.vue': NavBar,
   }).default
@@ -195,6 +223,17 @@ test('left window controls keep the avatar and account-menu Settings action navi
   app.config.globalProperties.$t = key => key
   const container = createNode('#root')
   app.mount(container)
+
+  const aside = findNode(container, node => node.props?.style?.['--sidebar-scale'])
+  assert.equal(aside.props.style['--sidebar-navigation-font-size'], '13px')
+  appSetting['common.sidebarNavigationFontSize'] = 18
+  appSetting['common.sidebarTitleFontSize'] = 16
+  appSetting['common.sidebarPlaylistFontSize'] = 20
+  appSetting['list.myListSidebarScale'] = 130
+  await nextTick()
+  assert.equal(aside.props.style['--sidebar-navigation-font-size'], '18px')
+  assert.equal(aside.props.style['--sidebar-title-font-size'], '16px')
+  assert.equal(aside.props.style['--sidebar-playlist-font-size'], '20px')
 
   assert.ok(findNode(container, node => node.props?.['data-test'] == 'window-controls'))
   const avatar = findNode(container, node =>

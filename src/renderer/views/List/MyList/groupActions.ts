@@ -30,12 +30,15 @@ export const createMoveUserList = (dependencies: MoveUserListDependencies) => {
   const execute = async({ id, toGroup, toIndex }: MoveRequest): Promise<void> => {
     const lists = dependencies.readLists()
     const list = lists.find(item => item.id == id)
-    if (!list) return
+    if (!list || id.startsWith('platform:')) return
 
     const oldGroup = dependencies.getGroup(list)
     const oldOrder = lists.map(item => item.id)
     const groups = Object.fromEntries(lists.map(item => [item.id, dependencies.getGroup(item)]))
-    const nextOrder = buildMovedUserListOrder(lists, groups, id, toGroup, toIndex)
+    const ordinaryLists = lists.filter(item => !item.id.startsWith('platform:'))
+    const ordinaryOrder = buildMovedUserListOrder(ordinaryLists, groups, id, toGroup, toIndex)
+    let ordinaryIndex = 0
+    const nextOrder = lists.map(item => item.id.startsWith('platform:') ? item.id : ordinaryOrder[ordinaryIndex++])
     let groupWritten = false
     let orderStarted = false
 

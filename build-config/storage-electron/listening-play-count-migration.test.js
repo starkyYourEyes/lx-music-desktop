@@ -15,6 +15,7 @@ require.extensions['.ts'] = (module, filename) => {
 
 const Database = require('better-sqlite3')
 const { migration8 } = require('../../src/main/worker/dbService/migrations/0008_listening_play_count.ts')
+const { migration9 } = require('../../src/main/worker/dbService/migrations/0009_kugou_account_profiles.ts')
 const { migrations } = require('../../src/main/worker/dbService/migrations/index.ts')
 const { databaseSchema8Contract } = require('../../src/main/worker/dbService/schemaContract.ts')
 
@@ -68,9 +69,10 @@ const createSchema7Projection = () => {
 }
 
 describe('listening play-count migration', () => {
-  it('registers schema 8 after the protected cache-cleanup migration', () => {
+  it('registers schema 8 after cache cleanup and before the Kugou account migration', () => {
     assert.equal(migration8.version, 8)
-    assert.equal(migrations.at(-1), migration8)
+    assert.equal(migrations.at(-2), migration8)
+    assert.equal(migrations.at(-1), migration9)
     assert.equal(databaseSchema8Contract.tables.some(table => table.name == 'listening_tracks'), true)
   })
 

@@ -20,6 +20,7 @@ export default (props, list) => {
   }
 
   const toggleSource = async(toggleMusicInfo) => {
+    if (props.listId.startsWith('platform:')) return
     const oldId = musicInfo.value.id
     let oldIdx = list.value.findIndex(m => m.id == oldId)
     if (oldIdx < 0) {

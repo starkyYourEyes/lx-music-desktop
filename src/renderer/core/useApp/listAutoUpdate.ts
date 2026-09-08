@@ -15,7 +15,7 @@ const handleSyncSourceList = async(waitUpdateLists: LX.List.UserListInfo[]) => {
 export default () => {
   void getListUpdateInfo().then(listUpdateInfo => {
     const waitUpdateLists = Object.entries(listUpdateInfo)
-      .map(([id, info]) => info.isAutoUpdate && userLists.find(l => l.id == id))
+      .map(([id, info]) => !id.startsWith('platform:') && info.isAutoUpdate && userLists.find(l => l.id == id))
       .filter(_ => _) as LX.List.UserListInfo[]
     // for (let i = 2; i > 0; i--) {
     //   void handleSyncSourceList(waitUpdateLists)

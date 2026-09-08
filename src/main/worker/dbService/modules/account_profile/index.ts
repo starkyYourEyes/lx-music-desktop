@@ -6,7 +6,7 @@ import {
 } from './dbHelper'
 import type { MigrationMarker } from '../../migrations/types'
 
-export type AccountProfileProvider = 'netease' | 'qq_music'
+export type AccountProfileProvider = 'netease' | 'qq_music' | 'kugou'
 
 export interface AccountProfileRow {
   provider: AccountProfileProvider

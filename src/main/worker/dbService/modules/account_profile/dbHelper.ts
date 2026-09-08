@@ -10,7 +10,7 @@ import { getAppDB } from '../../db'
 import { getMigrationMarker, putMigrationMarker } from '../../migrate'
 import type { MigrationMarker } from '../../migrations/types'
 
-const providers: readonly AccountProfileProvider[] = ['netease', 'qq_music']
+const providers: readonly AccountProfileProvider[] = ['netease', 'qq_music', 'kugou']
 
 const assertProvider: (provider: unknown) => asserts provider is AccountProfileProvider = provider => {
   if (!providers.includes(provider as AccountProfileProvider)) throw new Error('Invalid account profile provider')

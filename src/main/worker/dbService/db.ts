@@ -74,7 +74,7 @@ export interface DatabaseInitOptions {
 }
 
 export interface DatabaseAdvanceOptions {
-  targetSchemaVersion: 7 | 8
+  targetSchemaVersion: 7 | 8 | 9
   backupsRoot: string
 }
 
@@ -84,7 +84,7 @@ interface ReadyInitialization {
   dataPath: string
   cacheRoot: string
   backupsRoot: string
-  schemaVersion: 6 | 7 | 8
+  schemaVersion: 6 | 7 | 8 | 9
   existedBeforeOpen: boolean
 }
 
@@ -294,6 +294,12 @@ const verifySchema8SteadyState = (db: Database.Database): void => {
   cutover.verifySchema8SteadyState(db)
 }
 
+const verifySchema9SteadyState = (db: Database.Database): void => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the cache cutover loading boundary.
+  const cutover = require('../../migration/cache/cutover') as typeof CacheCutover
+  cutover.verifySchema9SteadyState(db)
+}
+
 const validInitializationOptions = (options: unknown): options is DatabaseInitOptions => {
   if (options == null || typeof options != 'object' || Array.isArray(options) ||
     Object.getPrototypeOf(options) != Object.prototype) return false
@@ -452,9 +458,10 @@ const initializeDatabase = async(
 
   if (fromVersion >= 7) {
     try {
-      if (fromVersion != 7 && fromVersion != 8) throw createDatabaseError('database_schema_version_unsupported')
+      if (fromVersion != 7 && fromVersion != 8 && fromVersion != 9) throw createDatabaseError('database_schema_version_unsupported')
       if (fromVersion == 7) verifySchema7SteadyState(localWriteDb)
-      else verifySchema8SteadyState(localWriteDb)
+      else if (fromVersion == 8) verifySchema8SteadyState(localWriteDb)
+      else verifySchema9SteadyState(localWriteDb)
       if (!options.previousShutdownWasClean) {
         if (localWriteDb.pragma('quick_check', { simple: true }) != 'ok') {
           return enterRecovery(
@@ -689,9 +696,9 @@ export const getAppDB = (): Database.Database => {
   return writeDb
 }
 
-export const getOpenAppDatabaseSchemaVersion = (): 6 | 7 | 8 => {
+export const getOpenAppDatabaseSchemaVersion = (): 6 | 7 | 8 | 9 => {
   const schemaVersion = getSchemaVersion(getAppDB())
-  if (schemaVersion != 6 && schemaVersion != 7 && schemaVersion != 8) {
+  if (schemaVersion != 6 && schemaVersion != 7 && schemaVersion != 8 && schemaVersion != 9) {
     throw createDatabaseError('database_schema_version_unsupported')
   }
   return schemaVersion
@@ -700,12 +707,12 @@ export const getOpenAppDatabaseSchemaVersion = (): 6 | 7 | 8 => {
 export const getDatabaseInitialization = (): Readonly<{
   cacheRoot: string
   backupsRoot: string
-  schemaVersion: 6 | 7 | 8
+  schemaVersion: 6 | 7 | 8 | 9
   existedBeforeOpen: boolean
 }> => {
   if (health.status != 'ready' || writeDb == null || readyInitialization == null ||
     (readyInitialization.schemaVersion != 6 && readyInitialization.schemaVersion != 7 &&
-      readyInitialization.schemaVersion != 8)) {
+      readyInitialization.schemaVersion != 8 && readyInitialization.schemaVersion != 9)) {
     throw createDatabaseError('database_not_ready')
   }
   return Object.freeze({
@@ -794,7 +801,7 @@ const runCacheCutoverMigration = (
 
 const publishPostCutoverSchema = (
   initialization: Readonly<ReadyInitialization>,
-  schemaVersion: 7 | 8,
+  schemaVersion: 7 | 8 | 9,
   backupPath: string | null,
   migratedVersions: number[],
 ): Readonly<DatabaseReadyResult> => {
@@ -1040,14 +1047,52 @@ const performSchema8Advance = async(
   return published
 }
 
+const performSchema9Advance = async(
+  db: Database.Database,
+  initialization: Readonly<ReadyInitialization>,
+  generation: number,
+): Promise<Readonly<DatabaseReadyResult>> => {
+  const currentVersion = getSchemaVersion(db)
+  if (currentVersion == 9) {
+    verifySchema9SteadyState(db)
+    return publishPostCutoverSchema(initialization, 9, null, [])
+  }
+  let migratedVersions: number[] = []
+  let backupPath: string | null = null
+  if (currentVersion == 7) {
+    const advanced = await performSchema8Advance(db, initialization, generation)
+    migratedVersions = [...advanced.migratedVersions]
+    backupPath = advanced.backupPath
+  } else if (currentVersion == 8) {
+    // Validate the existing cutover state before applying the account-profile migration.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires -- Preserve the cache cutover loading boundary.
+    const cutover = require('../../migration/cache/cutover') as typeof CacheCutover
+    cutover.verifySchema8SteadyState(db)
+  } else {
+    throw createDatabaseError('database_advance_schema_invalid')
+  }
+  if (generation != lifecycleGeneration || writeDb != db || health.status != 'ready') {
+    throw createDatabaseError('database_advance_cancelled')
+  }
+  const migration = runMigrations(db, migrations, { targetSchemaVersion: 9 })
+  if (migration.fromVersion != 8 || migration.toVersion != 9 ||
+    migration.applied.length != 1 || migration.applied[0] != 9) {
+    throw createDatabaseError('database_advance_migration_invalid')
+  }
+  verifySchema9SteadyState(db)
+  return publishPostCutoverSchema(initialization, 9, backupPath, [...migratedVersions, 9])
+}
+
 const performDatabaseAdvance = async(
   db: Database.Database,
   initialization: Readonly<ReadyInitialization>,
   generation: number,
-  targetSchemaVersion: 7 | 8,
+  targetSchemaVersion: 7 | 8 | 9,
 ): Promise<Readonly<DatabaseReadyResult>> => targetSchemaVersion == 7
   ? performSchema7Advance(db, initialization, generation)
-  : performSchema8Advance(db, initialization, generation)
+  : targetSchemaVersion == 8
+    ? performSchema8Advance(db, initialization, generation)
+    : performSchema9Advance(db, initialization, generation)
 
 const resolveAdvance = (input: DatabaseAdvanceOptions): {
   key: string
@@ -1058,7 +1103,7 @@ const resolveAdvance = (input: DatabaseAdvanceOptions): {
     Object.getPrototypeOf(input) != Object.prototype ||
     Reflect.ownKeys(input).length != 2 || !Object.hasOwn(input, 'targetSchemaVersion') ||
     !Object.hasOwn(input, 'backupsRoot') || typeof input.targetSchemaVersion != 'number' ||
-    (input.targetSchemaVersion != 7 && input.targetSchemaVersion != 8) ||
+    (input.targetSchemaVersion != 7 && input.targetSchemaVersion != 8 && input.targetSchemaVersion != 9) ||
     typeof input.backupsRoot != 'string' || health.status != 'ready' ||
     writeDb == null || readyInitialization == null) return null
   let resolvedBackupsRoot: string

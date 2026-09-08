@@ -31,6 +31,14 @@ const router = createRouter({
       },
     },
     {
+      path: '/kg-recommend',
+      name: 'KugouRecommend',
+      component: require('./views/KugouRecommend/index.vue').default,
+      meta: {
+        name: 'KugouRecommend',
+      },
+    },
+    {
       path: '/recent-play',
       name: 'RecentPlay',
       component: require('./views/RecentPlay/index.vue').default,

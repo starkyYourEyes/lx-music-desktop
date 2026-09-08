@@ -631,6 +631,19 @@ export const databaseSchema8Contract: SchemaContract = {
     : table),
 }
 
+export const databaseSchema9Contract: SchemaContract = {
+  tables: databaseSchema8Contract.tables.map(table => table.name == 'account_profiles'
+    ? {
+        ...table,
+        checks: [
+          { name: 'provider.enum', expression: "provider IN ('netease', 'qq_music', 'kugou')" },
+          { name: 'profile_json.valid', expression: 'json_valid(profile_json)' },
+          { name: 'updated_at_ms.nonnegative', expression: 'updated_at_ms >= 0' },
+        ],
+      }
+    : table),
+}
+
 // Existing callers validate the transition schema explicitly through version 6.
 export const databaseSchemaContract = databaseSchema6Contract
 

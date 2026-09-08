@@ -311,6 +311,7 @@ const credentialVaultReadable = (vault: Awaited<ReturnType<typeof initializeCred
   try {
     vault.read({ kind: 'netease-cookie' })
     vault.read({ kind: 'qq-music-cookie' })
+    vault.read({ kind: 'kugou-cookie' })
     vault.read({ kind: 'webdav-basic' })
     return true
   } catch {

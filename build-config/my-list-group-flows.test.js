@@ -174,6 +174,7 @@ const loadMyListRender = () => loadVueSfc(myListPath, {
   },
   '@renderer/store/list/action': { getListMusics: async() => [], removeUserList: async() => {} },
   '@renderer/store/setting': { appSetting: {} },
+  '@renderer/store/platformPlaylists/action': { getPlatformPlaylistGroups: () => ({ value: [] }), retryPlatformUserPlaylistGroup: async() => {} },
   '@common/utils/vueTools': {
     computed: () => ({ value: {} }),
     onBeforeUnmount: () => {},
@@ -193,6 +194,7 @@ const loadMyListRender = () => loadVueSfc(myListPath, {
   './useEditList': () => ({}),
   './useListScroll': () => {},
   './useGroups': () => ({}),
+  './groupState': loadTsModule(path.join(root, 'src/renderer/views/List/MyList/groupState.ts')),
   './useDuplicate': () => ({}),
 }).default
 
@@ -204,6 +206,8 @@ const renderUserListRows = (userLists, handleListsItemRigthClick = () => {}) => 
     $t: key => key,
     $refs: {},
     listSidebarStyle: {},
+    appSetting: {},
+    platformProviders: [],
     isModDown: false,
     loveList,
     listId: '',

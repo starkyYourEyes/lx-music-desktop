@@ -1,5 +1,9 @@
 <template>
-  <div id="container" class="view-container">
+  <div
+    id="container"
+    class="view-container"
+    :style="layoutBackgroundStyle"
+  >
     <layout-aside id="left" />
     <div id="right">
       <layout-toolbar id="toolbar" />
@@ -15,12 +19,19 @@
 </template>
 
 <script setup>
-import { onMounted } from '@common/utils/vueTools'
+import { computed, onMounted } from '@common/utils/vueTools'
 // import BubbleCursor from '@common/utils/effects/cursor-effects/bubbleCursor'
 // import '@common/utils/effects/snow.min'
 import useApp from '@renderer/core/useApp'
+import { appSetting } from '@renderer/store/setting'
+import { getLayoutBackgroundOpacity, normalizeBackgroundTransparency } from '@common/utils/backgroundTransparency'
 
 useApp()
+
+const backgroundTransparency = computed(() => normalizeBackgroundTransparency(appSetting['common.backgroundTransparency']))
+const layoutBackgroundStyle = computed(() => ({
+  '--layout-background-opacity': String(getLayoutBackgroundOpacity(backgroundTransparency.value)),
+}))
 
 onMounted(() => {
   document.getElementById('root').style.display = 'block'
@@ -121,24 +132,53 @@ body {
 
 #container {
   position: relative;
+  isolation: isolate;
   display: flex;
   height: 100%;
-  background-color: var(--color-app-background);
-  background-image:
-    linear-gradient(135deg, rgba(77, 175, 124, 0.16), rgba(75, 174, 213, 0.1) 46%, rgba(250, 180, 160, 0.12));
+
+  &::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    opacity: var(--layout-background-opacity);
+    background-image:
+      linear-gradient(135deg, rgba(77, 175, 124, 0.16), rgba(75, 174, 213, 0.1) 46%, rgba(250, 180, 160, 0.12));
+    backdrop-filter: saturate(180%) blur(22px);
+    transition: opacity @transition-normal;
+  }
+}
+
+#left,
+#right {
+  position: relative;
+  isolation: isolate;
+}
+
+#left::before,
+#right::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-color: var(--color-main-background);
+  opacity: var(--layout-background-opacity);
+  transition: opacity @transition-normal;
 }
 
 #left {
   flex: none;
-  width: @width-app-left;
+  width: calc(@width-app-left * var(--sidebar-scale, 1));
+  z-index: 2;
 }
 #right {
   flex: auto;
+  min-width: 0;
+  container: player-region / inline-size;
   display: flex;
   flex-flow: column nowrap;
-  transition: background-color @transition-normal;
-  background-color: var(--color-main-background);
-  backdrop-filter: saturate(180%) blur(22px);
   border-left: 1px solid var(--color-glass-border);
 
   border-top-left-radius: @radius-border;

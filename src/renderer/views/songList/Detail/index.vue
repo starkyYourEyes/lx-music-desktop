@@ -3,6 +3,7 @@
     <div :class="$style.list">
       <material-online-list
         ref="listRef"
+        source-tag
         :page="listDetailInfo.page"
         :limit="listDetailInfo.limit"
         :total="listDetailInfo.total"

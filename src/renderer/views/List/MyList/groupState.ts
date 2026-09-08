@@ -26,3 +26,42 @@ export const saveMyListGroupCollapsed = (storage: Storage | Pick<Storage, 'setIt
     storage.setItem(storageKey, JSON.stringify({ mine: !!state.mine, external: !!state.external }))
   } catch {}
 }
+
+const platformStorageKey = 'platform-playlist-group-collapsed-v1'
+
+export interface PlatformGroupCollapsed {
+  providers: Record<LX.PlatformPlaylistProvider, boolean>
+  kinds: Partial<Record<`${LX.PlatformPlaylistProvider}:${LX.PlatformPlaylistKind}`, boolean>>
+}
+
+const normalizePlatformGroupCollapsed = (value: unknown): PlatformGroupCollapsed => {
+  const result: PlatformGroupCollapsed = {
+    providers: { netease: false, qq_music: false, kugou: false },
+    kinds: {},
+  }
+  if (!value || typeof value != 'object' || Array.isArray(value)) return result
+  const state = value as Partial<PlatformGroupCollapsed>
+  for (const provider of ['netease', 'qq_music', 'kugou'] as const) {
+    if (typeof state.providers?.[provider] == 'boolean') result.providers[provider] = state.providers[provider]
+    for (const kind of ['created', 'collected'] as const) {
+      const key = `${provider}:${kind}` as const
+      if (typeof state.kinds?.[key] == 'boolean') result.kinds[key] = state.kinds[key]
+    }
+  }
+  return result
+}
+
+export const loadPlatformGroupCollapsed = (storage?: Pick<Storage, 'getItem'>): PlatformGroupCollapsed => {
+  try {
+    const value = (storage ?? localStorage).getItem(platformStorageKey)
+    return normalizePlatformGroupCollapsed(value ? JSON.parse(value) : null)
+  } catch {
+    return normalizePlatformGroupCollapsed(null)
+  }
+}
+
+export const savePlatformGroupCollapsed = (storage: Pick<Storage, 'setItem'> | undefined, state: PlatformGroupCollapsed) => {
+  try {
+    (storage ?? localStorage).setItem(platformStorageKey, JSON.stringify(normalizePlatformGroupCollapsed(state)))
+  } catch {}
+}

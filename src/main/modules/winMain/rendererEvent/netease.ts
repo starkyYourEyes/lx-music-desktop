@@ -6,6 +6,7 @@ import {
   getAccountStatus,
   getDailySongCategories,
   getHomeRecommendation,
+  getNeteaseUserPlaylists,
   getMusicUrl,
   getPrivateFmSongs,
   getRecommendPlaylistDetail,
@@ -51,6 +52,10 @@ export default () => {
 
   mainHandle<LX.Netease.DailySongCategory[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_daily_song_categories, async() => {
     return getDailySongCategories()
+  })
+
+  mainHandle<readonly LX.PlatformPlaylistKind[] | undefined, LX.PlatformPlaylistSummary[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_user_playlist_summaries, async({ params }) => {
+    return getNeteaseUserPlaylists(params)
   })
 
   mainHandle<LX.Netease.PlaylistDetailParams, LX.Netease.PlaylistDetailInfo>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_playlist_detail, async({ params }) => {

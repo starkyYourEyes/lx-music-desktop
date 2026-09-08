@@ -12,6 +12,7 @@ const { loadVueSfc } = require('../scripts/test-utils/load-vue-sfc')
 
 const root = path.resolve(__dirname, '..')
 const modernBarPath = path.join(root, 'src/renderer/components/layout/PlayBar/ModernBar.vue')
+const globalStylePath = path.join(root, 'src/renderer/assets/styles/index.less')
 const styleProxy = new Proxy({}, { get: (_, property) => String(property) })
 const emptyComponent = { render: () => null }
 const loadPlayBarLayout = () => loadTsModule(path.join(root, 'src/common/utils/playBarLayout.ts'))
@@ -132,6 +133,12 @@ const compilePlayBarStyle = async() => {
   return { modules: result.modules, stylesheet: postcss.parse(result.code) }
 }
 
+const compileGlobalStyles = async() => {
+  const source = fs.readFileSync(globalStylePath, 'utf8')
+  const result = await less.render(source, { filename: globalStylePath })
+  return postcss.parse(result.css)
+}
+
 const assertDeclarations = (stylesheet, selector, expected) => {
   const rule = stylesheet.nodes.find(node => node.type == 'rule' && node.selector == selector)
   assert.ok(rule, `missing ${selector} rule`)
@@ -145,7 +152,7 @@ const qualities = ['128k', '192k', '320k', 'flac', 'flac24bit', 'ape', 'wav']
 for (const quality of qualities) {
   test(`play bar renders raw quality ${quality}`, async() => {
     const { html } = await renderPlayBar({ quality, progressStyle: 'full' })
-    assert.match(html, new RegExp(`class="quality"[^>]*>${quality}</span>`))
+    assert.match(html, new RegExp(`class="badge badge-theme-primary quality"[^>]*>${quality}</span>`))
   })
 }
 
@@ -155,14 +162,14 @@ test('play bar hides an empty quality and all progress styles share ModernBar ma
   for (const progressStyle of ['full', 'middle', 'mini']) {
     const { html } = await renderPlayBar({ quality: 'flac', progressStyle })
     assert.match(html, /class="titleRow"/)
-    assert.match(html, /class="quality"[^>]*>flac</)
+    assert.match(html, /class="badge badge-theme-primary quality"[^>]*>flac</)
   }
 })
 
 test('only the title copies the song name while the quality remains passive metadata', () => {
   const mounted = createPlayBarMount()
   const title = findNode(mounted.container, node => node.props?.class == 'title')
-  const quality = findNode(mounted.container, node => node.props?.class == 'quality')
+  const quality = findNode(mounted.container, node => node.props?.class?.split(/\s+/).includes('quality'))
   assert.ok(title)
   assert.ok(quality)
   assert.equal(title.parent, quality.parent)
@@ -191,12 +198,23 @@ test('play bar compiles flex title and passive quality label styling', async() =
   })
   const quality = assertDeclarations(stylesheet, `.${modules.quality}`, {
     flex: 'none',
-    color: 'var(--color-primary)',
     'font-size': '0.8em',
     opacity: '0.75',
   })
-  assert.equal(quality.padding, '0 5px')
-  for (const forbidden of ['background', 'background-color', 'border', 'border-radius']) assert.equal(quality[forbidden], undefined)
+  for (const property of ['padding', 'color', 'white-space', 'background', 'background-color', 'border', 'border-radius']) {
+    assert.equal(quality[property], undefined)
+  }
+
+  const globalStylesheet = await compileGlobalStyles()
+  assertDeclarations(globalStylesheet, '.badge', {
+    display: 'inline-block',
+    padding: '0.05em 0.25em',
+    'line-height': '1.05',
+    'white-space': 'nowrap',
+    'background-color': 'transparent',
+    border: '1Px solid currentColor',
+    'border-radius': '3px',
+  })
 
   stylesheet.walkAtRules('media', mediaRule => {
     mediaRule.walkRules(rule => assert.equal(rule.selector.includes(`.${modules.quality}`), false, 'media queries must not hide quality'))

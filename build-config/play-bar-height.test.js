@@ -107,6 +107,7 @@ test('application settings preserve the existing 74px play bar by default', () =
     './constants': { RECOMMEND_HOME_SECTION_IDS: [] },
     './projectIdentity': { PROJECT_IDENTITY: { defaultWebdavUrl: '' } },
     './utils/playBarLayout': loadLayout(),
+    './utils/backgroundTransparency': { BACKGROUND_TRANSPARENCY_DEFAULT: 40 },
   }).default
 
   assert.equal(defaults['common.playBarHeight'], 74)

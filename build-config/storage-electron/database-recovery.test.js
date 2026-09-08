@@ -399,6 +399,7 @@ describe('guarded online backup', () => {
     assert.deepEqual(artifactBytes.subarray(20), snapshot.subarray(20))
     assert.equal(guard.sha256, crypto.createHash('sha256').update(artifactBytes).digest('hex'))
     const restored = openTracked(guard.path, { readonly: true, fileMustExist: true })
+    assert.equal(restored.prepare('SELECT count(*) count FROM items').get().count, 1)
     assert.equal(restored.pragma('quick_check', { simple: true }), 'ok')
     guard.close()
   })

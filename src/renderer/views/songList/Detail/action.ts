@@ -1,11 +1,10 @@
 import { tempListMeta, userLists } from '@renderer/store/list/state'
 import { dialog } from '@renderer/plugins/Dialog'
-import syncSourceList from '@renderer/store/list/syncSourceList'
+import { importSourceList } from '@renderer/store/list/importSourceList'
 import { getListDetail, getListDetailAll } from '@renderer/store/songList/action'
-import { createUserList, setTempList } from '@renderer/store/list/action'
+import { setTempList } from '@renderer/store/list/action'
 import { playList } from '@renderer/core/player/action'
 import { LIST_IDS } from '@common/constants'
-import { toMD5 } from '@renderer/utils'
 import { DAILY_RECOMMEND_TEMP_LIST_ID } from '@renderer/store/dailyRecommend/state'
 import { getQQMusicAccountKey } from '@renderer/store/qqMusic'
 import { playQQDailyRecommend } from '@renderer/store/qqDailyRecommend/action'
@@ -17,10 +16,7 @@ const getTempListId = (id: string, source: LX.OnlineSource) => source == 'wy' &&
   : getListId(id, source)
 
 export const addSongListDetail = async(id: string, source: LX.OnlineSource, name?: string) => {
-  // console.log(this.listDetail.info)
-  // if (!this.listDetail.info.name) return
-  const listId = getListId(id, source)
-  const targetList = userLists.find(l => l.sourceListId == listId)
+  const targetList = userLists.find(l => l.source == source && l.sourceListId == id && !l.id.startsWith('platform:'))
   if (targetList) {
     const confirm = await dialog.confirm({
       message: window.i18n.t('duplicate_list_tip', { name: targetList.name }),
@@ -28,15 +24,11 @@ export const addSongListDetail = async(id: string, source: LX.OnlineSource, name
       confirmButtonText: window.i18n.t('confirm_button_text'),
     })
     if (!confirm) return
-    void syncSourceList(targetList)
-    return
   }
 
-  const list = await getListDetailAll(id, source)
-  await createUserList({
-    name,
-    id: `${source}_${toMD5(listId)}`,
-    list,
+  return importSourceList({
+    name: targetList?.name ?? name,
+    id: targetList?.id,
     source,
     sourceListId: id,
   })

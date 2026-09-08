@@ -780,8 +780,8 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
     assert.equal(fs.existsSync(backupsRoot), false)
   })
 
-  it('advances a fresh schema-7 database to schema 8 and recognizes it on relaunch', async() => {
-    const fixture = createTestStorageRoot('cache-cutover-fresh-v8')
+  it('advances a fresh schema-7 database to schema 9 and recognizes it on relaunch', async() => {
+    const fixture = createTestStorageRoot('cache-cutover-fresh-v9')
     fixtures.push(fixture)
     const profileRoot = path.join(fixture.path, 'profile')
     const cacheRoot = path.join(fixture.path, 'cache')
@@ -797,22 +797,19 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
     assert.equal((await loadPhase4().initializePhase4()).schemaVersion, 7)
 
     const advanced = await dbService.advanceAppDatabase({
-      targetSchemaVersion: 8,
+      targetSchemaVersion: 9,
       backupsRoot,
     })
 
-    assert.equal(advanced.schemaVersion, 8)
-    assert.deepEqual(advanced.migratedVersions, [8])
-    assert.equal(dbService.getDatabaseHealth().schemaVersion, 8)
-    assert.equal(dbService.getOpenAppDatabaseSchemaVersion(), 8)
+    assert.equal(advanced.schemaVersion, 9)
+    assert.deepEqual(advanced.migratedVersions, [8, 9])
+    assert.equal(dbService.getDatabaseHealth().schemaVersion, 9)
+    assert.equal(dbService.getOpenAppDatabaseSchemaVersion(), 9)
     assert.equal(
       dbService.getAppDB().prepare("SELECT field_value FROM db_info WHERE field_name = 'version'").get().field_value,
-      '8',
+      '9',
     )
-    assert.equal(
-      dbService.getAppDB().pragma('table_xinfo("listening_tracks")').at(-1).name,
-      'play_count',
-    )
+    assert.equal(dbService.getAppDB().prepare("SELECT sql FROM sqlite_master WHERE name = 'account_profiles'").get().sql.includes("'kugou'"), true)
     assert.equal(fs.existsSync(backupsRoot), false)
 
     const relaunched = await dbService.init({
@@ -822,9 +819,9 @@ describe('typed cache ownership and guarded schema-7 cutover', () => {
       previousShutdownWasClean: true,
       targetSchemaVersion: 6,
     })
-    assert.equal(relaunched.schemaVersion, 8)
+    assert.equal(relaunched.schemaVersion, 9)
     assert.deepEqual(await loadPhase4().initializePhase4(), {
-      schemaVersion: 8,
+      schemaVersion: 9,
       typedOwnershipVerified: true,
     })
   })

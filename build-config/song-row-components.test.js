@@ -271,7 +271,7 @@ const createOnlineListHarness = async(actionButtonsVisible, options = {}) => {
   return { html, item, observed }
 }
 
-const createMusicListHarness = async(actionButtonsVisible) => {
+const createMusicListHarness = async(actionButtonsVisible, options = {}) => {
   const item = {
     ...music('saved'),
     name: 'Saved Song',
@@ -288,6 +288,8 @@ const createMusicListHarness = async(actionButtonsVisible) => {
     clickIndexes: [],
     contextMenus: [],
     doubleClickIndexes: [],
+    footerRenders: 0,
+    headerRenders: 0,
     rows: [],
     titleCellSlots: [],
     titleCells: [],
@@ -304,6 +306,7 @@ const createMusicListHarness = async(actionButtonsVisible) => {
     '@common/utils/electron': { clipboardWriteText: noop },
     '@common/utils/common': { encodePath: path => path },
     '@common/utils/vueTools': vueTools,
+    '@renderer/store/platformPlaylists/action': { getPlatformPlaylistFailure: noop },
     '@renderer/store/utils': {
       canOpenPrimaryDownload: () => true,
       canStartPlayback: () => false,
@@ -317,7 +320,7 @@ const createMusicListHarness = async(actionButtonsVisible) => {
       selectedIndex: value(0),
       dom_listContent: value(null),
       listRef: value(null),
-      list: value([item]),
+      list: value(options.empty ? [] : [item]),
       playerInfo: value({ isPlayList: true, playIndex: 0 }),
       setSelectedIndex: noop,
       isShowSource: value(true),
@@ -412,10 +415,17 @@ const createMusicListHarness = async(actionButtonsVisible) => {
     setup(props, { attrs, slots }) {
       return () => {
         observed.virtualListAttrs.push({ ...attrs })
-        const renderedRow = slots.default?.({ item: props.list[0], index: 0 })
-        const row = Array.isArray(renderedRow) ? renderedRow[0] : renderedRow
-        if (row) observed.rows.push(row)
-        return h('div', { class: 'virtualized-list' }, row)
+        const header = slots.header?.()
+        if (header) observed.headerRenders++
+        const rows = props.list.map((rowItem, index) => {
+          const renderedRow = slots.default?.({ item: rowItem, index })
+          const row = Array.isArray(renderedRow) ? renderedRow[0] : renderedRow
+          if (row) observed.rows.push(row)
+          return row
+        })
+        const footer = slots.footer?.()
+        if (footer) observed.footerRenders++
+        return h('div', { class: 'virtualized-list' }, [header, ...rows, footer])
       }
     },
   })
@@ -759,7 +769,7 @@ const assertMusicListMode = async(actionButtonsVisible) => {
   assert.deepEqual(observed.titleCellSlots[0].map(vnode => ({
     class: vnode.props.class,
     children: vnode.children,
-  })), [{ class: 'no-select label-source', children: 'wy' }])
+  })), [{ class: 'no-select badge badge-theme-tertiary', children: 'wy' }])
   assert.equal(countRenderedText(html, 'Saved Album'), 1)
   assert.equal(countRenderedText(html, '05:06'), 1)
   assert.equal(observed.actionButtons, actionButtonsVisible ? 1 : 0)
@@ -1246,6 +1256,40 @@ test('My Lists renders artwork title cells and preserves interactive rows with a
 
 test('My Lists renders artwork title cells and preserves interactive rows without action buttons', async() => {
   await assertMusicListMode(false)
+})
+
+for (const actionButtonsVisible of [true, false]) {
+  test(`My Lists puts its profile and column header before rows in one scroll area (${actionButtonsVisible ? 'actions' : 'no actions'})`, async() => {
+    const { html, observed } = await createMusicListHarness(actionButtonsVisible)
+    const scrollStart = html.indexOf('class="virtualized-list"')
+    const profileTitle = html.indexOf('Saved Songs')
+    const columnHeader = html.indexOf('music_title')
+    const songRow = html.indexOf('>Saved Song<')
+
+    assert.ok(scrollStart > -1)
+    assert.ok(scrollStart < profileTitle)
+    assert.ok(profileTitle < columnHeader)
+    assert.ok(columnHeader < songRow)
+    assert.equal(observed.headerRenders, 1)
+    assert.equal(observed.footerRenders, 1)
+  })
+}
+
+test('My Lists keeps profile and headings above its empty message in the same scroll area', async() => {
+  const { html, observed } = await createMusicListHarness(true, { empty: true })
+  const scrollStart = html.indexOf('class="virtualized-list"')
+  const profileTitle = html.indexOf('Saved Songs')
+  const columnHeader = html.indexOf('music_title')
+  const emptyMessage = html.indexOf('no_item')
+
+  assert.ok(scrollStart > -1)
+  assert.ok(scrollStart < profileTitle)
+  assert.ok(profileTitle < columnHeader)
+  assert.ok(columnHeader < emptyMessage)
+  assert.equal(html.includes('>Saved Song<'), false)
+  assert.equal(observed.headerRenders, 1)
+  assert.equal(observed.footerRenders, 1)
+  assert.equal(observed.rows.length, 0)
 })
 
 test('Recent Play renders history records through artwork title cells and preserves row behavior', async() => {

@@ -105,11 +105,20 @@ const assertListScrollPosition: (value: unknown) => asserts value is LX.List.Lis
 
 const assertPlaylistProfile: (value: unknown) => asserts value is LX.List.UserListProfile = value => {
   assertStorageRecord(value, 'profile')
-  assertExactKeys(value, 'profile', ['description', 'coverUrl', 'createdAt', 'group'])
+  assertExactKeys(value, 'profile', ['description', 'coverUrl', 'createdAt', 'group', 'managed', 'provider', 'kind', 'accountKey', 'lastSyncAt'])
   if (Object.hasOwn(value, 'description') && typeof value.description != 'string') invalidField('description')
   if (Object.hasOwn(value, 'coverUrl')) assertStorageString(value.coverUrl, 'coverUrl', 1, MAX_URL_LENGTH)
   if (Object.hasOwn(value, 'createdAt')) assertSafeTimestamp(value.createdAt, 'createdAt')
   if (Object.hasOwn(value, 'group') && value.group != 'mine' && value.group != 'external') invalidField('group')
+  if (Object.hasOwn(value, 'managed') && typeof value.managed != 'boolean') invalidField('managed')
+  if (Object.hasOwn(value, 'provider') || value.managed === true) {
+    if (value.provider != 'netease' && value.provider != 'qq_music' && value.provider != 'kugou') invalidField('provider')
+  }
+  if (Object.hasOwn(value, 'kind') || value.managed === true) {
+    if (value.kind != 'created' && value.kind != 'collected') invalidField('kind')
+  }
+  if (Object.hasOwn(value, 'accountKey') || value.managed === true) assertId(value.accountKey, 'accountKey')
+  if (Object.hasOwn(value, 'lastSyncAt')) assertSafeTimestamp(value.lastSyncAt, 'lastSyncAt')
   assertJsonByteSize(value, 'profile', MAX_JSON_BYTES)
 }
 

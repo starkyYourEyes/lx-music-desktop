@@ -47,6 +47,21 @@ dd
         @change="handlePlaylistProfileScaleChange")
       span(:class="$style.scaleUnit") %
 
+dd
+  h3#list_platform_playlists {{ $t('platform_playlist__refresh') }}
+  template(v-for="provider in ['netease', 'qq_music', 'kugou']" :key="provider")
+    h4 {{ $t(`platform_playlist__provider_${provider}`) }}
+    base-checkbox.gap-left(
+      :id="`setting_list_platform_${provider}_created`"
+      :model-value="appSetting[`list.platformPlaylists.${provider}.created`]"
+      :label="$t('platform_playlist__kind_created')"
+      @update:model-value="updatePlatformSetting(provider, 'created', $event)")
+    base-checkbox.gap-left(
+      :id="`setting_list_platform_${provider}_collected`"
+      :model-value="appSetting[`list.platformPlaylists.${provider}.collected`]"
+      :label="$t('platform_playlist__kind_collected')"
+      @update:model-value="updatePlatformSetting(provider, 'collected', $event)")
+
 </template>
 
 <script>
@@ -65,6 +80,9 @@ const normalizePlaylistProfileScale = value => {
 export default {
   name: 'SettingList',
   setup() {
+    const updatePlatformSetting = (provider, kind, value) => {
+      updateSetting({ [`list.platformPlaylists.${provider}.${kind}`]: value })
+    }
     const handleSidebarScaleChange = value => {
       updateSetting({ 'list.myListSidebarScale': normalizeSidebarScale(value?.target ? value.target.value : value) })
     }
@@ -75,6 +93,7 @@ export default {
     return {
       appSetting,
       updateSetting,
+      updatePlatformSetting,
       handleSidebarScaleChange,
       handlePlaylistProfileScaleChange,
     }

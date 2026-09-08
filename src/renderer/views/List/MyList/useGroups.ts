@@ -16,9 +16,9 @@ export default ({
 }) => {
   const collapsed = ref<MyListGroupCollapsed>(loadMyListGroupCollapsed())
   const groups = computed(() => {
-    const lists = partitionUserLists(userLists, getUserListGroup)
+    const lists = partitionUserLists(userLists.filter(list => !list.id.startsWith('platform:')), getUserListGroup)
     return {
-      mine: { key: 'mine' as const, lists: lists.mine, count: lists.mine.length + 1 },
+      mine: { key: 'mine' as const, lists: lists.mine, count: lists.mine.length },
       external: { key: 'external' as const, lists: lists.external, count: lists.external.length },
     }
   })
@@ -36,7 +36,7 @@ export default ({
     save()
   }
   const resolveGroup = (id: string): LX.List.UserListGroup | null => {
-    if (id == 'love') return 'mine'
+    if (id.startsWith('platform:')) return null
     const list = userLists.find(item => item.id == id)
     return list ? getUserListGroup(list) : null
   }

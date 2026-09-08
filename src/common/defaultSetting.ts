@@ -3,6 +3,7 @@ import os from 'node:os'
 import { RECOMMEND_HOME_SECTION_IDS } from './constants'
 import { PROJECT_IDENTITY } from './projectIdentity'
 import { PLAY_BAR_HEIGHT_DEFAULT } from './utils/playBarLayout'
+import { BACKGROUND_TRANSPARENCY_DEFAULT } from './utils/backgroundTransparency'
 
 const isMac = process.platform == 'darwin'
 const isWin = process.platform == 'win32'
@@ -25,8 +26,12 @@ const defaultSetting: LX.AppSetting = {
   'common.controlBtnPosition': isMac ? 'left' : 'right',
   'common.isShowSidebarScrollbar': true,
   'common.sidebarSettingLocation': 'bottom',
+  'common.sidebarNavigationFontSize': 13,
+  'common.sidebarTitleFontSize': 12,
+  'common.sidebarPlaylistFontSize': 13,
   'common.playBarHeight': PLAY_BAR_HEIGHT_DEFAULT,
   'common.playBarProgressStyle': 'mini',
+  'common.backgroundTransparency': BACKGROUND_TRANSPARENCY_DEFAULT,
   'common.transparentWindow': !isMac,
 
   'player.startupAutoPlay': false,
@@ -120,6 +125,12 @@ const defaultSetting: LX.AppSetting = {
   'list.actionButtonsVisible': false,
   'list.myListSidebarScale': 90,
   'list.playlistProfileScale': 85,
+  'list.platformPlaylists.netease.created': true,
+  'list.platformPlaylists.netease.collected': true,
+  'list.platformPlaylists.qq_music.created': true,
+  'list.platformPlaylists.qq_music.collected': true,
+  'list.platformPlaylists.kugou.created': true,
+  'list.platformPlaylists.kugou.collected': true,
 
   'download.enable': false,
   'download.isSavePathGroupByListName': false,

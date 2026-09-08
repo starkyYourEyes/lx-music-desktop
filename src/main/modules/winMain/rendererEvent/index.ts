@@ -21,6 +21,7 @@ import soundEffect from './soundEffect'
 import openAPI from './openAPI'
 import netease from './netease'
 import qqMusic from './qqMusic'
+import kugouMusic from './kugouMusic'
 import { getWebContents, isRendererAlive, sendEvent } from '../main'
 import { mainOn } from '@common/mainIpc'
 import { WIN_MAIN_RENDERER_EVENT_NAME } from '@common/ipcNames'
@@ -77,6 +78,7 @@ export default () => {
   openAPI()
   netease()
   qqMusic()
+  kugouMusic()
 
   global.lx.event_app.on('updated_config', (keys, setting) => {
     sendConfigChange(setting)

@@ -29,7 +29,7 @@ export interface CachePhasePrerequisiteV1 {
 }
 
 export interface CachePhase4Result {
-  schemaVersion: 6 | 7 | 8
+  schemaVersion: 6 | 7 | 8 | 9
   typedOwnershipVerified: boolean
 }
 

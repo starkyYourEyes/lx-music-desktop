@@ -52,6 +52,7 @@ export default ({ props, list, selectedList, removeAllSelect }) => {
   }
 
   const handleRemoveMusic = async(index, single) => {
+    if (props.listId.startsWith('platform:')) return
     if (selectedList.value.length && !single) {
       const confirm = await (selectedList.value.length > 1
         ? dialog.confirm({

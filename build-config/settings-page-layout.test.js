@@ -89,6 +89,7 @@ const loadSettingBasic = (settingStore = {}) => loadVueComponent(
   {
     '@common/utils/vueTools': vue,
     '@common/utils/playBarLayout': loadTsModule(path.join(root, 'src/common/utils/playBarLayout.ts')),
+    '@common/utils/backgroundTransparency': loadTsModule(path.join(root, 'src/common/utils/backgroundTransparency.ts')),
     '@renderer/store': {
       windowSizeList: [],
       userApi: { list: [], status: false, message: '' },
@@ -109,6 +110,7 @@ const loadSettingBasic = (settingStore = {}) => loadVueComponent(
         'common.apiSource': '',
         'common.font': '',
         'common.playBarHeight': 74,
+        'common.backgroundTransparency': 40,
         'theme.lightId': 'green',
         'theme.darkId': 'black',
         ...settingStore.appSetting,
@@ -183,6 +185,77 @@ test('Basic settings exposes a bounded localized play bar height control', () =>
   }
 })
 
+test('Basic settings applies a pending background transparency only after confirmation', () => {
+  const html = renderPugTemplate('src/renderer/views/Setting/components/SettingBasic.vue')
+  const source = fs.readFileSync(path.join(root, 'src/renderer/views/Setting/components/SettingBasic.vue'), 'utf8')
+  assert.match(html, /id="basic_background_transparency"/)
+  assert.match(source, /common\.backgroundTransparency/)
+  assert.match(html, /BACKGROUND_TRANSPARENCY_MIN/)
+  assert.match(html, /BACKGROUND_TRANSPARENCY_MAX/)
+  assert.match(html, /type="range"/)
+  assert.match(html, /type="number"/)
+  assert.match(html, />%</)
+  assert.equal((html.match(/aria-labelledby="basic_background_transparency"/g) ?? []).length, 2)
+  assert.match(html, /setting__basic_background_transparency_apply/)
+  assert.match(html, /disabled="!hasPendingBackgroundTransparency"/)
+  assert.match(html, /click="handleApplyBackgroundTransparency"/)
+
+  const appliedSetting = vue.reactive({
+    'common.apiSource': '',
+    'common.font': '',
+    'common.playBarHeight': 74,
+    'common.backgroundTransparency': 40,
+    'theme.lightId': 'green',
+    'theme.darkId': 'black',
+  })
+  const calls = []
+  const component = loadSettingBasic({
+    appSetting: appliedSetting,
+    mergeSetting: setting => {
+      calls.push(['merge', setting])
+      Object.assign(appliedSetting, setting)
+    },
+    updateSetting: setting => calls.push(['update', setting]),
+  })
+  const {
+    backgroundTransparencyInput,
+    hasPendingBackgroundTransparency,
+    handleBackgroundTransparencyChange,
+    handleApplyBackgroundTransparency,
+  } = component.setup()
+  assert.equal(backgroundTransparencyInput.value, 40)
+  assert.equal(hasPendingBackgroundTransparency.value, false)
+  handleBackgroundTransparencyChange('101')
+  assert.equal(backgroundTransparencyInput.value, 100)
+  handleBackgroundTransparencyChange({ target: { value: '-1' } })
+  assert.equal(backgroundTransparencyInput.value, 0)
+  handleBackgroundTransparencyChange('42.6')
+  assert.equal(backgroundTransparencyInput.value, 43)
+  assert.equal(hasPendingBackgroundTransparency.value, true)
+  assert.deepEqual(calls, [])
+
+  handleApplyBackgroundTransparency()
+  assert.deepEqual(calls, [
+    ['merge', { 'common.backgroundTransparency': 43 }],
+    ['update', { 'common.backgroundTransparency': 43 }],
+  ])
+  assert.equal(appliedSetting['common.backgroundTransparency'], 43)
+  assert.equal(hasPendingBackgroundTransparency.value, false)
+
+  const labels = {
+    'zh-cn.json': ['背景透明度', '应用'],
+    'zh-tw.json': ['背景透明度', '套用'],
+    'en-us.json': ['Background Transparency', 'Apply'],
+  }
+  for (const [file, expected] of Object.entries(labels)) {
+    const messages = JSON.parse(fs.readFileSync(path.join(root, 'src/lang', file), 'utf8'))
+    assert.deepEqual([
+      messages.setting__basic_background_transparency,
+      messages.setting__basic_background_transparency_apply,
+    ], expected)
+  }
+})
+
 test('Basic settings exposes persistent sidebar navigation preferences', () => {
   const html = renderPugTemplate('src/renderer/views/Setting/components/SettingBasic.vue')
   assert.match(html, /id="basic_sidebar"/)
@@ -196,6 +269,7 @@ test('Basic settings exposes persistent sidebar navigation preferences', () => {
     './constants': { RECOMMEND_HOME_SECTION_IDS: [] },
     './projectIdentity': { PROJECT_IDENTITY: { defaultWebdavUrl: '' } },
     './utils/playBarLayout': { PLAY_BAR_HEIGHT_DEFAULT: 74 },
+    './utils/backgroundTransparency': { BACKGROUND_TRANSPARENCY_DEFAULT: 40 },
   }).default
   assert.equal(defaults['common.isShowSidebarScrollbar'], true)
   assert.equal(defaults['common.sidebarSettingLocation'], 'bottom')

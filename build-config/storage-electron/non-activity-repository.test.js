@@ -414,6 +414,31 @@ describe('authoritative non-activity storage', () => {
     }), {})
   })
 
+  it('reads and updates platform profiles already persisted by another build', async() => {
+    const { db, root } = await createStore()
+    const profile = {
+      managed: true, provider: 'netease', kind: 'collected', accountKey: '42',
+      lastSyncAt: 100, coverUrl: 'https://example.test/cover.jpg', group: 'external',
+    }
+    db.prepare(`INSERT INTO playlist_metadata (
+      playlist_id, is_auto_update, update_time_ms, profile_json, updated_at_ms
+    ) VALUES (?, ?, ?, ?, ?)`).run('platform-list', 0, 100, JSON.stringify(profile), 100)
+    assert.deepEqual(getRepository().getPlaylistMetadata()['platform-list'].profile, profile)
+    dbService.close()
+    const result = await dbService.init({
+      dataPath: root, cacheRoot: path.join(root, 'cache'), backupsRoot: path.join(root, 'backups'),
+      previousShutdownWasClean: true, targetSchemaVersion: 6,
+    })
+    assert.equal(result.status, 'ready')
+    const repository = getRepository()
+    const value = repository.getPlaylistMetadata()['platform-list']
+    const updated = repository.applyPlaylistMetadata({
+      version: 1, action: 'upsert', playlistId: 'platform-list',
+      value: { ...value, isAutoUpdate: true }, updatedAtMs: 200,
+    })
+    assert.deepEqual(updated['platform-list'].profile, profile)
+  })
+
   it('enforces the 10000-row playlist metadata limit without blocking updates', async() => {
     const { db } = await createStore()
     const repository = getRepository()

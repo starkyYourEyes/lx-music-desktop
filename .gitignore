@@ -69,6 +69,31 @@ USER_PLAYLIST_RESPONSE.local.json
 DAILY_SONG_CATEGORY_API.local.md
 NETEASE_STYLE_RCMD_API.local.md
 
+# Local captures, account data, and exported user data
+/*.local.*
+/qq-getRecommend-response.json
+*.saz
+*.har
+config_v2.json
+hot_key.json
+user_api.json
+servers.v1.json
+devices.v2.json
+account-credential-operations.v1.json
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.lxmc
+*.slxmc
+/starky_list_*.txt
+/starky_list_*.csv
+
+# Generated portable builds and smoke-test workspaces
+/.portable-build-backup-*/
+/.test-tmp-portable-*/
+
 # next.js build output
 .next
 

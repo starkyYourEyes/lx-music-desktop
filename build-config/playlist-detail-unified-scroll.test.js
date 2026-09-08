@@ -60,9 +60,17 @@ test('playlist detail renders its metadata inside the online list scroll header'
     },
   }).default
 
+  const observed = { sourceTag: false }
   const MaterialOnlineList = defineComponent({
     inheritAttrs: false,
-    setup(_, { slots }) {
+    props: {
+      sourceTag: {
+        type: Boolean,
+        default: false,
+      },
+    },
+    setup(props, { slots }) {
+      observed.sourceTag = props.sourceTag
       return () => h('main', { class: 'online-scroll-root' }, [
         ...(slots.header?.() ?? []),
         h('div', { class: 'song-list-marker' }, 'Song Rows'),
@@ -91,4 +99,5 @@ test('playlist detail renders its metadata inside the online list scroll header'
   assert.ok(playlistName < songRows)
   assert.ok(songRows < scrollRootEnd)
   assert.equal((html.match(/class="songListHeader"/g) ?? []).length, 1)
+  assert.equal(observed.sourceTag, true)
 })

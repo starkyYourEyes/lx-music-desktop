@@ -73,7 +73,7 @@ export default {
         { ...defaultList, name: t(defaultList.name) },
         { ...loveList, name: t(loveList.name) },
         ...userLists,
-      ].filter(l => !props.excludeListId.includes(l.id))
+      ].filter(l => !l.id.startsWith('platform:') && !props.excludeListId.includes(l.id))
     })
     return {
       keyModDown,

@@ -22,6 +22,7 @@ import { createQQMusicDailyRecommendService } from './dailyRecommend'
 import { createQQMusicHomeRecommendService } from './homeRecommend'
 import { createQQMusicPlaylistDetailService } from './playlistDetail'
 import { createQQMusicFeedbackService } from './feedback'
+import { createQQMusicUserPlaylistService } from './userPlaylists'
 
 const CHECK_ERROR = 'QQ Music login check failed'
 const MAX_SCHEDULE_DELAY_MS = 2_147_483_647
@@ -72,6 +73,10 @@ interface PlaylistDetailService {
 interface FeedbackService {
   likeMusic: (musicInfo: LX.Music.MusicInfo_tx) => Promise<void>
   dislikeMusic: (musicInfo: LX.Music.MusicInfo_tx) => Promise<void>
+}
+
+interface UserPlaylistService {
+  getUserPlaylists: (kinds?: readonly LX.PlatformPlaylistKind[]) => Promise<LX.PlatformPlaylistSummary[]>
 }
 
 type QQMusicRefreshTrigger = 'scheduled' | 'preflight' | 'auth-error'
@@ -132,6 +137,7 @@ export const createQQMusicAccountService = ({
   homeRecommendService,
   playlistDetailService,
   feedbackService,
+  userPlaylistService,
   credentialService,
   onRefreshDiagnostic = defaultRefreshDiagnostic,
   now = Date.now,
@@ -147,6 +153,7 @@ export const createQQMusicAccountService = ({
   homeRecommendService: HomeRecommendService
   playlistDetailService: PlaylistDetailService
   feedbackService: FeedbackService
+  userPlaylistService?: UserPlaylistService
   credentialService: QQMusicCredentialService
   onRefreshDiagnostic?: (event: QQMusicRefreshDiagnostic) => void
   now?: () => number
@@ -155,6 +162,10 @@ export const createQQMusicAccountService = ({
   retryDelayMs?: number
   musicUrlAuthorization: Pick<MusicUrlAuthorizationService, 'transition'>
 }) => {
+  const playlists = userPlaylistService ?? createQQMusicUserPlaylistService({
+    getCookie: () => getAccountData(accounts).cookie,
+    getProfile: () => getAccountData(accounts).profile,
+  })
   let loginGeneration = 0
   let refreshTimer: ReturnType<typeof setTimeout> | undefined
   let lastSuccessfulRefresh: {
@@ -522,6 +533,11 @@ export const createQQMusicAccountService = ({
     return runAuthenticatedRequest(async() => playlistDetailService.getPlaylistDetail(id, page))
   }
 
+  const getUserPlaylists = async(kinds?: readonly LX.PlatformPlaylistKind[]) => {
+    if (kinds?.length == 0) return []
+    return runAuthenticatedRequest(async() => playlists.getUserPlaylists(kinds))
+  }
+
   const likeMusic = async(musicInfo: LX.Music.MusicInfo_tx) => {
     if (!getAccountData(accounts).cookie) return
     await runAuthenticatedRequest(async() => feedbackService.likeMusic(musicInfo))
@@ -547,6 +563,7 @@ export const createQQMusicAccountService = ({
     getDailyRecommendSongs,
     getHomeRecommendation,
     getPlaylistDetail,
+    getUserPlaylists,
     likeMusic,
     dislikeMusic,
   }
@@ -603,6 +620,9 @@ export const getGuessLikeSongs = async(options?: LX.QQMusic.GuessLikeRequest) =>
 }
 export const getDailyRecommendSongs = async() => getAccountService().getDailyRecommendSongs()
 export const getHomeRecommendation = async() => getAccountService().getHomeRecommendation()
+export const getQQMusicUserPlaylists = async(kinds?: readonly LX.PlatformPlaylistKind[]) => {
+  return getAccountService().getUserPlaylists(kinds)
+}
 export const getPlaylistDetail = async(id: string, page = 1) => {
   return getAccountService().getPlaylistDetail(id, page)
 }

@@ -66,6 +66,7 @@ const exactTestFixtureOwners = new Map([
     'build-config/storage/cache-manager.test.js',
     'build-config/storage/credential-migration.test.js',
     'build-config/storage/credential-vault.test.js',
+    'build-config/storage/kugou-account-repository.test.js',
     'build-config/storage/non-activity-source.test.js',
     'build-config/storage/non-activity-startup.test.js',
     'build-config/storage/portable-sync-filesystem.test.js',

@@ -7,6 +7,7 @@ import {
   databaseSchema6Contract,
   databaseSchema7Contract,
   databaseSchema8Contract,
+  databaseSchema9Contract,
   type SchemaContract,
 } from '../../worker/dbService/schemaContract'
 import { SCHEMA7_REMOVED_OBJECTS } from '../../worker/dbService/tables'
@@ -15,6 +16,7 @@ import migration4 from '../../worker/dbService/migrations/0004_account_profiles'
 import migration5 from '../../worker/dbService/migrations/0005_non_activity_state'
 import migration6 from '../../worker/dbService/migrations/0006_playback_activity'
 import migration8 from '../../worker/dbService/migrations/0008_listening_play_count'
+import migration9 from '../../worker/dbService/migrations/0009_kugou_account_profiles'
 import {
   parseRawLyricMarkerDetails,
   canonicalRawLyricHash,
@@ -531,9 +533,10 @@ const expectedMigrations = [
   migration6,
   { version: 7, name: CACHE_CLEANUP_MIGRATION_NAME, checksum: CACHE_CLEANUP_MIGRATION_CHECKSUM },
   migration8,
+  migration9,
 ]
 
-const verifyLedger = (db: Database.Database, schemaVersion: 6 | 7 | 8): void => {
+const verifyLedger = (db: Database.Database, schemaVersion: 6 | 7 | 8 | 9): void => {
   const rows = db.prepare(`
     SELECT version, name, checksum, applied_at_ms AS appliedAtMs
     FROM schema_migrations ORDER BY version
@@ -808,7 +811,7 @@ interface PostCutoverState {
 
 const verifyPostCutoverSteadyState = (
   db: Database.Database,
-  schemaVersion: 7 | 8,
+  schemaVersion: 7 | 8 | 9,
   contract: SchemaContract,
 ): PostCutoverState => {
   verifyLedger(db, schemaVersion)
@@ -963,4 +966,11 @@ export const verifySchema7MarkersBeforeCache = (db: Database.Database): void => 
 
 export const verifySchema8MarkersBeforeCache = (db: Database.Database): void => {
   verifySchema8SteadyState(db)
+}
+
+export const verifySchema9SteadyState = (db: Database.Database): PostCutoverState =>
+  verifyPostCutoverSteadyState(db, 9, databaseSchema9Contract)
+
+export const verifySchema9MarkersBeforeCache = (db: Database.Database): void => {
+  verifySchema9SteadyState(db)
 }

@@ -1,5 +1,5 @@
 <template>
-  <div :class="[$style.aside, { [$style.fullscreen]: isFullscreen }]">
+  <div :class="[$style.aside, { [$style.fullscreen]: isFullscreen }]" :style="sidebarStyle">
     <ControlBtns v-if="appSetting['common.controlBtnPosition'] == 'left'" />
     <div :class="$style.account" data-account-popover>
       <button type="button" :class="[$style.logo, { [$style.logged]: !!logoProfile?.avatarUrl }]" :aria-label="logoProfile?.nickname || 'LX Music'" @click="handleLogoClick">
@@ -38,6 +38,21 @@
               @click="handleNeteaseAction"
             >{{ neteaseIsLoggedIn ? '退出' : '登录' }}</button>
           </div>
+          <div :class="$style.providerRow">
+            <span :class="[$style.providerMarker, $style.kugouMarker]" aria-hidden="true">K</span>
+            <span :class="$style.providerInfo">
+              <span :class="$style.providerName">{{ $t('kugou_account_name') }}</span>
+              <span :class="$style.providerAccount" :title="kugouProfile?.nickname || ''">
+                {{ kugouProfile?.nickname || (kugouIsLoggedIn ? $t('kugou_account_logged_in') : $t('kugou_account_logged_out')) }}
+              </span>
+            </span>
+            <button
+              type="button"
+              :class="$style.providerAction"
+              :aria-label="kugouIsLoggedIn ? $t('kugou_account_logout_label') : $t('kugou_account_login_label')"
+              @click="handleKugouMusicAction"
+            >{{ kugouIsLoggedIn ? $t('kugou_account_logout') : $t('kugou_account_login') }}</button>
+          </div>
           <button
             v-if="isSettingInAccountMenu"
             type="button"
@@ -62,18 +77,26 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from '@common/utils/
 import { useRoute, useRouter } from '@common/utils/vueRouter'
 import { isFullscreen } from '@renderer/store'
 import { appSetting } from '@renderer/store/setting'
-import { initNeteaseAccount, isLoggedIn as neteaseIsLoggedIn, logoutNeteaseAccount, profile as neteaseProfile } from '@renderer/store/netease'
-import { initQQMusicAccount, isLoggedIn as qqIsLoggedIn, logoutQQMusicAccount, profile as qqProfile } from '@renderer/store/qqMusic'
+import { getSidebarFontStyles } from '@common/utils/sidebarFontSize'
+import { initNeteaseAccount, isLoggedIn as neteaseIsLoggedIn, logoutNeteaseAccount, profile as neteaseProfile, accountStatus as neteaseAccountStatus } from '@renderer/store/netease'
+import { initQQMusicAccount, isLoggedIn as qqIsLoggedIn, logoutQQMusicAccount, profile as qqProfile, accountStatus as qqAccountStatus } from '@renderer/store/qqMusic'
+import { initKugouMusicAccount, isLoggedIn as kugouIsLoggedIn, logoutKugouMusicAccount, profile as kugouProfile, accountStatus as kugouAccountStatus } from '@renderer/store/kugouMusic'
 
 import ControlBtns from './ControlBtns.vue'
 import NavBar from './NavBar.vue'
+import { refreshPlatformUserPlaylists } from '@renderer/store/platformPlaylists/action'
 
 const route = useRoute()
 const router = useRouter()
+let stopAccountWatchers = []
 const isAvatarLoadFailed = ref(false)
 const isShowAccountPopover = ref(false)
 const logoProfile = computed(() => isAvatarLoadFailed.value ? null : neteaseProfile.value)
 const isSettingInAccountMenu = computed(() => appSetting['common.sidebarSettingLocation'] == 'accountMenu')
+const sidebarStyle = computed(() => ({
+  '--sidebar-scale': Math.min(130, Math.max(70, Number(appSetting['list.myListSidebarScale']) || 90)) / 90,
+  ...getSidebarFontStyles(appSetting),
+}))
 
 watch(neteaseProfile, () => {
   isAvatarLoadFailed.value = false
@@ -117,6 +140,24 @@ const handleNeteaseAction = async() => {
   }).catch(_ => _)
 }
 
+const handleKugouMusicAction = async() => {
+  isShowAccountPopover.value = false
+  if (kugouIsLoggedIn.value) {
+    await logoutKugouMusicAccount()
+    return
+  }
+  if (route.path == '/kg-recommend') {
+    window.dispatchEvent(new Event('show-kugou-music-login'))
+    return
+  }
+  void router.push({
+    path: '/kg-recommend',
+    query: {
+      login: 'kugou',
+    },
+  }).catch(_ => _)
+}
+
 const handleSettingClick = () => {
   isShowAccountPopover.value = false
   void router.push('/setting').catch(_ => _)
@@ -126,7 +167,18 @@ onMounted(() => {
   void Promise.all([
     initQQMusicAccount().catch(() => null),
     initNeteaseAccount().catch(() => null),
-  ])
+    initKugouMusicAccount().catch(() => null),
+  ]).then(async() => refreshPlatformUserPlaylists())
+  stopAccountWatchers = [neteaseAccountStatus, qqAccountStatus, kugouAccountStatus].map(status => watch(status, () => {
+    void refreshPlatformUserPlaylists()
+  }, { deep: true }))
+  stopAccountWatchers.push(watch(() => [
+    appSetting['list.platformPlaylists.netease.created'], appSetting['list.platformPlaylists.netease.collected'],
+    appSetting['list.platformPlaylists.qq_music.created'], appSetting['list.platformPlaylists.qq_music.collected'],
+    appSetting['list.platformPlaylists.kugou.created'], appSetting['list.platformPlaylists.kugou.collected'],
+  ].join('|'), () => {
+    void refreshPlatformUserPlaylists()
+  }))
   window.addEventListener('click', handleWindowClick, true)
 })
 
@@ -138,6 +190,7 @@ const handleWindowClick = (event) => {
 }
 
 onBeforeUnmount(() => {
+  stopAccountWatchers.forEach(stop => stop())
   window.removeEventListener('click', handleWindowClick, true)
 })
 
@@ -148,6 +201,8 @@ onBeforeUnmount(() => {
 @import '@renderer/assets/styles/layout.less';
 
 .aside {
+  --sidebar-gap: calc(10px * var(--sidebar-scale));
+  --sidebar-tool-size: calc(28px * var(--sidebar-scale));
   // box-shadow: 0 0 5px rgba(0, 0, 0, .3);
   transition: @transition-normal;
   transition-property: background-color;
@@ -158,12 +213,12 @@ onBeforeUnmount(() => {
   -webkit-user-select: none;
   display: flex;
   flex-flow: column nowrap;
-  padding: 8px 8px 12px;
+  padding: calc(8px * var(--sidebar-scale)) calc(12px * var(--sidebar-scale));
   box-sizing: border-box;
 
   &.fullscreen {
     -webkit-app-region: no-drag;
-    .logo {
+    .account {
       display: none;
     }
   }
@@ -171,19 +226,21 @@ onBeforeUnmount(() => {
 
 .account {
   position: relative;
-  margin: 6px auto 14px;
+  flex: none;
+  margin: calc(6px * var(--sidebar-scale)) auto calc(14px * var(--sidebar-scale));
+  z-index: 2;
   -webkit-app-region: no-drag;
 }
 
 .logo {
   box-sizing: border-box;
-  height: 60px;
-  width: 60px;
+  height: calc(48px * var(--sidebar-scale));
+  width: calc(48px * var(--sidebar-scale));
   color: var(--color-nav-font);
   opacity: .9;
   flex: none;
   text-align: center;
-  line-height: 60px;
+  line-height: calc(48px * var(--sidebar-scale));
   font-weight: bold;
   border-radius: 16px;
   border: 0;
@@ -213,7 +270,7 @@ onBeforeUnmount(() => {
 
 .accountPopover {
   position: absolute;
-  left: 68px;
+  left: calc(100% + 8px);
   top: 4px;
   z-index: 8;
   width: 238px;
@@ -263,6 +320,10 @@ onBeforeUnmount(() => {
   color: var(--color-primary);
   font-size: 13px;
   font-weight: bold;
+}
+
+.kugouMarker {
+  color: #168be0;
 }
 
 .providerInfo {

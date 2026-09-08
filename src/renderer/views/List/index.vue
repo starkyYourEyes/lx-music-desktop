@@ -1,7 +1,6 @@
 <template>
-  <div id="my-list" :class="$style.container" @click="handleContainerClick">
-    <MyList ref="myList" :list-id="listId" @show-menu="$refs.musicList.handleMenuClick()" />
-    <MusicList ref="musicList" :list-id="listId" @show-menu="$refs.myList.handleMenuClick()" />
+  <div id="my-list" :class="$style.container">
+    <MusicList ref="musicList" :list-id="listId" />
   </div>
 </template>
 
@@ -9,13 +8,11 @@
 import { getListPrevSelectId } from '@renderer/utils/data'
 import { LIST_IDS } from '@common/constants'
 
-import MyList from './MyList/index.vue'
 import MusicList from './MusicList/index.vue'
 
 export default {
   name: 'List',
   components: {
-    MyList,
     MusicList,
   },
   async beforeRouteEnter(to, from, next) {

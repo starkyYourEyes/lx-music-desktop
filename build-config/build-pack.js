@@ -110,6 +110,7 @@ const options = {
     'node_modules/bufferutil',
     'node_modules/utf-8-validate',
     ...getPackageFiles('@neteasecloudmusicapienhanced/api'),
+    ...getPackageFiles('kugoumusicapi'),
     'build/Release/qrc_decode.node',
     'dist/**/*',
   ],

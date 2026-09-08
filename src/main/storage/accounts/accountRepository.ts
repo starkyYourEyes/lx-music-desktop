@@ -55,7 +55,7 @@ interface HydratedAccount {
   status: AccountStatus
 }
 
-const providers: readonly AccountProvider[] = ['netease', 'qq_music']
+const providers: readonly AccountProvider[] = ['netease', 'qq_music', 'kugou']
 const emptyStatus = (): AccountStatus => ({
   loggedIn: false,
   profile: null,
@@ -74,9 +74,11 @@ const cloneStatus = (status: AccountStatus): AccountStatus => ({
   profile: status.profile == null ? null : cloneProfile(status.profile),
 })
 
-const credentialRef = (provider: AccountProvider): CredentialRef => provider == 'netease'
-  ? { kind: 'netease-cookie' }
-  : { kind: 'qq-music-cookie' }
+const credentialRef = (provider: AccountProvider): CredentialRef => {
+  if (provider == 'netease') return { kind: 'netease-cookie' }
+  if (provider == 'qq_music') return { kind: 'qq-music-cookie' }
+  return { kind: 'kugou-cookie' }
+}
 
 const readCookie = (read: CredentialRead<unknown>): {
   cookie: string | null

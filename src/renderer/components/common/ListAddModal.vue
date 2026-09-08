@@ -87,7 +87,7 @@ export default {
         { ...defaultList, name: t(defaultList.name) },
         { ...loveList, name: t(loveList.name) },
         ...userLists,
-      ].filter(l => !props.excludeListId.includes(l.id)).map(l => ({ ...l, isExist: false }))
+      ].filter(l => !l.id.startsWith('platform:') && !props.excludeListId.includes(l.id)).map(l => ({ ...l, isExist: false }))
       checkMusicExist(currentMusicInfo.value)
     }
 

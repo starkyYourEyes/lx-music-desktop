@@ -1,21 +1,31 @@
 <template>
   <div :class="$style.menu">
-    <ul class="scroll" :class="[$style.list, $style.mainMenus, { [$style.scrollbarHidden]: !appSetting['common.isShowSidebarScrollbar'] }]" role="toolbar">
-      <li v-for="(item, index) in mainMenus" v-show="item.enable" :key="item.to" :class="[$style.navItem, { [$style.separator]: index == 2 }]" role="presentation">
-        <router-link :class="[$style.link, {[$style.active]: $route.meta.name == item.name}]" role="tab" :aria-selected="$route.meta.name == item.name" :to="item.to" :aria-label="item.tips">
-          <img v-if="item.logo" :class="$style.providerLogo" :src="item.logo" alt="" draggable="false">
-          <svg v-else version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" :viewBox="item.iconSize" :height="item.size" :width="item.size" space="preserve">
-            <use :xlink:href="item.icon" />
-          </svg>
-        </router-link>
-      </li>
-    </ul>
+    <div class="scroll" :class="[$style.mainMenus, { [$style.scrollbarHidden]: !appSetting['common.isShowSidebarScrollbar'] }]">
+      <ul :class="[$style.list, $style.providers]" role="toolbar">
+        <li v-for="item in providerMenus" :key="item.to" :class="$style.navItem" role="presentation">
+          <router-link :class="[$style.link, $style.providerLink, { [$style.active]: isActive(item.name) }]" :to="item.to" :aria-label="item.tips" :aria-current="isActive(item.name) ? 'page' : undefined">
+            <img :class="$style.providerLogo" :src="item.logo" alt="" draggable="false">
+          </router-link>
+        </li>
+      </ul>
+      <ul :class="[$style.list, $style.pages]" role="toolbar">
+        <li v-for="item in mainMenus" v-show="item.enable" :key="item.to" :class="$style.navItem" role="presentation">
+          <router-link
+            :class="[$style.link, { [$style.active]: isActive(item.name) }]" :to="item.to"
+            :aria-label="item.tips" :aria-current="isActive(item.name) ? 'page' : undefined"
+          >
+            <svg :class="$style.pageIcon" xmlns="http://www.w3.org/2000/svg" :viewBox="item.iconSize" aria-hidden="true"><use :xlink:href="item.icon" /></svg>
+            <span :class="$style.label">{{ item.tips }}</span>
+          </router-link>
+        </li>
+      </ul>
+    </div>
+    <MyList :list-id="activeListId" />
     <ul v-if="!isSettingInAccountMenu" :class="[$style.list, $style.bottomMenus]" role="toolbar">
-      <li v-for="item in bottomMenus" v-show="item.enable" :key="item.to" :class="$style.navItem" role="presentation">
-        <router-link :class="[$style.link, {[$style.active]: $route.meta.name == item.name}]" role="tab" :aria-selected="$route.meta.name == item.name" :to="item.to" :aria-label="item.tips">
-          <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" :viewBox="item.iconSize" :height="item.size" :width="item.size" space="preserve">
-            <use :xlink:href="item.icon" />
-          </svg>
+      <li v-for="item in bottomMenus" :key="item.to" :class="$style.navItem" role="presentation">
+        <router-link :class="[$style.link, { [$style.active]: isActive(item.name) }]" :to="item.to" :aria-label="item.tips" :aria-current="isActive(item.name) ? 'page' : undefined">
+          <svg :class="$style.pageIcon" xmlns="http://www.w3.org/2000/svg" :viewBox="item.iconSize" aria-hidden="true"><use :xlink:href="item.icon" /></svg>
+          <span :class="$style.label">{{ item.tips }}</span>
         </router-link>
       </li>
     </ul>
@@ -26,88 +36,44 @@
 import { appSetting } from '@renderer/store/setting'
 import { useI18n } from '@root/lang'
 import { computed } from '@common/utils/vueTools'
+import { useRoute } from '@common/utils/vueRouter'
+import MyList from '@renderer/views/List/MyList/index.vue'
 import neteaseMusicLogo from '@renderer/assets/images/providers/netease-music.svg'
 import qqMusicLogo from '@renderer/assets/images/providers/qq-music.svg'
+import kugouMusicLogo from '@renderer/assets/images/providers/kugou-music.svg'
 
-const iconSize = '32px'
+const providers = [
+  { to: '/recommend', tips: 'netease_recommend', logo: neteaseMusicLogo, name: 'Recommend' },
+  { to: '/qq-recommend', tips: 'qq_recommend', logo: qqMusicLogo, name: 'QQRecommend' },
+  { to: '/kg-recommend', tips: 'kugou_recommend', logo: kugouMusicLogo, name: 'KugouRecommend' },
+] as const
+
 const menuList = [
-  {
-    to: '/recommend',
-    tips: 'netease_recommend',
-    logo: neteaseMusicLogo,
-    name: 'Recommend',
-  },
-  {
-    to: '/qq-recommend',
-    tips: 'qq_recommend',
-    logo: qqMusicLogo,
-    name: 'QQRecommend',
-  },
-  {
-    to: '/list',
-    tips: 'my_list',
-    icon: '#icon-love',
-    iconSize: '0 0 444.87 391.18',
-    name: 'List',
-  },
-  {
-    to: '/cloud-disk',
-    tips: 'cloud_disk',
-    icon: '#icon-cloud-outline',
-    iconSize: '0 0 24 24',
-    name: 'CloudDisk',
-  },
-  {
-    to: '/local-music',
-    tips: 'local_music',
-    icon: '#icon-musicFolder',
-    iconSize: '0 0 247.498 247.498',
-    name: 'LocalMusic',
-  },
-  {
-    to: '/recent-play',
-    tips: 'recent_play',
-    icon: '#icon-recent-play',
-    iconSize: '0 0 24 24',
-    name: 'RecentPlay',
-  },
-  {
-    to: '/download',
-    tips: 'download',
-    icon: '#icon-download-2',
-    iconSize: '0 0 425.2 425.2',
-    name: 'Download',
-  },
-  {
-    to: '/setting',
-    tips: 'setting',
-    icon: '#icon-setting',
-    iconSize: '0 0 493.23 436.47',
-    name: 'Setting',
-  },
+  { to: '/cloud-disk', tips: 'cloud_disk', icon: '#icon-cloud-outline', iconSize: '0 0 24 24', name: 'CloudDisk' },
+  { to: '/local-music', tips: 'local_music', icon: '#icon-musicFolder', iconSize: '0 0 247.498 247.498', name: 'LocalMusic' },
+  { to: '/recent-play', tips: 'recent_play', icon: '#icon-recent-play', iconSize: '0 0 24 24', name: 'RecentPlay' },
+  { to: '/download', tips: 'download', icon: '#icon-download-2', iconSize: '0 0 425.2 425.2', name: 'Download' },
+  { to: '/setting', tips: 'setting', icon: '#icon-setting', iconSize: '0 0 493.23 436.47', name: 'Setting' },
 ] as const
 
 export default {
   name: 'NavBar',
+  components: { MyList },
   setup() {
     const t = useI18n()
-
+    const route = useRoute()
+    const activeListId = computed(() => route.path == '/list' && typeof route.query.id == 'string' ? route.query.id : '')
+    const isActive = (name: string) => route.meta.name == name
+    const providerMenus = computed(() => providers.map(item => ({ ...item, tips: t(item.tips) })))
     const menus = computed(() => menuList.map(item => ({
       ...item,
       tips: t(item.tips),
-      size: iconSize,
       enable: item.name == 'Download' ? appSetting['download.enable'] : true,
     })))
     const mainMenus = computed(() => menus.value.filter(item => item.name != 'Setting'))
     const bottomMenus = computed(() => menus.value.filter(item => item.name == 'Setting'))
     const isSettingInAccountMenu = computed(() => appSetting['common.sidebarSettingLocation'] == 'accountMenu')
-
-    return {
-      appSetting,
-      mainMenus,
-      bottomMenus,
-      isSettingInAccountMenu,
-    }
+    return { appSetting, activeListId, isActive, providerMenus, mainMenus, bottomMenus, isSettingInAccountMenu }
   },
 }
 </script>
@@ -119,18 +85,18 @@ export default {
   flex: auto;
   display: flex;
   flex-flow: column nowrap;
-  align-items: stretch;
   min-height: 0;
+  min-width: 0;
+  -webkit-app-region: no-drag;
 }
 .list {
-  -webkit-app-region: no-drag;
   width: 100%;
-  &:last-child {
-    margin-bottom: 0;
-  }
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 .mainMenus {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
 
@@ -139,102 +105,73 @@ export default {
     height: 0;
   }
 }
-.navItem {
-  position: relative;
-  margin: 10px 0;
-  &:before {
-    content: '';
-    display: block;
-    width: 100%;
-    padding-bottom: 84%;
-  }
+.providers {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sidebar-gap);
+  padding-bottom: var(--sidebar-gap);
 }
-.separator {
-  margin-top: 28px;
-
-  &:after {
-    content: '';
-    position: absolute;
-    top: -16px;
-    left: 50%;
-    width: 28px;
-    height: 1px;
-    border-radius: 999px;
-    background: linear-gradient(90deg, transparent, rgba(128, 128, 128, .36), transparent);
-    transform: translateX(-50%);
-  }
+.pages {
+  display: flex;
+  flex-flow: column nowrap;
+  gap: calc(3px * var(--sidebar-scale));
+  padding-bottom: var(--sidebar-gap);
+}
+.navItem {
+  min-width: 0;
+  flex: none;
 }
 .bottomMenus {
   flex: none;
+  padding-top: calc(6px * var(--sidebar-scale));
+  border-top: var(--color-list-header-border-bottom);
 }
 .link {
-  position: absolute;
-  left: 0%;
-  top: 0%;
-  width: 62px;
-  height: 62px;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
+  width: 100%;
+  min-height: calc(36px * var(--sidebar-scale));
   box-sizing: border-box;
-  transition: @transition-fast;
-  transition-property: background-color, box-shadow, color, opacity;
-  color: var(--color-nav-font);
-  cursor: pointer;
-  text-align: center;
-  outline: none;
   display: flex;
   align-items: center;
-  justify-content: center;
-
-  border-radius: 16px;
-  .mixin-ellipsis-1();
-  &:before {
-    .mixin-after();
-    left: 50%;
-    top: auto;
-    bottom: 6px;
-    width: 18px;
-    height: 3px;
-    background-color: var(--color-primary-dark-200-alpha-700);
-    border-radius: 999px;
-    transform: translate(-50%, 7px) scaleX(.35);
-    opacity: 0;
-    transition: @transition-fast;
-    transition-property: transform, opacity;
-  }
+  gap: var(--sidebar-gap);
+  padding: calc(6px * var(--sidebar-scale)) var(--sidebar-gap);
+  border-radius: 8px;
+  color: var(--color-nav-font);
+  cursor: pointer;
+  text-decoration: none;
+  transition: background-color @transition-fast, box-shadow @transition-fast, color @transition-fast;
 
   &.active {
-    background-color: rgba(255, 255, 255, 0.72);
+    background-color: rgba(255, 255, 255, .72);
     box-shadow: var(--shadow-soft);
-
-    &:before {
-      transform: translate(-50%, 0) scaleX(1);
-      opacity: 1;
-    }
-
-    &:hover {
-      background-color: rgba(255, 255, 255, 0.86);
-    }
+    &:hover { background-color: rgba(255, 255, 255, .86); }
   }
-
   &:hover {
     color: var(--color-nav-font);
-
-    &:not(.active) {
-      opacity: .8;
-      background-color: rgba(255, 255, 255, 0.38);
-    }
+    &:not(.active) { background-color: rgba(255, 255, 255, .38); }
   }
-  &:active:not(.active) {
-    opacity: .6;
-    background-color: var(--color-primary-light-300-alpha-600);
-  }
+  &:active:not(.active) { background-color: var(--color-primary-light-300-alpha-600); }
+  &:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
+}
+.providerLink {
+  height: calc(50px * var(--sidebar-scale));
+  justify-content: center;
+  background-color: var(--color-primary-background-hover);
 }
 .providerLogo {
   display: block;
-  width: 34px;
-  height: 34px;
+  width: calc(30px * var(--sidebar-scale));
+  height: calc(30px * var(--sidebar-scale));
   object-fit: contain;
+}
+.pageIcon {
+  flex: none;
+  width: calc(20px * var(--sidebar-scale));
+  height: calc(20px * var(--sidebar-scale));
+}
+.label {
+  min-width: 0;
+  font-size: var(--sidebar-navigation-font-size);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 </style>

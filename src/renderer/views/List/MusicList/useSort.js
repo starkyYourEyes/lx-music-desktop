@@ -19,6 +19,7 @@ export default ({ props, list, selectedList, removeAllSelect }) => {
   }
 
   const sortMusic = num => {
+    if (props.listId.startsWith('platform:')) return
     num = Math.min(num, list.value.length)
     updateListMusicsPosition({
       listId: props.listId,

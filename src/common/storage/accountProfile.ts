@@ -1,6 +1,6 @@
 import type { JsonValue } from './canonicalJson'
 
-export type PublicAccountProvider = 'netease' | 'qq_music'
+export type PublicAccountProvider = 'netease' | 'qq_music' | 'kugou'
 
 const invalidProfile = (): never => {
   throw new Error('Invalid public account profile')
@@ -34,6 +34,13 @@ export const normalizePublicAccountProfile = (
 ): JsonValue => {
   const profile = asPlainRecord(value)
   switch (provider) {
+    case 'kugou':
+      if (!hasExactKeys(profile, ['userId', 'nickname', 'avatarUrl'])) invalidProfile()
+      return {
+        userId: requiredString(profile.userId),
+        nickname: requiredString(profile.nickname),
+        avatarUrl: requiredString(profile.avatarUrl),
+      }
     case 'qq_music':
       if (!hasExactKeys(profile, ['uin', 'nickname'])) invalidProfile()
       return {

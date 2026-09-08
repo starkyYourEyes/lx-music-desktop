@@ -70,6 +70,8 @@ test('default setting starts with no fallbacks and serial mode', () => {
     'node:os': require('node:os'),
     './constants': { RECOMMEND_HOME_SECTION_IDS: [] },
     './projectIdentity': { PROJECT_IDENTITY: {} },
+    './utils/playBarLayout': { PLAY_BAR_HEIGHT_DEFAULT: 74 },
+    './utils/backgroundTransparency': { BACKGROUND_TRANSPARENCY_DEFAULT: 40 },
   }).default
   assert.deepEqual(defaults['common.apiFallbackSources'], [])
   assert.equal(defaults['common.apiFallbackMode'], 'serial')

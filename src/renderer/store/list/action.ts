@@ -164,7 +164,7 @@ export const moveListMusics = async(fromId: string, toId: string, musicInfos: LX
   })
 }
 
-export const createUserList = async({ name, id = `userlist_${Date.now()}`, list = [], source, sourceListId, position = -1, group, strictGroupPersistence = false }: {
+export const createUserList = async({ name, id = `userlist_${Date.now()}`, list = [], source, sourceListId, position = -1, group, strictGroupPersistence = false, reveal = true }: {
   name?: string
   id?: string
   list?: LX.Music.MusicInfo[]
@@ -173,6 +173,7 @@ export const createUserList = async({ name, id = `userlist_${Date.now()}`, list 
   position?: number
   group?: LX.List.UserListGroup
   strictGroupPersistence?: boolean
+  reveal?: boolean
 }): Promise<string> => {
   const listInfo: LX.List.UserListInfo = {
     id,
@@ -195,7 +196,7 @@ export const createUserList = async({ name, id = `userlist_${Date.now()}`, list 
     })
   }
   if (list.length) await addListMusics(id, list)
-  requestUserListReveal(id)
+  if (reveal) requestUserListReveal(id)
   return id
 }
 

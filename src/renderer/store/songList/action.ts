@@ -85,7 +85,7 @@ const loadNeteasePlaylistDetail = async(id: string, source: LX.OnlineSource, pag
     .then(normalizeIpcListDetail)
     .catch(async err => {
       console.warn('Load NetEase playlist detail failed, fallback to source sdk:', err)
-      return loadMusicSdkListDetail(id, source, page)
+      return loadMusicSdkListDetail(id, source, page).catch(() => { throw err })
     })
 }
 

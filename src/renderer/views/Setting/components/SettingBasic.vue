@@ -36,6 +36,29 @@ dd
         svg-icon(name="angle-right-solid" :class="$style.activeIcon")
 
 dd
+  h3#basic_background_transparency {{ $t('setting__basic_background_transparency') }}
+  div
+    .p(:class="$style.backgroundTransparencyControl")
+      input(
+        :class="$style.backgroundTransparencyRange" type="range" :min="BACKGROUND_TRANSPARENCY_MIN" :max="BACKGROUND_TRANSPARENCY_MAX" step="1"
+        aria-labelledby="basic_background_transparency"
+        :aria-valuetext="`${backgroundTransparencyInput}%`"
+        :value="backgroundTransparencyInput"
+        @input="handleBackgroundTransparencyChange")
+      base-input.gap-left(
+        :class="$style.backgroundTransparencyInput" type="number" :min="BACKGROUND_TRANSPARENCY_MIN" :max="BACKGROUND_TRANSPARENCY_MAX" step="1"
+        aria-labelledby="basic_background_transparency"
+        :model-value="backgroundTransparencyInput"
+        @change="handleBackgroundTransparencyChange")
+      span(:class="$style.backgroundTransparencyUnit") %
+    .p.gap-top(:class="$style.backgroundTransparencyActions")
+      base-btn.btn(
+        min
+        :disabled="!hasPendingBackgroundTransparency"
+        @click="handleApplyBackgroundTransparency"
+      ) {{ $t('setting__basic_background_transparency_apply') }}
+
+dd
   h3#basic_source {{ $t('setting__basic_source_primary') }}
   div
     .gap-top(v-for="item in apiSources" :key="item.id")
@@ -128,6 +151,7 @@ dd
       need :model-value="appSetting['common.sidebarSettingLocation']" value="accountMenu"
       :label="$t('setting__basic_sidebar_setting_location_account_menu')"
       @update:model-value="updateSetting({ 'common.sidebarSettingLocation': $event })")
+    SidebarFontSettings
 dd
   h3#basic_playbar_height {{ $t('setting__basic_playbar_height') }}
   div
@@ -179,13 +203,19 @@ import PlayTimeoutModal from './PlayTimeoutModal.vue'
 import UserApiModal from './UserApiModal.vue'
 import ApiFallbackSources from './ApiFallbackSources.vue'
 import SettingSearch from './SettingSearch.vue'
-import { appSetting, updateSetting, setApiSource } from '@renderer/store/setting'
+import SidebarFontSettings from './SidebarFontSettings.vue'
+import { appSetting, mergeSetting, updateSetting, setApiSource } from '@renderer/store/setting'
 import { getThemes, applyTheme, findTheme, buildBgUrl } from '@renderer/store/utils'
 import {
   PLAY_BAR_HEIGHT_MAX,
   PLAY_BAR_HEIGHT_MIN,
   normalizePlayBarHeight,
 } from '@common/utils/playBarLayout'
+import {
+  BACKGROUND_TRANSPARENCY_MAX,
+  BACKGROUND_TRANSPARENCY_MIN,
+  normalizeBackgroundTransparency,
+} from '@common/utils/backgroundTransparency'
 
 export default {
   name: 'SettingBasic',
@@ -196,6 +226,7 @@ export default {
     UserApiModal,
     ApiFallbackSources,
     SettingSearch,
+    SidebarFontSettings,
   },
   setup() {
     const t = useI18n()
@@ -407,6 +438,26 @@ export default {
       playBarHeightInput.value = normalizePlayBarHeight(value)
     })
 
+    const backgroundTransparencyInput = ref(normalizeBackgroundTransparency(appSetting['common.backgroundTransparency']))
+    const hasPendingBackgroundTransparency = computed(() => (
+      backgroundTransparencyInput.value != normalizeBackgroundTransparency(appSetting['common.backgroundTransparency'])
+    ))
+    const handleBackgroundTransparencyChange = value => {
+      const nextValue = value?.target ? value.target.value : value
+      backgroundTransparencyInput.value = normalizeBackgroundTransparency(nextValue)
+    }
+    const handleApplyBackgroundTransparency = () => {
+      const transparency = normalizeBackgroundTransparency(backgroundTransparencyInput.value)
+      const setting = { 'common.backgroundTransparency': transparency }
+      backgroundTransparencyInput.value = transparency
+      mergeSetting(setting)
+      updateSetting(setting)
+    }
+    watch(() => appSetting['common.backgroundTransparency'], value => {
+      const transparency = normalizeBackgroundTransparency(value)
+      if (backgroundTransparencyInput.value != transparency) backgroundTransparencyInput.value = transparency
+    })
+
     const systemFontList = ref([])
     const fontList = computed(() => {
       return [{ id: '', label: t('setting__desktop_lyric_font_default') }, ...systemFontList.value]
@@ -469,6 +520,12 @@ export default {
       PLAY_BAR_HEIGHT_MAX,
       playBarHeightInput,
       handlePlayBarHeightChange,
+      BACKGROUND_TRANSPARENCY_MIN,
+      BACKGROUND_TRANSPARENCY_MAX,
+      backgroundTransparencyInput,
+      hasPendingBackgroundTransparency,
+      handleBackgroundTransparencyChange,
+      handleApplyBackgroundTransparency,
       fontList,
       isFullscreen,
       toggleTheme,
@@ -686,26 +743,35 @@ export default {
   line-height: 1.4;
 }
 
-.playBarHeightControl {
+.playBarHeightControl,
+.backgroundTransparencyControl {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.playBarHeightRange {
+.playBarHeightRange,
+.backgroundTransparencyRange {
   width: 180px;
   max-width: 36vw;
   accent-color: var(--color-primary);
   cursor: pointer;
 }
 
-.playBarHeightInput {
+.playBarHeightInput,
+.backgroundTransparencyInput {
   width: 62px;
   text-align: center;
 }
 
-.playBarHeightUnit {
+.playBarHeightUnit,
+.backgroundTransparencyUnit {
   color: var(--color-label);
+}
+
+.backgroundTransparencyActions {
+  display: flex;
+  align-items: center;
 }
 
 </style>

@@ -72,6 +72,10 @@ declare global {
 
       'common.sidebarSettingLocation': 'bottom' | 'accountMenu'
 
+      'common.sidebarNavigationFontSize': number
+      'common.sidebarTitleFontSize': number
+      'common.sidebarPlaylistFontSize': number
+
       /**
        * Main window play bar height in pixels.
        */
@@ -81,6 +85,11 @@ declare global {
        * 播放栏进度条样式
        */
       'common.playBarProgressStyle': 'mini' | 'full' | 'middle'
+
+      /**
+       * 主界面背景透明度百分比
+       */
+      'common.backgroundTransparency': number
 
       /**
        * 启用透明窗口
@@ -516,6 +525,13 @@ declare global {
        * 歌单详情头部缩放比例
        */
       'list.playlistProfileScale': number
+
+      'list.platformPlaylists.netease.created': boolean
+      'list.platformPlaylists.netease.collected': boolean
+      'list.platformPlaylists.qq_music.created': boolean
+      'list.platformPlaylists.qq_music.collected': boolean
+      'list.platformPlaylists.kugou.created': boolean
+      'list.platformPlaylists.kugou.collected': boolean
 
       /**
        * 是否启用下载功能

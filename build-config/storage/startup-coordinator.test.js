@@ -1387,6 +1387,54 @@ describe('storage startup coordinator', () => {
     assert.deepEqual(calls, ['activity:flush', 'stores:flush', 'db:close', 'run-state:clean'])
   })
 
+  it('preflights only explicitly safe storage flushers without closing or marking the run clean', async() => {
+    const { calls, deps } = createDeps({ flushDatabase: async() => { calls.push('db:flush') } })
+    const coordinator = createCoordinator(deps)
+    await coordinator.start()
+    calls.length = 0
+    coordinator.registerShutdownFlusher('credentials', async() => { calls.push('credentials:flush') }, { restartSafe: true })
+    coordinator.registerShutdownFlusher('runtime-pool', async() => { calls.push('runtime:dispose') })
+    await coordinator.prepareRestart()
+    assert.deepEqual(calls, ['credentials:flush', 'stores:flush', 'db:flush'])
+    calls.length = 0
+    await coordinator.shutdown()
+    assert.ok(calls.includes('runtime:dispose'))
+    assert.ok(calls.includes('db:close'))
+  })
+
+  it('failed restart preflight keeps resources open and permits a corrected retry', async() => {
+    const { calls, deps } = createDeps()
+    const coordinator = createCoordinator(deps)
+    await coordinator.start()
+    calls.length = 0
+    let failing = true
+    coordinator.registerShutdownFlusher('credentials', async() => { if (failing) throw new Error('vault failed') }, { restartSafe: true })
+    await assert.rejects(coordinator.prepareRestart(), /restart_flusher_failed/)
+    assert.deepEqual(calls, [])
+    failing = false
+    await coordinator.prepareRestart()
+    assert.deepEqual(calls, ['stores:flush'])
+  })
+
+  it('timed out restart flushers reject without running destructive shutdown', async() => {
+    const { calls, deps } = createDeps({ shutdownTimeoutMs: 20 })
+    const coordinator = createCoordinator(deps)
+    await coordinator.start()
+    calls.length = 0
+    coordinator.registerShutdownFlusher('credentials', async() => new Promise(() => {}), { restartSafe: true })
+    await assert.rejects(coordinator.prepareRestart(), /restart_flush_timeout/)
+    assert.deepEqual(calls, [])
+  })
+
+  it('a failed database checkpoint aborts restart preflight with the database still open', async() => {
+    const { calls, deps } = createDeps({ flushDatabase: async() => { throw new Error('checkpoint failed') } })
+    const coordinator = createCoordinator(deps)
+    await coordinator.start()
+    calls.length = 0
+    await assert.rejects(coordinator.prepareRestart(), /checkpoint failed/)
+    assert.deepEqual(calls, ['stores:flush'])
+  })
+
   it('keeps the run unclean when a shutdown flusher times out without reporting payloads', async() => {
     const { calls, deps } = createDeps()
     const diagnostics = []
@@ -1509,6 +1557,18 @@ describe('storage startup coordinator', () => {
 })
 
 describe('database worker startup surface', () => {
+  it('checkpoints committed data without closing the active database', { skip: !supportsWorkerDatabase }, async() => {
+    const { db } = await createAppDbFixture()
+    db.exec('CREATE TABLE restart_flush_probe(value INTEGER); INSERT INTO restart_flush_probe VALUES (1)')
+    workerDbService.flush()
+    assert.equal(db.open, true)
+    assert.deepEqual(db.prepare('SELECT value FROM restart_flush_probe').all(), [{ value: 1 }])
+    db.prepare('INSERT INTO restart_flush_probe VALUES (?)').run(2)
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM restart_flush_probe').get().count, 2)
+    workerDbService.close()
+    assert.throws(() => workerDbService.flush(), /database_not_ready/)
+  })
+
   it('exposes the object/result database init contract without a legacy string adapter', async() => {
     const received = []
     const { adapter, exposed } = loadWorkerAdapter(async options => {

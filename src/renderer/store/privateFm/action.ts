@@ -6,6 +6,7 @@ import { playList, playMusicByInfo } from '@renderer/core/player'
 import { getListMusicsFromCache, setTempList } from '@renderer/store/list/action'
 import { tempListMeta } from '@renderer/store/list/state'
 import { getNeteasePrivateFm } from '@renderer/utils/ipc'
+import { assertRecommendationEnabled, beginRecommendationSession, endRecommendationSession, hasRecommendationSession, isRecommendationEnabled, registerRecommendationCleanup } from '@renderer/core/features/recommendationAccess'
 import {
   currentPrivateFmMode,
   isLoadingPrivateFm,
@@ -17,13 +18,19 @@ import {
 
 const DEFAULT_FM_LIMIT = 6
 const MIN_QUEUE_REMAINING = 2
+let queueRevision = 0
 
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
 
 export const loadPrivateFmSongs = async(mode = privateFmModeId.value, limit = DEFAULT_FM_LIMIT) => {
+  if (!isRecommendationEnabled('neteaseRecommend') && !isPrivateFmMode.value) return []
+  const revision = queueRevision
   isLoadingPrivateFm.value = true
   try {
-    const songs = await getNeteasePrivateFm({ mode, limit })
+    if (isPrivateFmMode.value && !hasRecommendationSession('neteaseFm')) await beginRecommendationSession('neteaseFm')
+    const params = { mode, limit, continuation: isPrivateFmMode.value }
+    const songs = await getNeteasePrivateFm(params)
+    if (revision != queueRevision || (!isRecommendationEnabled('neteaseRecommend') && !isPrivateFmMode.value)) return []
     return markRawList(songs)
   } finally {
     isLoadingPrivateFm.value = false
@@ -31,12 +38,15 @@ export const loadPrivateFmSongs = async(mode = privateFmModeId.value, limit = DE
 }
 
 export const refreshPrivateFmQueue = async(mode = privateFmModeId.value) => {
+  const revision = queueRevision
   const songs = await loadPrivateFmSongs(mode)
+  if (revision != queueRevision) return privateFmQueue
   privateFmQueue.splice(0, privateFmQueue.length, ...songs)
   return songs
 }
 
 export const preparePrivateFmQueue = async(forceRefresh = false, mode = privateFmModeId.value) => {
+  if (!isRecommendationEnabled('neteaseRecommend')) return isPrivateFmMode.value ? privateFmQueue : []
   if (!forceRefresh && privateFmQueue.length) return privateFmQueue
   return refreshPrivateFmQueue(mode)
 }
@@ -55,6 +65,7 @@ export const syncPrivateFmTempList = async() => {
 }
 
 export const setPrivateFmMode = async(mode: LX.Netease.PrivateFmModeId) => {
+  assertRecommendationEnabled('neteaseRecommend')
   if (mode == privateFmModeId.value) return
   privateFmModeId.value = mode
   if (!isPrivateFmMode.value) {
@@ -70,25 +81,49 @@ export const setPrivateFmMode = async(mode: LX.Netease.PrivateFmModeId) => {
 }
 
 export const enterPrivateFmMode = async(startIndex = 0) => {
+  assertRecommendationEnabled('neteaseRecommend')
   if (!privateFmQueue.length) await refreshPrivateFmQueue()
   if (!privateFmQueue.length) throw new Error('Private FM has no songs')
 
+  const wasActive = isPrivateFmMode.value
+  await beginRecommendationSession('neteaseFm')
   isPrivateFmMode.value = true
-  await syncPrivateFmTempList()
+  try {
+    await syncPrivateFmTempList()
+  } catch (error) {
+    if (!wasActive) {
+      isPrivateFmMode.value = false
+      endRecommendationSession('neteaseFm')
+      if (!isRecommendationEnabled('neteaseRecommend')) privateFmQueue.splice(0, privateFmQueue.length)
+    }
+    throw error
+  }
   clearPlayedList()
   playList(LIST_IDS.TEMP, Math.min(startIndex, privateFmQueue.length - 1))
 }
 
 export const playPrivateFmSong = async(musicInfo: LX.Music.MusicInfoOnline) => {
+  assertRecommendationEnabled('neteaseRecommend')
   const index = privateFmQueue.findIndex(song => song.id == musicInfo.id)
   if (index > -1) {
     await enterPrivateFmMode(index)
     return
   }
 
+  const wasActive = isPrivateFmMode.value
+  await beginRecommendationSession('neteaseFm')
   isPrivateFmMode.value = true
   privateFmQueue.unshift(musicInfo)
-  await syncPrivateFmTempList()
+  try {
+    await syncPrivateFmTempList()
+  } catch (error) {
+    if (!wasActive) {
+      isPrivateFmMode.value = false
+      endRecommendationSession('neteaseFm')
+      if (!isRecommendationEnabled('neteaseRecommend')) privateFmQueue.splice(0, privateFmQueue.length)
+    }
+    throw error
+  }
   clearPlayedList()
   playMusicByInfo(musicInfo, {
     listId: LIST_IDS.TEMP,
@@ -99,6 +134,12 @@ export const playPrivateFmSong = async(musicInfo: LX.Music.MusicInfoOnline) => {
 export const exitPrivateFmMode = () => {
   if (!isPrivateFmMode.value) return
   isPrivateFmMode.value = false
+  ++queueRevision
+  endRecommendationSession('neteaseFm')
+  if (!isRecommendationEnabled('neteaseRecommend')) {
+    privateFmQueue.splice(0, privateFmQueue.length)
+    return
+  }
   void refreshPrivateFmQueue().catch(err => {
     console.warn('Refresh private FM queue after exit failed:', err)
   })
@@ -141,3 +182,10 @@ export const ensurePrivateFmNextSongs = async() => {
 export {
   currentPrivateFmMode,
 }
+
+registerRecommendationCleanup('neteaseRecommend', () => {
+  if (isPrivateFmMode.value) return
+  ++queueRevision
+  privateFmQueue.splice(0, privateFmQueue.length)
+  isLoadingPrivateFm.value = false
+})

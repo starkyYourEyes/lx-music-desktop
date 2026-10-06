@@ -16,19 +16,7 @@ export const saveLrc = async(lrcData: LX.Music.LyricInfo, info: {
 }) => {
   const iconv = (await import('iconv-lite')).default
   const lrc = buildLyrics(lrcData, info.downloadLxlrc, info.downloadTlrc, info.downloadRlrc)
-  switch (info.format) {
-    case 'gbk':
-      fs.writeFile(info.filePath, iconv.encode(lrc, 'gbk', { addBOM: true }), err => {
-        if (err) console.log(err)
-      })
-      break
-    case 'utf8':
-    default:
-      fs.writeFile(info.filePath, iconv.encode(lrc, 'utf8', { addBOM: true }), err => {
-        if (err) console.log(err)
-      })
-      break
-  }
+  await fs.promises.writeFile(info.filePath, iconv.encode(lrc, info.format == 'gbk' ? 'gbk' : 'utf8', { addBOM: true }))
 }
 
 export const getExt = (type: string): LX.Download.FileExt => {

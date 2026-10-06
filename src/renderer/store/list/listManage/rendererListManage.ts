@@ -18,7 +18,9 @@ import {
   setUserLists,
   listMusicClear,
 } from './action'
-import { allMusicList } from './state'
+import { allMusicList, musicListReadGeneration } from './state'
+
+const pendingMusicLists = new Map<string, Promise<LX.Music.MusicInfo[]>>()
 
 /**
  * 获取用户列表
@@ -71,8 +73,20 @@ export const getListMusics = async(listId: string | null): Promise<LX.Music.Musi
   if (!listId) return []
   if (allMusicList.has(listId)) return allMusicList.get(listId)!
   if (listId == LIST_IDS.WEBDAV) return setMusicList(listId, [])
-  const list = await rendererInvoke<string, LX.Music.MusicInfo[]>(PLAYER_EVENT_NAME.list_music_get, listId)
-  return setMusicList(listId, list)
+  const pending = pendingMusicLists.get(listId)
+  if (pending) return pending
+  const generation = musicListReadGeneration
+  const request: Promise<LX.Music.MusicInfo[]> = rendererInvoke<string, LX.Music.MusicInfo[]>(PLAYER_EVENT_NAME.list_music_get, listId).then(async list => {
+    if (generation != musicListReadGeneration) {
+      if (pendingMusicLists.get(listId) == request) pendingMusicLists.delete(listId)
+      return getListMusics(listId)
+    }
+    return allMusicList.get(listId) ?? setMusicList(listId, list)
+  }).finally(() => {
+    if (pendingMusicLists.get(listId) == request) pendingMusicLists.delete(listId)
+  })
+  pendingMusicLists.set(listId, request)
+  return request
 }
 
 /**

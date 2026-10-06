@@ -8,6 +8,7 @@ module.exports = {
   },
   output: {
     filename: '[name].js',
+    chunkFilename: 'renderer-scripts-[name].js',
     library: {
       type: 'commonjs2',
     },

@@ -20,8 +20,9 @@ const getSession = partition => {
       if (this.cleanupFailureMode == 'throw') throw this.cleanupError
       return Promise.reject(this.cleanupError)
     },
-    clearAuthCache() { return this.cleanup('auth') },
-    clearStorageData() { return this.cleanup('storage') },
+    clearAuthCache() { throw new Error('must preserve authentication') },
+    clearStorageData(options) { assert.deepEqual(options, { storages: ['cachestorage'] }); return this.cleanup('storage') },
+    clearCodeCaches() { return this.cleanup('code') },
     clearCache() { return this.cleanup('cache') },
     setPermissionRequestHandler(handler) { this.permissionHandler = handler },
   }
@@ -97,6 +98,7 @@ const runtimeWindow = loadTsModule(
 )
 
 const deps = {
+  sessionRegistry: { register: () => ({ ready: Promise.resolve(), unregister() {} }) },
   createWindow: options => new FakeBrowserWindow(options),
   fromPartition: getSession,
   readRuntimeHtml: async() => '<html></html>',
@@ -150,7 +152,7 @@ const sameIdentity = (first, second) => (
     deps,
   })
   await runtimeWindow.disposeRuntimeWindow(isolatedRuntime, { clearSession: true }, deps)
-  assert.deepEqual(isolatedRuntime.session.cleanupCalls, ['auth', 'storage', 'cache'])
+  assert.deepEqual(isolatedRuntime.session.cleanupCalls, ['cache', 'storage', 'code'])
   assert.deepEqual(newRuntime.session.cleanupCalls, [])
 
   const windowsBeforeSessionClear = windows.length
@@ -158,7 +160,7 @@ const sameIdentity = (first, second) => (
   assert.equal(windows.length, windowsBeforeSessionClear)
   assert.deepEqual(
     getSession(runtimeWindow.getRuntimePartition('user_api/never-created')).cleanupCalls,
-    ['auth', 'storage', 'cache'],
+    ['cache', 'storage', 'code'],
   )
 
   await runtimeWindow.disposeRuntimeWindow(newRuntime, { clearSession: false }, deps)
@@ -178,9 +180,9 @@ const sameIdentity = (first, second) => (
   assert.deepEqual(destroyFailureRuntime.session.cleanupCalls, [])
   await runtimeWindow.disposeRuntimeWindow(destroyFailureRuntime, { clearSession: true }, deps)
   assert.equal(destroyFailureRuntime.window.destroyed, true)
-  assert.deepEqual(destroyFailureRuntime.session.cleanupCalls, ['auth', 'storage', 'cache'])
+  assert.deepEqual(destroyFailureRuntime.session.cleanupCalls, ['cache', 'storage', 'code'])
 
-  for (const stage of ['auth', 'storage', 'cache']) {
+  for (const stage of ['cache', 'storage', 'code']) {
     for (const mode of ['throw', 'reject']) {
       const cleanupRuntime = await runtimeWindow.createRuntimeWindow({
         apiInfo: { ...apiInfo, id: 'user_api/cleanup-' + stage + '-' + mode },
@@ -194,8 +196,10 @@ const sameIdentity = (first, second) => (
       cleanupRuntime.session.cleanupError = cleanupError
       await runtimeWindow.disposeRuntimeWindow(cleanupRuntime, { clearSession: true }, deps)
       assert.equal(cleanupRuntime.window.destroyed, true)
-      assert.deepEqual(cleanupRuntime.session.cleanupCalls, ['auth', 'storage', 'cache'])
-      assert.equal(logErrors.some(args => args.includes(cleanupError)), true)
+      assert.deepEqual(cleanupRuntime.session.cleanupCalls, ['cache', 'storage', 'code'])
+      const label = { cache: 'cache', storage: 'cache storage', code: 'code cache' }[stage]
+      assert.equal(logErrors.some(args => args[0] === 'session_cache_clear_failed' && args[1] === label), true)
+      assert.equal(logErrors.some(args => args.includes(cleanupError)), false, 'cleanup logs must not expose raw session errors')
     }
   }
 

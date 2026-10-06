@@ -12,6 +12,8 @@ import {
 import { quitApp } from '@main/app'
 import { TRAY_AUTO_ID } from '@common/constants'
 import { WIN_MAIN_RENDERER_EVENT_NAME } from '@common/ipcNames'
+import { getFeatureMode, isFeatureEnabled } from '@common/performance/featurePolicy'
+import { registerOptionalResourcePreparation, reportOptionalResourceState } from '@main/services/optionalResources'
 
 let tray: Electron.Tray | null
 let trayMenuWindow: Electron.BrowserWindow | null
@@ -21,6 +23,24 @@ let isTrayMenuShowPending = false
 let isEnableTray: boolean = false
 let themeId: number
 let isShowStatusBarLyric: boolean = false
+let trayMenuIdleTimer: ReturnType<typeof setTimeout> | null = null
+
+const clearTrayMenuIdleTimer = () => {
+  if (trayMenuIdleTimer == null) return
+  clearTimeout(trayMenuIdleTimer)
+  trayMenuIdleTimer = null
+}
+
+const scheduleTrayMenuDisposal = () => {
+  clearTrayMenuIdleTimer()
+  if (getFeatureMode(global.lx.appSetting, 'customTrayMenu') != 'onDemand') return
+  trayMenuIdleTimer = setTimeout(() => {
+    trayMenuIdleTimer = null
+    if (trayMenuWindow?.isVisible() === true || isTrayMenuShowPending) return
+    destroyTrayMenuWindow()
+  }, 60_000)
+  trayMenuIdleTimer.unref?.()
+}
 
 const playerState = {
   empty: false,
@@ -38,6 +58,8 @@ const watchConfigKeys = [
   'tray.enable',
   'player.isShowStatusBarLyric',
   'common.langId',
+  'performance.features.customTrayMenu',
+  'performance.features.desktopLyric',
 ] satisfies Array<keyof LX.AppSetting>
 
 const themeList = [
@@ -76,6 +98,9 @@ const messages = {
     untop_win_lyric: 'Un-top Lyric Window',
     show_statusbar_lyric: 'Show Lyrics on Statusbar',
     hide_statusbar_lyric: 'Hide Lyrics on Statusbar',
+    mute: 'Mute',
+    unmute: 'Unmute',
+    settings: 'Settings',
     exit: 'Exit',
     music_name: 'Title: ',
     music_singer: 'Artist: ',
@@ -97,6 +122,9 @@ const messages = {
     untop_win_lyric: '取消置顶',
     show_statusbar_lyric: '显示状态栏歌词',
     hide_statusbar_lyric: '隐藏状态栏歌词',
+    mute: '静音',
+    unmute: '取消静音',
+    settings: '设置',
     exit: '退出',
     music_name: '歌曲名: ',
     music_singer: '艺术家: ',
@@ -118,6 +146,9 @@ const messages = {
     untop_win_lyric: '取消置頂歌詞視窗',
     show_statusbar_lyric: '顯示狀態列歌詞',
     hide_statusbar_lyric: '隱藏狀態列歌詞',
+    mute: '靜音',
+    unmute: '取消靜音',
+    settings: '設定',
     exit: '退出',
     music_name: '標題: ',
     music_singer: '演出者: ',
@@ -150,12 +181,14 @@ type TrayMenuAction =
   | 'quit'
 
 interface TrayMenuState {
+  labels: Record<'collect' | 'play' | 'prev' | 'next' | 'mute' | 'lyric' | 'settings' | 'exit', string>
   title: string
   volume: number
   isMute: boolean
   isPlaying: boolean
   isCollected: boolean
   isDesktopLyricEnabled: boolean
+  isDesktopLyricAvailable: boolean
 }
 
 const trayMenuWindowSize = {
@@ -189,7 +222,7 @@ export const createTray = () => {
     tray.on('right-click', () => {
       showTrayMenuWindow()
     })
-    void preloadTrayMenuWindow()
+    if (getFeatureMode(global.lx.appSetting, 'customTrayMenu') == 'resident') void preloadTrayMenuWindow()
   }
 }
 
@@ -207,17 +240,22 @@ const handleUpdateConfig = (setting: Partial<LX.AppSetting>) => {
 }
 
 const closeTrayMenuWindow = () => {
+  isTrayMenuShowPending = false
   if (!trayMenuWindow || trayMenuWindow.isDestroyed()) return
   trayMenuWindow.hide()
+  reportOptionalResourceState('customTrayMenu', { active: false })
+  scheduleTrayMenuDisposal()
 }
 
 const destroyTrayMenuWindow = () => {
+  clearTrayMenuIdleTimer()
   if (!trayMenuWindow) return
   if (!trayMenuWindow.isDestroyed()) trayMenuWindow.destroy()
   trayMenuWindow = null
   trayMenuWindowLoadPromise = null
   isTrayMenuWindowReady = false
   isTrayMenuShowPending = false
+  reportOptionalResourceState('customTrayMenu', { loaded: false, active: false })
 }
 
 const escapeHtml = (value: string) => {
@@ -245,12 +283,23 @@ const getTrayMenuState = (): TrayMenuState => {
   const sourceVolume = global.lx.player_status.volume || global.lx.appSetting['player.volume']
   const volume = Math.max(0, Math.min(100, normalizeTrayVolume(sourceVolume)))
   return {
+    labels: {
+      collect: i18n.getMessage(playerState.collect ? 'uncollect' : 'collect'),
+      play: i18n.getMessage(playerState.play ? 'pause' : 'play'),
+      prev: i18n.getMessage('prev'),
+      next: i18n.getMessage('next'),
+      mute: i18n.getMessage(global.lx.player_status.mute || volume == 0 ? 'unmute' : 'mute'),
+      lyric: i18n.getMessage(global.lx.appSetting['desktopLyric.enable'] ? 'hide_win_lyric' : 'show_win_lyric'),
+      settings: i18n.getMessage('settings'),
+      exit: i18n.getMessage('exit'),
+    },
     title: getTrayMenuTitle(),
     volume,
     isMute: global.lx.player_status.mute || volume == 0,
     isPlaying: playerState.play,
     isCollected: playerState.collect,
     isDesktopLyricEnabled: global.lx.appSetting['desktopLyric.enable'],
+    isDesktopLyricAvailable: isFeatureEnabled(global.lx.appSetting, 'desktopLyric'),
   }
 }
 
@@ -274,7 +323,7 @@ const getTrayMenuHtml = () => {
   const loveIcon = state.isCollected
     ? '<path d="M16 27s-9-5.6-11.6-11.3C2.5 11.6 4.9 8 9 8c2.5 0 4.2 1.3 5 3 0.8-1.7 2.5-3 5-3 4.1 0 6.5 3.6 4.6 7.7C21 21.4 16 27 16 27z"/>'
     : '<path d="M16 27s-9-5.6-11.6-11.3C2.5 11.6 4.9 8 9 8c2.5 0 4.2 1.3 5 3 0.8-1.7 2.5-3 5-3 4.1 0 6.5 3.6 4.6 7.7C21 21.4 16 27 16 27z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>'
-  const lyricLabel = state.isDesktopLyricEnabled ? '关闭桌面歌词' : '打开桌面歌词'
+  const lyricLabel = escapeHtml(state.labels.lyric)
   const volumeIcon = isMute
     ? '<path d="M6 13h5l7-6v18l-7-6H6zM23.4 12.2l1.4 1.4-2.4 2.4 2.4 2.4-1.4 1.4-2.4-2.4-2.4 2.4-1.4-1.4 2.4-2.4-2.4-2.4 1.4-1.4 2.4 2.4z" fill="currentColor"/>'
     : '<path d="M6 13h5l7-6v18l-7-6H6zm16.5-2.4a7.5 7.5 0 0 1 0 10.8l-1.4-1.4a5.5 5.5 0 0 0 0-8.2zm2.9-2.9a11.5 11.5 0 0 1 0 16.6L24 22.9a9.5 9.5 0 0 0 0-13.8z" fill="currentColor"/>'
@@ -300,6 +349,7 @@ button:hover{color:#3f4657;background:#f6f7fa}.ctrl{width:42px;height:42px;borde
 .volume-tip{position:absolute;right:14px;top:-18px;min-width:34px;height:20px;padding:0 7px;border-radius:6px;background:rgba(58,66,82,.94);box-shadow:0 4px 12px rgba(24,31,43,.2);color:#fff;font-size:12px;line-height:20px;text-align:center;pointer-events:none;opacity:0;transform:translateY(3px);transition:opacity .12s ease,transform .12s ease}.volume-row:hover .volume-tip{opacity:1;transform:translateY(0)}
 .row{height:44px;padding:0 15px;display:flex;align-items:center;gap:9px;border-bottom:1px solid #edf0f5;font-size:13px;text-align:left;width:100%}.row svg{width:17px;height:17px;flex:none;color:#737b91}.row span{flex:auto;text-align:left}.row .arrow{width:13px;height:13px;margin-left:auto}
 .row.exit{border-bottom:0}.separator{height:0}
+[data-action="toggle-desktop-lyric"]{display:${state.isDesktopLyricAvailable ? 'flex' : 'none'}}
 </style>
 </head>
 <body>
@@ -309,19 +359,19 @@ button:hover{color:#3f4657;background:#f6f7fa}.ctrl{width:42px;height:42px;borde
     <span data-tray-title>${title}</span>
   </div>
   <div class="controls">
-    <button class="ctrl" data-action="collect-toggle" title="${state.isCollected ? '取消收藏' : '收藏'}"><svg viewBox="0 0 32 32">${loveIcon}</svg></button>
-    <button class="ctrl" data-action="prev" title="上一曲"><svg viewBox="0 0 32 32"><path d="M8 7h3v18H8zM12 16l14 9V7z"/></svg></button>
-    <button class="ctrl" data-action="play-toggle" title="${state.isPlaying ? '暂停' : '播放'}"><svg viewBox="0 0 32 32">${playIcon}</svg></button>
-    <button class="ctrl" data-action="next" title="下一曲"><svg viewBox="0 0 32 32"><path d="M21 7h3v18h-3zM6 25l14-9L6 7z"/></svg></button>
+    <button class="ctrl" data-action="collect-toggle" title="${escapeHtml(state.labels.collect)}"><svg viewBox="0 0 32 32">${loveIcon}</svg></button>
+    <button class="ctrl" data-action="prev" title="${escapeHtml(state.labels.prev)}"><svg viewBox="0 0 32 32"><path d="M8 7h3v18H8zM12 16l14 9V7z"/></svg></button>
+    <button class="ctrl" data-action="play-toggle" title="${escapeHtml(state.labels.play)}"><svg viewBox="0 0 32 32">${playIcon}</svg></button>
+    <button class="ctrl" data-action="next" title="${escapeHtml(state.labels.next)}"><svg viewBox="0 0 32 32"><path d="M21 7h3v18h-3zM6 25l14-9L6 7z"/></svg></button>
   </div>
   <div class="volume-row">
-    <button class="volume-btn" data-action="mute-toggle" title="${isMute ? '取消静音' : '静音'}"><svg viewBox="0 0 32 32">${volumeIcon}</svg></button>
+    <button class="volume-btn" data-action="mute-toggle" title="${escapeHtml(state.labels.mute)}"><svg viewBox="0 0 32 32">${volumeIcon}</svg></button>
     <input class="volume-slider" data-volume-slider type="range" min="0" max="100" step="1" value="${volume}" aria-label="volume">
     <span class="volume-tip" data-volume-tip>${volume}%</span>
   </div>
   <button class="row" data-action="toggle-desktop-lyric"><svg viewBox="0 0 32 32"><path d="M8 6h16v3H8zm0 8h16v2H8zm0 6h9v2H8zm14-2h2v5h4v2h-6zM4 5h2v22H4zm4 20h10v2H8z" fill="currentColor"/></svg><span>${lyricLabel}</span></button>
-  <button class="row" data-action="settings"><svg viewBox="0 0 32 32"><path d="M16 5l9 5v12l-9 5-9-5V10zm0 3.2L10 11.5v9l6 3.3 6-3.3v-9zm0 5.3a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z" fill="currentColor"/></svg><span>设置</span></button>
-  <button class="row exit" data-action="quit"><svg viewBox="0 0 32 32"><path d="M15 5h2v10h-2zM10.2 8.9A9 9 0 1 0 21.8 9.1l-1.3 1.5A7 7 0 1 1 11.5 10.4z" fill="currentColor"/></svg><span>退出</span></button>
+  <button class="row" data-action="settings"><svg viewBox="0 0 32 32"><path d="M16 5l9 5v12l-9 5-9-5V10zm0 3.2L10 11.5v9l6 3.3 6-3.3v-9zm0 5.3a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z" fill="currentColor"/></svg><span>${escapeHtml(state.labels.settings)}</span></button>
+  <button class="row exit" data-action="quit"><svg viewBox="0 0 32 32"><path d="M15 5h2v10h-2zM10.2 8.9A9 9 0 1 0 21.8 9.1l-1.3 1.5A7 7 0 1 1 11.5 10.4z" fill="currentColor"/></svg><span>${escapeHtml(state.labels.exit)}</span></button>
 </div>
 <script>
 const { ipcRenderer } = require('electron')
@@ -333,6 +383,10 @@ const volumeIcon = '<path d="M6 13h5l7-6v18l-7-6H6zm16.5-2.4a7.5 7.5 0 0 1 0 10.
 const mutedIcon = '<path d="M6 13h5l7-6v18l-7-6H6zM23.4 12.2l1.4 1.4-2.4 2.4 2.4 2.4-1.4 1.4-2.4-2.4-2.4 2.4-1.4-1.4 2.4-2.4-2.4-2.4 1.4-1.4 2.4 2.4z" fill="currentColor"/>'
 const title = document.querySelector('[data-tray-title]')
 const collectButton = document.querySelector('[data-action="collect-toggle"]')
+const prevButton = document.querySelector('[data-action="prev"]')
+const nextButton = document.querySelector('[data-action="next"]')
+const settingsButton = document.querySelector('[data-action="settings"]')
+const quitButton = document.querySelector('[data-action="quit"]')
 const playButton = document.querySelector('[data-action="play-toggle"]')
 const muteButton = document.querySelector('[data-action="mute-toggle"]')
 const lyricButton = document.querySelector('[data-action="toggle-desktop-lyric"]')
@@ -345,13 +399,18 @@ const setVolume = value => {
 }
 ipcRenderer.on('tray-menu-state', (_event, state) => {
   title.textContent = state.title
-  collectButton.title = state.isCollected ? '取消收藏' : '收藏'
+  collectButton.title = state.labels.collect
   collectButton.querySelector('svg').innerHTML = state.isCollected ? collectedIcon : uncollectedIcon
-  playButton.title = state.isPlaying ? '暂停' : '播放'
+  playButton.title = state.labels.play
   playButton.querySelector('svg').innerHTML = state.isPlaying ? pauseIcon : playIcon
-  muteButton.title = state.isMute ? '取消静音' : '静音'
+  muteButton.title = state.labels.mute
   muteButton.querySelector('svg').innerHTML = state.isMute ? mutedIcon : volumeIcon
-  lyricButton.querySelector('span').textContent = state.isDesktopLyricEnabled ? '关闭桌面歌词' : '打开桌面歌词'
+  lyricButton.querySelector('span').textContent = state.labels.lyric
+  prevButton.title = state.labels.prev
+  nextButton.title = state.labels.next
+  settingsButton.querySelector('span').textContent = state.labels.settings
+  quitButton.querySelector('span').textContent = state.labels.exit
+  lyricButton.style.display = state.isDesktopLyricAvailable ? 'flex' : 'none'
   setVolume(state.volume)
 })
 document.addEventListener('click', event => {
@@ -426,6 +485,7 @@ const handleTrayMenuAction = (action: TrayMenuAction, data?: unknown) => {
       refreshTrayMenuWindow()
       break
     case 'toggle-desktop-lyric':
+      if (!isFeatureEnabled(global.lx.appSetting, 'desktopLyric')) return
       handleUpdateConfig({ 'desktopLyric.enable': !global.lx.appSetting['desktopLyric.enable'] })
       break
     case 'settings':
@@ -461,15 +521,20 @@ const createTrayMenuWindow = () => {
     },
   })
   trayMenuWindow.setMenu(null)
+  const win = trayMenuWindow
+  reportOptionalResourceState('customTrayMenu', { loaded: true, active: false, error: undefined })
   trayMenuWindow.on('blur', closeTrayMenuWindow)
   trayMenuWindow.on('closed', () => {
+    if (trayMenuWindow !== win) return
+    clearTrayMenuIdleTimer()
     trayMenuWindow = null
     trayMenuWindowLoadPromise = null
     isTrayMenuWindowReady = false
     isTrayMenuShowPending = false
+    reportOptionalResourceState('customTrayMenu', { loaded: false, active: false })
   })
   trayMenuWindow.webContents.on('ipc-message', (event, channel, action: TrayMenuAction, data?: unknown) => {
-    if (channel != 'tray-menu-action') return
+    if (channel != 'tray-menu-action' || trayMenuWindow !== win || !isFeatureEnabled(global.lx.appSetting, 'customTrayMenu')) return
     handleTrayMenuAction(action, data)
   })
   return trayMenuWindow
@@ -477,12 +542,16 @@ const createTrayMenuWindow = () => {
 
 const showLoadedTrayMenuWindow = (win: Electron.BrowserWindow) => {
   if (!tray || trayMenuWindow !== win || win.isDestroyed() || !isTrayMenuWindowReady) return
+  if (!isFeatureEnabled(global.lx.appSetting, 'customTrayMenu')) return
+  clearTrayMenuIdleTimer()
   sendTrayMenuState()
   win.show()
   win.focus()
+  reportOptionalResourceState('customTrayMenu', { active: true })
 }
 
 const preloadTrayMenuWindow = async() => {
+  if (!tray || !global.lx.appSetting['tray.enable'] || !isFeatureEnabled(global.lx.appSetting, 'customTrayMenu')) return
   const win = createTrayMenuWindow()
   if (isTrayMenuWindowReady) return
   if (trayMenuWindowLoadPromise) return trayMenuWindowLoadPromise
@@ -493,17 +562,22 @@ const preloadTrayMenuWindow = async() => {
     if (trayMenuWindow !== win || win.isDestroyed()) return
     isTrayMenuWindowReady = true
     sendTrayMenuState()
-    if (!isTrayMenuShowPending) return
+    if (!isTrayMenuShowPending) {
+      scheduleTrayMenuDisposal()
+      return
+    }
     isTrayMenuShowPending = false
     showLoadedTrayMenuWindow(win)
-  }).catch(() => {
+  }).catch(error => {
+    reportOptionalResourceState('customTrayMenu', { error: String(error) })
     if (trayMenuWindow === win && !win.isDestroyed()) win.destroy()
   })
   return trayMenuWindowLoadPromise
 }
 
 const showTrayMenuWindow = () => {
-  if (!tray) return
+  if (!tray || !isFeatureEnabled(global.lx.appSetting, 'customTrayMenu')) return
+  clearTrayMenuIdleTimer()
   const win = createTrayMenuWindow()
   win.setBounds(getTrayMenuBounds())
   if (isTrayMenuWindowReady) {
@@ -555,52 +629,58 @@ const createPlayerMenu = () => {
 
 export const createMenu = () => {
   if (!tray) return
-  if (isWin) {
+  if (isWin && isFeatureEnabled(global.lx.appSetting, 'customTrayMenu')) {
     tray.setContextMenu(null)
     return
   }
   let menu: Electron.MenuItemConstructorOptions[] = createPlayerMenu()
   if (playerState.empty) for (const m of menu) m.enabled = false
   menu.push({ type: 'separator' })
-  menu.push(global.lx.appSetting['desktopLyric.enable']
-    ? {
-        label: i18n.getMessage('hide_win_lyric'),
-        click() {
-          handleUpdateConfig({ 'desktopLyric.enable': false })
-        },
-      }
-    : {
-        label: i18n.getMessage('show_win_lyric'),
-        click() {
-          handleUpdateConfig({ 'desktopLyric.enable': true })
-        },
-      })
-  menu.push(global.lx.appSetting['desktopLyric.isLock']
-    ? {
-        label: i18n.getMessage('unlock_win_lyric'),
-        click() {
-          handleUpdateConfig({ 'desktopLyric.isLock': false })
-        },
-      }
-    : {
-        label: i18n.getMessage('lock_win_lyric'),
-        click() {
-          handleUpdateConfig({ 'desktopLyric.isLock': true })
-        },
-      })
-  menu.push(global.lx.appSetting['desktopLyric.isAlwaysOnTop']
-    ? {
-        label: i18n.getMessage('untop_win_lyric'),
-        click() {
-          handleUpdateConfig({ 'desktopLyric.isAlwaysOnTop': false })
-        },
-      }
-    : {
-        label: i18n.getMessage('top_win_lyric'),
-        click() {
-          handleUpdateConfig({ 'desktopLyric.isAlwaysOnTop': true })
-        },
-      })
+  if (isFeatureEnabled(global.lx.appSetting, 'desktopLyric')) {
+    menu.push(global.lx.appSetting['desktopLyric.enable']
+      ? {
+          label: i18n.getMessage('hide_win_lyric'),
+          click() {
+            handleUpdateConfig({ 'desktopLyric.enable': false })
+          },
+        }
+      : {
+          label: i18n.getMessage('show_win_lyric'),
+          click() {
+            handleUpdateConfig({ 'desktopLyric.enable': true })
+          },
+        })
+  }
+  if (isFeatureEnabled(global.lx.appSetting, 'desktopLyric')) {
+    menu.push(global.lx.appSetting['desktopLyric.isLock']
+      ? {
+          label: i18n.getMessage('unlock_win_lyric'),
+          click() {
+            handleUpdateConfig({ 'desktopLyric.isLock': false })
+          },
+        }
+      : {
+          label: i18n.getMessage('lock_win_lyric'),
+          click() {
+            handleUpdateConfig({ 'desktopLyric.isLock': true })
+          },
+        })
+  }
+  if (isFeatureEnabled(global.lx.appSetting, 'desktopLyric')) {
+    menu.push(global.lx.appSetting['desktopLyric.isAlwaysOnTop']
+      ? {
+          label: i18n.getMessage('untop_win_lyric'),
+          click() {
+            handleUpdateConfig({ 'desktopLyric.isAlwaysOnTop': false })
+          },
+        }
+      : {
+          label: i18n.getMessage('top_win_lyric'),
+          click() {
+            handleUpdateConfig({ 'desktopLyric.isAlwaysOnTop': true })
+          },
+        })
+  }
   if (isMac) {
     menu.push({ type: 'separator' })
     menu.push(isShowStatusBarLyric
@@ -689,10 +769,20 @@ const init = () => {
     }
   }
   setTip()
+  const mode = getFeatureMode(global.lx.appSetting, 'customTrayMenu')
+  if (mode == 'off') destroyTrayMenuWindow()
+  else if (isWin && tray) {
+    if (mode == 'resident') {
+      clearTrayMenuIdleTimer()
+      void preloadTrayMenuWindow()
+    } else if (trayMenuWindow && !trayMenuWindow.isVisible()) scheduleTrayMenuDisposal()
+  }
+  refreshTrayMenuWindow()
   createMenu()
 }
 
 export default () => {
+  registerOptionalResourcePreparation('customTrayMenu', preloadTrayMenuWindow)
   global.lx.event_app.on('updated_config', (keys, setting) => {
     if (!watchConfigKeys.some(key => keys.includes(key))) return
 

@@ -107,7 +107,7 @@ const assertPlaylistProfile: (value: unknown) => asserts value is LX.List.UserLi
   assertStorageRecord(value, 'profile')
   assertExactKeys(value, 'profile', ['description', 'coverUrl', 'createdAt', 'group', 'managed', 'provider', 'kind', 'accountKey', 'lastSyncAt'])
   if (Object.hasOwn(value, 'description') && typeof value.description != 'string') invalidField('description')
-  if (Object.hasOwn(value, 'coverUrl')) assertStorageString(value.coverUrl, 'coverUrl', 1, MAX_URL_LENGTH)
+  if (Object.hasOwn(value, 'coverUrl')) assertStorageString(value.coverUrl, 'coverUrl', 0, MAX_URL_LENGTH)
   if (Object.hasOwn(value, 'createdAt')) assertSafeTimestamp(value.createdAt, 'createdAt')
   if (Object.hasOwn(value, 'group') && value.group != 'mine' && value.group != 'external') invalidField('group')
   if (Object.hasOwn(value, 'managed') && typeof value.managed != 'boolean') invalidField('managed')
@@ -190,9 +190,10 @@ export const parsePlaylistMetadataCommand = (value: unknown): PlaylistMetadataCo
   assertVersion(value.version)
   switch (value.action) {
     case 'upsert':
-      assertExactKeys(value, 'command', ['version', 'action', 'playlistId', 'value', 'updatedAtMs'])
+      assertExactKeys(value, 'command', ['version', 'action', 'playlistId', 'value', 'base', 'updatedAtMs'])
       assertId(value.playlistId, 'playlistId')
       assertPlaylistUpdateInfo(value.value)
+      if (value.base != null) assertPlaylistUpdateInfo(value.base)
       assertSafeTimestamp(value.updatedAtMs, 'updatedAtMs')
       break
     case 'remove':

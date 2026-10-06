@@ -7,6 +7,7 @@ import { clearPlayedList } from '@renderer/store/player/action'
 import { playInfo, playMusicInfo } from '@renderer/store/player/state'
 import { getQQMusicBrushSongs } from '@renderer/utils/ipc'
 import { QQ_BRUSH_MODE_TEMP_LIST_ID } from '@renderer/views/Recommend/constants'
+import { assertRecommendationEnabled, beginRecommendationSession, endRecommendationSession, hasRecommendationSession, isRecommendationEnabled, registerRecommendationCleanup } from '@renderer/core/features/recommendationAccess'
 import {
   isLoadingQQBrushMode,
   isQQBrushMode,
@@ -46,6 +47,7 @@ const getMusicId = (musicInfo: LX.Player.PlayMusicInfo['musicInfo'] | null) => {
 }
 
 export const resetQQBrushModeQueue = () => {
+  endRecommendationSession('qqBrush')
   qqBrushModeGeneration.value++
   isQQBrushMode.value = false
   qqBrushModeOwnerAccountKey.value = null
@@ -61,6 +63,7 @@ const beginSourceSession = (accountKey: string) => {
 }
 
 export const prepareQQBrushModeQueue = async(accountKey: string, force = false) => {
+  if (!isRecommendationEnabled('qqRecommend')) return isQQBrushMode.value ? qqBrushModeQueue : []
   beginSourceSession(accountKey)
   if (qqBrushModeQueue.length && (!force || isQQBrushMode.value)) return qqBrushModeQueue
 
@@ -72,7 +75,7 @@ export const prepareQQBrushModeQueue = async(accountKey: string, force = false) 
   isLoadingQQBrushMode.value = true
   const task = getQQMusicBrushSongs(false)
     .then(songs => {
-      if (!isCurrentSnapshot(accountKey, generation)) return []
+      if (!isRecommendationEnabled('qqRecommend') || !isCurrentSnapshot(accountKey, generation)) return []
       qqBrushModeQueue.splice(0, qqBrushModeQueue.length, ...markRawList(songs))
       return songs
     })
@@ -90,16 +93,25 @@ export const syncQQBrushModeTempList = async() => {
 }
 
 export const enterQQBrushMode = async(accountKey: string) => {
+  assertRecommendationEnabled('qqRecommend')
   beginSourceSession(accountKey)
   if (!qqBrushModeQueue.length) await prepareQQBrushModeQueue(accountKey)
   if (!qqBrushModeQueue.length) throw new Error('QQ Brush Mode has no songs')
 
   const generation = ++qqBrushModeGeneration.value
   request = null
-  await syncQQBrushModeTempList()
+  const wasActive = isQQBrushMode.value
+  await beginRecommendationSession('qqBrush')
+  if (!isCurrentSnapshot(accountKey, generation)) return
+  isQQBrushMode.value = true
+  try {
+    await syncQQBrushModeTempList()
+  } catch (error) {
+    if (!wasActive && isCurrentSnapshot(accountKey, generation)) resetQQBrushModeQueue()
+    throw error
+  }
   if (!isCurrentSnapshot(accountKey, generation)) return
 
-  isQQBrushMode.value = true
   clearPlayedList()
   playList(LIST_IDS.TEMP, 0)
 }
@@ -107,8 +119,10 @@ export const enterQQBrushMode = async(accountKey: string) => {
 const exitQQBrushMode = () => {
   if (!isQQBrushMode.value) return
   isQQBrushMode.value = false
+  endRecommendationSession('qqBrush')
   qqBrushModeGeneration.value++
   request = null
+  if (!isRecommendationEnabled('qqRecommend')) resetQQBrushModeQueue()
 }
 
 export const syncQQBrushModeWithPlayer = (accountKey: string | null) => {
@@ -148,7 +162,9 @@ export const ensureQQBrushModeNextSongs = (
     request.generation == generation &&
     request.continuation) return request.task
 
-  const task = getQQMusicBrushSongs(true)
+  const task = (hasRecommendationSession('qqBrush')
+    ? getQQMusicBrushSongs(true)
+    : beginRecommendationSession('qqBrush').then(async() => getQQMusicBrushSongs(true)))
     .then(async songs => {
       if (!isActiveSnapshot(accountKey, generation)) return []
       const ids = new Set(qqBrushModeQueue.map(song => song.id))
@@ -165,3 +181,7 @@ export const ensureQQBrushModeNextSongs = (
   return task
 }
 /* eslint-enable @typescript-eslint/promise-function-async */
+
+registerRecommendationCleanup('qqRecommend', () => {
+  if (!isQQBrushMode.value) resetQQBrushModeQueue()
+})

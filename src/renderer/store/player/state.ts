@@ -36,6 +36,8 @@ export const status = window.lxData.status = ref('')
 
 export const statusText = ref('')
 
+export const playbackNotice = ref('')
+
 export const isShowPlayerDetail = ref(false)
 
 export const isShowPlayComment = ref(false)

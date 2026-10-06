@@ -7,34 +7,32 @@ import {
 import { createNeteaseAccountService } from './netease/account'
 import { filterPublicRecommendPlaylists, normalizePlaylistList } from './neteasePlaylist'
 import { createNeteaseUserPlaylistService } from './netease/userPlaylists'
+import { createNeteaseApiClient, type NeteaseEndpoint } from './netease/api'
+import { getFeatureMode } from '@common/performance/featurePolicy'
+import { reportOptionalResourceState } from '@main/services/optionalResources'
 
-// @neteasecloudmusicapienhanced/api is CommonJS and dynamically loads module files internally.
-// Keep it as a runtime dependency instead of bundling it into the main process.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const neteaseApi = require('@neteasecloudmusicapienhanced/api') as {
-  login_qr_key: (params?: Record<string, any>) => Promise<any>
-  login_qr_create: (params: Record<string, any>) => Promise<any>
-  login_qr_check: (params: Record<string, any>) => Promise<any>
-  login_status: (params: Record<string, any>) => Promise<any>
-  logout: (params: Record<string, any>) => Promise<any>
-  recommend_songs: (params: Record<string, any>) => Promise<any>
-  personal_fm: (params: Record<string, any>) => Promise<any>
-  personal_fm_mode: (params: Record<string, any>) => Promise<any>
-  personalized: (params: Record<string, any>) => Promise<any>
-  personalized_newsong: (params: Record<string, any>) => Promise<any>
-  recommend_resource: (params: Record<string, any>) => Promise<any>
-  homepage_block_page: (params: Record<string, any>) => Promise<any>
-  batch: (params: Record<string, any>) => Promise<any>
-  toplist_detail: (params: Record<string, any>) => Promise<any>
-  album_songsaleboard: (params: Record<string, any>) => Promise<any>
-  playlist_detail: (params: Record<string, any>) => Promise<any>
-  user_playlist: (params: Record<string, any>) => Promise<any>
-  song_detail: (params: Record<string, any>) => Promise<any>
-  like: (params: Record<string, any>) => Promise<any>
-  fm_trash: (params: Record<string, any>) => Promise<any>
-  song_url_v1: (params: Record<string, any>) => Promise<any>
-  api: (params: Record<string, any>) => Promise<any>
-}
+const recommendationEndpoints: readonly NeteaseEndpoint[] = [
+  'recommend_songs', 'personalized', 'personalized_newsong', 'recommend_resource',
+  'homepage_block_page', 'batch', 'toplist_detail', 'album_songsaleboard',
+]
+let recommendationLoaded = false
+const neteaseApi = createNeteaseApiClient({
+  onLoad(name) {
+    if (!recommendationEndpoints.includes(name)) return
+    recommendationLoaded = true
+    reportOptionalResourceState('neteaseRecommend', {
+      loaded: true,
+      restartRequired: getFeatureMode(global.lx.appSetting, 'neteaseRecommend') == 'off',
+      error: undefined,
+    })
+  },
+  trackActivity: name => recommendationEndpoints.includes(name),
+  onActivity(active) {
+    if (recommendationLoaded) reportOptionalResourceState('neteaseRecommend', { active: active > 0 })
+  },
+})
+
+export const prepareNeteaseRecommendation = () => { neteaseApi.prepare(recommendationEndpoints) }
 
 let accountService: ReturnType<typeof createNeteaseAccountService> | undefined
 let userPlaylistService: ReturnType<typeof createNeteaseUserPlaylistService> | undefined

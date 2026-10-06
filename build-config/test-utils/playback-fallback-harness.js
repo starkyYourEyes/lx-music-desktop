@@ -1584,6 +1584,13 @@ const createMusicFacadeHarness = (options = {}) => {
       '../index': { proxy: { enable: false } },
       './utils': { buildSavePath: () => 'D:\\downloads' },
       '@renderer/core/music/primarySource': { ensurePrimarySourceCapabilities: async() => {} },
+      '@renderer/core/features/downloadRuntime': {
+        acquireDownloadActivity: () => () => {},
+        canStartDownload: () => true,
+        getDownloadGeneration: () => 0,
+        registerDownloadController() {},
+        reportDownloadError() {},
+      },
     },
   )
 
@@ -2008,6 +2015,10 @@ const createCoordinatorHarness = (options = {}) => {
 const loadPlayerIntegrationFactories = () => {
   const path = require('node:path')
   const loadTsModule = require('../../scripts/test-utils/load-ts-module')
+  const preloadStateModule = loadTsModule(
+    path.join(__dirname, '../../src/renderer/core/player/preloadState.ts'),
+    { '@renderer/core/music/playback/coordinator': loadPlaybackCoordinator() },
+  )
   const errorModule = loadTsModule(
     path.join(__dirname, '../../src/common/utils/playbackSourceError.ts'),
   )
@@ -2056,6 +2067,8 @@ const loadPlayerIntegrationFactories = () => {
       playbackUrlCache: {},
     },
     '@renderer/core/player': {},
+    '@renderer/core/player/preloadState': preloadStateModule,
+    './preloadState': preloadStateModule,
     '@renderer/core/music': { getMusicUrl: async() => ({ url: '' }) },
     '../music/index': { getMusicUrl: async() => ({ url: '' }), getPicPath: async() => '', getLyricInfo: async() => ({}) },
     './utils': { filterList: async() => ({ filteredList: [], playerIndex: -1 }) },
@@ -2286,6 +2299,7 @@ class FakeCoordinatorPreloadAudio {
   constructor(onBind) {
     this.listeners = new Map()
     this.bindings = new Map()
+    this.foregroundBindings = new Map()
     this.onBind = onBind
     this._src = ''
     this.muted = false
@@ -2297,6 +2311,7 @@ class FakeCoordinatorPreloadAudio {
     if (this.listeners.get(name) == handler) this.listeners.delete(name)
   }
   pause() {}
+  play() { return Promise.resolve() }
   load() {}
   removeAttribute(name) { if (name == 'src') this._src = '' }
   set src(value) {
@@ -2308,7 +2323,13 @@ class FakeCoordinatorPreloadAudio {
     this.onBind?.(value)
   }
   get src() { return this._src }
-  emitFor(resource, name) { return this.bindings.get(resource.url)?.[name]?.() ?? 'stale' }
+  get currentSrc() { return this._src }
+  attachContext(context) { this.foregroundBindings.set(context.resourceGeneration, new Map(this.listeners)) }
+  emitFor(resource, name, code) {
+    if (code !== undefined) this.error = { code }
+    if ('resourceGeneration' in resource) return this.foregroundBindings.get(resource.resourceGeneration)?.get(name)?.()
+    return this.bindings.get(resource.url)?.[name]?.() ?? 'stale'
+  }
 }
 
 const createPlayerHarness = (options = {}) => {
@@ -2360,10 +2381,11 @@ const createPlayerHarness = (options = {}) => {
   let candidateOrdinal = 0
   let playbackQuality = null
 
-  const mainAudio = new FakePlayerAudio(audioOperations, currentTimeWrites)
+  let mainAudio = new FakePlayerAudio(audioOperations, currentTimeWrites)
   const preloadAudio = new FakeCoordinatorPreloadAudio()
   const baseResource = createPlayerResourceController({
     audio: mainAudio,
+    async adoptAudio(next) { mainAudio = next },
     canonicalizeUrl: value => value,
   })
   const resource = {

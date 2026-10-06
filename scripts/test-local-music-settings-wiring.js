@@ -5,24 +5,23 @@ const path = require('node:path')
 const root = path.resolve(__dirname, '..')
 const read = file => fs.readFileSync(path.join(root, file), 'utf8')
 
-const settingIndex = read('src/renderer/views/Setting/index.vue')
+const { loadVueSfc } = require('./test-utils/load-vue-sfc')
+const lazyLoaders = []
+const settingComponent = loadVueSfc(path.join(root, 'src/renderer/views/Setting/index.vue'), {
+  '@common/utils/vueTools': { ...require('vue'), watch() {}, defineAsyncComponent(loader) { lazyLoaders.push(loader); return { loader } } },
+  '@renderer/plugins/i18n': { useI18n: () => key => key },
+  '@common/utils/vueRouter': { useRoute: () => ({ query: { name: 'SettingLocalMusic' } }), useRouter: () => ({}), onBeforeRouteLeave() {}, onBeforeRouteUpdate() {} },
+  '@renderer/store/performance': { requestPerformanceLeave: async() => true },
+}).default
 const localMusicPage = read('src/renderer/views/LocalMusic/index.vue')
 const localMusicAction = read('src/renderer/store/localMusic/action.ts')
 
-assert(
-  settingIndex.includes("import SettingLocalMusic from './components/SettingLocalMusic.vue'"),
-  'Setting page should import SettingLocalMusic component',
-)
-
-assert(
-  /SettingLocalMusic,\s*[\r\n]/.test(settingIndex),
-  'SettingLocalMusic should be registered as a setting component',
-)
-
-assert(
-  /id:\s*'SettingLocalMusic'/.test(settingIndex),
-  'Setting navigation should expose a top-level Local Music section',
-)
+assert(lazyLoaders.includes(settingComponent.components.SettingLocalMusic.loader), 'Local Music is registered lazily')
+assert.match(String(settingComponent.components.SettingLocalMusic.loader), /components\/SettingLocalMusic\.vue/)
+const settings = settingComponent.setup()
+assert.equal(settings.avtiveComponentName.value, 'SettingLocalMusic')
+assert.equal(settings.tocList.value.filter(item => item.id === 'SettingLocalMusic').length, 1)
+assert.equal(settings.tocList.value.some(item => !settingComponent.components[item.id]), false, 'every navigable setting must have a registered component')
 
 assert(
   /query:\s*\{\s*name:\s*'SettingLocalMusic'\s*\}/s.test(localMusicPage),

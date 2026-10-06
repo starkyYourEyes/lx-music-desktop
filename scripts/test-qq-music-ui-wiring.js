@@ -22,6 +22,7 @@ const loadTsModule = (filePath, mocks = {}) => {
   const originalLoad = Module._load
   Module._load = (request, parent, isMain) => {
     if (Object.prototype.hasOwnProperty.call(mocks, request)) return mocks[request]
+    if (request == '@renderer/core/features/recommendationAccess') return require('./test-utils/recommendation-access-enabled')
     return originalLoad(request, parent, isMain)
   }
   try {

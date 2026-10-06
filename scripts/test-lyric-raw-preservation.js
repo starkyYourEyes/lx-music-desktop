@@ -7,6 +7,10 @@ const identity = value => value
 const { buildLyricInfo } = loadTsModule(
   path.join(__dirname, '../src/renderer/core/music/utils.ts'),
   {
+    '@renderer/store/netease': { isLoggedIn: { value: false } },
+    '@renderer/store/qqMusic': { isLoggedIn: { value: false } },
+    './playback/candidates': {},
+    './playback/cache': { playbackUrlCache: new Map() },
     '@renderer/store': { qualityList: { value: {} } },
     '@renderer/store/utils': { assertApiSupport: () => true },
     '@renderer/utils/musicSdk': { __esModule: true, default: {} },

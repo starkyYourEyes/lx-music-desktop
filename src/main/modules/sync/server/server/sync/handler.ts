@@ -6,11 +6,20 @@ const handler: LX.Sync.ServerSyncHandlerActions<LX.Sync.Server.Socket> = {
   async onFeatureChanged(socket, feature) {
     // const userSpace = getUserSpace(socket.userInfo.name)
     const beforeFeature = socket.feature
-
+    const isProfileChangeCurrent = feature.listProfile != null || feature.list != null
+      ? modules.listProfile.invalidate(socket)
+      : undefined
+    if (feature.listProfile != null) beforeFeature.listProfile = feature.listProfile
     if (feature.list != null) {
+      socket.moduleReadys.listProfile = false
       beforeFeature.list = feature.list
       socket.moduleReadys.list = false
       if (feature.list) await modules.list.sync(socket).catch(_ => _)
+    }
+
+    if (isProfileChangeCurrent?.()) {
+      socket.moduleReadys.listProfile = false
+      if (beforeFeature.listProfile && socket.moduleReadys.list) await modules.listProfile.sync(socket)
     }
 
     if (feature.dislike != null) {

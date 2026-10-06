@@ -1,5 +1,6 @@
 import { WIN_MAIN_RENDERER_EVENT_NAME } from '@common/ipcNames'
 import { mainHandle } from '@common/mainIpc'
+import { assertRecommendationRequest, handleRecommendationSession } from '@main/services/recommendationSessions'
 import {
   checkLoginQr,
   createLoginQr,
@@ -34,23 +35,29 @@ export default () => {
     await logout()
   })
 
-  mainHandle<LX.Music.MusicInfoOnline[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_recommend_songs, async() => {
+  mainHandle<undefined, LX.Music.MusicInfoOnline[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_recommend_songs, async({ event }) => {
+    assertRecommendationRequest('neteaseRecommend', event)
     return getRecommendSongs()
   })
 
-  mainHandle<LX.Netease.PrivateFmParams, LX.Music.MusicInfoOnline[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_private_fm, async({ params }) => {
+  mainHandle<LX.Netease.PrivateFmParams & { continuation?: boolean }, LX.Music.MusicInfoOnline[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_private_fm, async({ event, params }) => {
+    if (handleRecommendationSession('neteaseRecommend', 'fm', event, params)) return []
+    assertRecommendationRequest('neteaseRecommend', event, params?.continuation === true ? 'fm' : undefined)
     return getPrivateFmSongs(params)
   })
 
-  mainHandle<{ limit?: number, removePrivateRecommend?: boolean }, LX.Netease.Playlist[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_recommend_playlists, async({ params }) => {
+  mainHandle<{ limit?: number, removePrivateRecommend?: boolean }, LX.Netease.Playlist[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_recommend_playlists, async({ event, params }) => {
+    assertRecommendationRequest('neteaseRecommend', event)
     return getRecommendPlaylists(params?.limit, params?.removePrivateRecommend)
   })
 
-  mainHandle<LX.Netease.HomeRecommendationParams, LX.Netease.HomeRecommendation>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_home_recommendation, async({ params }) => {
+  mainHandle<LX.Netease.HomeRecommendationParams, LX.Netease.HomeRecommendation>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_home_recommendation, async({ event, params }) => {
+    assertRecommendationRequest('neteaseRecommend', event)
     return getHomeRecommendation(params)
   })
 
-  mainHandle<LX.Netease.DailySongCategory[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_daily_song_categories, async() => {
+  mainHandle<undefined, LX.Netease.DailySongCategory[]>(WIN_MAIN_RENDERER_EVENT_NAME.netease_get_daily_song_categories, async({ event }) => {
+    assertRecommendationRequest('neteaseRecommend', event)
     return getDailySongCategories()
   })
 

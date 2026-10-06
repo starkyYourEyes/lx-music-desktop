@@ -158,45 +158,49 @@ const renderVueRuntime = {
   withKeys: callback => callback,
 }
 
-const loadMyListRender = () => loadVueSfc(myListPath, {
-  vue: renderVueRuntime,
-  '@common/utils/electron': { openUrl: () => {} },
-  '@common/utils/common': { encodePath: value => value },
-  '@renderer/utils/musicSdk': {},
-  './components/DuplicateMusicModal.vue': {},
-  './components/ListSortModal.vue': {},
-  './components/ListUpdateModal.vue': {},
-  '@renderer/store/list/state': {
-    allMusicList: new Map(),
-    loveList,
-    userLists: [],
-    fetchingListStatus: {},
-  },
-  '@renderer/store/list/action': { getListMusics: async() => [], removeUserList: async() => {} },
-  '@renderer/store/setting': { appSetting: {} },
-  '@renderer/store/platformPlaylists/action': { getPlatformPlaylistGroups: () => ({ value: [] }), retryPlatformUserPlaylistGroup: async() => {} },
-  '@common/utils/vueTools': {
-    computed: () => ({ value: {} }),
-    onBeforeUnmount: () => {},
-    ref: value => ({ value }),
-    watch: () => {},
-  },
-  '@common/utils/vueRouter': { useRouter: () => ({ replace: async() => {} }) },
-  '@common/constants': { LIST_IDS: { LOVE: 'love' } },
-  '@renderer/plugins/Dialog': { dialog: { confirm: async() => false } },
-  '@renderer/utils/data': { getListUpdateInfo: async() => ({}), saveListPrevSelectId: () => {} },
-  '@renderer/plugins/i18n': { useI18n: () => key => key },
-  './useShare': () => ({}),
-  './useMenu': () => ({}),
-  './useListUpdate': () => ({}),
-  './useSort': () => ({}),
-  './useDarg': () => ({}),
-  './useEditList': () => ({}),
-  './useListScroll': () => {},
-  './useGroups': () => ({}),
-  './groupState': loadTsModule(path.join(root, 'src/renderer/views/List/MyList/groupState.ts')),
-  './useDuplicate': () => ({}),
-}).default
+const loadMyListRender = () => {
+  const mocks = {
+    vue: renderVueRuntime,
+    '@common/utils/electron': { openUrl: () => {} },
+    '@common/utils/common': { encodePath: value => value },
+    '@renderer/utils/musicSdk': {},
+    './components/DuplicateMusicModal.vue': {},
+    './components/ListSortModal.vue': {},
+    './components/ListUpdateModal.vue': {},
+    '@renderer/store/list/state': {
+      allMusicList: new Map(),
+      loveList,
+      userLists: [],
+      fetchingListStatus: {},
+    },
+    '@renderer/store/list/action': { getListMusics: async() => [], removeUserList: async() => {} },
+    '@renderer/store/setting': { appSetting: {} },
+    '@renderer/store/platformPlaylists/action': { getPlatformPlaylistGroups: () => ({ value: [] }), retryPlatformUserPlaylistGroup: async() => {} },
+    '@common/utils/vueTools': {
+      computed: () => ({ value: {} }),
+      onBeforeUnmount: () => {},
+      ref: value => ({ value }),
+      watch: () => {},
+    },
+    '@common/utils/vueRouter': { useRouter: () => ({ replace: async() => {} }) },
+    '@common/constants': { LIST_IDS: { LOVE: 'love' } },
+    '@renderer/plugins/Dialog': { dialog: { confirm: async() => false } },
+    '@renderer/utils/data': { getListUpdateInfo: async() => ({}), saveListPrevSelectId: () => {} },
+    '@renderer/plugins/i18n': { useI18n: () => key => key },
+    './useShare': () => ({}),
+    './useMenu': () => ({}),
+    './useListUpdate': () => ({}),
+    './useSort': () => ({}),
+    './useDarg': () => ({}),
+    './useEditList': () => ({}),
+    './useListScroll': () => {},
+    './useGroups': () => ({}),
+    './groupState': loadTsModule(path.join(root, 'src/renderer/views/List/MyList/groupState.ts')),
+    './useDuplicate': () => ({}),
+  }
+  mocks['./useListCovers'] = loadTsModule(path.join(root, 'src/renderer/views/List/MyList/useListCovers.ts'), mocks)
+  return loadVueSfc(myListPath, mocks).default
+}
 
 const renderUserListRows = (userLists, handleListsItemRigthClick = () => {}) => {
   const component = loadMyListRender()
@@ -251,7 +255,7 @@ const renderUserListRows = (userLists, handleListsItemRigthClick = () => {}) => 
   return rows
 }
 
-const loadSettingBackup = ({ backupData, groups = {}, importedData, setGroup = async() => {} } = {}) => {
+const loadSettingBackup = ({ backupData, groups = {}, importedData, metadata = {}, setProfile = async() => {}, setGroup = async() => {} } = {}) => {
   const userLists = [
     { id: 'local', name: 'Local', locationUpdateTime: null },
     { id: 'collected', name: 'Collected', source: 'wy', sourceListId: '42', locationUpdateTime: null },
@@ -269,6 +273,8 @@ const loadSettingBackup = ({ backupData, groups = {}, importedData, setGroup = a
     },
   }
   const component = loadVueSfc(settingBackupPath, {
+    '@renderer/utils/data': { getListUpdateInfo: async() => metadata, setUserListProfile: setProfile },
+    '@common/utils/listProfile': require('../src/common/utils/listProfile'),
     vue: vueRuntime,
     '@common/utils/vueTools': { toRaw: value => value },
     '@renderer/utils': identityMusicUtils,
@@ -334,12 +340,13 @@ const restoreHarness = async(lists, type) => {
   return writes
 }
 
-const loadShare = ({ targetExists = false, currentGroup = 'mine', sourceLess = false } = {}) => {
+const loadShare = ({ targetExists = false, currentGroup = 'mine', sourceLess = false, importedProfile, savedGroup = 'mine', metadata = {} } = {}) => {
   const imported = {
     id: 'incoming',
     name: 'Incoming',
     locationUpdateTime: null,
-    group: 'mine',
+    group: savedGroup,
+    profile: importedProfile,
     list: [{ id: 'track' }],
     ...(sourceLess ? {} : { source: 'wy', sourceListId: '7' }),
   }
@@ -350,11 +357,20 @@ const loadShare = ({ targetExists = false, currentGroup = 'mine', sourceLess = f
   const groupWrites = []
   const exported = []
   const sequence = []
+  const profileWrites = []
   const groups = { incoming: currentGroup }
   global.window = {
     lx: { worker: { main: { readLxConfigFile: async() => ({ type: 'playListPart_v2', data: imported }) } } },
   }
   const useShare = loadTsModule(useSharePath, {
+    '@renderer/utils/data': {
+      getListUpdateInfo: async() => metadata,
+      setUserListProfile: async(id, profile) => {
+        profileWrites.push([id, profile])
+        if (profile.group) groups[id] = profile.group
+      },
+    },
+    '@common/utils/listProfile': require('../src/common/utils/listProfile'),
     '@common/utils/vueTools': { toRaw: value => value },
     '@renderer/utils/ipc': { showSelectDialog: async() => ({ canceled: false, filePaths: ['part.lxmc'] }) },
     '@renderer/plugins/i18n': { useI18n: () => key => key },
@@ -400,7 +416,7 @@ const loadShare = ({ targetExists = false, currentGroup = 'mine', sourceLess = f
       },
     },
   }).default()
-  return { useShare, target, created, exported, groupWrites, groups, sequence }
+  return { useShare, target, created, exported, groupWrites, groups, sequence, profileWrites }
 }
 
 const importSingleHarness = async options => {
@@ -420,6 +436,29 @@ test('playlist backup records carry the resolved group', async() => {
   assert.equal(backup.find(item => item.id == 'collected').group, 'external')
 })
 
+test('backup export and restore retain portable profile fields and exclude account authority', async() => {
+  const profile = { description: 'Notes', coverUrl: 'https://example.test/cover', group: 'mine', managed: true, accountKey: 'local-only' }
+  const exported = loadSettingBackup({ groups: { local: 'mine', collected: 'external' }, metadata: { local: { profile } } })
+  await exported.handlers.handleExportPlayList()
+  const data = exported.getCaptured().data
+  assert.deepEqual(data.find(item => item.id == 'local').profile, { description: 'Notes', coverUrl: profile.coverUrl, group: 'mine' })
+  const writes = []
+  const restored = loadSettingBackup({ importedData: { type: 'playList_v2', data }, setProfile: async(id, value) => writes.push([id, value]) })
+  await restored.handlers.handleImportPlayList()
+  assert.deepEqual(writes.find(([id]) => id == 'local')[1], data.find(item => item.id == 'local').profile)
+})
+
+test('single-list imports restore saved profiles while legacy omissions retain existing fields', async() => {
+  const profile = { description: '', coverUrl: 'https://example.test/cover', group: 'external', managed: true }
+  const loaded = loadShare({ targetExists: true, importedProfile: profile })
+  await loaded.useShare.handleImportList(loaded.target)
+  assert.deepEqual(loaded.profileWrites, [['incoming', { description: '', coverUrl: profile.coverUrl, group: 'external' }]])
+  assert.equal(loaded.groups.incoming, 'external')
+  const legacy = loadShare({ targetExists: true, savedGroup: null })
+  await legacy.useShare.handleImportList(legacy.target)
+  assert.deepEqual(legacy.profileWrites, [['incoming', {}]])
+})
+
 test('restore applies saved groups and derives groups for old records', async() => {
   const lists = [
     { id: 'saved', name: 'Saved', list: [], group: 'mine', source: 'wy', sourceListId: '1' },
@@ -437,8 +476,8 @@ test('restore applies saved groups and derives groups for old records', async() 
   assert.deepEqual(await restoreHarness(lists, 'allData_v2'), expected)
 })
 
-test('single-list import assigns external only for a new target', async() => {
-  const created = await importSingleHarness({ targetExists: false, sourceLess: true })
+test('legacy single-list import assigns external only for a new target', async() => {
+  const created = await importSingleHarness({ targetExists: false, sourceLess: true, savedGroup: null })
   assert.equal(created.created?.group, 'external')
   assert.equal(created.created?.strictGroupPersistence, true)
   assert.deepEqual(created.created?.list, [{ id: 'track' }])

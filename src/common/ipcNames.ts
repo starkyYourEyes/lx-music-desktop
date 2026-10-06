@@ -43,6 +43,10 @@ const modules = {
     clear_dislike_music_infos: 'clear_dislike_music_infos',
   },
   winMain: {
+    performance_apply: 'performance_apply',
+    performance_status: 'performance_status',
+    performance_prepare: 'performance_prepare',
+    performance_restart: 'performance_restart',
     focus: 'focus',
     close: 'close',
     min: 'min',
@@ -97,6 +101,7 @@ const modules = {
     storage_local_state_set: 'storage_local_state_set',
     storage_playlist_metadata_get: 'storage_playlist_metadata_get',
     storage_playlist_metadata_mutate: 'storage_playlist_metadata_mutate',
+    storage_playlist_metadata_changed: 'storage_playlist_metadata_changed',
     storage_search_history_get: 'storage_search_history_get',
     storage_search_history_mutate: 'storage_search_history_mutate',
     playback_start: 'playback_start',

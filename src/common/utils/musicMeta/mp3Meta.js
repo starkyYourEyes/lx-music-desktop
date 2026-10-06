@@ -12,7 +12,9 @@ const handleWriteMeta = (meta, filePath) => {
     }
     delete meta.lyrics
   }
-  NodeID3.write(meta, filePath)
+  const result = NodeID3.write(meta, filePath)
+  if (result instanceof Error) throw result
+  if (!result) throw new Error('Could not write MP3 metadata')
 }
 
 module.exports = (filePath, meta, proxy) => {
@@ -26,13 +28,14 @@ module.exports = (filePath, meta, proxy) => {
 
   let picUrl = meta.APIC
   if (picUrl.includes('music.126.net')) picUrl += `${picUrl.includes('?') ? '&' : '?'}param=500y500`
-  download(picUrl, picPath, proxy).then(success => {
+  return download(picUrl, picPath, proxy).then(async success => {
     if (success) {
       meta.APIC = picPath
-      handleWriteMeta(meta, filePath)
-      fs.unlink(picPath, err => {
-        if (err) console.log(err.message)
-      })
+      try {
+        handleWriteMeta(meta, filePath)
+      } finally {
+        await fs.promises.unlink(picPath)
+      }
     } else {
       delete meta.APIC
       handleWriteMeta(meta, filePath)

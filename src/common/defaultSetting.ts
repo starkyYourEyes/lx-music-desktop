@@ -4,11 +4,13 @@ import { RECOMMEND_HOME_SECTION_IDS } from './constants'
 import { PROJECT_IDENTITY } from './projectIdentity'
 import { PLAY_BAR_HEIGHT_DEFAULT } from './utils/playBarLayout'
 import { BACKGROUND_TRANSPARENCY_DEFAULT } from './utils/backgroundTransparency'
+import { migratePerformanceSettings } from './performance/featurePolicy'
 
 const isMac = process.platform == 'darwin'
 const isWin = process.platform == 'win32'
 
 const defaultSetting: LX.AppSetting = {
+  ...migratePerformanceSettings({}),
   version: '2.2.0',
 
   'common.windowSizeId': 5,
@@ -57,7 +59,9 @@ const defaultSetting: LX.AppSetting = {
   'player.waitPlayEndStop': true,
   'player.waitPlayEndStopTime': '',
   'player.autoSkipOnError': true,
+  'player.preloadNext': true,
   'player.isAutoCleanPlayedList': false,
+  'player.soundEffect.mode': 'effects',
   'player.soundEffect.convolution.fileName': '',
   'player.soundEffect.convolution.mainGain': 10,
   'player.soundEffect.convolution.sendGain': 0,
@@ -176,6 +180,7 @@ const defaultSetting: LX.AppSetting = {
   'sync.mode': 'server',
   'sync.enable': false,
   'sync.server.port': '23332',
+  'sync.server.allowUserApiPush': false,
   'sync.server.maxSsnapshotNum': 5,
   'sync.client.host': '',
 

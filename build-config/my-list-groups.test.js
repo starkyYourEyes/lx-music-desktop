@@ -91,7 +91,7 @@ test('target indexes are clamped and an unknown ID is a no-op', () => {
   assert.deepEqual(buildMovedUserListOrder(lists, groups, 'missing', 'mine', 0), ['mine-a', 'ext-a'])
 })
 
-test('initialization honors stored groups and backfills only missing groups', async() => {
+test('initialization honors stored groups without persisting inferred display groups', async() => {
   const writes = []
   const module = loadGroupStore({
     metadata: { stored: { updateTime: 0, isAutoUpdate: false, profile: { group: 'external' } } },
@@ -99,16 +99,19 @@ test('initialization honors stored groups and backfills only missing groups', as
   })
   await module.initializeUserListGroups([list('stored'), list('online', 'wy', '42'), list('local')])
   assert.deepEqual(module.userListGroups, { stored: 'external', online: 'external', local: 'mine' })
-  assert.deepEqual(writes, [
-    { id: 'online', profile: { group: 'external' } },
-    { id: 'local', profile: { group: 'mine' } },
-  ])
+  assert.deepEqual(writes, [])
 })
 
-test('a failed legacy backfill keeps the derived in-memory group', async() => {
-  const module = loadGroupStore({ metadata: {}, setProfile: async() => { throw new Error('disk') } })
-  await module.initializeUserListGroups([list('online', 'wy', '42')])
-  assert.equal(module.getUserListGroup(list('online', 'wy', '42')), 'external')
+test('a newly synced playlist cannot manufacture a conflicting group before its profile arrives', async() => {
+  const metadata = {}
+  const writes = []
+  const module = loadGroupStore({ metadata, setProfile: async(id, profile) => writes.push({ id, profile }) })
+  await module.ensureUserListGroups([list('phone-list')])
+  assert.equal(module.getUserListGroup(list('phone-list')), 'mine')
+  metadata['phone-list'] = { updateTime: 0, isAutoUpdate: false, profile: { group: 'external' } }
+  await module.ensureUserListGroups([list('phone-list')])
+  assert.equal(module.getUserListGroup(list('phone-list')), 'external')
+  assert.deepEqual(writes, [])
 })
 
 test('reveal request consumption clears only the token it was given', () => {
@@ -203,6 +206,6 @@ test('ensure derives newly synced groups, retains manual assignments, removes st
   await module.ensureUserListGroups([list('retained', 'wy', '42'), list('observed', 'wy', '7')])
 
   assert.deepEqual(module.userListGroups, { retained: 'mine', observed: 'external' })
-  assert.deepEqual(writes, [{ id: 'observed', profile: { group: 'external' } }])
+  assert.deepEqual(writes, [])
   assert.equal(module.userListRevealRequest.value, null)
 })

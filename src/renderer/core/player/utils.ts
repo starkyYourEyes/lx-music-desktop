@@ -16,12 +16,13 @@ import { setPowerSaveBlocker as setPowerSaveBlockerRemote } from '@renderer/util
 /**
  * 过滤列表中已播放的歌曲
  */
-export const filterList = async({ playedList, listId, list, playerMusicInfo, isNext }: {
+export const filterList = async({ playedList, listId, list, playerMusicInfo, isNext, preview = false }: {
   playedList: LX.Player.PlayMusicInfo[]
   listId: string
   list: Array<LX.Music.MusicInfo | LX.Download.ListItem>
   playerMusicInfo?: LX.Music.MusicInfo | LX.Download.ListItem
   isNext: boolean
+  preview?: boolean
 }) => {
   // if (this.list.listName === null) return
   // console.log(isCheckFile)
@@ -36,7 +37,7 @@ export const filterList = async({ playedList, listId, list, playerMusicInfo, isN
   })
 
   if (!filteredList.length && playedList.length) {
-    clearPlayedList()
+    if (!preview) clearPlayedList()
     return { filteredList: markRawList(canPlayList), playerIndex }
   }
   return { filteredList: markRawList(filteredList), playerIndex }

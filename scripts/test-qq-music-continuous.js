@@ -291,9 +291,9 @@ const testGlobalLifecycleWiring = () => {
 
   const endedBody = player.match(/const handleEnded = \(\) => \{([\s\S]*?)\n  \}/)?.[1] ?? ''
   const ensureIndex = endedBody.indexOf('await ensureContinuousNextSongs()')
-  const playNextIndex = endedBody.indexOf('playNext(true)')
+  const playNextIndex = endedBody.indexOf("playNext({ automatic: true, reason: 'natural_end', startReason: 'auto' })")
   assert(ensureIndex >= 0 && playNextIndex > ensureIndex,
-    'media-ended continuation must finish before playNext(true)')
+    'media-ended continuation must finish before advancing with natural-end playback intent')
 }
 
 const tests = [

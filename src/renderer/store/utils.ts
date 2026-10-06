@@ -100,6 +100,8 @@ export const applyTheme = (id: string, lightId: string, darkId: string, dataPath
       themeId = id == 'auto' && themeShouldUseDarkColors.value ? 'black' : 'green'
       theme = themeInfo.themes.find(theme => theme.id == themeId)!
     }
-    window.setTheme(buildThemeColors(theme, dataPath))
+    const colors = buildThemeColors(theme, dataPath)
+    if (appSetting['performance.simplifyVisuals']) colors['--background-image'] = 'none'
+    window.setTheme(colors)
   })
 }

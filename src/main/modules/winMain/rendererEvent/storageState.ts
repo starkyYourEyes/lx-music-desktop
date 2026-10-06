@@ -21,6 +21,7 @@ import { assertRecord } from '@common/storage/validation'
 import { updateCatalogPreferences } from '@main/utils'
 import getStore from '@main/utils/store'
 import { parseSettingsDocument } from '../../../storage/settings/document'
+import { notifyPlaylistMetadataChanged } from '@main/modules/sync/listProfileEvent'
 
 type Awaitable<T> = Promise<T> | T
 
@@ -156,7 +157,11 @@ export default () => {
     getLocalState: () => global.lx.worker.dbService.getLocalState(),
     setLocalState: update => global.lx.worker.dbService.setLocalState(update),
     getPlaylistMetadata: () => global.lx.worker.dbService.getPlaylistMetadata(),
-    applyPlaylistMetadata: command => global.lx.worker.dbService.applyPlaylistMetadata(command),
+    applyPlaylistMetadata: async command => {
+      const metadata = await global.lx.worker.dbService.applyPlaylistMetadata(command)
+      notifyPlaylistMetadataChanged(metadata)
+      return metadata
+    },
     getSearchHistory: () => global.lx.worker.dbService.getSearchHistory(),
     applySearchHistory: command => global.lx.worker.dbService.applySearchHistory(command),
   })

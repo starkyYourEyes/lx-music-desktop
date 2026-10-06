@@ -1,4 +1,5 @@
 import {
+  defineAsyncComponent,
   ref,
   reactive,
   computed,
@@ -56,6 +57,7 @@ export const markRawList = <T extends any[]>(list: T) => {
 }
 
 export {
+  defineAsyncComponent,
   nextTick,
   onBeforeUnmount,
   ref,

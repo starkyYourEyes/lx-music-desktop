@@ -99,6 +99,8 @@ export interface PlaybackResolutionCoordinator {
   isForegroundValidating: () => boolean
   cancelForeground: (reason: ForegroundCancelReason) => void
   cancelPreload: (reason: PreloadCancelReason) => void
+  takePreloadedAudio: (resource: PlaybackResource) => HTMLAudioElement | null
+  onPreloadFailure: (handler: (identity: string, error: LX.Playback.SourceError) => void) => () => void
   dispose: () => void
 }
 
@@ -110,6 +112,7 @@ interface ActiveResolution {
   resource: DirectPlaybackResource | CandidatePlaybackResource | null
   pendingResource: Promise<DirectPlaybackResource | CandidatePlaybackResource> | null
   validated: ValidatedPlaybackResource | null
+  bufferedAudio: HTMLAudioElement | null
   validationTimer: ReturnType<typeof setTimeout> | null
   cancelReason: PlaybackCancelReason | null
 }
@@ -193,6 +196,7 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
   let preload: ActiveResolution | null = null
   let foregroundHandlers: ForegroundResolutionHandlers | null = null
   let preloadBinding: PreloadBinding | null = null
+  const preloadFailureHandlers = new Set<(identity: string, error: LX.Playback.SourceError) => void>()
   let disposed = false
 
   const isCurrent = (record: ActiveResolution) => (
@@ -203,15 +207,21 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
     deps.clock.clearTimeout(record.validationTimer)
     record.validationTimer = null
   }
-  const detachPreloadValidator = (record: ActiveResolution) => {
+  const detachPreloadValidator = (record: ActiveResolution, retain = false) => {
     const binding = preloadBinding
     clearValidationTimer(record)
     if (!binding || binding.record != record) return
     binding.audio.removeEventListener('error', binding.handleError)
     binding.audio.removeEventListener('canplay', binding.handleCanplay)
-    binding.audio.pause()
-    binding.audio.removeAttribute('src')
-    binding.audio.load()
+    if (retain) {
+      record.bufferedAudio = binding.audio
+      // Retain the media element and its initial buffer for the real player.
+      binding.audio.preload = 'none'
+    } else {
+      binding.audio.pause()
+      binding.audio.removeAttribute('src')
+      binding.audio.load()
+    }
     preloadBinding = null
   }
   const removeFromSlot = (record: ActiveResolution) => {
@@ -233,6 +243,12 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
     record.phase = 'closed'
     record.resource = null
     record.validated = null
+    if (record.bufferedAudio) {
+      record.bufferedAudio.pause()
+      record.bufferedAudio.removeAttribute('src')
+      record.bufferedAudio.load()
+      record.bufferedAudio = null
+    }
     if (record.owner == 'preload') {
       detachPreloadValidator(record)
     } else if (foregroundCandidate) {
@@ -258,6 +274,7 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
     resource: null,
     pendingResource: null,
     validated: null,
+    bufferedAudio: null,
     validationTimer: null,
     cancelReason: null,
   })
@@ -316,9 +333,9 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
   ): 'accepted' | 'expired' | 'stale' => {
     const { record, resource } = binding
     if (preloadBinding != binding || preload != record || record.owner != 'preload') return 'stale'
-    detachPreloadValidator(record)
     if (resource.kind == 'direct') {
       if (record.phase != 'validating' || record.resource != resource) return 'stale'
+      detachPreloadValidator(record, true)
       record.validated = {
         kind: 'validated',
         origin: 'direct',
@@ -331,6 +348,7 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
     }
     if (!matchesCandidate(record, resource) || !record.session) return 'stale'
     if (deps.clock.now() >= resource.deadlineAt) {
+      detachPreloadValidator(record)
       record.phase = 'resolving'
       record.resource = null
       const settlement = record.session.expireCandidate(resource.candidateId)
@@ -346,6 +364,7 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
     }
     const settlement = record.session.accept(resource.candidateId)
     if (settlement != 'accepted') return settlement == 'expired' ? 'expired' : 'stale'
+    detachPreloadValidator(record, true)
     record.validated = toValidatedCandidate(resource)
     record.phase = 'validated'
     return 'accepted'
@@ -361,6 +380,7 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
     record.resource = null
     if (resource.kind == 'direct') {
       closeExhausted(record)
+      for (const handler of preloadFailureHandlers) handler(record.identity, normalizeSourceError(new Error('Audio could not be loaded')))
       return 'resumed'
     }
     if (!record.session) return 'stale'
@@ -411,6 +431,8 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
           ).catch(() => {})
         }
       }, remaining)
+    } else {
+      record.validationTimer = deps.clock.setTimeout(() => { preloadError(binding) }, 10_000)
     }
     audio.src = resource.url
     audio.load()
@@ -436,6 +458,9 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
     if (record.phase == 'closed' || !isCurrent(record)) return
     const sourceError = normalizeSourceError(error)
     closeExhausted(record)
+    if (record.owner == 'preload' && !isCancellationError(sourceError)) {
+      for (const handler of preloadFailureHandlers) handler(record.identity, sourceError)
+    }
     if (
       options.publishForeground &&
       record.owner == 'foreground' &&
@@ -629,11 +654,23 @@ export const createPlaybackResolutionCoordinator: CreatePlaybackResolutionCoordi
     cancelPreload(reason) {
       if (preload) closeRecord(preload, reason, true)
     },
+    takePreloadedAudio(resource) {
+      const record = foreground
+      if (!record || record.validated != resource) return null
+      const audio = record.bufferedAudio
+      record.bufferedAudio = null
+      return audio
+    },
+    onPreloadFailure(handler) {
+      preloadFailureHandlers.add(handler)
+      return () => { preloadFailureHandlers.delete(handler) }
+    },
     dispose() {
       if (disposed) return
       disposed = true
       if (foreground) closeRecord(foreground, 'shutdown', true)
       if (preload) closeRecord(preload, 'shutdown', true)
+      preloadFailureHandlers.clear()
     },
   }
 }

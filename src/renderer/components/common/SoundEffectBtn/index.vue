@@ -1,13 +1,14 @@
 <template>
-  <button :class="$style.btn" :aria-label="$t('player__sound_effect')" @click="visible = true">
+  <button v-if="enabled" :class="$style.btn" :aria-label="$t('player__sound_effect')" @click="visible = true">
     <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" width="90%" viewBox="0 0 24 24" space="preserve">
       <use xlink:href="#icon-tune-variant" />
     </svg>
   </button>
-  <material-modal :show="visible" bg-close="bg-close" :teleport="teleport" @close="visible = false">
+  <material-modal v-if="enabled" :show="visible" bg-close="bg-close" :teleport="teleport" @close="visible = false">
     <!-- <main :class="$style.main"> -->
     <!-- <h2 :class="$style.title">{{ $t('theme_edit_modal__title') }}</h2> -->
-    <div :class="$style.content">
+    <SoundEffectMode />
+    <div v-if="isEffectsMode" :class="$style.content">
       <div :class="['scroll', $style.row]">
         <AudioConvolution />
         <PitchShifter />
@@ -17,13 +18,14 @@
         <BiquadFilter />
       </div>
     </div>
+    <p v-else :class="$style.disabledTip">{{ $t('player__sound_effect_mode_original_edit_tip') }}</p>
     <p v-if="showTip" :class="$style.tip">{{ $t('player__sound_effect_features_tip') }}</p>
     <!-- </main> -->
   </material-modal>
 </template>
 
 <script setup>
-import { ref, watch } from '@common/utils/vueTools'
+import { computed, ref, watch } from '@common/utils/vueTools'
 // import useNextTogglePlay from '@renderer/utils/compositions/useNextTogglePlay'
 // import useToggleDesktopLyric from '@renderer/utils/compositions/useToggleDesktopLyric'
 // import { musicInfo, playMusicInfo } from '@renderer/store/player/state'
@@ -34,7 +36,9 @@ import BiquadFilter from './BiquadFilter.vue'
 import AudioPanner from './AudioPanner.vue'
 import AudioConvolution from './AudioConvolution.vue'
 import PitchShifter from './PitchShifter.vue'
+import SoundEffectMode from './SoundEffectMode.vue'
 import { appSetting } from '@renderer/store/setting'
+import { isFeatureEnabled } from '@common/performance/featurePolicy'
 
 defineProps({
   teleport: {
@@ -44,6 +48,9 @@ defineProps({
 })
 
 const visible = ref(false)
+const enabled = computed(() => isFeatureEnabled(appSetting, 'soundEffects'))
+watch(enabled, enabled => { if (!enabled) visible.value = false })
+const isEffectsMode = computed(() => appSetting['player.soundEffect.mode'] == 'effects')
 
 const showTip = ref(false)
 
@@ -148,6 +155,15 @@ watch(visible, (visible) => {
   font-size: 12px;
   line-height: 1.25;
   color: var(--color-font);
+}
+
+.disabledTip {
+  padding: 25px 20px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-font-label);
+  text-align: center;
 }
 
 </style>

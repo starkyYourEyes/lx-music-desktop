@@ -9,6 +9,7 @@ import { ref, onBeforeUnmount, onMounted, watch } from '@common/utils/vueTools'
 import { useEvent, getAnalyserDataArray } from '@lyric/core/mainWindowChannel'
 // import { getAnalyser } from '@renderer/plugins/player'
 import { isPlay, setting } from '@lyric/store/state'
+import { isFeatureEnabled } from '@common/performance/featurePolicy'
 
 // const themes = {
 //   green: 'rgba(77,175,124,.16)',
@@ -39,7 +40,8 @@ const getBarWidth = canvasWidth => {
     : diffWidth > 12 ? width : barWidth
 }
 export default {
-  setup() {
+  props: { visible: { type: Boolean, default: true } },
+  setup(props) {
     const dom_canvas = ref(null)
 
     let ctx
@@ -53,6 +55,10 @@ export default {
     let x = 0
     let isPlaying = false
     let animationFrameId
+    let requestPending = false
+    let analyserAvailable = true
+    const shouldRender = () => analyserAvailable && !!ctx && isPlay.value && props.visible && !document.hidden &&
+      setting['desktopLyric.audioVisualization'] && isFeatureEnabled(setting, 'audioVisualization')
 
     let num
     let mult
@@ -67,6 +73,10 @@ export default {
     // })
 
     useEvent((event) => {
+      if (event.action == 'set_analyser_available') {
+        analyserAvailable = event.data
+        updateActivity()
+      }
       if (event.action == 'send_analyser_data_array') {
         // console.log(event.action)
         renderFrame(event.data)
@@ -75,6 +85,8 @@ export default {
 
     // https://developer.mozilla.org/zh-CN/docs/Web/API/AnalyserNode/smoothingTimeConstant
     const renderFrame = (dataArray) => {
+      if (!isPlaying || !shouldRender() || !requestPending) return
+      requestPending = false
       x = 0
 
       // console.log(dataArray)
@@ -112,11 +124,18 @@ export default {
         x += barWidth
       }
 
+      if (isPlaying && animationFrameId == null) animationFrameId = window.requestAnimationFrame(requestData)
+    }
+
+    const requestData = () => {
       animationFrameId = null
-      if (isPlaying) animationFrameId = window.requestAnimationFrame(getAnalyserDataArray)
+      if (!isPlaying || !shouldRender() || requestPending) return
+      requestPending = true
+      getAnalyserDataArray()
     }
 
     const handlePlay = () => {
+      if (isPlaying || !shouldRender()) return
       isPlaying = true
       // analyser.fftSize = 256
       // bufferLength = analyser.frequencyBinCount
@@ -124,13 +143,16 @@ export default {
       barWidth = getBarWidth(WIDTH)
       // dataArray = new Uint8Array(bufferLength)
       // renderFrame()
-      getAnalyserDataArray()
+      requestData()
     }
 
 
     const handlePause = () => {
       if (animationFrameId) window.cancelAnimationFrame(animationFrameId)
+      animationFrameId = null
+      requestPending = false
       isPlaying = false
+      ctx?.clearRect(0, 0, WIDTH, HEIGHT)
     }
 
     const handleResize = () => {
@@ -144,17 +166,15 @@ export default {
       barWidth = getBarWidth(WIDTH)
     }
 
-    watch(isPlay, (isPlay) => {
-      if (isPlay) handlePlay()
-      else handlePause()
-    })
-    watch(() => setting['desktopLyric.audioVisualization'], (enable) => {
-      if (!enable) handlePause()
-    })
+    const updateActivity = () => { if (shouldRender()) handlePlay(); else handlePause() }
+    watch(() => [isPlay.value, props.visible, setting['desktopLyric.audioVisualization'],
+      isFeatureEnabled(setting, 'audioVisualization')], updateActivity)
+    document.addEventListener('visibilitychange', updateActivity)
     window.addEventListener('resize', handleResize)
     onBeforeUnmount(() => {
       handlePause()
       window.removeEventListener('resize', handleResize)
+      document.removeEventListener('visibilitychange', updateActivity)
     })
 
     onMounted(() => {

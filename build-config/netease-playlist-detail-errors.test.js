@@ -7,7 +7,9 @@ const root = path.resolve(__dirname, '..')
 const loadMainDetail = response => {
   global.lx = { accountRepository: {}, musicUrlAuthorization: {} }
   return loadTsModule(path.join(root, 'src/main/modules/netease.ts'), {
-    '@neteasecloudmusicapienhanced/api': { playlist_detail: response },
+    './netease/api': { createNeteaseApiClient: () => ({ playlist_detail: response }) },
+    '@common/performance/featurePolicy': {},
+    '@main/services/optionalResources': {},
     '@common/utils/common': {},
     '@common/utils/neteaseDailySongCategory': { parseDailySongCategoryPlaylistId: () => null },
     './netease/account': { createNeteaseAccountService: () => ({ getCookie: () => 'test-cookie' }) },

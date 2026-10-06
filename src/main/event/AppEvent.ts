@@ -1,9 +1,11 @@
 import { EventEmitter } from 'events'
 
-import { saveAppHotKeyConfig, updateSetting } from '@main/utils'
+import { saveAppHotKeyConfig, updateSetting, updateSettingDurable } from '@main/utils'
+import { isPerformanceSetting } from '@common/performance/featurePolicy'
 import type { BrowserWindow } from 'electron'
 
 export class Event extends EventEmitter {
+  private configUpdateTail: Promise<void> | null = null
   // closeAll() {
   //   this.emit(COMMON_EVENT_NAME.closeAll)
   // }
@@ -32,8 +34,31 @@ export class Event extends EventEmitter {
    * 更新配置
    * @param setting 新设置
    */
+  // Preserve synchronous ordinary updates when no durable save is pending.
+  // eslint-disable-next-line @typescript-eslint/promise-function-async
   update_config(setting: Partial<LX.AppSetting>) {
-    const { setting: newSetting, updatedSettingKeys, updatedSetting } = updateSetting(setting)
+    const durable = Object.keys(setting).some(key => isPerformanceSetting(key) || key == 'download.enable')
+    if (!durable && !this.configUpdateTail) {
+      this.publish_config(updateSetting(setting))
+      return
+    }
+    const patch = { ...setting }
+    const save = async() => {
+      const result = durable ? await updateSettingDurable(patch) : updateSetting(patch)
+      this.publish_config(result)
+    }
+    const operation = this.configUpdateTail ? this.configUpdateTail.then(save, save) : save()
+    this.configUpdateTail = operation
+    const clear = () => { if (this.configUpdateTail == operation) this.configUpdateTail = null }
+    void operation.then(clear, clear)
+    return operation
+  }
+
+  async flush_config(): Promise<void> {
+    while (this.configUpdateTail) await this.configUpdateTail
+  }
+
+  private publish_config({ setting: newSetting, updatedSettingKeys, updatedSetting }: ReturnType<typeof updateSetting>) {
     global.lx.appSetting = newSetting
     if (!updatedSettingKeys.length) return
     this.emit('update_config', newSetting)

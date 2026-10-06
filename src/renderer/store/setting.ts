@@ -2,11 +2,12 @@ import { reactive, computed } from '@common/utils/vueTools'
 import defaultSetting from '@common/defaultSetting'
 import { changePrimaryPlaybackSource } from '@common/utils/playbackSourceSetting'
 import { updateSetting as saveSetting } from '@renderer/utils/ipc'
+import { applyCacheProfile } from '@common/performance/cacheProfile'
 
 export const appSetting = window.lxData.appSetting = reactive<LX.AppSetting>({ ...defaultSetting })
 
 export const isShowAnimation = computed(() => {
-  return appSetting['common.isShowAnimation']
+  return appSetting['common.isShowAnimation'] && !appSetting['performance.simplifyVisuals']
 })
 
 
@@ -19,6 +20,7 @@ export const mergeSetting = (newSetting: Partial<LX.AppSetting>) => {
     // @ts-expect-error
     appSetting[key] = value
   }
+  if (newSetting['performance.cacheProfile']) applyCacheProfile(newSetting['performance.cacheProfile'])
 }
 
 export const updateSetting = window.lxData.updateSetting = (setting: Partial<LX.AppSetting>) => {

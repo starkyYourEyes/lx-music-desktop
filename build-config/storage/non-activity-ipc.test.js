@@ -28,6 +28,7 @@ const commonRoot = path.resolve(__dirname, '../../src/common')
 const loadSourceModule = modulePath => {
   const originalLoad = Module._load
   Module._load = function(request, parent, isMain) {
+    if (request == '@main/modules/sync/listProfileEvent') return { notifyPlaylistMetadataChanged: () => {} }
     if (request == '@common/mainIpc') return { mainHandle: () => {}, mainOn: () => {} }
     if (request == '@main/utils') return { updateCatalogPreferences: () => { throw new Error('unexpected settings write') } }
     if (request == '@main/utils/store') return () => { throw new Error('unexpected Store access') }
@@ -167,6 +168,8 @@ describe('typed non-activity IPC', () => {
     const firstWrite = new Promise(resolve => { resolveFirstWrite = resolve })
     const originalLoad = Module._load
     Module._load = function(request, parent, isMain) {
+      if (request == '@common/rendererIpc' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { rendererOn: () => {} }
+      if (request == '@common/ipcNames' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { WIN_MAIN_RENDERER_EVENT_NAME: {} }
       if (request == '@renderer/utils/storageState') {
         return {
           getCatalogPreferences: async() => structuredClone(initial),
@@ -233,6 +236,8 @@ describe('typed non-activity IPC', () => {
     const secondRead = new Promise(resolve => { resolveSecondRead = resolve })
     const originalLoad = Module._load
     Module._load = function(request, parent, isMain) {
+      if (request == '@common/rendererIpc' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { rendererOn: () => {} }
+      if (request == '@common/ipcNames' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { WIN_MAIN_RENDERER_EVENT_NAME: {} }
       if (request == '@renderer/utils/storageState') {
         return {
           getCatalogPreferences: () => {
@@ -293,6 +298,8 @@ describe('typed non-activity IPC', () => {
     const secondRecoveryRead = new Promise(resolve => { resolveSecondRecoveryRead = resolve })
     const originalLoad = Module._load
     Module._load = function(request, parent, isMain) {
+      if (request == '@common/rendererIpc' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { rendererOn: () => {} }
+      if (request == '@common/ipcNames' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { WIN_MAIN_RENDERER_EVENT_NAME: {} }
       if (request == '@renderer/utils/storageState') {
         return {
           getCatalogPreferences: () => { throw new Error('unexpected catalog read') },
@@ -395,6 +402,8 @@ describe('typed non-activity IPC', () => {
     process.once('unhandledRejection', onUnhandledRejection)
     const originalLoad = Module._load
     Module._load = function(request, parent, isMain) {
+      if (request == '@common/rendererIpc' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { rendererOn: () => {} }
+      if (request == '@common/ipcNames' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { WIN_MAIN_RENDERER_EVENT_NAME: {} }
       if (request == '@renderer/utils/storageState') {
         return {
           getCatalogPreferences: () => { throw new Error('unexpected catalog read') },
@@ -450,6 +459,8 @@ describe('typed non-activity IPC', () => {
     let mutationCount = 0
     const originalLoad = Module._load
     Module._load = function(request, parent, isMain) {
+      if (request == '@common/rendererIpc' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { rendererOn: () => {} }
+      if (request == '@common/ipcNames' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { WIN_MAIN_RENDERER_EVENT_NAME: {} }
       if (request == '@renderer/utils/storageState') {
         return {
           getCatalogPreferences: () => { throw new Error('unexpected catalog read') },
@@ -502,6 +513,8 @@ describe('typed non-activity IPC', () => {
     let mutationCount = 0
     const originalLoad = Module._load
     Module._load = function(request, parent, isMain) {
+      if (request == '@common/rendererIpc' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { rendererOn: () => {} }
+      if (request == '@common/ipcNames' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { WIN_MAIN_RENDERER_EVENT_NAME: {} }
       if (request == '@renderer/utils/storageState') {
         return {
           getCatalogPreferences: () => { throw new Error('unexpected catalog read') },
@@ -573,6 +586,8 @@ describe('typed non-activity IPC', () => {
     const commands = []
     const originalLoad = Module._load
     Module._load = function(request, parent, isMain) {
+      if (request == '@common/rendererIpc' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { rendererOn: () => {} }
+      if (request == '@common/ipcNames' && parent?.filename.endsWith('renderer\\utils\\data.ts')) return { WIN_MAIN_RENDERER_EVENT_NAME: {} }
       if (request == '@renderer/utils/storageState') {
         return {
           getSearchHistory: async() => historyList,

@@ -67,6 +67,7 @@ const getStorageCoordinator = () => {
       targetSchemaVersion: 6,
     }),
     closeDatabase: () => global.lx.worker.dbService.close(),
+    flushDatabase: () => global.lx.worker.dbService.flush(),
     runMigrationHooks: runStorageMigrationHooks,
     runPlaybackActivityMigration,
     checkCredentials: () => checkCredentialStartup({

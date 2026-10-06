@@ -7,9 +7,10 @@ import { getListMusics, getUserLists, refreshWebDAVList, registerAction } from '
 
 import useInitUserApi from './useInitUserApi'
 import { play, playList } from '@renderer/core/player'
-import { onBeforeUnmount } from '@common/utils/vueTools'
+import { onBeforeUnmount, watch } from '@common/utils/vueTools'
 import { appSetting } from '@renderer/store/setting'
-import { playMusicInfo } from '@renderer/store/player/state'
+import { playMusicInfo, playInfo } from '@renderer/store/player/state'
+import { retainMusicList, setMusicListCacheOwner } from '@renderer/store/list/listManage/state'
 import { initDislikeInfo, registerRemoteDislikeAction } from '@renderer/core/dislikeList'
 import { initializeUserListGroups } from '@renderer/store/list/group'
 
@@ -44,33 +45,43 @@ const initPrevPlayInfo = async() => {
   const resume = await getPlaybackResume()
   window.lx.restorePlayInfo = null
   if (resume?.listId == null) return
-  const list = await getListMusics(resume.listId)
-  const info = resolvePlaybackResume(resume, list)
-  if (info == null) return
-  window.lx.restorePlayInfo = info
-  playList(info.listId, info.index, {
-    automatic: false,
-    reason: 'select',
-    startReason: 'restore',
-    startPositionMs: info.time * 1000,
-  })
-
-  if (appSetting['player.startupAutoPlay']) {
-    const musicInfo = playMusicInfo.musicInfo
-    if (!musicInfo) return
-    setTimeout(() => {
-      if (musicInfo.id == playMusicInfo.musicInfo?.id) play()
+  const release = retainMusicList(resume.listId)
+  try {
+    const list = await getListMusics(resume.listId)
+    const info = resolvePlaybackResume(resume, list)
+    if (info == null) return
+    window.lx.restorePlayInfo = info
+    playList(info.listId, info.index, {
+      automatic: false,
+      reason: 'select',
+      startReason: 'restore',
+      startPositionMs: info.time * 1000,
     })
-  }
+
+    if (appSetting['player.startupAutoPlay']) {
+      const musicInfo = playMusicInfo.musicInfo
+      if (!musicInfo) return
+      setTimeout(() => {
+        if (musicInfo.id == playMusicInfo.musicInfo?.id) play()
+      })
+    }
+  } finally { release() }
 }
 
 export default () => {
+  const cacheOwner = {}
+  const stopCacheWatch = watch(() => [playInfo.playerListId, playMusicInfo.listId], ids => {
+    setMusicListCacheOwner(cacheOwner, ids)
+    setMusicListCacheOwner('playback-staging', [])
+  }, { immediate: true, flush: 'sync' })
   const initUserApi = useInitUserApi()
 
   let unregister: null | (() => void) = null
   let unregisterDislikeEvent: null | (() => void) = null
 
   onBeforeUnmount(() => {
+    stopCacheWatch()
+    setMusicListCacheOwner(cacheOwner, [])
     if (unregister) unregister()
     if (unregisterDislikeEvent) unregisterDislikeEvent()
   })

@@ -13,6 +13,7 @@ const handler: Omit<LX.Sync.ClientSyncHandlerActions<LX.Sync.Client.Socket>, 'fi
       case 'server':
         if (featureVersion.list == supportedFeatures.list) {
           features.list = { skipSnapshot: false }
+          if (featureVersion.listProfile == supportedFeatures.listProfile) features.listProfile = {}
         }
         if (featureVersion.dislike == supportedFeatures.dislike) {
           features.dislike = { skipSnapshot: false }
@@ -28,6 +29,7 @@ const handler: Omit<LX.Sync.ClientSyncHandlerActions<LX.Sync.Client.Socket>, 'fi
       default:
         if (featureVersion.list == supportedFeatures.list) {
           features.list = { skipSnapshot: false }
+          if (featureVersion.listProfile == supportedFeatures.listProfile) features.listProfile = {}
         }
         if (featureVersion.dislike == supportedFeatures.dislike) {
           features.dislike = { skipSnapshot: false }

@@ -22,8 +22,8 @@
             {{ currentPlaybackQuality }}
           </span>
         </div>
-        <div :class="$style.singer" :aria-label="musicInfo.singer + $t('copy_tip')" @click="handleCopy(musicInfo.singer)">
-          {{ musicInfo.singer || statusText }}
+        <div :class="$style.singer" :title="playbackNotice || statusText || musicInfo.singer" aria-live="polite" :aria-label="playbackNotice || statusText || (musicInfo.singer + $t('copy_tip'))" @click="!playbackNotice && !statusText && handleCopy(musicInfo.singer)">
+          {{ playbackNotice || statusText || musicInfo.singer }}
         </div>
       </div>
       <control-btns show-favorite :show-add-to="false" :show-lyric="false" :show-volume="false" :show-play-mode="false" compact />
@@ -100,6 +100,7 @@ import PlayQueue from '../PlayQueue.vue'
 import usePlayProgress from '@renderer/utils/compositions/usePlayProgress'
 import {
   statusText,
+  playbackNotice,
   musicInfo,
   isShowPlayerDetail,
   isPlay,
@@ -217,6 +218,7 @@ export default {
       handleCopy,
       imgError,
       statusText,
+      playbackNotice,
       showPlayerDetail,
       isPlay,
       togglePlay,

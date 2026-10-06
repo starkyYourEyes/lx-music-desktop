@@ -7,6 +7,7 @@ import { clearPlayedList } from '@renderer/store/player/action'
 import { playInfo, playMusicInfo } from '@renderer/store/player/state'
 import { getQQMusicAccountKey } from '@renderer/store/qqMusic'
 import { dislikeQQMusic, getQQMusicDailyRecommendSongs } from '@renderer/utils/ipc'
+import { assertRecommendationEnabled, isRecommendationEnabled, registerRecommendationCleanup } from '@renderer/core/features/recommendationAccess'
 import {
   QQ_DAILY_RECOMMEND_LIST_ID,
   QQ_DAILY_RECOMMEND_TEMP_LIST_ID,
@@ -85,6 +86,7 @@ export const resetQQDailyRecommend = () => {
 }
 
 export const prepareQQDailyRecommend = async(accountKey: string, force = false) => {
+  if (!isRecommendationEnabled('qqRecommend')) return isQQDailyRecommendListActive(accountKey) ? qqDailyRecommendSongs : []
   beginAccountSession(accountKey)
   if (!force && qqDailyRecommendSongs.length) return qqDailyRecommendSongs
 
@@ -101,7 +103,7 @@ export const prepareQQDailyRecommend = async(accountKey: string, force = false) 
   isLoadingQQDailyRecommend.value = true
   const task = getQQMusicDailyRecommendSongs()
     .then(songs => {
-      if (!isCurrentSnapshot(accountKey, generation)) return []
+      if (!isRecommendationEnabled('qqRecommend') || !isCurrentSnapshot(accountKey, generation)) return []
       qqDailyRecommendSongs.splice(0, qqDailyRecommendSongs.length, ...markRawList(songs))
       return songs
     })
@@ -244,6 +246,7 @@ export const dislikeQQDailyRecommendMusic = (
 }
 
 export const playQQDailyRecommend = async(accountKey: string, startIndex = 0) => {
+  assertRecommendationEnabled('qqRecommend')
   beginAccountSession(accountKey)
   const generation = qqDailyRecommendGeneration.value
   if (!qqDailyRecommendSongs.length) {
@@ -251,11 +254,11 @@ export const playQQDailyRecommend = async(accountKey: string, startIndex = 0) =>
   } else if (request?.accountKey == accountKey && request.generation == generation) {
     await request.task
   }
-  if (!isCurrentSnapshot(accountKey, generation)) return
+  if (!isRecommendationEnabled('qqRecommend') || !isCurrentSnapshot(accountKey, generation)) return
   if (!qqDailyRecommendSongs.length) throw new Error('QQ Daily 30 has no songs')
 
   const previousTempList = await syncQQDailyRecommendTempList()
-  if (!isCurrentSnapshot(accountKey, generation)) {
+  if (!isRecommendationEnabled('qqRecommend') || !isCurrentSnapshot(accountKey, generation)) {
     await restorePreviousTempList(previousTempList)
     return
   }
@@ -291,3 +294,7 @@ export const getQQDailyRecommendPlaylistDetail = async(
     noItemLabel: songs.length ? '' : '暂无每日30首推荐',
   } as unknown as LX.Netease.PlaylistDetailInfo
 }
+
+registerRecommendationCleanup('qqRecommend', () => {
+  if (!isQQDailyRecommendListActive(qqDailyRecommendOwnerAccountKey.value)) resetQQDailyRecommend()
+})

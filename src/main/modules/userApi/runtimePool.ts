@@ -94,6 +94,7 @@ export interface UserApiRuntimePool {
   releaseLease(params: LX.UserApi.UserApiRuntimeLeaseParams, ownerWebContentsId: number): Promise<void>
   releaseOwner(ownerWebContentsId: number): Promise<void>
   markConfigured(apiIds: ReadonlySet<string>): Promise<void>
+  configureIdlePolicy(policy: { primaryApiId: string, idleMinutes: 0 | 1 | 5 | 15 }): Promise<void>
   acceptInit(senderId: number, envelope: LX.UserApi.UserApiRuntimeInitEnvelope): boolean
   acceptResponse(senderId: number, envelope: LX.UserApi.UserApiRuntimeResponseEnvelope): boolean
   handleOpenDevTools(senderId: number, envelope: LX.UserApi.UserApiRuntimeControlEnvelope): boolean
@@ -127,6 +128,15 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   const retiringCreationsByApiId = new Map<string, RuntimeCreationRetirementState>()
   const retiringByApiId = new Map<string, RuntimeRetirementState>()
   const nextGenerationByApiId = new Map<string, number>()
+  const idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  let primaryApiId = ''
+  let idleMinutes: 0 | 1 | 5 | 15 = 5
+  const cancelIdleTimer = (apiId: string) => {
+    const timer = idleTimers.get(apiId)
+    if (timer == null) return
+    deps.clearTimeout(timer)
+    idleTimers.delete(apiId)
+  }
 
   const hasLeases = (apiId: string) => {
     const owners = leasesByApiId.get(apiId)
@@ -193,6 +203,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   }
 
   const removeRecord = (record: RuntimeRecord) => {
+    cancelIdleTimer(record.apiId)
     if (recordsByApiId.get(record.apiId) == record) recordsByApiId.delete(record.apiId)
     const binding = bindingsByWebContentsId.get(record.runtime.webContentsId)
     if (binding?.apiId == record.apiId && binding.generation == record.generation) {
@@ -545,8 +556,11 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   }
 
   const ensure = async(apiId: string) => {
+    cancelIdleTimer(apiId)
     const record = await ensureRecord(apiId)
-    return record.initPromise
+    const info = await record.initPromise
+    await disposeIfIdle(apiId)
+    return info
   }
 
   const invalidate = async(apiId: string, kind: 'sourceChanged' | 'runtimeCrash') => {
@@ -576,6 +590,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   }
 
   dispose = async(apiId, options) => {
+    cancelIdleTimer(apiId)
     leasesByApiId.delete(apiId)
     const failure = messageFailure(apiId, 'sourceChanged', 'User API source changed')
     const creating = creatingByApiId.get(apiId)
@@ -631,9 +646,26 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
   }
 
   disposeIfIdle = async(apiId: string) => {
-    if ((pendingByApiId.get(apiId)?.size ?? 0) > 0 || hasLeases(apiId)) return
-    if (configuredApiIds.has(apiId)) return
+    if ((pendingByApiId.get(apiId)?.size ?? 0) > 0 || hasLeases(apiId) || apiId == primaryApiId) {
+      cancelIdleTimer(apiId)
+      return
+    }
     const record = recordsByApiId.get(apiId)
+    if (configuredApiIds.has(apiId)) {
+      // Configuration keeps capabilities discoverable, but only the primary source is pinned.
+      if (!record?.initSettled || record.disposing || idleMinutes == 0 || idleTimers.has(apiId)) return
+      const generation = record.generation
+      const timer = deps.setTimeout(() => {
+        idleTimers.delete(apiId)
+        if (recordsByApiId.get(apiId)?.generation != generation || apiId == primaryApiId ||
+          hasLeases(apiId) || (pendingByApiId.get(apiId)?.size ?? 0) > 0) return
+        deps.publishStatus({ apiId, status: false, message: 'User API runtime released after idle timeout' })
+        observeLifecycle(`dispose idle user API runtime ${apiId} failed`, dispose(apiId, { clearSession: false }))
+      }, idleMinutes * 60_000)
+      idleTimers.set(apiId, timer)
+      ;(timer as { unref?: () => void }).unref?.()
+      return
+    }
     if (record?.disposeWhenIdle) {
       await dispose(apiId, { clearSession: false })
       return
@@ -704,6 +736,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
 
   const acquireLease: UserApiRuntimePool['acquireLease'] = (params, ownerWebContentsId) => {
     for (const apiId of params.apiIds) {
+      cancelIdleTimer(apiId)
       let owners = leasesByApiId.get(apiId)
       if (!owners) leasesByApiId.set(apiId, owners = new Map())
       let leases = owners.get(ownerWebContentsId)
@@ -744,6 +777,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     configuredApiIds.clear()
     for (const apiId of apiIds) configuredApiIds.add(apiId)
     for (const apiId of affected) {
+      cancelIdleTimer(apiId)
       const isConfigured = configuredApiIds.has(apiId)
       const record = recordsByApiId.get(apiId)
       if (record) record.disposeWhenIdle = !isConfigured
@@ -754,6 +788,13 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
       }
     }
     await Promise.all([...affected].map(disposeIfIdle))
+  }
+
+  const configureIdlePolicy: UserApiRuntimePool['configureIdlePolicy'] = async policy => {
+    primaryApiId = policy.primaryApiId
+    idleMinutes = policy.idleMinutes
+    for (const apiId of idleTimers.keys()) cancelIdleTimer(apiId)
+    await Promise.all([...recordsByApiId.keys()].map(disposeIfIdle))
   }
 
   const acceptInit: UserApiRuntimePool['acceptInit'] = (senderId, envelope) => {
@@ -871,6 +912,7 @@ export const createUserApiRuntimePool: CreateUserApiRuntimePool = deps => {
     releaseLease,
     releaseOwner,
     markConfigured,
+    configureIdlePolicy,
     acceptInit,
     acceptResponse,
     handleOpenDevTools,

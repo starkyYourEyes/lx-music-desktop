@@ -7,6 +7,7 @@ import { tempListMeta } from '@renderer/store/list/state'
 import { isPlay, playInfo, playMusicInfo } from '@renderer/store/player/state'
 import { toCloneable } from '@renderer/views/Recommend/utils'
 import { playSongListDetail } from '@renderer/views/songList/Detail/action'
+import { isRecommendationEnabled } from '@renderer/core/features/recommendationAccess'
 
 type SectionName = 'public' | 'daily' | 'style' | 'fm'
 
@@ -69,6 +70,7 @@ export const useKugouRecommendPlayback = ({
   }
 
   const playSection = async(name: SectionName) => {
+    if (!isRecommendationEnabled('kugouRecommend') && !isSectionListActive(name)) return
     const songs = getSongs(name)
     if (!songs.length) return
     try {
@@ -85,6 +87,7 @@ export const useKugouRecommendPlayback = ({
   }
 
   const playSong = async(name: SectionName, index: number) => {
+    if (!isRecommendationEnabled('kugouRecommend') && !isSectionListActive(name)) return
     const songs = getSongs(name)
     const song = songs[index]
     if (!song) return

@@ -53,6 +53,7 @@ const loadSourceModule = modulePath => {
     if (request == '@common/mainIpc') return { mainHandle: () => {}, mainOn: () => {} }
     if (request == '@common/utils') return { log: { error: () => {} } }
     if (request == '@main/utils') return { updateCatalogPreferences: () => { throw new Error('unexpected global settings write') } }
+    if (request == '@main/modules/sync/listProfileEvent') return { publishPlaylistProfileUpdate() {} }
     if (request == '@main/utils/store') return () => { throw new Error('unexpected global Store access') }
     if (request.startsWith('@common/')) {
       return originalLoad.call(this, path.join(commonRoot, `${request.slice('@common/'.length)}.ts`), parent, isMain)

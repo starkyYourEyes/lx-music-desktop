@@ -8,7 +8,7 @@
       </button>
       <transition enter-active-class="animated fadeIn" leave-active-class="animated fadeOut">
         <div v-if="isShowAccountPopover" :class="$style.accountPopover">
-          <div :class="$style.providerRow">
+          <div v-if="isFeatureEnabled(appSetting, 'qqRecommend')" :class="$style.providerRow">
             <span :class="$style.providerMarker" aria-hidden="true">Q</span>
             <span :class="$style.providerInfo">
               <span :class="$style.providerName">QQ 音乐</span>
@@ -23,7 +23,7 @@
               @click="handleQQMusicAction"
             >{{ qqIsLoggedIn ? '退出' : '登录' }}</button>
           </div>
-          <div :class="$style.providerRow">
+          <div v-if="isFeatureEnabled(appSetting, 'neteaseRecommend')" :class="$style.providerRow">
             <span :class="$style.providerMarker" aria-hidden="true">N</span>
             <span :class="$style.providerInfo">
               <span :class="$style.providerName">网易云音乐</span>
@@ -38,7 +38,7 @@
               @click="handleNeteaseAction"
             >{{ neteaseIsLoggedIn ? '退出' : '登录' }}</button>
           </div>
-          <div :class="$style.providerRow">
+          <div v-if="isFeatureEnabled(appSetting, 'kugouRecommend')" :class="$style.providerRow">
             <span :class="[$style.providerMarker, $style.kugouMarker]" aria-hidden="true">K</span>
             <span :class="$style.providerInfo">
               <span :class="$style.providerName">{{ $t('kugou_account_name') }}</span>
@@ -73,6 +73,7 @@
 </template>
 
 <script setup>
+import { isFeatureEnabled } from '@common/performance/featurePolicy'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from '@common/utils/vueTools'
 import { useRoute, useRouter } from '@common/utils/vueRouter'
 import { isFullscreen } from '@renderer/store'

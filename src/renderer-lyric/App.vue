@@ -9,7 +9,7 @@
       <layout-lyric-vertical v-if="setting['desktopLyric.direction'] == 'vertical'" />
       <layout-lyric-horizontal v-else />
       <transition enter-active-class="animated-fast fadeIn" leave-active-class="animated-fast fadeOut">
-        <common-audio-visualizer v-if="setting['desktopLyric.audioVisualization']" />
+        <common-audio-visualizer v-if="setting['desktopLyric.audioVisualization']" :visible="!isHide && !(isHoverHide && isMouseEnter)" />
       </transition>
     </div>
     <template v-if="isShowResize">

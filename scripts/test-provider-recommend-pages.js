@@ -6,7 +6,6 @@ const root = path.resolve(__dirname, '..')
 const read = file => fs.readFileSync(path.join(root, file), 'utf8')
 const exists = file => fs.existsSync(path.join(root, file))
 
-const router = read('src/renderer/router.ts')
 const navBar = read('src/renderer/components/layout/Aside/NavBar.vue')
 const aside = read('src/renderer/components/layout/Aside/index.vue')
 const neteasePage = read('src/renderer/views/Recommend/index.vue')
@@ -21,23 +20,15 @@ assert.strictEqual(JSON.parse(zhCN).setting__recommend, '推荐设置')
 assert.strictEqual(JSON.parse(zhTW).setting__recommend, '推薦設定')
 assert.strictEqual(JSON.parse(enUS).setting__recommend, 'Recommendations')
 
-assert.match(router, /path:\s*'\/qq-recommend'[\s\S]*?views\/QQRecommend\/index\.vue/,
-  'router should expose a dedicated QQ recommendation page')
+require('./test-utils/provider-navigation').assertProviderNavigation('qqRecommend', '/qq-recommend')
 
 assert(exists('src/renderer/assets/images/providers/netease-music.svg'),
   'NetEase Music logo should be bundled locally')
 assert(exists('src/renderer/assets/images/providers/qq-music.svg'),
   'QQ Music logo should be bundled locally')
 
-const neteaseMenuIndex = navBar.indexOf("to: '/recommend'")
-const qqMenuIndex = navBar.indexOf("to: '/qq-recommend'")
-const listMenuIndex = navBar.indexOf("to: '/list'")
-assert(neteaseMenuIndex >= 0 && qqMenuIndex > neteaseMenuIndex && listMenuIndex > qqMenuIndex,
-  'sidebar should order NetEase, QQ Music, then the library')
 assert.match(navBar, /<img[^>]*item\.logo/,
   'provider entries should render their local logo images')
-assert.match(navBar, /separator[\s\S]*index == 2/,
-  'the navigation separator should follow both provider entries')
 
 assert.match(aside, /handleQQMusicAction[\s\S]*?path:\s*'\/qq-recommend'/,
   'QQ account login should navigate to the QQ recommendation page')

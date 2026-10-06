@@ -11,6 +11,9 @@ dd
         base-input.gap-left(:class="$style.portInput" :model-value="appSetting['sync.server.port']" :disabled="sync.enable" type="number" :placeholder="$t('setting__sync_server_port_tip')" @update:model-value="setSyncServerPort")
 
     .p.gap-top
+      base-checkbox(id="setting_sync_allow_user_api_push" :model-value="appSetting['sync.server.allowUserApiPush']" :label="$t('setting__sync_server_allow_user_api_push')" @update:model-value="updateSetting({ 'sync.server.allowUserApiPush': $event })")
+      .p.small {{ $t('setting__sync_server_allow_user_api_push_tip') }}
+    .p.gap-top
       base-btn.btn(min :disabled="!sync.server.status.status" @click="refreshSyncCode") {{ $t('setting__sync_server_refresh_code') }}
       base-btn.btn(min @click="isShowDeviceListModal = true") {{ $t('setting__sync_server_show_device_list') }}
   ServerDeviceListModal(v-model="isShowDeviceListModal")
@@ -61,6 +64,7 @@ export default {
 
     return {
       appSetting,
+      updateSetting,
       sync,
       syncEnableServerTitle,
       setSyncServerPort,

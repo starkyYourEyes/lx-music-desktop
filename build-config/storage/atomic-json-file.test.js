@@ -442,6 +442,51 @@ describe('atomic JSON file', () => {
 })
 
 describe('Store atomic persistence', () => {
+  it('rebases durable transforms over synchronous writes made during atomic persistence', async() => {
+    const { target } = await createFixture('store-durable-rebase')
+    await fsp.writeFile(target, '{"feature":"onDemand","volume":1}')
+    let release
+    let entered
+    const held = new Promise(resolve => { release = resolve })
+    const paused = new Promise(resolve => { entered = resolve })
+    let intercepted = false
+    const fileSystem = {
+      ...fsp,
+      async open(filePath, flags, mode) {
+        const handle = await fsp.open(filePath, flags, mode)
+        if (!String(filePath).includes('.owned-tmp-') || intercepted) return handle
+        intercepted = true
+        return {
+          writeFile: handle.writeFile.bind(handle),
+          async sync() { entered(); await held; await handle.sync() },
+          close: handle.close.bind(handle),
+        }
+      },
+    }
+    const store = new Store(target, false, fileSystem)
+    const saved = store.updateDurable(snapshot => ({ ...snapshot, feature: 'off' }))
+    await paused
+    assert.equal(store.get('feature'), 'onDemand')
+    store.set('volume', 2)
+    release()
+    await saved
+    await store.flush()
+    assert.equal(store.get('feature'), 'off')
+    assert.equal(store.get('volume'), 2)
+    assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { feature: 'off', volume: 2 })
+  })
+
+  it('serializes concurrent durable transforms without losing independent changes', async() => {
+    const { target } = await createFixture('store-durable-serial')
+    await fsp.writeFile(target, '{"feature":"onDemand","volume":1}')
+    const store = new Store(target)
+    await Promise.all([
+      store.updateDurable(snapshot => ({ ...snapshot, feature: 'off' })),
+      store.updateDurable(snapshot => ({ ...snapshot, volume: 3 })),
+    ])
+    assert.deepEqual(JSON.parse(await fsp.readFile(target, 'utf8')), { feature: 'off', volume: 3 })
+  })
+
   it('publishes a durable value only after atomic replacement succeeds', async() => {
     // Catches an awaitable Store API that mutates observable memory before a failed durable write.
     const { target } = await createFixture('store-durable-failure')
@@ -523,6 +568,9 @@ describe('Store atomic persistence', () => {
     global.lxDataPath = dir
 
     const store = getStore(name, true, false)
+    // Recovery has quarantined the malformed original. Inject a new invalid
+    // destination to exercise a genuine post-recovery atomic persistence error.
+    await fsp.writeFile(target, '[]')
     store.set('value', 2)
 
     await assert.rejects(flushStores(), error => error.message == 'Store persistence failed')
@@ -636,7 +684,10 @@ describe('Store atomic persistence', () => {
       assert.equal(recovered.has('cookie'), false)
       assert.equal(storeLogEntries.length, 1)
       assert.equal(storeDialogEntries.length, 1)
-      assert.deepEqual(storeShownPaths, [target])
+      assert.equal(storeShownPaths.length, 1)
+      assert.notEqual(storeShownPaths[0], target)
+      assert.equal(await fsp.readFile(storeShownPaths[0], 'utf8'), fixture.contents)
+      assert.equal(storeDialogEntries[0].detail.includes(storeShownPaths[0]), true)
       const diagnosticText = [
         storeLogEntries[0]?.stack ?? String(storeLogEntries[0]),
         JSON.stringify(storeDialogEntries[0]),

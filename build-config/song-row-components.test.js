@@ -267,8 +267,12 @@ const createOnlineListHarness = async(actionButtonsVisible, options = {}) => {
   app.component('BaseMenu', EmptyStub)
   app.component('SvgIcon', SvgIcon)
 
-  const html = await renderToString(app)
-  return { html, item, observed }
+  const previousWindow = global.window
+  global.window = { app_event: { on() {}, off() {} }, i18n: { t: key => key } }
+  try {
+    const html = await renderToString(app)
+    return { html, item, observed }
+  } finally { global.window = previousWindow }
 }
 
 const createMusicListHarness = async(actionButtonsVisible, options = {}) => {
@@ -473,8 +477,12 @@ const createMusicListHarness = async(actionButtonsVisible, options = {}) => {
   app.component('BaseMenu', EmptyStub)
   app.component('SvgIcon', SvgIcon)
 
-  const html = await renderToString(app)
-  return { html, item, observed }
+  const previousWindow = global.window
+  global.window = { app_event: { on() {}, off() {} }, i18n: { t: key => key } }
+  try {
+    const html = await renderToString(app)
+    return { html, item, observed }
+  } finally { global.window = previousWindow }
 }
 
 const createRecentPlayHarness = async() => {

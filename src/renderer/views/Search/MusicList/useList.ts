@@ -7,6 +7,7 @@ import { addHistoryWord } from '@renderer/store/search/action'
 // import { } from '@renderer/store/search/state'
 import { search as searchMusic, listInfos, type ListInfo } from '@renderer/store/search/music'
 import { canStartPlayback } from '@renderer/store/utils'
+import { retainMusicList } from '@renderer/store/list/listManage/state'
 
 export type SearchSource = LX.OnlineSource | 'all'
 
@@ -39,13 +40,15 @@ export default () => {
     let targetSong = listInfo.value.list[index]
 
     if (!canStartPlayback(targetSong.source)) return
+    const release = retainMusicList(LIST_IDS.DEFAULT)
+    try {
+      const defaultListMusics = await getListMusics(LIST_IDS.DEFAULT)
 
-    const defaultListMusics = await getListMusics(LIST_IDS.DEFAULT)
+      await addListMusics(LIST_IDS.DEFAULT, [targetSong])
 
-    await addListMusics(LIST_IDS.DEFAULT, [targetSong])
-
-    let targetIndex = defaultListMusics.findIndex(s => s.id === targetSong.id)
-    if (targetIndex > -1) playList(LIST_IDS.DEFAULT, targetIndex)
+      let targetIndex = defaultListMusics.findIndex(s => s.id === targetSong.id)
+      if (targetIndex > -1) playList(LIST_IDS.DEFAULT, targetIndex)
+    } finally { release() }
   }
 
   return {

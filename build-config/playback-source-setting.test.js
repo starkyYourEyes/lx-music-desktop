@@ -66,6 +66,7 @@ test('add move and remove preserve explicit user order', () => {
 
 test('default setting starts with no fallbacks and serial mode', () => {
   const defaults = loadTsModule(path.join(__dirname, '../src/common/defaultSetting.ts'), {
+    './performance/featurePolicy': loadTsModule(path.join(__dirname, '../src/common/performance/featurePolicy.ts')),
     'node:path': require('node:path'),
     'node:os': require('node:os'),
     './constants': { RECOMMEND_HOME_SECTION_IDS: [] },

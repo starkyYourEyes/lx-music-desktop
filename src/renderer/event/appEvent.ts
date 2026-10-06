@@ -19,6 +19,10 @@ import type {
 // }
 
 export class AppEvent extends Event {
+  listProfilesUpdated() {
+    this.emit('listProfilesUpdated')
+  }
+
   configUpdate(setting: Partial<LX.AppSetting>) {
     this.emit('configUpdate', setting)
   }

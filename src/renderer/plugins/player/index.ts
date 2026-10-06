@@ -1,4 +1,5 @@
 import type { PlaybackResource } from '@renderer/core/music/playback/coordinator'
+import type { FeatureLoadMode } from '@common/performance/featurePolicy'
 
 interface HTMLAudioElementChrome extends HTMLAudioElement {
   setSinkId: (id: string) => Promise<void>
@@ -14,6 +15,7 @@ export interface SetResourceOptions {
   startTime?: number
   shouldPlay?: boolean
   resource: PlaybackResource
+  preloadedAudio?: HTMLAudioElement | null
 }
 
 export interface PlayerResourceController {
@@ -32,13 +34,25 @@ export interface PlayerResourceController {
 
 export type CreatePlayerResourceController = (deps: {
   audio: HTMLAudioElement
+  adoptAudio?: (next: HTMLAudioElement) => Promise<void>
   canonicalizeUrl: (value: string) => string
 }) => PlayerResourceController
 
 let audio: HTMLAudioElementChrome | null = null
+const audioListeners = new Map<string, Set<EventListener>>()
+const addAudioListener = (name: string, listener: EventListener) => {
+  let listeners = audioListeners.get(name)
+  if (!listeners) audioListeners.set(name, listeners = new Set())
+  listeners.add(listener)
+  audio?.addEventListener(name, listener)
+}
+const removeAudioListener = (name: string, listener: EventListener) => {
+  audioListeners.get(name)?.delete(listener)
+  audio?.removeEventListener(name, listener)
+}
 let audioContext: AudioContext
 let mediaSource: MediaElementAudioSourceNode
-let analyser: AnalyserNode
+let analyser: AnalyserNode | null = null
 // https://developer.mozilla.org/en-US/docs/Web/API/BaseAudioContext
 // https://benzleung.gitbooks.io/web-audio-api-mini-guide/content/chapter5-1.html
 export const freqs = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000] as const
@@ -83,13 +97,100 @@ let convolverSourceGainNode: GainNode
 let convolverOutputGainNode: GainNode
 let convolverDynamicsCompressor: DynamicsCompressorNode
 let gainNode: GainNode
+let originalGainNode: GainNode
+let equalizerGainNode: GainNode
+let equalizerResponseFilter: BiquadFilterNode
+let soundEffectMode: 'original' | 'effects' = 'effects'
 let panner: PannerNode
 let pitchShifterNode: AudioWorkletNode
 let pitchShifterNodePitchFactor: AudioParam | null
 let pitchShifterNodeLoadStatus: 'none' | 'loading' | 'unconnect' | 'connected' = 'none'
 let pitchShifterNodeTempValue = 1
+let pitchWorkletPromise: Promise<void> | null = null
+let pitchWorkletLoaded = false
+let pitchLoadGeneration = 0
+let effectLoadError: string | null = null
 let defaultChannelCount = 2
 export const soundR = 0.5
+
+type AudioFeature = 'soundEffects' | 'audioVisualization'
+let featurePolicy: Record<AudioFeature, FeatureLoadMode> & { mediaDeviceId: string } = {
+  soundEffects: 'onDemand', audioVisualization: 'onDemand', mediaDeviceId: 'default',
+}
+let maxOutputChannels = false
+let analyserUsers = 0
+let effectDisposalTimer: ReturnType<typeof setTimeout> | null = null
+let savedEqualizerGains: number[] = freqs.map(() => 0)
+const featureListeners = new Set<() => void>()
+const effectsAllowed = () => featurePolicy.soundEffects != 'off' && featurePolicy.mediaDeviceId == 'default'
+const effectsActive = () => effectsAllowed() && soundEffectMode == 'effects'
+const notifyFeatureState = () => { for (const listener of featureListeners) listener() }
+
+export const getAudioFeatureState = () => {
+  const outputRemovable = audioContext != null && !maxOutputChannels &&
+    featurePolicy.soundEffects == 'off' && featurePolicy.audioVisualization == 'off'
+  const effectsRestartRequired = featurePolicy.soundEffects == 'off' && (outputRemovable || pitchWorkletLoaded)
+  return {
+    effectsLoaded: biquads != null,
+    effectsActive: biquads != null && effectsActive(),
+    analyserLoaded: analyser != null,
+    analyserActive: analyser != null && analyserUsers > 0,
+    deviceBlocked: featurePolicy.mediaDeviceId != 'default',
+    error: effectLoadError,
+    // The media source cannot be detached from its element. Never close its context:
+    // only a new player can remove it, and maximum-channel output still needs it.
+    restartRequired: outputRemovable || effectsRestartRequired,
+    effectsRestartRequired,
+    visualizationRestartRequired: outputRemovable,
+  }
+}
+
+export const subscribeAudioFeatureState = (listener: () => void) => {
+  featureListeners.add(listener)
+  return () => { featureListeners.delete(listener) }
+}
+
+const releaseAnalyser = () => {
+  if (!analyser) return
+  mediaSource.disconnect(analyser)
+  analyser.disconnect()
+  analyser = null
+  notifyFeatureState()
+}
+
+export const setAudioFeaturePolicy = (policy: typeof featurePolicy) => {
+  featurePolicy = { ...policy }
+  if (policy.audioVisualization == 'off' || policy.mediaDeviceId != 'default' ||
+    (policy.audioVisualization != 'resident' && !analyserUsers)) releaseAnalyser()
+  applySoundEffectMode()
+  if (!effectsActive()) releaseEffects()
+  notifyFeatureState()
+}
+
+export const prepareAudioFeature = (feature: AudioFeature) => {
+  if (featurePolicy[feature] != 'resident' || featurePolicy.mediaDeviceId != 'default') return
+  if (feature == 'soundEffects') initEffectNodes()
+  else getAnalyser()
+  notifyFeatureState()
+}
+
+export const acquireAnalyser = () => {
+  const node = getAnalyser()
+  if (!node) return null
+  analyserUsers++
+  notifyFeatureState()
+  let released = false
+  return {
+    analyser: node,
+    release() {
+      if (released) return
+      released = true
+      analyserUsers--
+      if (!analyserUsers && featurePolicy.audioVisualization != 'resident') releaseAnalyser()
+      notifyFeatureState()
+    },
+  }
+}
 
 
 export const createAudio = () => {
@@ -101,6 +202,34 @@ export const createAudio = () => {
   audio.crossOrigin = 'anonymous'
   resourceControllerInstance = createPlayerResourceController({
     audio,
+    async adoptAudio(next) {
+      const previous = audio!
+      for (const [name, listeners] of audioListeners) {
+        for (const listener of listeners) {
+          previous.removeEventListener(name, listener)
+          next.addEventListener(name, listener)
+        }
+      }
+      next.volume = previous.volume
+      next.muted = previous.muted
+      next.defaultPlaybackRate = previous.defaultPlaybackRate
+      next.playbackRate = previous.playbackRate
+      next.preservesPitch = previous.preservesPitch
+      next.loop = previous.loop
+      next.preload = 'auto'
+      audio = next as HTMLAudioElementChrome
+      previous.autoplay = false
+      previous.pause()
+      previous.removeAttribute('src')
+      previous.load()
+      if (audioContext) {
+        mediaSource.disconnect()
+        mediaSource = audioContext.createMediaElementSource(next)
+        handleMediaListChange()
+      } else if (featurePolicy.mediaDeviceId != 'default') {
+        await audio.setSinkId(featurePolicy.mediaDeviceId)
+      }
+    },
     canonicalizeUrl(value) {
       try { return new URL(value, window.location.href).href } catch { return value }
     },
@@ -128,6 +257,7 @@ const initBiquadFilter = () => {
   for (i = 1; i < freqs.length; i++) {
     (biquads.get(`hz${freqs[i - 1]}`)!).connect(biquads.get(`hz${freqs[i]}`)!)
   }
+  return biquads
 }
 
 const initConvolver = () => {
@@ -146,6 +276,11 @@ const initPanner = () => {
 
 const initGain = () => {
   gainNode = audioContext.createGain()
+  equalizerGainNode = audioContext.createGain()
+  equalizerResponseFilter = audioContext.createBiquadFilter()
+  equalizerResponseFilter.type = 'peaking'
+  equalizerResponseFilter.Q.value = 1.4
+  gainNode.gain.value = 0
 }
 
 const initAdvancedAudioFeatures = () => {
@@ -154,35 +289,42 @@ const initAdvancedAudioFeatures = () => {
   audioContext = new window.AudioContext({ latencyHint: 'playback' })
   defaultChannelCount = audioContext.destination.channelCount
 
-  initAnalyser()
-  initBiquadFilter()
+  mediaSource = audioContext.createMediaElementSource(audio)
+  originalGainNode = audioContext.createGain()
+  mediaSource.connect(originalGainNode)
+  originalGainNode.connect(audioContext.destination)
+
+  window.app_event.on('playerDeviceChanged', handleMediaListChange)
+  notifyFeatureState()
+}
+
+const initEffectNodes = () => {
+  if (biquads || !effectsAllowed()) return
+  initAdvancedAudioFeatures()
+  const filters = initBiquadFilter()
   initConvolver()
   initPanner()
   initGain()
-  // source -> analyser -> biquadFilter -> pitchShifter -> [(convolver & convolverSource)->convolverDynamicsCompressor] -> panner -> gain
-  mediaSource = audioContext.createMediaElementSource(audio)
-  mediaSource.connect(analyser)
-  analyser.connect(biquads.get(`hz${freqs[0]}`)!)
-  const lastBiquadFilter = (biquads.get(`hz${freqs.at(-1)!}`)!)
+  mediaSource.connect(equalizerGainNode)
+  equalizerGainNode.connect(filters.get(`hz${freqs[0]}`)!)
+  const lastBiquadFilter = (filters.get(`hz${freqs.at(-1)!}`)!)
   lastBiquadFilter.connect(convolverSourceGainNode)
   lastBiquadFilter.connect(convolver)
-  convolverDynamicsCompressor.connect(panner)
+  convolverSourceGainNode.connect(panner)
   panner.connect(gainNode)
   gainNode.connect(audioContext.destination)
 
-  // 音频输出设备改变时刷新 audio node 连接
-  window.app_event.on('playerDeviceChanged', handleMediaListChange)
-
-  // audio.addEventListener('playing', connectAudioNode)
-  // audio.addEventListener('pause', disconnectAudioNode)
-  // audio.addEventListener('waiting', disconnectAudioNode)
-  // audio.addEventListener('emptied', disconnectAudioNode)
-  // if (!audio.paused) connectAudioNode()
+  applySoundEffectMode()
+  setEqualizerGains(savedEqualizerGains)
+  if (!effectsActive()) releaseEffects()
+  notifyFeatureState()
 }
 
 const handleMediaListChange = () => {
   mediaSource.disconnect()
-  mediaSource.connect(analyser)
+  mediaSource.connect(originalGainNode)
+  if (analyser) mediaSource.connect(analyser)
+  if (biquads && isConnected) mediaSource.connect(equalizerGainNode)
 }
 
 // let isConnected = true
@@ -213,6 +355,7 @@ export const getAudioContext = () => {
 
 let unsubMediaListChangeEvent: (() => void) | null = null
 export const setMaxOutputChannelCount = (enable: boolean) => {
+  maxOutputChannels = enable
   if (enable) {
     initAdvancedAudioFeatures()
     audioContext.destination.channelCountMode = 'max'
@@ -236,21 +379,144 @@ export const setMaxOutputChannelCount = (enable: boolean) => {
       audioContext.destination.channelCountMode = 'explicit'
     }
   }
+  notifyFeatureState()
 }
 
 export const getAnalyser = (): AnalyserNode | null => {
+  if (featurePolicy.audioVisualization == 'off' || featurePolicy.mediaDeviceId != 'default') return null
   initAdvancedAudioFeatures()
+  if (!analyser) {
+    initAnalyser()
+    mediaSource.connect(analyser!)
+    notifyFeatureState()
+  }
   return analyser
 }
 
 export const getBiquadFilter = () => {
-  initAdvancedAudioFeatures()
+  initEffectNodes()
   return biquads
 }
 
-// let isConvolverConnected = false
+export const setSoundEffectMode = (mode: 'original' | 'effects') => {
+  soundEffectMode = mode == 'original' ? 'original' : 'effects'
+  if (effectsActive()) setEqualizerGains(savedEqualizerGains)
+  applySoundEffectMode()
+  if (!effectsActive()) releaseEffects()
+  notifyFeatureState()
+}
+
+const applySoundEffectMode = () => {
+  if (effectDisposalTimer) {
+    clearTimeout(effectDisposalTimer)
+    effectDisposalTimer = null
+  }
+  if (!audioContext) return
+  const active = effectsActive() && biquads != null
+  if (active && !isConnected) connectNode()
+  const now = audioContext.currentTime
+  for (const [node, target] of [
+    [originalGainNode, active ? 0 : 1],
+    [gainNode, active ? 1 : 0],
+  ] as const) {
+    if (!node) continue
+    node.gain.cancelAndHoldAtTime(now)
+    node.gain.setValueAtTime(node.gain.value, now)
+    if (now == 0) node.gain.setValueAtTime(target, now)
+    else node.gain.linearRampToValueAtTime(target, now + 0.02)
+  }
+}
+
+const releaseEffects = () => {
+  stopPanner()
+  pitchLoadGeneration++
+  if (pitchShifterNodeLoadStatus == 'loading') pitchShifterNodeLoadStatus = 'none'
+  if (!biquads) return
+  const dispose = () => {
+    effectDisposalTimer = null
+    if (effectsActive()) return
+    if (pitchShifterNodeLoadStatus == 'connected') disconnectPitchShifterNode()
+    if (isConnected) mediaSource.disconnect(equalizerGainNode)
+    isConnected = false
+    if (effectsAllowed() && featurePolicy.soundEffects == 'resident') return
+    pitchShifterNode?.disconnect()
+    pitchShifterNode?.port.close()
+    pitchShifterNode = undefined!
+    pitchShifterNodePitchFactor = null
+    pitchShifterNodeLoadStatus = 'none'
+    convolver.buffer = null
+    for (const node of [...biquads.values(), equalizerResponseFilter, equalizerGainNode, convolver,
+      convolverSourceGainNode, convolverOutputGainNode, convolverDynamicsCompressor, panner, gainNode]) node.disconnect()
+    biquads = undefined!
+    equalizerResponseFilter = equalizerGainNode = convolver = convolverSourceGainNode = convolverOutputGainNode = convolverDynamicsCompressor = panner = gainNode = undefined!
+    isConnected = true
+    notifyFeatureState()
+  }
+  // Let the existing 20 ms crossfade finish before disconnecting its branch.
+  if (audioContext.currentTime == 0) dispose()
+  else effectDisposalTimer = setTimeout(dispose, 30)
+}
+
+const getEqualizerHeadroom = (gains: readonly number[]) => {
+  if (gains.every(gain => gain <= 0)) return 1
+  const nyquist = audioContext.sampleRate / 2
+  const frequencies = new Float32Array([
+    0,
+    ...Array.from({ length: 2048 }, (_, i) => 10 * (nyquist / 10) ** (i / 2048)),
+    ...freqs.filter(freq => freq < nyquist),
+  ])
+  const magnitudes = new Float32Array(frequencies.length)
+  const phases = new Float32Array(frequencies.length)
+  const combined = new Float64Array(frequencies.length).fill(1)
+  for (let band = 0; band < freqs.length; band++) {
+    equalizerResponseFilter.frequency.value = freqs[band]
+    equalizerResponseFilter.gain.value = gains[band]
+    equalizerResponseFilter.getFrequencyResponse(frequencies, magnitudes, phases)
+    for (let i = 0; i < combined.length; i++) combined[i] *= magnitudes[i]
+  }
+  const maximum = Math.max(1, ...combined)
+  if (!Number.isFinite(maximum)) {
+    return 10 ** (-(gains.reduce((sum, gain) => sum + Math.max(0, gain), 0) + 1) / 20)
+  }
+  // Allow for overlapping bands, with 1 dB extra headroom for boosted curves.
+  return maximum > 1.000001 ? 1 / (maximum * 10 ** (1 / 20)) : 1
+}
+
+export const setEqualizerGains = (gains: readonly number[]) => {
+  const targets = freqs.map((_, i) => Number.isFinite(gains[i]) ? Math.max(-15, Math.min(15, gains[i])) : 0)
+  savedEqualizerGains = targets
+  if (!effectsActive() || (!biquads && targets.every(gain => gain == 0))) return
+  initEffectNodes()
+  const now = audioContext.currentTime
+  const filters = freqs.map(freq => biquads.get(`hz${freq}`)!)
+  const targetHeadroom = getEqualizerHeadroom(targets)
+  equalizerGainNode.gain.cancelAndHoldAtTime(now)
+  equalizerGainNode.gain.setValueAtTime(equalizerGainNode.gain.value, now)
+  for (const filter of filters) filter.gain.cancelAndHoldAtTime(now)
+  if (now == 0) {
+    equalizerGainNode.gain.setValueAtTime(targetHeadroom, now)
+    filters.forEach((filter, i) => filter.gain.setValueAtTime(targets[i], now))
+    return
+  }
+
+  // Attenuate before boosting, then restore gain after the new curve settles.
+  // The per-band envelope also covers interrupted/overlapping slider changes.
+  const currentGains = filters.map(filter => filter.gain.value)
+  const transitionHeadroom = Math.min(equalizerGainNode.gain.value,
+    getEqualizerHeadroom(targets.map((target, i) => Math.max(target, currentGains[i]))))
+  equalizerGainNode.gain.linearRampToValueAtTime(transitionHeadroom, now + 0.01)
+  equalizerGainNode.gain.setValueAtTime(transitionHeadroom, now + 0.03)
+  equalizerGainNode.gain.linearRampToValueAtTime(targetHeadroom, now + 0.05)
+  filters.forEach((filter, i) => {
+    filter.gain.setValueAtTime(currentGains[i], now + 0.01)
+    filter.gain.linearRampToValueAtTime(targets[i], now + 0.03)
+  })
+}
+
 export const setConvolver = (buffer: AudioBuffer | null, mainGain: number, sendGain: number) => {
-  initAdvancedAudioFeatures()
+  if (!effectsActive() || (!buffer && !biquads)) return
+  initEffectNodes()
+  const wasEnabled = convolver.buffer != null
   convolver.buffer = buffer
   // console.log(mainGain, sendGain)
   if (buffer) {
@@ -260,15 +526,26 @@ export const setConvolver = (buffer: AudioBuffer | null, mainGain: number, sendG
     convolverSourceGainNode.gain.value = 1
     convolverOutputGainNode.gain.value = 0
   }
+
+  if (wasEnabled == (buffer != null)) return
+  if (buffer) {
+    convolverSourceGainNode.disconnect(panner)
+    convolverDynamicsCompressor.connect(panner)
+  } else {
+    convolverDynamicsCompressor.disconnect(panner)
+    convolverSourceGainNode.connect(panner)
+  }
 }
 
 export const setConvolverMainGain = (gain: number) => {
+  if (!convolverSourceGainNode || !effectsActive()) return
   if (convolverSourceGainNode.gain.value == gain) return
   // console.log(gain)
   convolverSourceGainNode.gain.value = gain
 }
 
 export const setConvolverSendGain = (gain: number) => {
+  if (!convolverOutputGainNode || !effectsActive()) return
   if (convolverOutputGainNode.gain.value == gain) return
   // console.log(gain)
   convolverOutputGainNode.gain.value = gain
@@ -306,13 +583,15 @@ export const stopPanner = () => {
     pannerInfo.intv = null
     pannerInfo.rad = 0
   }
+  if (!panner) return
   panner.positionX.value = 0
   panner.positionY.value = 0
   panner.positionZ.value = 0
 }
 
 export const startPanner = () => {
-  initAdvancedAudioFeatures()
+  if (!effectsActive()) return
+  initEffectNodes()
   if (pannerInfo.intv) {
     clearInterval(pannerInfo.intv)
     pannerInfo.intv = null
@@ -328,8 +607,7 @@ export const startPanner = () => {
 let isConnected = true
 const connectNode = () => {
   if (isConnected) return
-  console.log('connect Node')
-  analyser?.connect(biquads.get(`hz${freqs[0]}`)!)
+  if (biquads) mediaSource.connect(equalizerGainNode)
   isConnected = true
   if (pitchShifterNodeTempValue == 1 && pitchShifterNodeLoadStatus == 'connected') {
     disconnectPitchShifterNode()
@@ -337,8 +615,7 @@ const connectNode = () => {
 }
 const disconnectNode = () => {
   if (!isConnected) return
-  console.log('disconnect Node')
-  analyser?.disconnect()
+  if (biquads) mediaSource.disconnect(equalizerGainNode)
   isConnected = false
   if (pitchShifterNodeTempValue == 1 && pitchShifterNodeLoadStatus == 'connected') {
     disconnectPitchShifterNode()
@@ -346,10 +623,10 @@ const disconnectNode = () => {
 }
 const connectPitchShifterNode = () => {
   console.log('connect Pitch Shifter Node')
-  audio!.addEventListener('playing', connectNode)
-  audio!.addEventListener('pause', disconnectNode)
-  audio!.addEventListener('waiting', disconnectNode)
-  audio!.addEventListener('emptied', disconnectNode)
+  addAudioListener('playing', connectNode)
+  addAudioListener('pause', disconnectNode)
+  addAudioListener('waiting', disconnectNode)
+  addAudioListener('emptied', disconnectNode)
   if (audio!.paused) disconnectNode()
 
   const lastBiquadFilter = (biquads.get(`hz${freqs.at(-1)!}`)!)
@@ -362,7 +639,8 @@ const connectPitchShifterNode = () => {
   // convolverDynamicsCompressor.connect(pitchShifterNode)
   // pitchShifterNode.connect(panner)
   pitchShifterNodeLoadStatus = 'connected'
-  pitchShifterNodePitchFactor!.value = pitchShifterNodeTempValue
+  pitchShifterNodePitchFactor = pitchShifterNode.parameters.get('pitchFactor')!
+  pitchShifterNodePitchFactor.value = pitchShifterNodeTempValue
 }
 const disconnectPitchShifterNode = () => {
   console.log('disconnect Pitch Shifter Node')
@@ -370,40 +648,65 @@ const disconnectPitchShifterNode = () => {
   lastBiquadFilter.disconnect()
   lastBiquadFilter.connect(convolver)
   lastBiquadFilter.connect(convolverSourceGainNode)
+  pitchShifterNode.disconnect()
   pitchShifterNodeLoadStatus = 'unconnect'
   pitchShifterNodePitchFactor = null
 
-  audio!.removeEventListener('playing', connectNode)
-  audio!.removeEventListener('pause', disconnectNode)
-  audio!.removeEventListener('waiting', disconnectNode)
-  audio!.removeEventListener('emptied', disconnectNode)
+  removeAudioListener('playing', connectNode)
+  removeAudioListener('pause', disconnectNode)
+  removeAudioListener('waiting', disconnectNode)
+  removeAudioListener('emptied', disconnectNode)
   connectNode()
 }
 const loadPitchShifterNode = () => {
   pitchShifterNodeLoadStatus = 'loading'
-  initAdvancedAudioFeatures()
+  const token = ++pitchLoadGeneration
+  effectLoadError = null
+  initEffectNodes()
   // source -> analyser -> biquadFilter -> audioWorklet(pitch shifter) -> [(convolver & convolverSource)->convolverDynamicsCompressor] -> panner -> gain
-  void audioContext.audioWorklet.addModule(new URL(
+  pitchWorkletPromise ??= audioContext.audioWorklet.addModule(new URL(
     /* webpackChunkName: 'pitch_shifter.audioWorklet' */
     './pitch-shifter/phase-vocoder.js',
     import.meta.url,
   )).then(() => {
-    console.log('pitch shifter audio worklet loaded')
+    pitchWorkletLoaded = true
+    notifyFeatureState()
+  }).catch(error => {
+    pitchWorkletPromise = null
+    throw error
+  })
+  void pitchWorkletPromise.then(() => {
+    if (token != pitchLoadGeneration) return
+    if (pitchShifterNodeTempValue == 1 || !effectsActive() || !biquads) {
+      pitchShifterNodeLoadStatus = 'none'
+      return
+    }
     // https://github.com/olvb/phaze/issues/26#issuecomment-1574629971
     pitchShifterNode = new AudioWorkletNode(audioContext, 'phase-vocoder-processor', { outputChannelCount: [2] })
     let pitchFactorParam = pitchShifterNode.parameters.get('pitchFactor')
     if (!pitchFactorParam) return
     pitchShifterNodePitchFactor = pitchFactorParam
     pitchShifterNodeLoadStatus = 'unconnect'
-    if (pitchShifterNodeTempValue == 1) return
-
     connectPitchShifterNode()
+    notifyFeatureState()
+  }).catch(error => {
+    if (token != pitchLoadGeneration) return
+    pitchShifterNodeLoadStatus = 'none'
+    effectLoadError = error instanceof Error ? error.message : String(error)
+    notifyFeatureState()
+    console.error('pitch shifter audio worklet failed', error)
   })
 }
 
 export const setPitchShifter = (val: number) => {
   // console.log('setPitchShifter', val)
   pitchShifterNodeTempValue = val
+  if (!effectsActive()) return
+  if (val == 1) {
+    if (pitchShifterNodeLoadStatus == 'connected') disconnectPitchShifterNode()
+    return
+  }
+  initEffectNodes()
   switch (pitchShifterNodeLoadStatus) {
     case 'loading':
       break
@@ -435,6 +738,7 @@ export const createPlayerResourceController: CreatePlayerResourceController = de
   }
   const installed = new Map<keyof typeof handlers, EventListener>()
   let removePendingSeek: (() => void) | null = null
+  let pendingOutput: Promise<void> | null = null
 
   const clearAudio = () => {
     removePendingSeek?.()
@@ -477,11 +781,28 @@ export const createPlayerResourceController: CreatePlayerResourceController = de
     setResource(url, options) {
       removePendingSeek?.()
       removePendingSeek = null
+      const buffered = options.preloadedAudio
+      const adopting = buffered != null && !buffered.error &&
+        deps.canonicalizeUrl(buffered.src) == deps.canonicalizeUrl(url)
+      if (buffered && !adopting) {
+        buffered.pause()
+        buffered.removeAttribute('src')
+        buffered.load()
+      }
+      let adopted: Promise<void> | undefined
+      if (adopting) {
+        for (const [name, listener] of installed) deps.audio.removeEventListener(name, listener)
+        installed.clear()
+        adopted = deps.adoptAudio?.(buffered)
+        pendingOutput = adopted ?? null
+        deps.audio = buffered
+      }
+      const outputReady = pendingOutput
       const context = { ...options.resource, resourceGeneration: ++nextResourceGeneration }
       resourceContext = context
       installResourceListeners(context.resourceGeneration)
       const shouldPlay = options.shouldPlay != false
-      deps.audio.autoplay = shouldPlay
+      deps.audio.autoplay = adopting || outputReady ? false : shouldPlay
       if (!shouldPlay) deps.audio.pause()
       if ((options.startTime ?? 0) > 0) {
         let active = true
@@ -499,12 +820,30 @@ export const createPlayerResourceController: CreatePlayerResourceController = de
           active = false
           deps.audio.removeEventListener('loadedmetadata', seek)
         }
+        if (adopting && deps.audio.readyState >= 1) seek()
       }
-      deps.audio.src = url
-      if (resourceContext?.resourceGeneration == context.resourceGeneration) {
+      if (!adopting) deps.audio.src = url
+      const start = () => {
+        if (resourceContext?.resourceGeneration != context.resourceGeneration) return
+        if (adopting || outputReady) deps.audio.autoplay = shouldPlay
+        if (adopting) {
+          installed.get('loadeddata')?.(new Event('loadeddata'))
+          if (deps.audio.readyState >= 3) installed.get('canplay')?.(new Event('canplay'))
+        }
         if (shouldPlay) void deps.audio.play().catch(() => {})
         else deps.audio.pause()
       }
+      if (adopting || outputReady) {
+        void Promise.resolve(outputReady).then(() => {
+          if (pendingOutput == outputReady) pendingOutput = null
+          start()
+        }).catch(() => {
+          if (pendingOutput == outputReady) pendingOutput = null
+          if (resourceContext?.resourceGeneration == context.resourceGeneration) {
+            installed.get('error')?.(new Event('error'))
+          }
+        })
+      } else start()
       return context
     },
     setStop: clearAudio,
@@ -633,27 +972,27 @@ type Noop = () => void
 export const onPlaying = (callback: Noop) => {
   if (!audio) throw new Error('audio not defined')
 
-  audio.addEventListener('playing', callback)
+  addAudioListener('playing', callback)
   return () => {
-    audio?.removeEventListener('playing', callback)
+    removeAudioListener('playing', callback)
   }
 }
 
 export const onPause = (callback: Noop) => {
   if (!audio) throw new Error('audio not defined')
 
-  audio?.addEventListener('pause', callback)
+  addAudioListener('pause', callback)
   return () => {
-    audio?.removeEventListener('pause', callback)
+    removeAudioListener('pause', callback)
   }
 }
 
 export const onEnded = (callback: Noop) => {
   if (!audio) throw new Error('audio not defined')
 
-  audio.addEventListener('ended', callback)
+  addAudioListener('ended', callback)
   return () => {
-    audio?.removeEventListener('ended', callback)
+    removeAudioListener('ended', callback)
   }
 }
 
@@ -676,18 +1015,18 @@ export const onCanplay: PlayerResourceController['onCanplay'] = handler => (
 export const onEmptied = (callback: Noop) => {
   if (!audio) throw new Error('audio not defined')
 
-  audio.addEventListener('emptied', callback)
+  addAudioListener('emptied', callback)
   return () => {
-    audio?.removeEventListener('emptied', callback)
+    removeAudioListener('emptied', callback)
   }
 }
 
 export const onTimeupdate = (callback: Noop) => {
   if (!audio) throw new Error('audio not defined')
 
-  audio.addEventListener('timeupdate', callback)
+  addAudioListener('timeupdate', callback)
   return () => {
-    audio?.removeEventListener('timeupdate', callback)
+    removeAudioListener('timeupdate', callback)
   }
 }
 
@@ -699,27 +1038,27 @@ export const onWaiting: PlayerResourceController['onWaiting'] = handler => (
 export const onSeeking = (callback: Noop) => {
   if (!audio) throw new Error('audio not defined')
 
-  audio.addEventListener('seeking', callback)
+  addAudioListener('seeking', callback)
   return () => {
-    audio?.removeEventListener('seeking', callback)
+    removeAudioListener('seeking', callback)
   }
 }
 
 export const onSeeked = (callback: Noop) => {
   if (!audio) throw new Error('audio not defined')
 
-  audio.addEventListener('seeked', callback)
+  addAudioListener('seeked', callback)
   return () => {
-    audio?.removeEventListener('seeked', callback)
+    removeAudioListener('seeked', callback)
   }
 }
 
 export const onRatechange = (callback: Noop) => {
   if (!audio) throw new Error('audio not defined')
 
-  audio.addEventListener('ratechange', callback)
+  addAudioListener('ratechange', callback)
   return () => {
-    audio?.removeEventListener('ratechange', callback)
+    removeAudioListener('ratechange', callback)
   }
 }
 

@@ -3,7 +3,7 @@ name: Run build test
 on:
   pull_request:
     branches:
-      - dev
+      - master
 
 jobs:
   test:
@@ -24,5 +24,27 @@ jobs:
       - name: Eslint check
         run: npm run lint
 
+      - name: Run tests
+        run: npm test
+
       - name: Test Build
         run: npm run build
+
+      - name: Reject tracked ignored files
+        shell: bash
+        run: |
+          ignored=$(git ls-files -ci --exclude-standard -- . ':!:docs/superpowers/**')
+          if [ -n "$ignored" ]; then
+            printf '%s\n' "$ignored"
+            exit 1
+          fi
+
+      - name: Reject unsafe renderer HTML
+        shell: bash
+        run: |
+          if grep -RInE 'v-html|innerHTML' src/renderer; then
+            exit 1
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then exit "$status"; fi
+          fi

@@ -4,10 +4,16 @@ import { appSetting } from '@renderer/store/setting'
 import { sendSyncAction, setWindowSize } from '@renderer/utils/ipc'
 import { setLanguage } from '@root/lang'
 import { setUserApi } from '../apiSource'
-// import { applyTheme, getThemes } from '@renderer/store/utils'
+import { applyTheme, getThemes } from '@renderer/store/utils'
 
 
 export default () => {
+  watch(() => appSetting['performance.simplifyVisuals'], simplified => {
+    document.documentElement.classList.toggle('simplifyVisuals', simplified)
+    getThemes(({ dataPath }) => {
+      applyTheme(appSetting['theme.id'], appSetting['theme.lightId'], appSetting['theme.darkId'], dataPath)
+    })
+  }, { immediate: true })
   watch(() => appSetting['common.windowSizeId'], (index) => {
     const info = index == null ? windowSizeList[2] : windowSizeList.find(i => i.id == index) ?? windowSizeList[0]
     setWindowSize(info.width, info.height)

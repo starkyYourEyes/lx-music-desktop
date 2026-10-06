@@ -31,7 +31,7 @@ let shutdownFlusherRegistered = false
 
 const registerShutdownFlusher = (): void => {
   if (shutdownFlusherRegistered || global.lx.storage == null) return
-  global.lx.storage.registerShutdownFlusher('sync-server-credentials', flushSyncServerData)
+  global.lx.storage.registerShutdownFlusher('sync-server-credentials', flushSyncServerData, { restartSafe: true })
   shutdownFlusherRegistered = true
 }
 

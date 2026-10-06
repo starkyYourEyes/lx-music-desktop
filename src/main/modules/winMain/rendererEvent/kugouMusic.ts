@@ -1,5 +1,6 @@
 import { WIN_MAIN_RENDERER_EVENT_NAME } from '@common/ipcNames'
 import { mainHandle } from '@common/mainIpc'
+import { assertRecommendationRequest } from '@main/services/recommendationSessions'
 import {
   cancelLoginQr,
   checkLoginQr,
@@ -131,9 +132,10 @@ export default () => {
     await logout()
   })
 
-  mainHandle<LX.KuGouMusic.PublicRecommendation>(
+  mainHandle<undefined, LX.KuGouMusic.PublicRecommendation>(
     WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_get_public_recommendation,
-    async() => {
+    async({ event }) => {
+      assertRecommendationRequest('kugouRecommend', event)
       const result = await getPublicRecommendation()
       return {
         playlists: Array.isArray(result.playlists) ? result.playlists.map(sanitizePlaylist) : [],
@@ -142,24 +144,34 @@ export default () => {
     },
   )
 
-  mainHandle<LX.Music.MusicInfo_kg[]>(
+  mainHandle<undefined, LX.Music.MusicInfo_kg[]>(
     WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_get_daily_recommend_songs,
-    async() => sanitizeSongs(await getDailyRecommendSongs()),
+    async({ event }) => {
+      assertRecommendationRequest('kugouRecommend', event)
+      return sanitizeSongs(await getDailyRecommendSongs())
+    },
   )
 
-  mainHandle<LX.Music.MusicInfo_kg[]>(
+  mainHandle<undefined, LX.Music.MusicInfo_kg[]>(
     WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_get_style_recommendation,
-    async() => sanitizeSongs(await getStyleRecommendation()),
+    async({ event }) => {
+      assertRecommendationRequest('kugouRecommend', event)
+      return sanitizeSongs(await getStyleRecommendation())
+    },
   )
 
-  mainHandle<LX.Music.MusicInfo_kg[]>(
+  mainHandle<undefined, LX.Music.MusicInfo_kg[]>(
     WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_get_private_fm,
-    async() => sanitizeSongs(await getPrivateFmSongs()),
+    async({ event }) => {
+      assertRecommendationRequest('kugouRecommend', event)
+      return sanitizeSongs(await getPrivateFmSongs())
+    },
   )
 
-  mainHandle<LX.KuGouMusic.RankRecommendation>(
+  mainHandle<undefined, LX.KuGouMusic.RankRecommendation>(
     WIN_MAIN_RENDERER_EVENT_NAME.kugou_music_get_rank_recommendation,
-    async() => {
+    async({ event }) => {
+      assertRecommendationRequest('kugouRecommend', event)
       const result = await getRankRecommendation()
       return { rank: result.rank ? sanitizeRank(result.rank) : null, songs: sanitizeSongs(result.songs) }
     },

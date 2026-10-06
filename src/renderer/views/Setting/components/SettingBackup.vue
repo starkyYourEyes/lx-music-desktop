@@ -47,6 +47,8 @@ import { appSetting, updateSetting } from '@renderer/store/setting'
 import migrateSetting from '@common/utils/migrateSetting'
 import { BACKUP_IMPORT_EXTENSIONS, BACKUP_NAMES } from '@common/backupFormats'
 import useBackupExport from '@renderer/utils/compositions/useBackupExport'
+import { getListUpdateInfo, setUserListProfile } from '@renderer/utils/data'
+import { normalizeProfile } from '@common/utils/listProfile'
 
 
 export default {
@@ -61,6 +63,7 @@ export default {
     const showImportTip = useImportTip()
 
     const getAllLists = async(includeUserListGroups = true) => {
+      const metadata = includeUserListGroups ? await getListUpdateInfo() : {}
       const lists = []
       lists.push(await getListMusics(defaultList.id).then(musics => ({ ...defaultList, list: toRaw(musics) })))
       lists.push(await getListMusics(loveList.id).then(musics => ({ ...loveList, list: toRaw(musics) })))
@@ -69,7 +72,7 @@ export default {
         lists.push(await getListMusics(list.id).then(musics => ({
           ...toRaw(list),
           list: toRaw(musics),
-          ...(includeUserListGroups ? { group: getUserListGroup(list) } : {}),
+          ...(includeUserListGroups ? { group: getUserListGroup(list), profile: { ...normalizeProfile(metadata[list.id]?.profile), group: getUserListGroup(list) } } : {}),
         })))
       }
 
@@ -77,8 +80,12 @@ export default {
     }
 
     const applyImportedUserListGroups = async(importedUserLists) => {
+      const metadata = await getListUpdateInfo()
       await Promise.all(Array.from(importedUserLists.values(), async list => {
-        await setUserListGroup(list.id, resolveUserListGroup(list, list.group))
+        const profile = normalizeProfile(list.profile)
+        const group = resolveUserListGroup(list, profile.group ?? list.group ?? metadata[list.id]?.profile?.group)
+        await setUserListProfile(list.id, profile)
+        await setUserListGroup(list.id, group)
       }))
     }
 

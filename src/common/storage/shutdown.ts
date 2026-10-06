@@ -1,4 +1,4 @@
-export type RendererShutdownFlusherNameV1 = 'playback'
+export type RendererShutdownFlusherNameV1 = 'playback' | 'performance'
 
 export interface RendererShutdownFlushRequestV1 {
   version: 1
@@ -24,14 +24,14 @@ const hasExactKeys = (value: Record<string, unknown>, keys: string[]): boolean =
 
 export const parseRendererShutdownFlushRequest = (value: unknown): RendererShutdownFlushRequestV1 | null => {
   if (!isRecord(value) || !hasExactKeys(value, ['version', 'requestId', 'name', 'timeoutMs'])) return null
-  if (value.version != 1 || typeof value.requestId != 'string' || value.requestId.length == 0 || value.name != 'playback') return null
+  if (value.version != 1 || typeof value.requestId != 'string' || value.requestId.length == 0 || (value.name != 'playback' && value.name != 'performance')) return null
   if (typeof value.timeoutMs != 'number' || !Number.isSafeInteger(value.timeoutMs) || value.timeoutMs <= 0) return null
   return value as unknown as RendererShutdownFlushRequestV1
 }
 
 export const parseRendererShutdownFlushAck = (value: unknown): RendererShutdownFlushAckV1 | null => {
   if (!isRecord(value) || !hasExactKeys(value, ['version', 'requestId', 'name', 'ok'])) return null
-  if (value.version != 1 || typeof value.requestId != 'string' || value.requestId.length == 0 || value.name != 'playback') return null
+  if (value.version != 1 || typeof value.requestId != 'string' || value.requestId.length == 0 || (value.name != 'playback' && value.name != 'performance')) return null
   if (typeof value.ok != 'boolean') return null
   return value as unknown as RendererShutdownFlushAckV1
 }

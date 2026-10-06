@@ -5,7 +5,7 @@ div(:class="$style.footerLeftControlBtns")
       use(xlink:href="#icon-desktop-lyric-on")
     svg(v-show="!appSetting['desktopLyric.enable']" version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" height="125%" viewBox="0 0 512 512" space="preserve")
       use(xlink:href="#icon-desktop-lyric-off")
-  button(:class="[$style.footerLeftControlBtn, { [$style.active]: appSetting['player.audioVisualization'] }]" :aria-label="$t('audio_visualization')" @click="toggleAudioVisualization")
+  button(v-if="visualizationEnabled" :class="[$style.footerLeftControlBtn, { [$style.active]: appSetting['player.audioVisualization'] }]" :aria-label="$t('audio_visualization')" @click="toggleAudioVisualization")
     svg(version="1.1" xmlns="http://www.w3.org/2000/svg" xlink="http://www.w3.org/1999/xlink" width="95%" viewBox="0 0 24 24" space="preserve")
       use(xlink:href="#icon-audio-wave")
   button(:class="[$style.footerLeftControlBtn, { [$style.active]: isShowLrcSelectContent }]" :aria-label="$t('lyric__select')" @click="toggleVisibleLrc")
@@ -26,7 +26,8 @@ div(:class="$style.footerLeftControlBtns")
 </template>
 
 <script>
-import { ref } from '@common/utils/vueTools'
+import { computed, ref } from '@common/utils/vueTools'
+import { isFeatureEnabled } from '@common/performance/featurePolicy'
 import { useI18n } from '@renderer/plugins/i18n'
 
 import {
@@ -70,8 +71,10 @@ export default {
     } = useToggleDesktopLyric()
 
     const isShowAddMusicTo = ref(false)
+    const visualizationEnabled = computed(() => isFeatureEnabled(appSetting, 'audioVisualization'))
 
     const toggleAudioVisualization = async() => {
+      if (!visualizationEnabled.value) return
       const newSetting = !appSetting['player.audioVisualization']
       if (newSetting && appSetting['player.mediaDeviceId'] != 'default') {
         const confirm = await dialog.confirm({
@@ -87,6 +90,7 @@ export default {
     }
 
     return {
+      visualizationEnabled,
       appSetting,
       isShowLrcSelectContent,
       toggleVisibleLrc,

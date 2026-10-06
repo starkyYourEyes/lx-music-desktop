@@ -53,5 +53,19 @@ assert.match(settingBasic, /user_api_pull/)
 assert.match(settingBasic, /user_api_push/)
 assert.match(settingBasic, /user_api_sync__pull_merge/)
 assert.match(settingBasic, /user_api_sync__push_overwrite/)
+assert.match(settingBasic, /message\.includes\('user_api_push_not_allowed'\)\s*\?\s*t\('user_api_sync__push_not_allowed'\)/)
+
+assert.match(read('src/common/defaultSetting.ts'), /'sync\.server\.allowUserApiPush':\s*false/)
+assert.match(read('src/common/types/app_setting.d.ts'), /'sync\.server\.allowUserApiPush':\s*boolean/)
+const syncServer = read('src/renderer/views/Setting/components/SettingSync/SyncServer.vue')
+assert.match(syncServer, /updateSetting\(\{ 'sync\.server\.allowUserApiPush': \$event \}\)/)
+assert.match(syncServer, /setting__sync_server_allow_user_api_push_tip/)
+for (const lang of ['zh-cn', 'zh-tw', 'en-us']) {
+  const translations = JSON.parse(read(`src/lang/${lang}.json`))
+  for (const key of ['setting__sync_server_allow_user_api_push', 'setting__sync_server_allow_user_api_push_tip', 'user_api_sync__push_not_allowed']) {
+    assert.equal(typeof translations[key], 'string')
+    assert.ok(translations[key].length)
+  }
+}
 
 console.log('user api sync v2 wiring tests passed')

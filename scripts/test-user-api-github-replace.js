@@ -161,7 +161,7 @@ const createRuntimeHarness = (options = {}) => {
           }
         },
         setAllowShowUpdateAlert() {},
-        prepareApisFromGitHub: prepareReplacement,
+        prepareApisFromGitHub: async() => ({ state: await prepareReplacement(), skipped: [] }),
         commitUserApiState: commitState,
         notifyUserApiChanged() {
           changeEvents++
@@ -255,6 +255,7 @@ const createDirectDeleteIpcHarness = userApiRuntime => {
       },
       '@common/utils': { log: { error() {} } },
       '@main/modules/userApi': userApiRuntime,
+      '@main/modules/userApi/ipcValidation': loadTsModule(path.join(path.join(__dirname, '..'), 'src/main/modules/userApi/ipcValidation.ts')),
       '@main/modules/userApi/runtimeError': { normalizeRuntimeFailure: error => error },
       '@main/modules/userApi/runtimePool': { getUserApiRuntimePool: () => mainRuntimePool },
       '@main/modules/winMain/main': { sendEvent() {} },
@@ -267,6 +268,10 @@ const createDirectDeleteIpcHarness = userApiRuntime => {
   return loadTsModule(
     path.join(__dirname, '../src/renderer/utils/ipc.ts'),
     {
+      '@common/utils': { log: { error() {} } },
+      '@common/storage/cache': { STORAGE_CACHE_GENERATION_EVENT: 'cache-generation' },
+      './storageState': {},
+      './shutdown': {},
       '@common/rendererIpc': {
         rendererSend() {},
         async rendererInvoke(name, params) {
@@ -383,7 +388,7 @@ const createHarness = (options = {}) => {
       if (!rawUserApiUtils.prepareApisFromGitHub) {
         return rawUserApiUtils.replaceApisFromGitHub(items)
       }
-      const state = await rawUserApiUtils.prepareApisFromGitHub(items)
+      const { state } = await rawUserApiUtils.prepareApisFromGitHub(items)
       const apiList = rawUserApiUtils.commitUserApiState(state)
       rawUserApiUtils.notifyUserApiChanged()
       return apiList
@@ -436,6 +441,7 @@ const assertAtomicFailure = async(label, mutate, options = {}) => {
 
 const originalLx = global.lx
 
+const completionTimeout = setTimeout(() => { console.error('GitHub replacement test did not complete'); process.exit(1) }, 15000)
 ;(async() => {
   try {
     const harness = createHarness()
@@ -486,17 +492,18 @@ const originalLx = global.lx
     assert.strictEqual(coldLoadAliasHarness.getChangeEvents(), 0)
 
     const invalidScriptPath = `${VERSION}/online/b.js`
-    await assertAtomicFailure('invalid script', inputItems => {
-      inputItems[1].script = 'console.log("missing metadata header")'
-    }, {
-      expectedDeflateCalls: 1,
-      expectedError: err => {
-        assert.strictEqual(err.code, 'GITHUB_INVALID_SCRIPT')
-        assert.strictEqual(err.detail, invalidScriptPath)
-        assert.strictEqual(err.message, `GITHUB_INVALID_SCRIPT: ${invalidScriptPath}`)
-        return true
-      },
-    })
+    const partialHarness = createHarness()
+    const partialInput = makeInput()
+    partialInput[1].script = 'console.log("missing metadata header")'
+    const prepared = await partialHarness.userApiUtils.prepareApisFromGitHub(partialInput)
+    assert.deepStrictEqual(prepared.skipped, [invalidScriptPath])
+    assert.strictEqual(prepared.state.apiList.length, 1)
+    assert.strictEqual(prepared.state.apiList[0].remote.path, partialInput[0].remote.path)
+    assert.strictEqual(partialHarness.storeSets.length, 0, 'preparation must not persist before commit')
+    const validOnly = await partialHarness.userApiUtils.replaceApisFromGitHub(partialInput)
+    assert.strictEqual(validOnly.length, 1)
+    assert.strictEqual(partialHarness.getStored().length, 1)
+    assert.strictEqual(partialHarness.getDeflateCalls(), 2)
     await assertAtomicFailure('duplicate path', inputItems => {
       inputItems[1].remote.path = inputItems[0].remote.path
     }, { expectedDeflateCalls: 0 })
@@ -682,7 +689,7 @@ const originalLx = global.lx
     })
     const retainedRuntime = createRuntimeHarness()
     const retainedList = await retainedRuntime.runtime.replaceApisFromGitHub(makeInput())
-    assert.deepStrictEqual(retainedList, [{ id: 'stable-id' }])
+    assert.deepStrictEqual(retainedList, { apiList: [{ id: 'stable-id' }], skipped: [] })
     assert.deepStrictEqual(retainedRuntime.actions, ['replace'])
 
     const changedRuntime = createRuntimeHarness({
@@ -696,7 +703,7 @@ const originalLx = global.lx
 
     const removedRuntime = createRuntimeHarness({ replacementSteps: [[]] })
     const removedList = await removedRuntime.runtime.replaceApisFromGitHub(makeInput())
-    assert.deepStrictEqual(removedList, [])
+    assert.deepStrictEqual(removedList, { apiList: [], skipped: [] })
     assert.deepStrictEqual(removedRuntime.actions, [
       'replace',
       'dispose:stable-id:true',
@@ -1196,7 +1203,7 @@ const originalLx = global.lx
     const removalPool = createPoolHarness({
       autoInit: false,
       createGate: removalCreationGate.promise,
-      disposeRejectIds: ['a'],
+      disposeFailures: [['a', 1]],
       initialConfiguredIds: ['a'],
     })
     const removalEnsureError = removalPool.pool.ensure('a').then(
@@ -1217,6 +1224,8 @@ const originalLx = global.lx
       apiList: [{ id: 'a' }],
       scripts: new Map([['a', 'script:a:old']]),
     })
+    await assert.rejects(() => removalPool.pool.ensure('a'), /dispose a failed/)
+    await removalPool.pool.dispose('a', { clearSession: true })
     const removalRecovery = removalPool.pool.ensure('a')
     await removalPool.waitForRuntimeCreated('a', 2)
     await removalPool.init('a', { sources: {} })
@@ -1227,7 +1236,7 @@ const originalLx = global.lx
     const invalidationPool = createPoolHarness({
       autoInit: false,
       createGate: invalidationCreationGate.promise,
-      disposeRejectIds: ['a'],
+      disposeFailures: [['a', 1]],
       initialConfiguredIds: ['a'],
     })
     const invalidationEnsureError = invalidationPool.pool.ensure('a').then(
@@ -1250,6 +1259,8 @@ const originalLx = global.lx
       apiList: [{ id: 'a' }],
       scripts: new Map([['a', 'script:a:old']]),
     })
+    await assert.rejects(() => invalidationPool.pool.ensure('a'), /dispose a failed/)
+    await invalidationPool.pool.dispose('a', { clearSession: false })
     const invalidationRecovery = invalidationPool.pool.ensure('a')
     await invalidationPool.waitForRuntimeCreated('a', 2)
     await invalidationPool.init('a', { sources: {} })
@@ -1261,10 +1272,11 @@ const originalLx = global.lx
       kind: 'sourceChanged',
     })
     const shapedRemovalGate = createDeferred()
+    const shapedRemovalErrors = new Map([['a', shapedRemovalError]])
     const shapedRemovalPool = createPoolHarness({
       autoInit: false,
       createGate: shapedRemovalGate.promise,
-      disposeErrors: new Map([['a', shapedRemovalError]]),
+      disposeErrors: shapedRemovalErrors,
       initialConfiguredIds: ['a'],
     })
     const shapedRemovalEnsureError = shapedRemovalPool.pool.ensure('a').then(
@@ -1285,6 +1297,9 @@ const originalLx = global.lx
       apiList: [{ id: 'a' }],
       scripts: new Map([['a', 'script:a:old']]),
     })
+    shapedRemovalErrors.clear() // The failed teardown must succeed before the retained retirement can be retried.
+    await assert.rejects(() => shapedRemovalPool.pool.ensure('a'), error => error === shapedRemovalError)
+    await shapedRemovalPool.pool.dispose('a', { clearSession: true })
     const shapedRemovalRecovery = shapedRemovalPool.pool.ensure('a')
     await shapedRemovalPool.waitForRuntimeCreated('a', 2)
     await shapedRemovalPool.init('a', { sources: {} })
@@ -1296,10 +1311,11 @@ const originalLx = global.lx
       kind: 'sourceChanged',
     })
     const shapedInvalidationGate = createDeferred()
+    const shapedInvalidationErrors = new Map([['a', shapedInvalidationError]])
     const shapedInvalidationPool = createPoolHarness({
       autoInit: false,
       createGate: shapedInvalidationGate.promise,
-      disposeErrors: new Map([['a', shapedInvalidationError]]),
+      disposeErrors: shapedInvalidationErrors,
       initialConfiguredIds: ['a'],
     })
     const shapedInvalidationEnsureError = shapedInvalidationPool.pool.ensure('a').then(
@@ -1322,6 +1338,9 @@ const originalLx = global.lx
       apiList: [{ id: 'a' }],
       scripts: new Map([['a', 'script:a:old']]),
     })
+    shapedInvalidationErrors.clear() // The failed teardown must succeed before the retained retirement can be retried.
+    await assert.rejects(() => shapedInvalidationPool.pool.ensure('a'), error => error === shapedInvalidationError)
+    await shapedInvalidationPool.pool.dispose('a', { clearSession: false })
     const shapedInvalidationRecovery = shapedInvalidationPool.pool.ensure('a')
     await shapedInvalidationPool.waitForRuntimeCreated('a', 2)
     await shapedInvalidationPool.init('a', { sources: {} })
@@ -1366,6 +1385,7 @@ const originalLx = global.lx
 
     console.log('GitHub user API replacement tests passed')
   } finally {
+    clearTimeout(completionTimeout)
     global.lx = originalLx
   }
 })().catch(err => {

@@ -1,9 +1,11 @@
 import Lyric from '@common/utils/lyric-font-player'
-import { getAnalyser, getCurrentTime as getPlayerCurrentTime } from '@renderer/plugins/player'
+import { acquireAnalyser, getCurrentTime as getPlayerCurrentTime } from '@renderer/plugins/player'
+import { isFeatureEnabled } from '@common/performance/featurePolicy'
 import { lyric, setLines, setOffset, setTempOffset, setText } from '@renderer/store/player/lyric'
 import { isPlay, musicInfo } from '@renderer/store/player/state'
 import { setStatusText } from '@renderer/store/player/action'
-import { markRawList } from '@common/utils/vueTools'
+import { markRawList, watch } from '@common/utils/vueTools'
+import { onScopeDispose } from 'vue'
 import { appSetting } from '@renderer/store/setting'
 import { onNewDesktopLyricProcess } from '@renderer/utils/ipc'
 
@@ -13,28 +15,38 @@ const getCurrentTime = () => {
 
 let lrc: Lyric
 let desktopLyricPort: Electron.IpcRendererEvent['ports'][0] | null = null
-const analyserTools: {
-  dataArray: Uint8Array
-  bufferLength: number
-  analyser: AnalyserNode | null
-  sendDataArray: () => void
-} = {
-  dataArray: new Uint8Array(),
-  bufferLength: 0,
-  analyser: null,
+const canSendAnalyser = () => !!desktopLyricPort && isPlay.value && appSetting['desktopLyric.enable'] &&
+  appSetting['desktopLyric.audioVisualization'] && isFeatureEnabled(appSetting, 'audioVisualization')
+let analyserLease: ReturnType<typeof acquireAnalyser> = null
+let analyserReleaseTimer: ReturnType<typeof setTimeout> | null = null
+const releaseDesktopAnalyser = () => {
+  if (analyserReleaseTimer) clearTimeout(analyserReleaseTimer)
+  analyserReleaseTimer = null
+  analyserLease?.release()
+  analyserLease = null
+}
+const analyserTools = {
   sendDataArray() {
-    if (this.analyser == null) {
-      this.analyser = getAnalyser()
-      // console.log(this.analyser)
-      if (!this.analyser) return
-      this.bufferLength = this.analyser.frequencyBinCount
+    if (!canSendAnalyser()) {
+      releaseDesktopAnalyser()
+      sendDesktopLyricInfo({ action: 'set_analyser_available', data: false })
+      return
     }
-    const dataArray = new Uint8Array(this.bufferLength)
-    this.analyser.getByteFrequencyData(dataArray)
+    analyserLease ??= acquireAnalyser()
+    if (!analyserLease) {
+      sendDesktopLyricInfo({ action: 'set_analyser_available', data: false })
+      return
+    }
+    const dataArray = new Uint8Array(analyserLease.analyser.frequencyBinCount)
+    analyserLease.analyser.getByteFrequencyData(dataArray)
     sendDesktopLyricInfo({
       action: 'send_analyser_data_array',
       data: dataArray,
     }, [dataArray.buffer])
+    if (analyserReleaseTimer) clearTimeout(analyserReleaseTimer)
+    // Hidden/destroyed lyric windows stop requesting frames. Retire their lease
+    // after a short grace period without requiring another window IPC protocol.
+    analyserReleaseTimer = setTimeout(releaseDesktopAnalyser, 1000)
   },
 }
 
@@ -82,6 +94,16 @@ const handleDesktopLyricMessage = (action: LX.DesktopLyric.WinMainActions) => {
   }
 }
 export const init = () => {
+  watch(() => [isPlay.value, appSetting['desktopLyric.enable'], appSetting['desktopLyric.audioVisualization'],
+    isFeatureEnabled(appSetting, 'audioVisualization'), appSetting['player.mediaDeviceId']], () => {
+    releaseDesktopAnalyser()
+  }, { flush: 'sync' })
+  onScopeDispose(releaseDesktopAnalyser)
+  // Notify after synchronous player policy watchers have applied the new output.
+  watch(() => [isPlay.value, appSetting['desktopLyric.enable'], appSetting['desktopLyric.audioVisualization'],
+    isFeatureEnabled(appSetting, 'audioVisualization'), appSetting['player.mediaDeviceId']], () => {
+    sendDesktopLyricInfo({ action: 'set_analyser_available', data: canSendAnalyser() })
+  }, { flush: 'post' })
   lrc = new Lyric({
     shadowContent: false,
     onPlay(line, text) {
@@ -108,6 +130,8 @@ export const init = () => {
   onNewDesktopLyricProcess(({ event }) => {
     console.log('onNewDesktopLyricProcess')
     const [port] = event.ports
+    releaseDesktopAnalyser()
+    desktopLyricPort?.close()
     desktopLyricPort = port
 
     port.onmessage = ({ data }) => {
@@ -119,6 +143,7 @@ export const init = () => {
     }
 
     port.onmessageerror = (event) => {
+      releaseDesktopAnalyser()
       console.log('onmessageerror', event)
     }
   })

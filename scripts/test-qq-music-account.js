@@ -1,6 +1,7 @@
 const assert = require('node:assert')
 const path = require('node:path')
 const loadTsModule = require('./qq-music-test-loader')
+const { accountRepository, musicUrlAuthorization } = require('./test-utils/qq-account-repository')
 
 const { getQQMusicAccountUin } = loadTsModule(
   path.join(__dirname, '../src/main/modules/qqMusic/auth.ts'),
@@ -130,6 +131,7 @@ const {
       createQQMusicLoginService: () => loginService,
       isQQMusicLoginRequestId,
     },
+    './userPlaylists': { createQQMusicUserPlaylistService: () => ({}) },
     './auth': { getQQMusicAccountUin },
     './credential': {
       createQQMusicCredentialService: () => unavailableCredentialService,
@@ -173,7 +175,8 @@ const {
 assert.strictEqual(storeFactoryCallCount, 0)
 
 const createFacade = () => createQQMusicAccountService({
-  store,
+  accounts: accountRepository(data),
+  musicUrlAuthorization,
   loginService,
   songService,
   dailyRecommendService,
@@ -190,15 +193,17 @@ const createQr = async service => {
   return service.createLoginQr(requestId, Date.now())
 }
 
+global.lx = { accountRepository: accountRepository(data), musicUrlAuthorization }
+
 const main = async() => {
   getSingletonAccountStatus()
-  assert.strictEqual(storeFactoryCallCount, 1)
+  assert.strictEqual(storeFactoryCallCount, 0, 'singleton must use initialized account repository, never the legacy store')
   assert.strictEqual(singletonGetDailyRecommendCookie, singletonGetCookie)
   assert.strictEqual(singletonGetHomeRecommendCookie, singletonGetCookie)
   assert.strictEqual(singletonGetPlaylistDetailCookie, singletonGetCookie)
   assert.strictEqual(singletonGetFeedbackCookie, singletonGetCookie)
   await createSingletonLoginQr(nextLoginRequestId(), Date.now())
-  assert.strictEqual(storeFactoryCallCount, 1)
+  assert.strictEqual(storeFactoryCallCount, 0, 'singleton must use initialized account repository, never the legacy store')
 
   const service = createFacade()
   assert.deepStrictEqual(service.getAccountStatus(), {

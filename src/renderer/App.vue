@@ -15,6 +15,7 @@
     <layout-sync-mode-modal />
     <layout-sync-auth-code-modal />
     <layout-play-detail />
+    <PerformanceNotices />
   </div>
 </template>
 
@@ -24,6 +25,7 @@ import { computed, onMounted } from '@common/utils/vueTools'
 // import '@common/utils/effects/snow.min'
 import useApp from '@renderer/core/useApp'
 import { appSetting } from '@renderer/store/setting'
+import PerformanceNotices from '@renderer/components/common/PerformanceNotices.vue'
 import { getLayoutBackgroundOpacity, normalizeBackgroundTransparency } from '@common/utils/backgroundTransparency'
 
 useApp()
@@ -81,6 +83,16 @@ body {
 .disableAnimation * {
   transition: none !important;
   animation: none !important;
+}
+
+.simplifyVisuals {
+  --background-image: none !important;
+  *, *::before, *::after {
+    backdrop-filter: none !important;
+    animation: none !important;
+    transition: none !important;
+  }
+  #container::before { background-image: none !important; }
 }
 
 .transparent {

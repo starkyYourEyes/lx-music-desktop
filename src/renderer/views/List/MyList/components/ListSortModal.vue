@@ -71,7 +71,8 @@
 </template>
 
 <script>
-import { ref, computed } from '@common/utils/vueTools'
+import { ref, computed, watch, onBeforeUnmount } from '@common/utils/vueTools'
+import { retainMusicList } from '@renderer/store/list/listManage/state'
 // import { dialog } from '@renderer/plugins/Dialog'
 import { getListMusics, updateListMusicsPosition } from '@renderer/store/list/action'
 import { useI18n } from '@root/lang'
@@ -91,6 +92,12 @@ export default {
   },
   emits: ['update:visible'],
   setup(props, { emit }) {
+    let releaseList = () => {}
+    watch(() => [props.visible, props.listInfo.id], ([visible, id]) => {
+      releaseList()
+      releaseList = visible ? retainMusicList(id) : () => {}
+    }, { immediate: true, flush: 'sync' })
+    onBeforeUnmount(() => { releaseList() })
     const t = useI18n()
     const sortField = ref('')
     const sortType = ref('')
@@ -106,18 +113,21 @@ export default {
     }
     const handleSort = async() => {
       if (!verify()) return
+      const release = retainMusicList(props.listInfo.id)
+      try {
       // if (!await dialog.confirm({
       //   message: t('list_sort_modal_tip_confirm'),
       //   cancelButtonText: t('cancel_button_text'),
       //   confirmButtonText: t('confirm_button_text'),
       // })) return
 
-      let list = [...(await getListMusics(props.listInfo.id))]
-      list = await window.lx.worker.main.sortListMusicInfo(list, sortType.value, sortField.value, window.i18n.locale)
-      console.log(sortType.value, sortField.value)
+        let list = [...(await getListMusics(props.listInfo.id))]
+        list = await window.lx.worker.main.sortListMusicInfo(list, sortType.value, sortField.value, window.i18n.locale)
+        console.log(sortType.value, sortField.value)
 
-      closeModal()
-      void updateListMusicsPosition({ listId: props.listInfo.id, position: 0, ids: list.map(m => m.id) })
+        closeModal()
+        await updateListMusicsPosition({ listId: props.listInfo.id, position: 0, ids: list.map(m => m.id) })
+      } finally { release() }
     }
 
     const listName = computed(() => {

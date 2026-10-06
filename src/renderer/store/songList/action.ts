@@ -8,6 +8,8 @@ import { DAILY_RECOMMEND_TEMP_LIST_ID } from '@renderer/store/dailyRecommend/sta
 import { getQQDailyRecommendPlaylistDetail } from '@renderer/store/qqDailyRecommend/action'
 import { QQ_DAILY_RECOMMEND_LIST_ID, qqDailyRecommendGeneration } from '@renderer/store/qqDailyRecommend/state'
 import { markRaw, markRawList } from '@common/utils/vueTools'
+import { BoundedCache } from '@common/performance/boundedCache'
+import { CACHE_IDLE_TTL, getCacheProfile, registerCacheProfile } from '@common/performance/cacheProfile'
 import {
   tags,
   listInfo,
@@ -23,7 +25,14 @@ import type {
   TagInfo,
 } from './state'
 
-const cache = new Map<string, any>()
+const cache = new BoundedCache<string, any>({
+  maxEntries: getCacheProfile().onlineEntries,
+  maxWeight: getCacheProfile().onlineSongs,
+  weight: (result, key) => key.startsWith('slist__') ? 0 : result.list?.length ?? 0,
+  ttl: CACHE_IDLE_TTL,
+})
+registerCacheProfile(profile => { cache.configure({ maxEntries: profile.onlineEntries, maxWeight: profile.onlineSongs }) })
+export const clearSongListCache = () => { cache.clear() }
 const neteasePrivateRadarPlaylistId = '3136952023'
 
 const isNeteasePrivateRadarPlaylist = (id: string, source: LX.OnlineSource) => {
@@ -105,8 +114,9 @@ const loadListDetail = async(id: string, source: LX.OnlineSource, page: number, 
   const isQQDailyRecommend = isQQDailyRecommendPlaylist(id, source)
   const qqAccountKey = isQQDailyRecommend ? getQQMusicAccountKey() : null
   const qqPlaylistAccountKey = source == 'tx' && !isQQDailyRecommend ? getQQMusicAccountKey() : null
-  if (isRefresh && cache.has(key)) cache.delete(key)
+  if (isRefresh) cache.clear()
   if (!isRefresh && cache.has(key)) return cache.get(key)
+  const cacheGeneration = cache.generation
 
   let result: ListDetailInfo
   let qqDailyGeneration: number | null = null
@@ -126,7 +136,7 @@ const loadListDetail = async(id: string, source: LX.OnlineSource, page: number, 
   )
   const isCurrentQQPlaylist = source != 'tx' || isQQDailyRecommend ||
     qqPlaylistAccountKey == getQQMusicAccountKey()
-  if (isCurrentQQDailyRecommend && isCurrentQQPlaylist) {
+  if (cacheGeneration == cache.generation && isCurrentQQDailyRecommend && isCurrentQQPlaylist) {
     cache.set(isQQDailyRecommend ? getListDetailCacheKey(id, source, page) : key, result)
   }
   return result
@@ -142,6 +152,7 @@ export const clearList = () => {
   listInfo.noItemLabel = ''
   listInfo.page = 1
   listInfo.key = ''
+  clearSongListCache()
 }
 
 export const setList = (result: ListInfo, tagId: string, sortId: string, page: number) => {
@@ -179,6 +190,7 @@ export const setSelectListInfo = (info: ListInfoItem) => {
   selectListInfo.source = info.source
 }
 export const clearListDetail = () => {
+  clearSongListCache()
   listDetailInfo.list = []
   listDetailInfo.id = ''
   listDetailInfo.source = 'kw'
@@ -205,6 +217,7 @@ export const getTags = async<T extends LX.OnlineSource>(source: T) => {
  * @returns
  */
 export const getAndSetList = async(source: LX.OnlineSource, tabId: string, sortId: string, page: number, isRefresh = false) => {
+  if (isRefresh) cache.clear()
   // let source = rootState.setting.songList.source
   // let tabId = rootState.setting.songList.tagInfo.id
   // let sortId = rootState.setting.songList.sortId
@@ -222,8 +235,9 @@ export const getAndSetList = async(source: LX.OnlineSource, tabId: string, sortI
   listInfo.noItemLabel = window.i18n.t('list__loading')
   listInfo.key = key
   // clearList()
+  const cacheGeneration = cache.generation
   return musicSdk[source]?.songList.getList(sortId, tabId, page).then((result: ListInfo) => {
-    cache.set(key, result)
+    if (cacheGeneration == cache.generation) cache.set(key, result)
     if (key != listInfo.key) return
     setList(result, tabId, sortId, page)
   }).catch((error: any) => {

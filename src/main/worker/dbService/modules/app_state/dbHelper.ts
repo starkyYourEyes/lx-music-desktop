@@ -9,6 +9,7 @@ import {
   parseSearchHistoryCommand,
 } from '../../../../../common/storage/stateValidation'
 import { getAppDB } from '../../db'
+import { mergeMetadataUpdate } from '../../../../../common/utils/playlistMetadataMerge'
 import { getMigrationMarker, putMigrationMarker } from '../../migrate'
 import type { MigrationMarker } from '../../migrations/types'
 import type {
@@ -322,7 +323,7 @@ export const mutatePlaylistMetadata = (input: unknown): LX.List.ListUpdateInfo =
         }
         createUpsertPlaylistMetadataStatement().run(playlistMetadataRow(
           command.playlistId,
-          command.value,
+          mergeMetadataUpdate(readPlaylistMetadata()[command.playlistId], command.value, command.base),
           command.updatedAtMs,
         ))
         break

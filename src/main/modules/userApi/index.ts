@@ -320,7 +320,15 @@ export default () => {
   })
 
   initRendererEvents(runtimePool)
+  const applyIdlePolicy = async() => runtimePool.configureIdlePolicy({
+    primaryApiId: global.lx.appSetting['common.apiSource'],
+    idleMinutes: global.lx.appSetting['performance.sourceIdleMinutes'] ?? 5,
+  })
+  void applyIdlePolicy().catch(error => log.error('configure user API idle policy failed', error))
   global.lx.event_app.on('updated_config', (keys) => {
+    if (keys.includes('common.apiSource') || keys.includes('performance.sourceIdleMinutes')) {
+      void applyIdlePolicy().catch(error => log.error('configure user API idle policy failed', error))
+    }
     if (!keys.includes('common.apiSource') && !keys.includes('common.apiFallbackSources')) return
     const configured = new Set([
       global.lx.appSetting['common.apiSource'],

@@ -723,14 +723,60 @@ describe('portable profile migration journal', () => {
     const fixture = createFixture()
     seedSource(fixture)
     const { preparePortableProfile } = require(migrationModule)
-    const results = await Promise.all([
-      preparePortableProfile(fixture),
-      preparePortableProfile({ ...fixture, runId: 'startup-2' }),
-    ])
+    let second
+    const first = preparePortableProfile({
+      ...fixture,
+      logger: {
+        ...silentLogger,
+        info(message) {
+          if (!message.startsWith('Migrated portable profile to ')) return
+          // Start the competing creator while the successful owner still holds
+          // its lease, after slow copying/hashing has completed. The production
+          // contention budget is deliberately bounded, not a migration timeout.
+          assert.equal(exists(path.join(fixture.portableRoot, '.portable-profile-migration.lock')), true)
+          second = preparePortableProfile({ ...fixture, runId: 'startup-2' })
+        },
+      },
+    })
+    const firstResult = await first
+    assert.ok(second, 'the competing creator must start before the first lease release')
+    const results = [firstResult, await second]
 
-    assert.deepEqual(results.map(result => result.state).sort(), ['already-promoted', 'promoted'])
+    assert.deepEqual(results.map(result => result.state).sort(), ['already-promoted', 'promoted'], JSON.stringify(results.map(({ state, error }) => ({ state, code: error?.code, message: error?.message }))))
     assert.equal((await preparePortableProfile({ ...fixture, runId: 'startup-3' })).state, 'already-promoted')
     assert.equal(fs.readFileSync(path.join(fixture.profileRoot, 'lx.data.db'), 'utf8'), 'database-v1')
+  })
+
+  it('fails a bounded contender without promoting while another creator still owns the lease', async() => {
+    const fixture = createFixture()
+    seedSource(fixture)
+    const { preparePortableProfile } = require(migrationModule)
+    let releaseRead
+    let startedRead
+    const reading = new Promise(resolve => { startedRead = resolve })
+    const gate = new Promise(resolve => { releaseRead = resolve })
+    let gated = false
+    const fsApi = {
+      ...fs,
+      read(...args) {
+        if (gated) return fs.read(...args)
+        gated = true
+        startedRead()
+        gate.then(() => fs.read(...args))
+      },
+    }
+    const first = preparePortableProfile({ ...fixture, fsApi })
+    await reading
+    try {
+      const second = await preparePortableProfile({ ...fixture, runId: 'startup-2' })
+      assert.equal(second.state, 'failed')
+      assert.equal(second.error.code, 'ELOCKED')
+      assert.equal(exists(fixture.profileRoot), false, 'the contender cannot promote while the owner is held')
+    } finally {
+      releaseRead()
+      assert.equal((await first).state, 'promoted')
+    }
+    assert.equal((await preparePortableProfile({ ...fixture, runId: 'startup-3' })).state, 'already-promoted')
   })
 
   it('keeps a destination collision after the promotion journal fail-closed on retry and acknowledgement', async() => {

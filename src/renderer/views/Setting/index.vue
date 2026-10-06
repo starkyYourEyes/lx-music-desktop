@@ -5,8 +5,8 @@
         <li v-for="h2 in tocList" :key="h2.id" :class="$style.tocListItem" role="presentation">
           <h2
             :class="[$style.tocH2, {[$style.active]: avtiveComponentName == h2.id }]"
-            role="tab" :aria-selected="avtiveComponentName == h2.id"
-            :aria-label="h2.title" ignore-tip @click="toggleTab(h2.id)"
+            role="tab" tabindex="0" :aria-selected="avtiveComponentName == h2.id"
+            :aria-label="h2.title" ignore-tip @click="toggleTab(h2.id)" @keydown.enter="toggleTab(h2.id)" @keydown.space.prevent="toggleTab(h2.id)"
           >
             <transition name="list-active">
               <svg-icon v-if="avtiveComponentName == h2.id" name="angle-right-solid" :class="$style.activeIcon" />
@@ -44,31 +44,35 @@
 </template>
 
 <script>
-import { ref, computed, nextTick, watch } from '@common/utils/vueTools'
+import { ref, computed, nextTick, watch, defineAsyncComponent } from '@common/utils/vueTools'
 // import { currentStting } from './setting'
 import { useI18n } from '@renderer/plugins/i18n'
-import { useRoute } from '@common/utils/vueRouter'
+import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from '@common/utils/vueRouter'
+import { requestPerformanceLeave } from '@renderer/store/performance'
 
-import SettingBasic from './components/SettingBasic.vue'
-import SettingPlay from './components/SettingPlay.vue'
-import SettingPlayDetail from './components/SettingPlayDetail.vue'
-import SettingDesktopLyric from './components/SettingDesktopLyric.vue'
-import SettingRecommend from './components/SettingRecommend.vue'
-import SettingList from './components/SettingList.vue'
-import SettingLocalMusic from './components/SettingLocalMusic.vue'
-import SettingDownload from './components/SettingDownload.vue'
-import SettingSync from './components/SettingSync/index.vue'
-import SettingOpenAPI from './components/SettingOpenAPI.vue'
-import SettingHotKey from './components/SettingHotKey.vue'
-import SettingNetwork from './components/SettingNetwork.vue'
-import SettingBackup from './components/SettingBackup.vue'
-import SettingOther from './components/SettingOther.vue'
-import SettingListeningTime from './components/SettingListeningTime.vue'
-import SettingAbout from './components/SettingAbout.vue'
+const SettingBasic = defineAsyncComponent(async() => import('./components/SettingBasic.vue'))
+const SettingPlay = defineAsyncComponent(async() => import('./components/SettingPlay.vue'))
+const SettingPlayDetail = defineAsyncComponent(async() => import('./components/SettingPlayDetail.vue'))
+const SettingDesktopLyric = defineAsyncComponent(async() => import('./components/SettingDesktopLyric.vue'))
+const SettingRecommend = defineAsyncComponent(async() => import('./components/SettingRecommend.vue'))
+const SettingList = defineAsyncComponent(async() => import('./components/SettingList.vue'))
+const SettingLocalMusic = defineAsyncComponent(async() => import('./components/SettingLocalMusic.vue'))
+const SettingDownload = defineAsyncComponent(async() => import('./components/SettingDownload.vue'))
+const SettingSync = defineAsyncComponent(async() => import('./components/SettingSync/index.vue'))
+const SettingOpenAPI = defineAsyncComponent(async() => import('./components/SettingOpenAPI.vue'))
+const SettingHotKey = defineAsyncComponent(async() => import('./components/SettingHotKey.vue'))
+const SettingNetwork = defineAsyncComponent(async() => import('./components/SettingNetwork.vue'))
+const SettingBackup = defineAsyncComponent(async() => import('./components/SettingBackup.vue'))
+const SettingOther = defineAsyncComponent(async() => import('./components/SettingOther.vue'))
+const SettingListeningTime = defineAsyncComponent(async() => import('./components/SettingListeningTime.vue'))
+const SettingAbout = defineAsyncComponent(async() => import('./components/SettingAbout.vue'))
+
+const SettingPerformance = defineAsyncComponent(async() => import('./components/SettingPerformance.vue'))
 
 export default {
   name: 'Setting',
   components: {
+    SettingPerformance,
     SettingBasic,
     SettingPlay,
     SettingPlayDetail,
@@ -89,12 +93,14 @@ export default {
   setup() {
     const t = useI18n()
     const route = useRoute()
+    const router = useRouter()
 
     const dom_content_ref = ref(null)
 
     const tocList = computed(() => {
       return [
         { id: 'SettingBasic', title: t('setting__basic') },
+        { id: 'SettingPerformance', title: t('setting__performance') },
         { id: 'SettingPlay', title: t('setting__play') },
         { id: 'SettingPlayDetail', title: t('setting__play_detail') },
         { id: 'SettingDesktopLyric', title: t('setting__desktop_lyric') },
@@ -122,7 +128,14 @@ export default {
       ? getRouteComponentName()
       : tocList.value[0].id)
 
-    const toggleTab = id => {
+    const canLeave = async() => avtiveComponentName.value == 'SettingPerformance' ? requestPerformanceLeave() : true
+    onBeforeRouteLeave(canLeave)
+    onBeforeRouteUpdate(canLeave)
+
+    const toggleTab = async id => {
+      await router.replace({ path: '/setting', query: { ...route.query, name: id } })
+    }
+    const activateTab = id => {
       avtiveComponentName.value = id
       void nextTick(() => {
         dom_content_ref.value?.scrollTo({
@@ -135,7 +148,7 @@ export default {
     watch(() => route.query.name, () => {
       const name = getRouteComponentName()
       if (!name || avtiveComponentName.value == name) return
-      toggleTab(name)
+      activateTab(name)
     })
 
     return {

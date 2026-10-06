@@ -9,6 +9,7 @@ const isolatedSession = {
   clearAuthCache: async() => {},
   clearStorageData: async() => {},
   clearCache: async() => {},
+  clearCodeCaches: async() => {},
   setPermissionRequestHandler(handler) {
     this.permissionHandler = handler
   },
@@ -28,24 +29,28 @@ class FakeBrowserWindow {
     this.webContents = {
       session: options.webPreferences.session ?? defaultSession,
       on() {},
+      removeListener() {},
       setWindowOpenHandler() {},
     }
   }
 
   on() {}
+  removeListener() {}
+  isDestroyed() { return !!this.destroyed }
   async loadURL() {}
-  destroy() {}
+  destroy() { this.destroyed = true }
 }
 
 global.envParams = { cmdParams: {} }
 global.lx = {
+  sessionRegistry: { register: () => ({ ready: Promise.resolve(), unregister() {} }) },
   appSetting: {},
   event_app: { on() {}, off() {} },
 }
 process.env.NODE_ENV = 'production'
 
-const { createWindow, closeWindow } = loadTsModule(
-  path.join(root, 'src/main/modules/userApi/main.ts'),
+const { createRuntimeWindow, disposeRuntimeWindow, getRuntimePartition } = loadTsModule(
+  path.join(root, 'src/main/modules/userApi/runtimeWindow.ts'),
   {
     '@common/mainIpc': { mainSend() {} },
     '@common/utils': { log: { error() {} } },
@@ -62,13 +67,15 @@ const { createWindow, closeWindow } = loadTsModule(
     fs: { promises: { readFile: async() => '<html></html>' } },
     '@main/utils': { openDevTools() {} },
     './rendererEvent/name': { __esModule: true, default: {} },
+    './main': { getProxy: () => ({ host: '', port: '' }) },
     './utils': { getScript: async() => '' },
   },
 )
 
 const run = async() => {
-  await createWindow({ id: 'test' })
-  assert.strictEqual(userApiPartition, PROJECT_IDENTITY.userApiPartition)
+  const runtime = await createRuntimeWindow({ apiInfo: { id: 'test' }, generation: 1, hooks: { onClosed() {}, onRenderProcessGone() {} } })
+  assert.strictEqual(userApiPartition, getRuntimePartition('test'))
+  assert.notStrictEqual(userApiPartition, getRuntimePartition('other'), 'sources must not share a session partition')
   assert.strictEqual(
     browserOptions.webPreferences.session,
     isolatedSession,
@@ -80,7 +87,7 @@ const run = async() => {
   let permissionGranted
   isolatedSession.permissionHandler({}, 'geolocation', value => { permissionGranted = value })
   assert.strictEqual(permissionGranted, false)
-  await closeWindow()
+  await disposeRuntimeWindow(runtime, { clearSession: true })
 
   const appSource = fs.readFileSync(path.join(root, 'src/main/app.ts'), 'utf8')
   const navigationHandler = /contents\.on\('will-navigate',[\s\S]*?\n\s*}\)/.exec(appSource)?.[0]

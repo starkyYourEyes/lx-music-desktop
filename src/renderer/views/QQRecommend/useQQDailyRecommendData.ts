@@ -1,7 +1,8 @@
 import { computed, ref } from '@common/utils/vueTools'
-import { prepareQQDailyRecommend, resetQQDailyRecommend } from '@renderer/store/qqDailyRecommend/action'
+import { isQQDailyRecommendListActive, prepareQQDailyRecommend, resetQQDailyRecommend } from '@renderer/store/qqDailyRecommend/action'
 import { isLoadingQQDailyRecommend, qqDailyRecommendSongs } from '@renderer/store/qqDailyRecommend/state'
 import { getQQMusicAccountKey, initQQMusicAccount } from '@renderer/store/qqMusic'
+import { useRecommendationPage } from '@renderer/core/features/recommendationAccess'
 
 const LOAD_ERROR = '每日30首加载失败，请稍后重试'
 
@@ -12,6 +13,7 @@ export const useQQDailyRecommendData = () => {
   let requestRevision = 0
 
   const load = async(force = false) => {
+    if (!isEnabled()) return []
     const revision = ++requestRevision
     const accountKey = getQQMusicAccountKey()
     if (!accountKey) {
@@ -41,6 +43,13 @@ export const useQQDailyRecommendData = () => {
     isRefreshing.value = false
     resetQQDailyRecommend()
   }
+
+  const isEnabled = useRecommendationPage('qqRecommend', () => {
+    requestRevision++
+    loadError.value = ''
+    isRefreshing.value = false
+    if (!isQQDailyRecommendListActive(getQQMusicAccountKey())) resetQQDailyRecommend()
+  })
 
   return {
     songs,

@@ -9,7 +9,7 @@ import {
   moveListMusics as moveListMusicsAction,
   overwriteListMusics,
 } from '@renderer/store/list/listManage'
-import { setMusicList } from '@renderer/store/list/listManage/action'
+import { setMusicList, stageMusicList } from '@renderer/store/list/listManage/action'
 import { toRaw } from '@common/utils/vueTools'
 import { LIST_IDS } from '@common/constants'
 import { likeNeteaseMusic, likeQQMusic, listWebDAVMusics, uploadLocalMusicToWebDAV } from '@renderer/utils/ipc'
@@ -49,6 +49,7 @@ export const registerAction = (onListChanged: (listIds: string[]) => void) => {
 
 /**
  * 从缓存获取列表内歌曲，前提是知道列表之前已被获取过，否则返回空数组
+ * 只对已用 retainMusicList 保持的列表可靠。
  * @param listId 列表ID
  * @returns
  */
@@ -203,7 +204,7 @@ export const createUserList = async({ name, id = `userlist_${Date.now()}`, list 
 
 export const setTempList = async(id: string, list: LX.Music.MusicInfo[]) => {
   tempListMeta.id = id
-  setMusicList(LIST_IDS.TEMP, list)
+  stageMusicList(LIST_IDS.TEMP, list)
   await overwriteListMusics({
     listId: LIST_IDS.TEMP,
     musicInfos: list,

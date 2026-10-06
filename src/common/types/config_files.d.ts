@@ -11,7 +11,7 @@ declare namespace LX {
 
     interface MyListInfoPart {
       type: 'playListPart_v2'
-      data: ListInfoBackup
+      data: ListInfoBackup & { profile?: LX.List.UserListProfile }
     }
 
   }

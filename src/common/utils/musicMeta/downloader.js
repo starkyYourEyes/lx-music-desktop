@@ -1,6 +1,7 @@
 const http = require('http')
 const https = require('https')
 const fs = require('fs')
+const { pipeline } = require('stream/promises')
 const { httpOverHttp, httpsOverHttp } = require('tunnel')
 
 const httpsRxp = /^https:/
@@ -22,52 +23,37 @@ const sendRequest = (url, proxy) => {
   }
 
   // console.log(httpOptions)
-  return url.protocol === 'https:'
+  return urlParse.protocol === 'https:'
     ? https.request(httpOptions)
     : http.request(httpOptions)
 }
 
-module.exports = (url, filePath, proxy) => {
-  return new Promise((resolve) => {
-    sendRequest(url, proxy)
-      .on('response', response => {
-        // console.log(response.statusCode)
-        if (response.statusCode !== 200 && response.statusCode != 206) {
-          response.destroy(new Error('failed'))
-          return
-        }
-        response
-          .pipe(fs.createWriteStream(filePath))
-          .on('finish', () => {
-            // console.log('finish')
-            if (response.complete) {
-              // console.log('complete')
-              // meta.APIC = picPath
-              // handleWriteMeta(meta, filePath)
-              resolve(true)
-            } else {
-              resolve(false)
-              fs.unlink(filePath, err => {
-                if (err) console.log(err.message)
-              })
-            }
-          }).on('error', err => {
-            // console.log('response error')
-            if (err) console.log(err.message)
-            fs.unlink(filePath, err => {
-              if (err) console.log(err.message)
-            })
-            resolve(false)
-          })
+module.exports = async(url, filePath, proxy) => {
+  let response
+  let hasFile = false
+  try {
+    response = await new Promise((resolve, reject) => {
+      const request = sendRequest(url, proxy).on('response', resolve).on('error', reject)
+      request.setTimeout(20_000, () => { request.destroy(new Error('Cover download timeout')) })
+      request.end()
+    })
+    if (response.statusCode !== 200 && response.statusCode !== 206) {
+      response.destroy()
+      return false
+    }
+    hasFile = true
+    await pipeline(response, fs.createWriteStream(filePath))
+    if (!response.complete) throw new Error('Incomplete cover download')
+    return true
+  } catch (error) {
+    response?.destroy()
+    if (hasFile) {
+      await fs.promises.unlink(filePath).catch(error => {
+        if (error.code !== 'ENOENT') throw error
       })
-      .on('error', err => {
-        if (err) console.log(err.message)
-        // delete meta.APIC
-        // handleWriteMeta(meta, filePath)
-        resolve(false)
-      })
-      .end()
-  })
+    }
+    return false
+  }
 }
 
 // const url = 'https://y.gtimg.cn/music/photo_new/T002R500x500M000000nfgwP0D6qxd.jpg'

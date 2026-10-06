@@ -48,7 +48,8 @@ export type StorageStartupOutcome =
 export interface StorageCoordinator {
   readonly cacheManager: CacheManager
   start: () => Promise<StorageStartupOutcome>
-  registerShutdownFlusher: (name: string, flush: () => Promise<void>) => () => void
+  registerShutdownFlusher: (name: string, flush: () => Promise<void>, options?: { restartSafe?: boolean }) => () => void
+  prepareRestart: () => Promise<void>
   shutdown: () => Promise<void>
 }
 
@@ -116,6 +117,7 @@ export interface StorageCoordinatorDependencies {
   appInited: () => void
   showRecovery: (outcome: RecoveryOutcome) => Promise<void>
   flushStores: () => Promise<void>
+  flushDatabase?: () => Promise<void> | void
   reportShutdownFailure?: (diagnostic: ShutdownDiagnostic) => void
   shutdownTimeoutMs?: number
 }
@@ -406,6 +408,7 @@ export const createStorageCoordinator = (
   dependencies: StorageCoordinatorDependencies,
 ): StorageCoordinator => {
   const shutdownFlushers = new Map<string, () => Promise<void>>()
+  const restartSafeFlushers = new Set<string>()
   const shutdownTimeoutMs = dependencies.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS
   let startPromise: Promise<StorageStartupOutcome> | null = null
   let shutdownPromise: Promise<void> | null = null
@@ -550,15 +553,19 @@ export const createStorageCoordinator = (
     return startPromise
   }
 
-  const registerShutdownFlusher = (name: string, flush: () => Promise<void>): (() => void) => {
+  const registerShutdownFlusher = (name: string, flush: () => Promise<void>, options?: { restartSafe?: boolean }): (() => void) => {
     shutdownFlushers.set(name, flush)
+    if (options?.restartSafe) restartSafeFlushers.add(name)
+    else restartSafeFlushers.delete(name)
     return () => {
-      if (shutdownFlushers.get(name) == flush) shutdownFlushers.delete(name)
+      if (shutdownFlushers.get(name) == flush) {
+        shutdownFlushers.delete(name)
+        restartSafeFlushers.delete(name)
+      }
     }
   }
 
-  const runFlushers = async(): Promise<{ timedOut: string[], failed: boolean }> => {
-    const entries = [...shutdownFlushers.entries()]
+  const runFlushers = async(entries = [...shutdownFlushers.entries()]): Promise<{ timedOut: string[], failed: boolean }> => {
     if (!entries.length) return { timedOut: [], failed: false }
 
     const pending = new Set(entries.map(([name]) => name))
@@ -583,6 +590,17 @@ export const createStorageCoordinator = (
     await Promise.race([complete, timeoutResult])
     if (timeout != null) clearTimeout(timeout)
     return { timedOut: timedOut ? [...pending] : [], failed }
+  }
+
+  const prepareRestart = async(): Promise<void> => {
+    if (shutdownRequested) throw errorWithCode('restart_shutdown_in_progress')
+    // Only explicitly safe flushers participate: source-runtime disposal and
+    // other shutdown-only work must leave a failed preflight usable.
+    const result = await runFlushers([...shutdownFlushers.entries()].filter(([name]) => restartSafeFlushers.has(name)))
+    if (result.timedOut.length) throw errorWithCode('restart_flush_timeout')
+    if (result.failed) throw errorWithCode('restart_flusher_failed')
+    await dependencies.flushStores()
+    await dependencies.flushDatabase?.()
   }
 
   const waitForStartup = async(): Promise<boolean> => {
@@ -651,5 +669,5 @@ export const createStorageCoordinator = (
     return shutdownPromise
   }
 
-  return { cacheManager: dependencies.cacheManager, start, registerShutdownFlusher, shutdown }
+  return { cacheManager: dependencies.cacheManager, start, registerShutdownFlusher, prepareRestart, shutdown }
 }

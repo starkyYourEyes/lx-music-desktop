@@ -1,6 +1,9 @@
 <template lang="pug">
 dt#recommend {{ $t('setting__recommend') }}
 dd
+  router-link(to="/setting?name=SettingPerformance") {{ $t('performance_open_settings') }}
+
+dd
   h3#recommend_qq_guess_like_api {{ $t('setting__recommend_qq_guess_like_api') }}
   div(:class="$style.apiVersionOptions")
     base-checkbox(

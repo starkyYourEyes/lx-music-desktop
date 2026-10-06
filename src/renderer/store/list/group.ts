@@ -1,7 +1,6 @@
 /* eslint-disable @typescript-eslint/no-dynamic-delete */
-import { log } from '@common/utils'
 import { reactive, ref } from '@common/utils/vueTools'
-import { isUserListGroup, resolveUserListGroup } from '@common/listGroup'
+import { resolveUserListGroup } from '@common/listGroup'
 import { getListUpdateInfo, setUserListProfile } from '@renderer/utils/data'
 
 export const userListGroups = reactive<Record<string, LX.List.UserListGroup>>({})
@@ -16,18 +15,13 @@ const hydrateGroups = async(lists: readonly LX.List.UserListInfo[]) => {
     if (!liveIds.has(id)) delete userListGroups[id]
   }
 
-  const backfills: Array<Promise<void>> = []
   for (const list of lists) {
     const storedGroup = metadata[list.id]?.profile?.group
     const group = resolveUserListGroup(list, storedGroup)
     userListGroups[list.id] = group
-    if (!isUserListGroup(storedGroup)) {
-      backfills.push(setUserListProfile(list.id, { group }).catch(error => {
-        log.error(error)
-      }))
-    }
   }
-  await Promise.all(backfills)
+  // A derived display group is not an edit. Persisting it here can race with
+  // an explicit profile arriving after its playlist during initial sync.
 }
 
 export const initializeUserListGroups = hydrateGroups

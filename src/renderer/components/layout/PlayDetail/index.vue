@@ -1,13 +1,13 @@
 <template lang="pug">
 transition(enter-active-class="animated slideInRight" leave-active-class="animated slideOutDown" @after-enter="handleAfterEnter" @after-leave="handleAfterLeave")
   div(v-if="isShowPlayerDetail" :class="[$style.container, { fullscreen: isFullscreen }]" @contextmenu="handleContextMenu")
-    div(:class="$style.bg")
+    div(v-if="!appSetting['performance.simplifyVisuals']" :class="$style.bg")
     //- div(:class="$style.bg" :style="bgStyle")
     //- div(:class="$style.bg2")
     ControlBtnsLeftHeader(v-if="appSetting['common.controlBtnPosition'] == 'left'")
     ControlBtnsRightHeader(v-else)
     div(:class="[$style.main, {[$style.showComment]: isShowPlayComment}]")
-      Turntable(:class="$style.turntable")
+      Turntable(v-if="!appSetting['performance.simplifyVisuals']" :class="$style.turntable")
       section(:class="$style.lyricPanel")
         header(:class="$style.trackHeader")
           h1(:title="musicInfo.name") {{ musicInfo.name || 'LX Music' }}
@@ -21,12 +21,13 @@ transition(enter-active-class="animated slideInRight" leave-active-class="animat
       play-bar(v-if="visibled")
     PartyModal
     transition(enter-active-class="animated-slow fadeIn" leave-active-class="animated-slow fadeOut")
-      common-audio-visualizer(v-if="appSetting['player.audioVisualization'] && visibled")
+      common-audio-visualizer(v-if="appSetting['player.audioVisualization'] && visualizationEnabled && visibled")
 </template>
 
 
 <script>
-import { ref, watch } from '@common/utils/vueTools'
+import { computed, ref, watch } from '@common/utils/vueTools'
+import { isFeatureEnabled } from '@common/performance/featurePolicy'
 import { isFullscreen } from '@renderer/store'
 import {
   isShowPlayerDetail,
@@ -63,6 +64,7 @@ export default {
   },
   setup() {
     const visibled = ref(false)
+    const visualizationEnabled = computed(() => isFeatureEnabled(appSetting, 'audioVisualization'))
 
     let clickTime = 0
 
@@ -102,6 +104,7 @@ export default {
 
 
     return {
+      visualizationEnabled,
       appSetting,
       playMusicInfo,
       isShowPlayerDetail,

@@ -1,4 +1,5 @@
 import type { I18n } from '../../lang/i18n'
+import type { PerformanceSettings } from '../performance/featurePolicy'
 
 declare global {
 
@@ -6,7 +7,7 @@ declare global {
     type AddMusicLocationType = 'top' | 'bottom'
     type RecommendHomeSectionId = 'radarPlaylists' | 'styleSongs' | 'dailySongCategories' | 'similarSongs' | 'recommendPlaylists' | 'charts'
 
-    interface AppSetting {
+    interface AppSetting extends PerformanceSettings {
       version: string
 
       /**
@@ -208,6 +209,11 @@ declare global {
       'player.waitPlayEndStopTime': string
 
       /**
+       * 音效处理模式
+       */
+      'player.soundEffect.mode': 'original' | 'effects'
+
+      /**
        * 环境音效文件名
        */
       'player.soundEffect.convolution.fileName': string | null
@@ -296,6 +302,8 @@ declare global {
        * 是否启用音频加载失败时自动切歌
        */
       'player.autoSkipOnError': boolean
+      /** 提前解析并缓冲下一首歌曲 */
+      'player.preloadNext': boolean
 
       /**
        * 点击相同列表内的歌曲切歌时是否清空已播放列表（随机模式下列表内所有歌曲会重新参与随机）
@@ -737,6 +745,8 @@ declare global {
        * 同步服务端口号
        */
       'sync.server.port': '23332' | string
+      /** Allow remote devices to push executable custom source scripts. */
+      'sync.server.allowUserApiPush': boolean
 
       /**
        * 最大备份快照数

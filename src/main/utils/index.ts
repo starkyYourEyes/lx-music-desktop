@@ -18,6 +18,7 @@ import {
 } from '@main/storage/settings/document'
 import { normalizePlaybackSourceSetting } from '@common/utils/playbackSourceSetting'
 import type { ThemeAssetManager } from '@main/services/themeAssetManager'
+import { migratePerformanceSettings, normalizePerformancePatch } from '@common/performance/featurePolicy'
 
 export const parseEnvParams = (argv = process.argv): { cmdParams: LX.CmdParams, deeplink: string | null } => {
   const cmdParams: LX.CmdParams = {}
@@ -206,6 +207,7 @@ const updateSettingWithStore = (
   if (isInit) {
     setting &&= migrateSetting(setting)
     setting = sanitizeSettingUpdate(setting) ?? {}
+    setting = { ...setting, ...migratePerformanceSettings(setting) }
     applyInitSetting(setting as LX.AppSetting)
     originSetting = { ...defaultSetting }
   } else {
@@ -216,6 +218,7 @@ const updateSettingWithStore = (
       'webdav.username': '',
       'webdav.password': '',
     }
+    setting = normalizePerformancePatch(originSetting, setting ?? {}) as Partial<LX.AppSetting>
   }
 
   const result = normalizePlaybackSettingResult(mergeSetting(originSetting, setting))
@@ -229,6 +232,21 @@ const updateSettingWithStore = (
 
 export const updateSetting = (setting?: Partial<LX.AppSetting>, isInit: boolean = false) => {
   return updateSettingWithStore(getStore(STORE_NAMES.APP_SETTINGS), setting, isInit)
+}
+
+/** Publish runtime changes only after an atomic save succeeds. Rebase on concurrent writes. */
+export const updateSettingDurable = async(patch: Partial<LX.AppSetting>) => {
+  assertNoWebDAVCredentialWrite(patch)
+  const sanitized = sanitizeSettingUpdate(patch) ?? {}
+  let result!: ReturnType<typeof mergeSetting>
+  await getStore(STORE_NAMES.APP_SETTINGS).updateDurable(snapshot => {
+    const document = parseSettingsDocument(snapshot)
+    const current: LX.AppSetting = { ...defaultSetting, ...document.setting }
+    const normalized = normalizePerformancePatch(current, sanitized) as Partial<LX.AppSetting>
+    result = normalizePlaybackSettingResult(mergeSetting(current, normalized))
+    return { ...snapshot, ...replaceOrdinarySettings(document, result.setting) }
+  })
+  return result
 }
 
 export const updateCatalogPreferences = (preferences: CatalogPreferencesV1): SettingsDocumentV1 => {
@@ -413,6 +431,7 @@ export const getTheme = () => {
     ...theme.config.themeColors,
     ...theme.config.extInfo,
   }
+  if (global.lx.appSetting['performance.simplifyVisuals']) colors['--background-image'] = 'none'
 
   return {
     shouldUseDarkColors,

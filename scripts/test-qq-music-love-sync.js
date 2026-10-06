@@ -26,6 +26,9 @@ const createHarness = ({ likeQQMusic = async() => {} } = {}) => {
   const action = loadTsModule(
     path.join(__dirname, '../src/renderer/store/list/action.ts'),
     {
+      '@common/listGroup': loadTsModule(path.join(__dirname, '../src/common/listGroup.ts')),
+      '@common/utils': { log: { error() {} } },
+      './group': { initializeUserListGroups: async() => {} },
       '@renderer/store/setting': {
         appSetting: { 'list.addMusicLocationType': 'top' },
       },
@@ -39,6 +42,7 @@ const createHarness = ({ likeQQMusic = async() => {} } = {}) => {
       '@renderer/store/list/listManage': listManage,
       '@renderer/store/list/listManage/action': {
         setMusicList: () => [],
+        stageMusicList: () => {},
       },
       '@common/utils/vueTools': { toRaw: value => value },
       '@common/constants': {

@@ -336,11 +336,12 @@ test('Kugou recommendation page is registered in the router and sidebar', () => 
 
   assert.match(router, /path:\s*['"]\/kg-recommend['"]/)
   assert.match(router, /name:\s*['"]KugouRecommend['"]/)
-  assert.match(router, /views\/KugouRecommend\/index\.vue/)
+  assert.match(router, /loadRecommendationPage\('kugouRecommend'\)/)
+  assert.match(readSource('src/renderer/core/features/recommendations.ts'), /views\/KugouRecommend\/index\.vue/)
   assert.match(nav, /kugou-music\.svg/)
   assert.match(nav, /to:\s*['"]\/kg-recommend['"]/)
   assert.match(nav, /tips:\s*['"]kugou_recommend['"]/)
-  assert.match(nav, /\$style\.separator\]: index == 3/)
+  require('../scripts/test-utils/provider-navigation').assertProviderNavigation('kugouRecommend', '/kg-recommend')
 })
 
 test('Kugou account action initializes the provider and routes login requests', () => {

@@ -58,14 +58,16 @@ const createComputed = getter => ({
 
 const getSettingsToc = () => {
   const component = loadVueComponent('src/renderer/views/Setting/index.vue', {
+    '@renderer/store/performance': { requestPerformanceLeave: async() => true },
     '@common/utils/vueTools': {
+      defineAsyncComponent: vue.defineAsyncComponent,
       computed: createComputed,
       nextTick: callback => callback(),
       ref: value => ({ value }),
       watch() {},
     },
     '@renderer/plugins/i18n': { useI18n: () => key => key },
-    '@common/utils/vueRouter': { useRoute: () => ({ query: {} }) },
+    '@common/utils/vueRouter': { useRoute: () => ({ query: {} }), useRouter: () => ({}), onBeforeRouteLeave() {}, onBeforeRouteUpdate() {} },
   })
   return component.setup().tocList.value
 }
@@ -266,6 +268,7 @@ test('Basic settings exposes persistent sidebar navigation preferences', () => {
   assert.match(html, /value="accountMenu"/)
 
   const defaults = loadTsModule(path.join(root, 'src/common/defaultSetting.ts'), {
+    './performance/featurePolicy': loadTsModule(path.join(__dirname, '../src/common/performance/featurePolicy.ts')),
     './constants': { RECOMMEND_HOME_SECTION_IDS: [] },
     './projectIdentity': { PROJECT_IDENTITY: { defaultWebdavUrl: '' } },
     './utils/playBarLayout': { PLAY_BAR_HEIGHT_DEFAULT: 74 },

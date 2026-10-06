@@ -8,7 +8,7 @@ export default () => {
     return global.lx.appSetting
   })
   mainHandle<Partial<LX.AppSetting>>(CMMON_EVENT_NAME.set_app_setting, async({ params: config }) => {
-    global.lx.event_app.update_config(config)
+    await global.lx.event_app.update_config(config)
   })
 
   mainHandle<LX.EnvParams>(CMMON_EVENT_NAME.get_env_params, async() => {

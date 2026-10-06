@@ -498,7 +498,7 @@ const testAcceptedDailyDislikeRemovesAndAdvances = async() => {
   assert.strictEqual(store.getDislikeCalls(), 1)
   assert.deepStrictEqual(store.state.qqDailyRecommendSongs.map(item => item.id), ['tx_one', 'tx_three'])
   assert.deepStrictEqual(store.tempList.map(item => item.id), ['tx_one', 'tx_three'])
-  assert.deepStrictEqual(store.calls.playList.at(-1), ['temp', 1])
+  assert.deepStrictEqual(store.calls.playList.at(-1), ['temp', 1, { automatic: true, reason: 'dislike', startReason: 'auto' }])
 }
 
 const testDuplicateDailyDislikeSharesOneRequest = async() => {
@@ -1139,7 +1139,7 @@ const testDetailPlaybackDelegatesToDailyOwnerAndCardPauses = async() => {
   const detailAction = loadTsModule(path.join(__dirname, '../src/renderer/views/songList/Detail/action.ts'), {
     '@renderer/store/list/state': { tempListMeta: store.tempListMeta, userLists: [] },
     '@renderer/plugins/Dialog': { dialog: { confirm: async() => false } },
-    '@renderer/store/list/syncSourceList': async() => {},
+    '@renderer/store/list/importSourceList': { importSourceList: async() => {} },
     '@renderer/store/songList/action': {
       getListDetail: async() => { genericDetailLoads++; return { list: [] } },
       getListDetailAll: async() => { genericDetailLoads++; return [] },

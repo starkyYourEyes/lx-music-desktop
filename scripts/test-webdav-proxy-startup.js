@@ -14,6 +14,7 @@ const musicInfo = {
 
 const loadWebDAV = createServer => {
   global.lx = {
+    credentialVault: { read: () => ({ status: 'available', value: { version: 1, username: 'user', password: 'password' } }) },
     appSetting: {
       'webdav.url': rootUrl,
       'webdav.username': 'user',
@@ -23,6 +24,7 @@ const loadWebDAV = createServer => {
   }
 
   return loadTsModule(path.join(__dirname, '../src/main/modules/webdav.ts'), {
+    '@main/storage/credentials/types': loadTsModule(path.join(__dirname, '../src/main/storage/credentials/types.ts')),
     'node:http': { createServer },
     undici: { request: async() => { throw new Error('unexpected request') } },
     jschardet: { detect: () => ({}) },

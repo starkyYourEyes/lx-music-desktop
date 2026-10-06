@@ -1,3 +1,4 @@
+import { isFeatureEnabled } from '@common/performance/featurePolicy'
 import {
   computed,
 } from '@common/utils/vueTools'
@@ -20,6 +21,7 @@ export default () => {
   })
 
   const toggleDesktopLyric = () => {
+    if (!isFeatureEnabled(appSetting, 'desktopLyric')) return
     setVisibleDesktopLyric(!appSetting['desktopLyric.enable'])
   }
   const toggleLockDesktopLyric = () => {

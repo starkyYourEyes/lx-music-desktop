@@ -176,6 +176,9 @@ const loadPlayerActions = ({
   }
 
   const actions = loadTsModule(path.join(rendererRoot, 'core/player/action.ts'), {
+    './preloadState': loadTsModule(path.join(rendererRoot, 'core/player/preloadState.ts'), {
+      '@renderer/core/music/playback/coordinator': { getPlaybackSongIdentity },
+    }),
     '@renderer/plugins/player': {
       isEmpty: () => false,
       playerResourceController,
@@ -184,6 +187,7 @@ const loadPlayerActions = ({
     },
     '@renderer/store/player/state': {
       currentPlaybackQuality: { value: null },
+      playbackNotice: { value: '' },
       isPlay: { value: false },
       playedList: [],
       playInfo,

@@ -128,8 +128,8 @@ import DuplicateMusicModal from './components/DuplicateMusicModal.vue'
 import ListSortModal from './components/ListSortModal.vue'
 import ListUpdateModal from './components/ListUpdateModal.vue'
 
-import { allMusicList, loveList, userLists, fetchingListStatus } from '@renderer/store/list/state'
-import { getListMusics, removeUserList } from '@renderer/store/list/action'
+import { loveList, userLists, fetchingListStatus } from '@renderer/store/list/state'
+import { removeUserList } from '@renderer/store/list/action'
 import { appSetting } from '@renderer/store/setting'
 
 import { onBeforeUnmount, onMounted, ref, watch } from '@common/utils/vueTools'
@@ -152,6 +152,7 @@ import useEditList from './useEditList'
 import useListScroll from './useListScroll'
 import useDuplicate from './useDuplicate'
 import useGroups from './useGroups'
+import { useListCovers } from './useListCovers'
 import { loadPlatformGroupCollapsed, savePlatformGroupCollapsed } from './groupState'
 import { getPlatformPlaylistGroups, getPlatformPlaylistFailure, retryPlatformUserPlaylistGroup } from '@renderer/store/platformPlaylists/action'
 
@@ -183,7 +184,7 @@ export default {
     const dom_mine_list = ref(null)
     const dom_external_list = ref(null)
     const rightClickItemId = ref(null)
-    const coverVersion = ref(0)
+    const covers = useListCovers()
     const userListProfiles = ref({})
     const platformGroups = getPlatformPlaylistGroups()
     const platformProviders = ['netease', 'qq_music', 'kugou']
@@ -314,7 +315,6 @@ export default {
     const refreshUserListProfiles = () => {
       void getListUpdateInfo().then(info => {
         userListProfiles.value = Object.fromEntries(Object.entries(info).map(([id, item]) => [id, item.profile ?? {}]))
-        coverVersion.value++
       })
     }
 
@@ -323,26 +323,23 @@ export default {
     }
 
     const getListCover = (listInfo) => {
-      // Keep coverVersion as a lightweight render trigger after async list preloading.
-      const version = coverVersion.value
+      // Track cover publication after each async list read.
+      const version = covers.version.value
       void version
       const customCover = getCustomCover(listInfo)
       if (customCover) return buildCoverUrl(customCover)
-      const firstMusic = allMusicList.get(listInfo.id)?.[0]
-      return firstMusic?.meta?.picUrl ?? ''
+      return covers.get(listInfo.id)
     }
 
     const preloadListCovers = () => {
       const ids = [loveList.id, ...userLists.map(l => l.id)]
-      void Promise.all(ids.map(async id => getListMusics(id).catch(() => []))).then(() => {
-        coverVersion.value++
-      })
+      void covers.preload(ids)
     }
 
     const handleMyListUpdate = (ids) => {
       if (!ids.some(id => id == loveList.id || userLists.some(l => l.id == id))) return
       refreshUserListProfiles()
-      coverVersion.value++
+      void covers.refresh(ids.filter(id => id == loveList.id || userLists.some(l => l.id == id)))
     }
 
     watch(() => props.listId, (listId) => {
@@ -361,12 +358,18 @@ export default {
       })
     })
 
-    watch(() => userLists.map(l => l.id).join(','), preloadListCovers, { immediate: true })
+    watch(() => userLists.map(l => l.id), (ids, previousIds = []) => {
+      const present = new Set(ids)
+      covers.remove(previousIds.filter(id => !present.has(id)))
+      preloadListCovers()
+    }, { immediate: true })
     refreshUserListProfiles()
 
     window.app_event.on('myListUpdate', handleMyListUpdate)
+    window.app_event.on('listProfilesUpdated', refreshUserListProfiles)
     onBeforeUnmount(() => {
       window.app_event.off('myListUpdate', handleMyListUpdate)
+      window.app_event.off('listProfilesUpdated', refreshUserListProfiles)
     })
 
     return {
@@ -536,6 +539,8 @@ export default {
 }
 .listsContent {
   position: relative;
+  // Keep group updates off the layer shared with the main page and glass background.
+  transform: translateZ(0);
   flex: auto;
   min-width: 0;
   min-height: 0;

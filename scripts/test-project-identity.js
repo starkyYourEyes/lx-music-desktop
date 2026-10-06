@@ -54,6 +54,9 @@ const getRuntimeEntries = () => {
         stop() {},
       },
     },
+    '@common/utils/webdavUrl': require('../src/common/utils/webdavUrl'),
+    '@common/utils/playbackSourceSetting': loadTsModule(path.join(root, 'src/common/utils/playbackSourceSetting.ts')),
+    '@main/storage/settings/document': {},
     '@common/constants': constants,
     '@common/defaultHotKey': { global: {}, local: {} },
     '@common/defaultSetting': { version: 1 },
@@ -80,6 +83,10 @@ const getRuntimeEntries = () => {
     '@common/utils/common': { throttle: callback => callback },
     '../../utils': { exists: async() => false },
     '../utils': syncUtils,
+    '@main/storage/atomicJsonFile': {},
+    '@main/storage/credentials': {},
+    '@main/storage/operationJournal': {},
+    '@common/storage/syncMetadata': {},
   })
   const clients = new Map()
   const userSpace = {
@@ -329,10 +336,10 @@ test('runtime identifiers are consumed from the shared identity', () => {
     ['src/main/app.ts', /projectIdentity/],
     ['src/main/modules/sync/client/auth.ts', /syncProtocol/],
     ['src/main/modules/sync/server/server/auth.ts', /syncProtocol/],
-    ['src/main/modules/userApi/main.ts', /projectIdentity/],
+    ['src/main/modules/userApi/runtimeWindow.ts', /projectIdentity/],
     ['src/renderer/core/useApp/useDeeplink/index.ts', /projectIdentity/],
     ['src/renderer/utils/musicSdk/options.js', /projectIdentity/],
-    ['src/renderer/worker/main/music.ts', /projectIdentity/],
+    ['src/main/utils/storagePaths.ts', /projectIdentity/],
   ]
   for (const [relativePath, dependency] of expectedImports) {
     assert.match(read(relativePath), dependency, relativePath)

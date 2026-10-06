@@ -1,7 +1,8 @@
 import { computed, ref } from '@common/utils/vueTools'
 import { prepareQQGuessLikeQueue, resetQQGuessLikeQueue } from '@renderer/store/qqGuessLike/action'
-import { isLoadingQQGuessLike, qqGuessLikeQueue } from '@renderer/store/qqGuessLike/state'
+import { isLoadingQQGuessLike, isQQGuessLikeMode, qqGuessLikeQueue } from '@renderer/store/qqGuessLike/state'
 import { getQQMusicAccountKey, initQQMusicAccount } from '@renderer/store/qqMusic'
+import { useRecommendationPage } from '@renderer/core/features/recommendationAccess'
 
 const LOAD_ERROR = '猜你喜欢加载失败，请稍后重试'
 
@@ -12,6 +13,7 @@ export const useQQGuessLikeData = () => {
   let requestRevision = 0
 
   const load = async(force = false) => {
+    if (!isEnabled()) return []
     const revision = ++requestRevision
     const accountKey = getQQMusicAccountKey()
     if (!accountKey) {
@@ -42,6 +44,13 @@ export const useQQGuessLikeData = () => {
     isRefreshing.value = false
     resetQQGuessLikeQueue()
   }
+
+  const isEnabled = useRecommendationPage('qqRecommend', () => {
+    requestRevision++
+    loadError.value = ''
+    isRefreshing.value = false
+    if (!isQQGuessLikeMode.value) resetQQGuessLikeQueue()
+  })
 
   return {
     songs,

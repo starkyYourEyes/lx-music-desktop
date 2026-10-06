@@ -5,10 +5,11 @@
 </template>
 
 <script>
-import { ref, onBeforeUnmount, onMounted } from '@common/utils/vueTools'
-import { getAnalyser } from '@renderer/plugins/player'
+import { ref, onBeforeUnmount, onMounted, watch } from '@common/utils/vueTools'
+import { acquireAnalyser } from '@renderer/plugins/player'
 import { isPlay } from '@renderer/store/player/state'
-// import { appSetting } from '@renderer/store/setting'
+import { appSetting } from '@renderer/store/setting'
+import { isFeatureEnabled } from '@common/performance/featurePolicy'
 
 // const themes = {
 //   green: 'rgba(77,175,124,.16)',
@@ -41,7 +42,11 @@ const getBarWidth = canvasWidth => {
 export default {
   setup() {
     const dom_canvas = ref(null)
-    const analyser = getAnalyser()
+    let analyserLease = null
+    let analyser = null
+    const shouldRender = () => !!ctx && isPlay.value && !document.hidden &&
+      appSetting['player.audioVisualization'] && isFeatureEnabled(appSetting, 'audioVisualization') &&
+      (!appSetting['player.mediaDeviceId'] || appSetting['player.mediaDeviceId'] == 'default')
 
     let ctx
     let bufferLength = 0
@@ -69,6 +74,11 @@ export default {
 
     // https://developer.mozilla.org/zh-CN/docs/Web/API/AnalyserNode/smoothingTimeConstant
     const renderFrame = () => {
+      animationFrameId = null
+      if (!shouldRender() || !analyser) {
+        handlePause()
+        return
+      }
       x = 0
 
       analyser.getByteFrequencyData(dataArray)
@@ -110,6 +120,10 @@ export default {
     }
 
     const handlePlay = () => {
+      if (isPlaying || !shouldRender()) return
+      analyserLease = acquireAnalyser()
+      if (!analyserLease) return
+      analyser = analyserLease.analyser
       isPlaying = true
       // analyser.fftSize = 256
       bufferLength = analyser.frequencyBinCount
@@ -120,8 +134,18 @@ export default {
     }
     const handlePause = () => {
       if (animationFrameId) window.cancelAnimationFrame(animationFrameId)
+      animationFrameId = null
       isPlaying = false
+      analyserLease?.release()
+      analyserLease = null
+      analyser = null
+      dataArray = null
+      ctx?.clearRect(0, 0, WIDTH, HEIGHT)
     }
+    const updateActivity = () => { if (shouldRender()) handlePlay(); else handlePause() }
+    watch(() => [isPlay.value, appSetting['player.audioVisualization'],
+      isFeatureEnabled(appSetting, 'audioVisualization'), appSetting['player.mediaDeviceId']], updateActivity)
+    document.addEventListener('visibilitychange', updateActivity)
 
     const handleResize = () => {
       const canvas = dom_canvas.value
@@ -144,6 +168,7 @@ export default {
       window.app_event.off('pause', handlePause)
       window.app_event.off('error', handlePause)
       window.removeEventListener('resize', handleResize)
+      document.removeEventListener('visibilitychange', updateActivity)
     })
 
     onMounted(() => {

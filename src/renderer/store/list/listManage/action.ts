@@ -5,6 +5,9 @@ import {
   loveList,
   tempList,
   userLists,
+  invalidateMusicListReads,
+  retainMusicList,
+  setMusicListCacheOwner,
 } from './state'
 import { overwriteListPosition, overwriteListUpdateInfo, removeListPosition, removeListUpdateInfo } from '@renderer/utils/data'
 import { LIST_IDS } from '@common/constants'
@@ -21,6 +24,11 @@ export const setMusicList = (listId: string, musicList: LX.Music.MusicInfo[]) =>
   return list
 }
 
+export const stageMusicList = (listId: string, musicList: LX.Music.MusicInfo[]) => {
+  setMusicListCacheOwner('playback-staging', [listId])
+  return setMusicList(listId, musicList)
+}
+
 const overwriteMusicList = (id: string, list: LX.Music.MusicInfo[]) => {
   // console.log(id, list)
   markRawList(list)
@@ -28,6 +36,7 @@ const overwriteMusicList = (id: string, list: LX.Music.MusicInfo[]) => {
   if (targetList) {
     targetList.splice(0, targetList.length)
     arrPush(targetList, list)
+    allMusicList.prune()
   } else {
     allMusicList.set(id, list)
   }
@@ -107,18 +116,17 @@ const overwriteUserList = (lists: LX.List.UserListInfo[]) => {
 
 
 export const listDataOverwrite = ({ defaultList, loveList, userList, tempList }: MakeOptional<LX.List.ListDataFull, 'tempList'>): string[] => {
+  invalidateMusicListReads()
   const updatedListIds: string[] = []
   const newUserIds: string[] = []
   const newUserListInfos = userList.map(({ list, ...listInfo }) => {
     newUserIds.push(listInfo.id)
-    if (allMusicList.has(listInfo.id)) {
-      overwriteMusicList(listInfo.id, list)
-      updatedListIds.push(listInfo.id)
-    }
+    if (allMusicList.has(listInfo.id)) overwriteMusicList(listInfo.id, list)
+    updatedListIds.push(listInfo.id)
     return listInfo
   })
   for (const list of userLists) {
-    if (!allMusicList.has(list.id) || newUserIds.includes(list.id)) continue
+    if (newUserIds.includes(list.id)) continue
     removeMusicList(list.id)
     updatedListIds.push(list.id)
   }
@@ -126,14 +134,14 @@ export const listDataOverwrite = ({ defaultList, loveList, userList, tempList }:
 
   if (allMusicList.has(LIST_IDS.DEFAULT)) {
     overwriteMusicList(LIST_IDS.DEFAULT, defaultList)
-    updatedListIds.push(LIST_IDS.DEFAULT)
   }
+  updatedListIds.push(LIST_IDS.DEFAULT)
 
   overwriteMusicList(LIST_IDS.LOVE, loveList)
   updatedListIds.push(LIST_IDS.LOVE)
 
-  if (tempList && allMusicList.has(LIST_IDS.TEMP)) {
-    overwriteMusicList(LIST_IDS.TEMP, tempList)
+  if (tempList) {
+    if (allMusicList.has(LIST_IDS.TEMP)) overwriteMusicList(LIST_IDS.TEMP, tempList)
     updatedListIds.push(LIST_IDS.TEMP)
   }
   const newIds = [LIST_IDS.DEFAULT, LIST_IDS.LOVE, ...userList.map(l => l.id)]
@@ -163,12 +171,12 @@ export const userListCreate = ({ name, id, source, sourceListId, position, locat
 }
 
 export const userListsRemove = (ids: string[]) => {
+  invalidateMusicListReads()
   const changedIds = []
   for (const id of ids) {
     removeUserList(id)
     void removeListPosition(id)
     void removeListUpdateInfo(id)
-    if (!allMusicList.has(id)) continue
     removeMusicList(id)
     changedIds.push(id)
   }
@@ -205,25 +213,25 @@ export const userListsUpdatePosition = (position: number, ids: string[]) => {
 }
 
 export const listMusicOverwrite = (listId: string, musicInfos: LX.Music.MusicInfo[]): string[] => {
-  const isExist = allMusicList.has(listId)
-  overwriteMusicList(listId, musicInfos)
-  return isExist || listId == loveList.id ? [listId] : []
+  invalidateMusicListReads()
+  if (allMusicList.has(listId) || listId == loveList.id) overwriteMusicList(listId, musicInfos)
+  return [listId]
 }
 
 export const listMusicClear = (ids: string[]): string[] => {
-  const changedIds: string[] = []
+  invalidateMusicListReads()
   for (const id of ids) {
     const list = allMusicList.get(id)
     if (!list?.length) continue
     overwriteMusicList(id, [])
-    changedIds.push(id)
   }
-  return changedIds
+  return ids
 }
 
 export const listMusicAdd = (id: string, musicInfos: LX.Music.MusicInfo[], addMusicLocationType: LX.AddMusicLocationType): string[] => {
+  invalidateMusicListReads()
   const targetList = allMusicList.get(id)
-  if (!targetList) return id == loveList.id ? [id] : []
+  if (!targetList) return [id]
 
   const listSet = new Set<string>()
   for (const item of targetList) listSet.add(item.id)
@@ -243,6 +251,7 @@ export const listMusicAdd = (id: string, musicInfos: LX.Music.MusicInfo[], addMu
       break
   }
 
+  allMusicList.prune()
   return [id]
 }
 
@@ -254,8 +263,9 @@ export const listMusicMove = (fromId: string, toId: string, musicInfos: LX.Music
 }
 
 export const listMusicRemove = (listId: string, ids: string[]): string[] => {
+  invalidateMusicListReads()
   let targetList = allMusicList.get(listId)
-  if (!targetList) return listId == loveList.id ? [listId] : []
+  if (!targetList) return [listId]
 
   const idsSet = new Set<string>(ids)
   const newList = targetList.filter(mInfo => !idsSet.has(mInfo.id))
@@ -266,8 +276,10 @@ export const listMusicRemove = (listId: string, ids: string[]): string[] => {
 }
 
 export const listMusicUpdateInfo = (musicInfos: LX.List.ListActionMusicUpdate): string[] => {
+  invalidateMusicListReads()
   const updateListIds = new Set<string>()
   for (const { id, musicInfo } of musicInfos) {
+    updateListIds.add(id)
     const targetList = allMusicList.get(id)
     if (!targetList) continue
     const index = targetList.findIndex(l => l.id == musicInfo.id)
@@ -287,26 +299,30 @@ export const listMusicUpdateInfo = (musicInfos: LX.List.ListActionMusicUpdate): 
 }
 
 export const listMusicUpdatePosition = async(listId: string, position: number, ids: string[]): Promise<string[]> => {
-  let targetList = allMusicList.get(listId)
-  if (!targetList) return listId == loveList.id ? [listId] : []
+  invalidateMusicListReads()
+  const release = retainMusicList(listId)
+  try {
+    let targetList = allMusicList.get(listId)
+    if (!targetList) return [listId]
 
 
-  // const infos = Array(ids.length)
-  // for (let i = targetList.length; i--;) {
-  //   const item = targetList[i]
-  //   const index = ids.indexOf(item.id)
-  //   if (index < 0) continue
-  //   infos.splice(index, 1, targetList.splice(i, 1)[0])
-  // }
-  // targetList.splice(Math.min(position, targetList.length - 1), 0, ...infos)
+    // const infos = Array(ids.length)
+    // for (let i = targetList.length; i--;) {
+    //   const item = targetList[i]
+    //   const index = ids.indexOf(item.id)
+    //   if (index < 0) continue
+    //   infos.splice(index, 1, targetList.splice(i, 1)[0])
+    // }
+    // targetList.splice(Math.min(position, targetList.length - 1), 0, ...infos)
 
-  // console.time('ts')
+    // console.time('ts')
 
-  const list = await window.lx.worker.main.createSortedList(toRaw(targetList), position, ids)
-  markRawList(list)
-  targetList.splice(0, targetList.length)
-  arrPush(targetList, list)
+    const list = await window.lx.worker.main.createSortedList(toRaw(targetList), position, ids)
+    markRawList(list)
+    targetList.splice(0, targetList.length)
+    arrPush(targetList, list)
 
-  // console.timeEnd('ts')
-  return [listId]
+    // console.timeEnd('ts')
+    return [listId]
+  } finally { release() }
 }

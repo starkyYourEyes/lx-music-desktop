@@ -8,6 +8,7 @@ import { appSetting } from '@renderer/store/setting'
 import { isPrivateFmMode } from '@renderer/store/privateFm/state'
 import { preparePrivateFmQueue } from '@renderer/store/privateFm/action'
 import { loadDailyRecommendSongs } from '@renderer/store/dailyRecommend/action'
+import { useRecommendationPage } from '@renderer/core/features/recommendationAccess'
 import {
   EXPLORE_PLAYLIST_LIMIT,
   HOME_RECOMMEND_PLAYLIST_LIMIT,
@@ -258,6 +259,7 @@ export const useRecommendData = ({
   }
 
   const loadRecommendPlaylists = async(forceRefresh = false) => {
+    if (!isEnabled()) return
     let context = createLoadRequestContext()
     const cachedList = forceRefresh ? null : getRecommendPlaylistCache(context.recommendPlaylistCacheKey)
     const cachedHome = forceRefresh || context.isExploreMode ? null : getHomeRecommendationCache(context.homeRecommendationCacheKey)
@@ -379,6 +381,7 @@ export const useRecommendData = ({
   }
 
   const handleRefreshStyleSongs = async() => {
+    if (!isEnabled()) return
     if (isRefreshingStyleSongs.value) return
     const context = createAccountRequestContext()
     isRefreshingStyleSongs.value = true
@@ -402,6 +405,7 @@ export const useRecommendData = ({
   }
 
   const handleRefreshSimilarSongs = async() => {
+    if (!isEnabled()) return
     if (isRefreshingSimilarSongs.value) return
     const context = createAccountRequestContext()
     isRefreshingSimilarSongs.value = true
@@ -422,6 +426,7 @@ export const useRecommendData = ({
   }
 
   const handleRefreshRecommendPlaylists = async() => {
+    if (!isEnabled()) return
     if (isRefreshingRecommendPlaylists.value) return
     const context = createAccountRequestContext()
     isRefreshingRecommendPlaylists.value = true
@@ -440,6 +445,16 @@ export const useRecommendData = ({
       if (isCurrentAccountRequest(context)) isRefreshingRecommendPlaylists.value = false
     }
   }
+
+  const isEnabled = useRecommendationPage('neteaseRecommend', () => {
+    ++accountRevision
+    loadRevisions.clear()
+    blockingLoadRevisions.clear()
+    recommendPlaylistCache.clear()
+    homeRecommendationCache.clear()
+    recommendScrollCache.clear()
+    clearVisibleState()
+  })
 
   return {
     isLoadingPlaylists,

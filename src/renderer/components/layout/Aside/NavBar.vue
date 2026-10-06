@@ -33,6 +33,7 @@
 </template>
 
 <script lang="ts">
+import { getFeatureForPath, isFeatureEnabled } from '@common/performance/featurePolicy'
 import { appSetting } from '@renderer/store/setting'
 import { useI18n } from '@root/lang'
 import { computed } from '@common/utils/vueTools'
@@ -64,7 +65,7 @@ export default {
     const route = useRoute()
     const activeListId = computed(() => route.path == '/list' && typeof route.query.id == 'string' ? route.query.id : '')
     const isActive = (name: string) => route.meta.name == name
-    const providerMenus = computed(() => providers.map(item => ({ ...item, tips: t(item.tips) })))
+    const providerMenus = computed(() => providers.filter(item => isFeatureEnabled(appSetting, getFeatureForPath(item.to)!)).map(item => ({ ...item, tips: t(item.tips) })))
     const menus = computed(() => menuList.map(item => ({
       ...item,
       tips: t(item.tips),

@@ -44,6 +44,7 @@ test('layout backgrounds use unified continuously composited layers', () => {
 
 test('application settings preserve the current visual density by default', () => {
   const defaults = loadTsModule(path.join(root, 'src/common/defaultSetting.ts'), {
+    './performance/featurePolicy': loadTsModule(path.join(__dirname, '../src/common/performance/featurePolicy.ts')),
     './constants': { RECOMMEND_HOME_SECTION_IDS: [] },
     './projectIdentity': { PROJECT_IDENTITY: { defaultWebdavUrl: '' } },
     './utils/playBarLayout': { PLAY_BAR_HEIGHT_DEFAULT: 74 },

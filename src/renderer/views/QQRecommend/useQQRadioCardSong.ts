@@ -1,4 +1,5 @@
 import { computed, shallowRef, watch } from '@common/utils/vueTools'
+import { isRecommendationEnabled, useRecommendationPage } from '@renderer/core/features/recommendationAccess'
 
 type QQRadioCardSongKey = 'guessLike' | 'brushMode'
 
@@ -30,8 +31,10 @@ export const useQQRadioCardSong = (
   }, { immediate: true, flush: 'sync' })
 
   watch(() => currentSong.value, song => {
-    if (song) lastSong.value = song
+    if (song && isRecommendationEnabled('qqRecommend')) lastSong.value = song
   }, { immediate: true, flush: 'sync' })
+
+  useRecommendationPage('qqRecommend', () => { lastSong.value = null })
 
   return {
     song: computed(() => currentSong.value ?? lastSong.value),

@@ -104,6 +104,7 @@ test('play bar layout scales artwork and keeps it vertically centered', () => {
 
 test('application settings preserve the existing 74px play bar by default', () => {
   const defaults = loadTsModule(path.join(root, 'src/common/defaultSetting.ts'), {
+    './performance/featurePolicy': loadTsModule(path.join(__dirname, '../src/common/performance/featurePolicy.ts')),
     './constants': { RECOMMEND_HOME_SECTION_IDS: [] },
     './projectIdentity': { PROJECT_IDENTITY: { defaultWebdavUrl: '' } },
     './utils/playBarLayout': loadLayout(),

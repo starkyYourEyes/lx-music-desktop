@@ -4,6 +4,7 @@ import { clearPlayedList } from '@renderer/store/player/action'
 import { playList } from '@renderer/core/player'
 import { setTempList } from '@renderer/store/list/action'
 import { getNeteaseRecommendSongs } from '@renderer/utils/ipc'
+import { assertRecommendationEnabled, getRecommendationRevision, isRecommendationEnabled, isRecommendationRequestCurrent, registerRecommendationCleanup } from '@renderer/core/features/recommendationAccess'
 import {
   DAILY_RECOMMEND_TEMP_LIST_ID,
   dailyRecommendSongs,
@@ -13,11 +14,14 @@ import {
 const toCloneable = <T>(value: T): T => JSON.parse(JSON.stringify(toRaw(value)))
 
 export const loadDailyRecommendSongs = async(forceRefresh = false) => {
+  if (!isRecommendationEnabled('neteaseRecommend')) return []
+  const revision = getRecommendationRevision('neteaseRecommend')
   if (!forceRefresh && dailyRecommendSongs.length) return dailyRecommendSongs
 
   isLoadingDailyRecommend.value = true
   try {
     const songs = markRawList(await getNeteaseRecommendSongs())
+    if (!isRecommendationRequestCurrent('neteaseRecommend', revision)) return []
     dailyRecommendSongs.splice(0, dailyRecommendSongs.length, ...songs)
     return dailyRecommendSongs
   } finally {
@@ -55,10 +59,17 @@ export const syncDailyRecommendTempList = async() => {
 }
 
 export const playDailyRecommend = async(startIndex = 0) => {
+  assertRecommendationEnabled('neteaseRecommend')
   if (!dailyRecommendSongs.length) await loadDailyRecommendSongs()
   if (!dailyRecommendSongs.length) throw new Error('每日推荐暂无歌曲')
 
   await syncDailyRecommendTempList()
+  assertRecommendationEnabled('neteaseRecommend')
   clearPlayedList()
   playList(LIST_IDS.TEMP, Math.min(startIndex, dailyRecommendSongs.length - 1))
 }
+
+registerRecommendationCleanup('neteaseRecommend', () => {
+  dailyRecommendSongs.splice(0, dailyRecommendSongs.length)
+  isLoadingDailyRecommend.value = false
+})

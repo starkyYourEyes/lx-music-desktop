@@ -18,6 +18,7 @@ declare global {
             dislike: boolean
             party: boolean
             userApi: boolean
+            listProfile: boolean
           }
 
           onClose: (handler: (err: Error) => (void | Promise<void>)) => () => void
@@ -26,6 +27,7 @@ declare global {
           remoteQueueDislike: LX.Sync.ServerSyncDislikeActions
           remoteQueueParty: LX.Sync.ServerSyncPartyActions
           remoteQueueUserApi: LX.Sync.ServerSyncUserApiActions
+          remoteQueueListProfile: LX.Sync.ServerSyncListProfileActions
         }
 
         interface UrlInfo {
@@ -42,10 +44,12 @@ declare global {
           userInfo: { name: 'default' }
           keyInfo: ServerKeyInfo
           feature: LX.Sync.EnabledFeatures
+          profileSyncMode?: LX.Sync.List.SyncMode
           moduleReadys: {
             list: boolean
             dislike: boolean
             userApi: boolean
+            listProfile: boolean
           }
 
           onClose: (handler: (err: Error) => (void | Promise<void>)) => () => void
@@ -55,6 +59,7 @@ declare global {
           remoteQueueList: LX.Sync.ClientSyncListActions
           remoteQueueDislike: LX.Sync.ClientSyncDislikeActions
           remoteQueueUserApi: LX.Sync.ClientSyncUserApiActions
+          remoteQueueListProfile: LX.Sync.ClientSyncListProfileActions
         }
         type SocketServer = WS.Server<Socket>
       }

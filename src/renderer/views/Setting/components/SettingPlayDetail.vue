@@ -1,6 +1,9 @@
 <template lang="pug">
 dt#play_detail {{ $t('setting__play_detail') }}
 dd
+  router-link(to="/setting?name=SettingPerformance") {{ $t('performance_open_settings') }}
+
+dd
   .gap-top
     base-checkbox(id="setting_play_detail_font_zoom_enable" :model-value="appSetting['playDetail.isZoomActiveLrc']" :label="$t('setting__play_detail_font_zoom')" @update:model-value="updateSetting({'playDetail.isZoomActiveLrc': $event})")
   .gap-top

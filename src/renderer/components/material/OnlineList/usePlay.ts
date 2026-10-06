@@ -6,6 +6,7 @@ import { appSetting } from '@renderer/store/setting'
 import { type Ref } from '@common/utils/vueTools'
 import { playList, playMusicByInfo } from '@renderer/core/player'
 import { LIST_IDS } from '@common/constants'
+import { retainMusicList } from '@renderer/store/list/listManage/state'
 
 const wait = async(ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -28,24 +29,27 @@ export default ({ selectedList, props, removeAllSelect, emit }: {
       emit('play-list', index)
       return
     }
-    if (selectedList.value.length && !single) {
-      await addListMusics(defaultList.id, [...selectedList.value])
-      removeAllSelect()
-    } else {
-      await addListMusics(defaultList.id, [targetSong])
-    }
-
-    for (let i = 0; i < 5; i++) {
-      const defaultListMusics = await getListMusics(defaultList.id)
-      const targetIndex = defaultListMusics.findIndex(s => s.id === targetSong.id)
-      if (targetIndex > -1) {
-        playList(defaultList.id, targetIndex)
-        return
+    const release = retainMusicList(defaultList.id)
+    try {
+      if (selectedList.value.length && !single) {
+        await addListMusics(defaultList.id, [...selectedList.value])
+        removeAllSelect()
+      } else {
+        await addListMusics(defaultList.id, [targetSong])
       }
-      await wait(20)
-    }
 
-    playMusicByInfo(targetSong)
+      for (let i = 0; i < 5; i++) {
+        const defaultListMusics = await getListMusics(defaultList.id)
+        const targetIndex = defaultListMusics.findIndex(s => s.id === targetSong.id)
+        if (targetIndex > -1) {
+          playList(defaultList.id, targetIndex)
+          return
+        }
+        await wait(20)
+      }
+
+      playMusicByInfo(targetSong)
+    } finally { release() }
   }
 
   const handlePlayMusicLater = (index: number, single: boolean) => {

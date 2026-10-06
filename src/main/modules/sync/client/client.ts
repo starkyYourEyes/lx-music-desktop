@@ -212,6 +212,7 @@ export const connect = (urlInfo: LX.Sync.Client.UrlInfo, keyInfo: LX.Sync.Client
   client.remoteQueueDislike = syncRpc.createQueueRemote('dislike')
   client.remoteQueueParty = syncRpc.createQueueRemote('party')
   client.remoteQueueUserApi = syncRpc.createQueueRemote('userApi')
+  client.remoteQueueListProfile = syncRpc.createQueueRemote('listProfile')
 
   client.addEventListener('message', ({ data }) => {
     if (data == 'ping') return
@@ -250,6 +251,7 @@ export const connect = (urlInfo: LX.Sync.Client.UrlInfo, keyInfo: LX.Sync.Client
       dislike: false,
       party: false,
       userApi: false,
+      listProfile: false,
     }
     disconnected = false
     sendSyncStatus({

@@ -17,6 +17,7 @@
       <base-btn v-for="item in userPresetList" :key="item.id" min @click="handleSetPreset(item)" @contextmenu="handleRemovePreset(item.id)">{{ item.name }}</base-btn>
       <AddEQPresetBtn v-if="userPresetList.length < 31" />
     </div>
+    <p :class="$style.tip">{{ $t('player__sound_effect_biquad_filter_headroom_tip') }}</p>
     <!-- <div :class="$style.footer">
       <base-btn min @click="handleReset">{{ $t('player__sound_effect_biquad_filter_reset_btn') }}</base-btn>
     </div> -->
@@ -164,6 +165,13 @@ onMounted(() => {
   flex-flow: row wrap;
   margin-top: 10px;
   gap: 10px;
+}
+
+.tip {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-font-label);
 }
 
 </style>

@@ -103,6 +103,7 @@ declare namespace LX {
       dislike?: false | DislikeConfig
       userApi?: false | UserApiConfig
       party?: false | PartyConfig
+      listProfile?: false | Record<string, never>
     }
     type SupportedFeatures = Partial<{ [k in keyof EnabledFeatures]: number }>
   }

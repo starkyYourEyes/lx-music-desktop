@@ -8,6 +8,7 @@ const { loadVueSfc } = require('../scripts/test-utils/load-vue-sfc')
 const root = path.resolve(__dirname, '..')
 const loadFonts = () => loadTsModule(path.join(root, 'src/common/utils/sidebarFontSize.ts'))
 const loadDefaults = () => loadTsModule(path.join(root, 'src/common/defaultSetting.ts'), {
+  './performance/featurePolicy': loadTsModule(path.join(__dirname, '../src/common/performance/featurePolicy.ts')),
   './constants': { RECOMMEND_HOME_SECTION_IDS: [] },
   './projectIdentity': { PROJECT_IDENTITY: { defaultWebdavUrl: '' } },
   './utils/playBarLayout': { PLAY_BAR_HEIGHT_DEFAULT: 74 },

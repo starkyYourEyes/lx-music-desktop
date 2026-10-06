@@ -1,6 +1,9 @@
 <template lang="pug">
 dt#basic {{ $t('setting__basic') }}
 dd
+  router-link(to="/setting?name=SettingPerformance") {{ $t('performance_open_settings') }}
+
+dd
   div
     .gap-top
       base-checkbox(id="setting_show_animate" :model-value="appSetting['common.isShowAnimation']" :label="$t('setting__basic_show_animation')" @update:model-value="updateSetting({'common.isShowAnimation': $event})")
@@ -374,7 +377,10 @@ export default {
         if (action == 'user_api_pull') await refreshUserApiList()
         userApiSyncStatus.value = t('user_api_sync__complete', { meta: formatUserApiMeta(meta) })
       } catch (err) {
-        userApiSyncStatus.value = t('user_api_sync__failed', { message: err?.message ?? String(err) })
+        const message = err?.message ?? String(err)
+        userApiSyncStatus.value = t('user_api_sync__failed', {
+          message: message.includes('user_api_push_not_allowed') ? t('user_api_sync__push_not_allowed') : message,
+        })
         void dialog({
           message: userApiSyncStatus.value,
           confirmButtonText: t('alert_button_text'),

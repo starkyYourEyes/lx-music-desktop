@@ -8,6 +8,7 @@ import { playInfo, playMusicInfo } from '@renderer/store/player/state'
 import { appSetting } from '@renderer/store/setting'
 import { getQQMusicGuessLikeSongs } from '@renderer/utils/ipc'
 import { QQ_GUESS_LIKE_TEMP_LIST_ID } from '@renderer/views/Recommend/constants'
+import { assertRecommendationEnabled, beginRecommendationSession, endRecommendationSession, hasRecommendationSession, isRecommendationEnabled, registerRecommendationCleanup } from '@renderer/core/features/recommendationAccess'
 import {
   isLoadingQQGuessLike,
   isQQGuessLikeMode,
@@ -51,6 +52,7 @@ const getMusicId = (musicInfo: LX.Player.PlayMusicInfo['musicInfo'] | null) => {
 }
 
 export const resetQQGuessLikeQueue = () => {
+  endRecommendationSession('qqGuessLike')
   qqGuessLikeGeneration.value++
   isQQGuessLikeMode.value = false
   qqGuessLikeOwnerAccountKey.value = null
@@ -68,6 +70,7 @@ const beginSourceSession = (accountKey: string, apiVersion: LX.QQMusic.GuessLike
 }
 
 export const prepareQQGuessLikeQueue = async(accountKey: string, force = false) => {
+  if (!isRecommendationEnabled('qqRecommend')) return isQQGuessLikeMode.value ? qqGuessLikeQueue : []
   const apiVersion = getApiVersion()
   beginSourceSession(accountKey, apiVersion)
   if (qqGuessLikeQueue.length && (!force || isQQGuessLikeMode.value)) return qqGuessLikeQueue
@@ -81,7 +84,7 @@ export const prepareQQGuessLikeQueue = async(accountKey: string, force = false) 
   isLoadingQQGuessLike.value = true
   const task = getQQMusicGuessLikeSongs(false, apiVersion)
     .then(songs => {
-      if (!isCurrentSnapshot(accountKey, generation)) return []
+      if (!isRecommendationEnabled('qqRecommend') || !isCurrentSnapshot(accountKey, generation)) return []
       qqGuessLikeQueue.splice(0, qqGuessLikeQueue.length, ...markRawList(songs))
       return songs
     })
@@ -99,16 +102,25 @@ export const syncQQGuessLikeTempList = async() => {
 }
 
 export const enterQQGuessLikeMode = async(accountKey: string) => {
+  assertRecommendationEnabled('qqRecommend')
   beginSourceSession(accountKey, getApiVersion())
   if (!qqGuessLikeQueue.length) await prepareQQGuessLikeQueue(accountKey)
   if (!qqGuessLikeQueue.length) throw new Error('QQ Guess You Like has no songs')
 
   const generation = ++qqGuessLikeGeneration.value
   request = null
-  await syncQQGuessLikeTempList()
+  const wasActive = isQQGuessLikeMode.value
+  await beginRecommendationSession('qqGuessLike')
+  if (!isCurrentSnapshot(accountKey, generation)) return
+  isQQGuessLikeMode.value = true
+  try {
+    await syncQQGuessLikeTempList()
+  } catch (error) {
+    if (!wasActive && isCurrentSnapshot(accountKey, generation)) resetQQGuessLikeQueue()
+    throw error
+  }
   if (!isCurrentSnapshot(accountKey, generation)) return
 
-  isQQGuessLikeMode.value = true
   clearPlayedList()
   playList(LIST_IDS.TEMP, 0)
 }
@@ -116,8 +128,10 @@ export const enterQQGuessLikeMode = async(accountKey: string) => {
 const exitQQGuessLikeMode = () => {
   if (!isQQGuessLikeMode.value) return
   isQQGuessLikeMode.value = false
+  endRecommendationSession('qqGuessLike')
   qqGuessLikeGeneration.value++
   request = null
+  if (!isRecommendationEnabled('qqRecommend')) resetQQGuessLikeQueue()
 }
 
 export const syncQQGuessLikeModeWithPlayer = (accountKey: string | null) => {
@@ -160,7 +174,9 @@ export const ensureQQGuessLikeNextSongs = (
     request.generation == generation &&
     request.continuation) return request.task
 
-  const task = getQQMusicGuessLikeSongs(true, apiVersion)
+  const task = (hasRecommendationSession('qqGuessLike')
+    ? getQQMusicGuessLikeSongs(true, apiVersion)
+    : beginRecommendationSession('qqGuessLike').then(async() => getQQMusicGuessLikeSongs(true, apiVersion)))
     .then(async songs => {
       if (!isActiveSnapshot(accountKey, generation)) return []
       const ids = new Set(qqGuessLikeQueue.map(song => song.id))
@@ -181,3 +197,7 @@ export const ensureQQGuessLikeNextSongs = (
   return task
 }
 /* eslint-enable @typescript-eslint/promise-function-async */
+
+registerRecommendationCleanup('qqRecommend', () => {
+  if (!isQQGuessLikeMode.value) resetQQGuessLikeQueue()
+})

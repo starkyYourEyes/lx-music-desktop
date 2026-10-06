@@ -4,6 +4,19 @@ type WarpSyncHandlerActions<Socket, Actions> = {
 
 declare namespace LX {
   namespace Sync {
+    interface ProfileSnapshot {
+      version: 1
+      listIds: string[]
+      profiles: Record<string, LX.List.UserListProfile>
+    }
+    type ServerSyncListProfileActions = WarpPromiseRecord<{
+      profile_sync_request: () => void
+    }>
+    type ClientSyncListProfileActions = WarpPromiseRecord<{
+      profile_sync_get: () => ProfileSnapshot
+      profile_sync_apply: (base: ProfileSnapshot, next: ProfileSnapshot) => ProfileSnapshot
+      profile_sync_finished: () => void
+    }>
     type ServerSyncActions = WarpPromiseRecord<{
       onFeatureChanged: (feature: EnabledFeatures) => void
     }>

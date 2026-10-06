@@ -9,6 +9,8 @@ import useImportTip from '@renderer/utils/compositions/useImportTip'
 import { dialog } from '@renderer/plugins/Dialog'
 import { BACKUP_IMPORT_EXTENSIONS, createPlaylistPartBackupName } from '@common/backupFormats'
 import useBackupExport from '@renderer/utils/compositions/useBackupExport'
+import { getListUpdateInfo, setUserListProfile } from '@renderer/utils/data'
+import { normalizeProfile } from '@common/utils/listProfile'
 
 
 export default () => {
@@ -22,7 +24,7 @@ export default () => {
       title: t('lists__export_part_desc'),
       defaultPath: createPlaylistPartBackupName(filterFileName(listInfo.name)),
     }, async() => {
-      const data = { ...toRaw(listInfo), list: toRaw(await getListMusics(listInfo.id)) }
+      const data = { ...toRaw(listInfo), list: toRaw(await getListMusics(listInfo.id)), profile: normalizeProfile((await getListUpdateInfo())[listInfo.id]?.profile) }
       return {
         type: 'playListPart_v2',
         data: listInfo.id == defaultList.id || listInfo.id == loveList.id
@@ -91,6 +93,7 @@ export default () => {
             break
         }
         await overwriteListMusics({ listId: listData.id, musicInfos: normalizedMusic })
+        await setUserListProfile(listData.id, normalizeProfile({ group: (listData as { group?: unknown }).group, ...listData.profile }))
         requestUserListReveal(targetList.id)
         return
       }
@@ -101,10 +104,11 @@ export default () => {
       id: listData.id,
       source: (listData as LX.List.UserListInfo).source,
       sourceListId: (listData as LX.List.UserListInfo).sourceListId,
-      group: 'external',
+      group: normalizeProfile({ group: (listData as { group?: unknown }).group, ...listData.profile }).group ?? 'external',
       strictGroupPersistence: true,
       list: normalizedMusic,
     })
+    await setUserListProfile(listData.id, normalizeProfile(listData.profile))
   }
 
   return {

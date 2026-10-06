@@ -132,6 +132,12 @@ const closeConnection = (db: Database.Database | null): CloseAttempt => {
   }
 }
 
+export const flush = (): void => {
+  if (!writeDb?.open) throw new Error('database_not_ready')
+  const result = writeDb.pragma('wal_checkpoint(FULL)') as Array<{ busy: number }>
+  if (result[0]?.busy !== 0) throw new Error('database_flush_busy')
+}
+
 export const close = (): void => {
   lifecycleGeneration++
   let failure: unknown | null = null

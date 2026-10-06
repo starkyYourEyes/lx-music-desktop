@@ -1,6 +1,7 @@
 import {
   advanceAppDatabase,
   close as closeAppDatabase,
+  flush,
   getDatabaseHealth,
   init,
 } from './db'
@@ -31,6 +32,7 @@ const common = {
   init,
   advanceAppDatabase,
   close,
+  flush,
   getDatabaseHealth,
 }
 

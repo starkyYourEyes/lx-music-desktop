@@ -77,6 +77,8 @@ test('getListDetail and getListDetailAll resolve source kg through musicSdk.kg.s
   }
   const failIpc = async() => { throw new Error('unexpected playlist IPC') }
   const action = loadTypeScriptModule('src/renderer/store/songList/action.ts', {
+    '@common/performance/boundedCache': loadTypeScriptModule('src/common/performance/boundedCache.ts', {}),
+    '@common/performance/cacheProfile': loadTypeScriptModule('src/common/performance/cacheProfile.ts', {}),
     '@renderer/utils': { deduplicationList: list => list, toNewMusicInfo: item => item },
     '@renderer/utils/musicSdk': { __esModule: true, default: musicSdk },
     '@renderer/utils/ipc': { getNeteasePlaylistDetail: failIpc, getQQMusicPlaylistDetail: failIpc },

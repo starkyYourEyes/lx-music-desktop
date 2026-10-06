@@ -769,6 +769,7 @@ test('failed session clear retains the barrier until explicit cleanup retry succ
 test('successful init and explicit lifecycle exits clear the initialization deadline', async() => {
   let clock = createFakeClock()
   let harness = createPoolHarness({ autoInit: false, clock, initialConfiguredIds: ['a'] })
+  await harness.pool.configureIdlePolicy({ primaryApiId: 'a', idleMinutes: 5 })
   let ensuring = harness.pool.ensure('a')
   await harness.waitForInitializeCall('a', 1)
   await harness.init('a', { sources: {} })

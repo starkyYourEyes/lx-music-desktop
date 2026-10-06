@@ -1,0 +1,1 @@
+export function mergeMetadataUpdate(current: LX.List.ListUpdateInfo[string] | undefined, value: LX.List.ListUpdateInfo[string], base?: LX.List.ListUpdateInfo[string] | null): LX.List.ListUpdateInfo[string]

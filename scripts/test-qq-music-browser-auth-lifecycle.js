@@ -33,6 +33,8 @@ const withWatchdog = async(promise, timeoutMs, message) => {
   }
 }
 
+global.lx = { sessionRegistry: { register: () => ({ ready: Promise.resolve(), unregister() {} }) } }
+
 let harness
 
 class FakeBrowserWindow extends EventEmitter {
@@ -103,6 +105,7 @@ const createHarness = () => {
     clearAuthCache: async() => {},
     clearStorageData: async() => {},
     clearCache: async() => {},
+    clearCodeCaches: async() => {},
   }
 
   return {
@@ -409,12 +412,15 @@ const testDestroyReusesCleanupPromise = async() => {
     auth: 0,
     storage: 0,
     cache: 0,
+    code: 0,
   }
+  harness.loginSession.clearCodeCaches = async() => { cleanupCalls.code++; await cleanupGate.promise }
   harness.loginSession.clearAuthCache = async() => {
     cleanupCalls.auth++
     await cleanupGate.promise
   }
-  harness.loginSession.clearStorageData = async() => {
+  harness.loginSession.clearStorageData = async options => {
+    assert.deepEqual(options, { storages: ['cachestorage'] })
     cleanupCalls.storage++
     await cleanupGate.promise
   }
@@ -432,12 +438,12 @@ const testDestroyReusesCleanupPromise = async() => {
   assert.strictEqual(repeatedCleanup, firstCleanup)
   assert.equal(harness.destroyCount, 1)
   await settle()
-  assert.deepEqual(cleanupCalls, { auth: 1, storage: 1, cache: 1 })
+  assert.deepEqual(cleanupCalls, { auth: 0, storage: 1, cache: 1, code: 1 })
 
   cleanupGate.resolve()
   await withWatchdog(firstCleanup, 250, 'partition cleanup did not settle')
   assert.strictEqual(authSession.destroy(), firstCleanup)
-  assert.deepEqual(cleanupCalls, { auth: 1, storage: 1, cache: 1 })
+  assert.deepEqual(cleanupCalls, { auth: 0, storage: 1, cache: 1, code: 1 })
   assert.equal(harness.destroyCount, 1)
 }
 

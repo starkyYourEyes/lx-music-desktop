@@ -4,10 +4,10 @@ import type { Socket } from 'node:net'
 import { getAddress } from '@common/utils/nodejs'
 import { sendTaskbarButtonClick } from '@main/modules/winMain'
 
-const sendResponse = (res: http.ServerResponse, code = 200, msg: string | Record<any, unknown> = 'OK', contentType = 'text/plain; charset=utf-8') => {
+const sendResponse = (res: http.ServerResponse, code = 200, msg: string | Record<any, unknown> = 'OK', contentType = 'text/plain; charset=utf-8', allowCors = true) => {
   res.writeHead(code, {
     'Content-Type': contentType,
-    'Access-Control-Allow-Origin': '*',
+    ...(allowCors ? { 'Access-Control-Allow-Origin': '*' } : {}),
   })
   if (typeof msg === 'object') {
     res.end(JSON.stringify(msg))
@@ -82,10 +82,29 @@ const handleSubscribePlayerStatus = (req: http.IncomingMessage, res: http.Server
   }
 }
 
+const writeRoutes = new Set(['/play', '/pause', '/skip-next', '/skip-prev', '/seek', '/collect', '/uncollect', '/volume', '/mute'])
+
+const isAllowedWriteRequest = (req: http.IncomingMessage) => {
+  const fetchSite = req.headers['sec-fetch-site']
+  if (fetchSite !== undefined && fetchSite !== 'same-origin' && fetchSite !== 'none') return false
+  const host = req.headers.host
+  if (typeof host !== 'string') return false
+  const match = /^([^:]+):([0-9]+)$/.exec(host)
+  if (!match) return false
+  const port = Number(match[2])
+  if (port < 1 || port > 65535) return false
+  return ['127.0.0.1', 'localhost', ...getAddress()].includes(match[1])
+}
+
 const handleStartServer = async(port: number, ip: string) => new Promise<void>((resolve, reject) => {
   playerStatusKeys = Object.keys(global.lx.player_status) as SubscribeKeys[]
   httpServer = http.createServer((req, res): void => {
     const [endUrl, query] = `/${req.url?.split('/').at(-1) ?? ''}`.split('?')
+    const isWrite = writeRoutes.has(endUrl)
+    if (isWrite && !isAllowedWriteRequest(req)) {
+      sendResponse(res, 403, 'Forbidden', undefined, false)
+      return
+    }
     let code = 200
     let msg = 'OK'
     switch (endUrl) {
@@ -207,7 +226,7 @@ const handleStartServer = async(port: number, ip: string) => new Promise<void>((
         msg = 'Forbidden'
         break
     }
-    sendResponse(res, code, msg)
+    sendResponse(res, code, msg, undefined, !isWrite)
   })
   httpServer.on('error', error => {
     console.log(error)

@@ -328,7 +328,7 @@ export const runStorageMigrationHooks = async(
   try {
     vault = await initializeCredentialVault()
     if (!credentialVaultReadable(vault)) return credentialMigrationRecovery('credentials.vault_unreadable')
-    global.lx.storage?.registerShutdownFlusher('credential-vault', async() => { await vault.flush() })
+    global.lx.storage?.registerShutdownFlusher('credential-vault', async() => { await vault.flush() }, { restartSafe: true })
   } catch {
     return credentialMigrationRecovery('credentials.vault_unreadable')
   }
@@ -366,8 +366,8 @@ export const runStorageMigrationHooks = async(
       worker: global.lx.worker.dbService,
     })
     global.lx.musicUrlAuthorization = musicUrlAuthorization
-    global.lx.storage?.registerShutdownFlusher('account-repository', async() => { await accountRepository.flush() })
-    global.lx.storage?.registerShutdownFlusher('music-url-authorization', async() => { await musicUrlAuthorization.flush() })
+    global.lx.storage?.registerShutdownFlusher('account-repository', async() => { await accountRepository.flush() }, { restartSafe: true })
+    global.lx.storage?.registerShutdownFlusher('music-url-authorization', async() => { await musicUrlAuthorization.flush() }, { restartSafe: true })
   } catch {
     return credentialMigrationRecovery('credentials.profile_repository_unreadable')
   }

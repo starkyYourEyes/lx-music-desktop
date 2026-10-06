@@ -36,7 +36,8 @@
 </template>
 
 <script>
-import { ref, watch, computed, markRawList } from '@common/utils/vueTools'
+import { ref, watch, computed, markRawList, onBeforeUnmount } from '@common/utils/vueTools'
+import { retainMusicList } from '@renderer/store/list/listManage/state'
 import { playList } from '@renderer/core/player'
 import { getListMusics, removeListMusics } from '@renderer/store/list/action'
 import { isFullscreen } from '@renderer/store'
@@ -58,6 +59,12 @@ export default {
   },
   emits: ['update:visible'],
   setup(props) {
+    let releaseList = () => {}
+    watch(() => [props.visible, props.listInfo.id], ([visible, id]) => {
+      releaseList()
+      releaseList = visible ? retainMusicList(id) : () => {}
+    }, { immediate: true, flush: 'sync' })
+    onBeforeUnmount(() => { releaseList() })
     const t = useI18n()
     const duplicateList = ref([])
     const listItemHeight = computed(() => {

@@ -1,5 +1,6 @@
 import { WIN_MAIN_RENDERER_EVENT_NAME } from '@common/ipcNames'
 import { mainHandle } from '@common/mainIpc'
+import { assertRecommendationRequest, handleRecommendationSession } from '@main/services/recommendationSessions'
 import {
   cancelLoginQr,
   checkLoginQr,
@@ -61,17 +62,28 @@ export default () => {
 
   mainHandle<LX.QQMusic.GuessLikeRequest | undefined, LX.Music.MusicInfo_tx[]>(
     WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_guess_like_songs,
-    async({ params }) => getGuessLikeSongs(params),
+    async({ event, params }) => {
+      const kind = params?.radioMode == 'brush' ? 'brush' : 'guessLike'
+      if (handleRecommendationSession('qqRecommend', kind, event, params)) return []
+      assertRecommendationRequest('qqRecommend', event, params?.continuation === true ? kind : undefined)
+      return getGuessLikeSongs(params)
+    },
   )
 
-  mainHandle<LX.Music.MusicInfo_tx[]>(
+  mainHandle<undefined, LX.Music.MusicInfo_tx[]>(
     WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_daily_recommend_songs,
-    async() => getDailyRecommendSongs(),
+    async({ event }) => {
+      assertRecommendationRequest('qqRecommend', event)
+      return getDailyRecommendSongs()
+    },
   )
 
-  mainHandle<LX.QQMusic.HomeRecommendation>(
+  mainHandle<undefined, LX.QQMusic.HomeRecommendation>(
     WIN_MAIN_RENDERER_EVENT_NAME.qq_music_get_home_recommendation,
-    async() => getHomeRecommendation(),
+    async({ event }) => {
+      assertRecommendationRequest('qqRecommend', event)
+      return getHomeRecommendation()
+    },
   )
 
   mainHandle<LX.QQMusic.PlaylistDetailParams, LX.QQMusic.PlaylistDetailInfo>(

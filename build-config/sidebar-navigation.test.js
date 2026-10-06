@@ -84,6 +84,7 @@ const renderNavBar = async(settingOverrides = {}, route = { path: '/recommend', 
     ...settingOverrides,
   })
   const NavBar = loadVueSfc(navBarPath, {
+    '@common/performance/featurePolicy': loadTsModule(path.join(root, 'src/common/performance/featurePolicy.ts')),
     '@renderer/store/setting': { appSetting },
     '@root/lang': { useI18n: () => key => key },
     '@common/utils/vueTools': require('vue'),
@@ -187,6 +188,7 @@ test('left window controls keep the avatar and account-menu Settings action navi
     setup: (props, { slots }) => () => slots.default?.(),
   }
   const Aside = loadVueSfc(asidePath, {
+    '@common/performance/featurePolicy': loadTsModule(path.join(root, 'src/common/performance/featurePolicy.ts')),
     '@common/utils/sidebarFontSize': loadTsModule(path.join(root, 'src/common/utils/sidebarFontSize.ts')),
     '@renderer/store/platformPlaylists/action': { refreshPlatformUserPlaylists: async() => {} },
     vue: { ...vue, Transition },

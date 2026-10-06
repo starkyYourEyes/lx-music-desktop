@@ -22,6 +22,9 @@ import { langList } from '@root/lang'
 import type { I18n } from '@root/lang/i18n'
 
 import { initSetting } from './store/setting'
+import { prepareDownloadRuntime, pauseDownloadsForShutdown } from './core/features/downloadRuntime'
+import { initRecommendationPolicies } from './core/features/recommendations'
+import { registerShutdownFlusher } from './utils/shutdown'
 // import { bubbleCursor } from './utils/cursor-effects/bubbleCursor'
 
 import './worker'
@@ -29,7 +32,8 @@ import { saveViewPrevState } from './utils/data'
 
 // sync(store, router)
 
-router.afterEach((to) => {
+router.afterEach((to, _from, failure) => {
+  if (failure) return
   if (to.path != '/songList/detail') {
     saveViewPrevState({
       url: to.path,
@@ -68,6 +72,9 @@ void getSetting().then(setting => {
 
   // store.commit('setSetting', setting)
   initSetting(setting)
+  void prepareDownloadRuntime().catch(() => {})
+  initRecommendationPolicies()
+  registerShutdownFlusher('performance', async() => { await pauseDownloadsForShutdown(); return true })
 
   const app = createApp(App)
   app

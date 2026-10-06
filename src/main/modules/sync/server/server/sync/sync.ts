@@ -25,4 +25,8 @@ export const sync = async(socket: LX.Sync.Server.Socket) => {
   }
   if (disconnected) throw new Error('disconnected')
   await socket.remote.finished()
+  if (enabledFeatures.listProfile && socket.moduleReadys.list) {
+    socket.feature.listProfile = enabledFeatures.listProfile
+    await modules.listProfile.sync(socket)
+  }
 }

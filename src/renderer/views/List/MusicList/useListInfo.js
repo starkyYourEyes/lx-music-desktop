@@ -2,6 +2,7 @@ import { ref, watch, computed, onBeforeUnmount } from '@common/utils/vueTools'
 import { playMusicInfo, playInfo } from '@renderer/store/player/state'
 import { getListMusics } from '@renderer/store/list/action'
 import { appSetting } from '@renderer/store/setting'
+import { retainMusicList } from '@renderer/store/list/listManage/state'
 
 
 export default ({ props, onLoadedList }) => {
@@ -14,10 +15,15 @@ export default ({ props, onLoadedList }) => {
 
 
   const list = ref([])
+  let releaseList = () => {}
+  let disposed = false
   watch(() => props.listId, id => {
+    const releasePrevious = releaseList
+    releaseList = retainMusicList(id)
+    releasePrevious()
     getListMusics(id).then(l => {
+      if (disposed || id != props.listId) return
       list.value = [...l]
-      if (id != props.listId) return
       onLoadedList()
     })
   }, {
@@ -37,7 +43,9 @@ export default ({ props, onLoadedList }) => {
 
   const handleMyListUpdate = (ids) => {
     if (!ids.includes(props.listId)) return
-    getListMusics(props.listId).then(l => {
+    const id = props.listId
+    getListMusics(id).then(l => {
+      if (disposed || id != props.listId) return
       list.value = [...l]
     })
   }
@@ -45,6 +53,8 @@ export default ({ props, onLoadedList }) => {
   window.app_event.on('myListUpdate', handleMyListUpdate)
 
   onBeforeUnmount(() => {
+    disposed = true
+    releaseList()
     window.app_event.off('myListUpdate', handleMyListUpdate)
   })
 

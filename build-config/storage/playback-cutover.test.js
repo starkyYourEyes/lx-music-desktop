@@ -740,6 +740,7 @@ describe('query-backed renderer state', () => {
 
   it('resolves resume by source identity before accepting a still-matching index hint', () => {
     const { resolvePlaybackResume } = loadFeature(dataInitPath, {
+      '@renderer/store/list/listManage/state': {},
       '@renderer/utils/ipc': {},
       '@renderer/utils/playback': {},
       '@renderer/utils/musicSdk': {},

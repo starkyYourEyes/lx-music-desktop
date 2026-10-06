@@ -43,7 +43,7 @@ test('accepts and preserves platform playlist metadata at the real storage bound
 
 test('accepts playlists without cover images and existing local playlist profiles', () => {
   const { coverUrl, ...withoutCover } = managedProfile
-  for (const profile of [withoutCover, {}, { description: '', group: 'mine', createdAt: 0 }]) {
+  for (const profile of [withoutCover, { ...managedProfile, coverUrl: '' }, {}, { description: '', group: 'mine', createdAt: 0 }]) {
     assert.deepEqual(parsePlaylistMetadataCommand(command(profile)), command(profile))
   }
 })
@@ -53,7 +53,7 @@ test('rejects invalid platform metadata and unrelated fields', () => {
     { provider: 'unknown' }, { kind: 'unknown' }, { managed: 'true' },
     { accountKey: '' }, { accountKey: 42 }, { accountKey: 'x'.repeat(257) },
     { lastSyncAt: -1 }, { lastSyncAt: NaN }, { lastSyncAt: 1.5 },
-    { cookie: 'not-allowed' }, { coverUrl: '' },
+    { cookie: 'not-allowed' }, { coverUrl: 42 },
   ]) {
     assert.throws(() => parsePlaylistMetadataCommand(command({ ...managedProfile, ...update })), /Invalid/)
   }

@@ -31,7 +31,7 @@ interface SyncCredentialMutationOptions {
 
 const getMetadataFile = () => {
   if (!shutdownFlusherRegistered && global.lx.storage != null) {
-    global.lx.storage.registerShutdownFlusher('sync-client-credentials', flushSyncClientData)
+    global.lx.storage.registerShutdownFlusher('sync-client-credentials', flushSyncClientData, { restartSafe: true })
     shutdownFlusherRegistered = true
   }
   metadataFile ??= createAtomicJsonFile<SyncClientServersFileV1>({

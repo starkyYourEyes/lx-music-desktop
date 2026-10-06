@@ -86,6 +86,17 @@ const legacyImport = (overrides = {}) => ({
 })
 
 describe('authoritative non-activity storage', () => {
+  it('rebases stale metadata edits in SQLite and supports explicit portable cover clearing', async() => {
+    await createStore()
+    const repository = getRepository()
+    const base = { updateTime: 1, isAutoUpdate: false, profile: { description: 'before', coverUrl: 'https://example.test/cover', group: 'mine', managed: true, provider: 'netease', kind: 'created', accountKey: 'local' } }
+    const write = (value, previous) => repository.applyPlaylistMetadata({ version: 1, action: 'upsert', playlistId: 'one', value, base: previous, updatedAtMs: 2 })
+    write(base, null)
+    write({ ...base, profile: { ...base.profile, group: 'external' } }, base)
+    const saved = write({ ...base, profile: { ...base.profile, description: 'edited', coverUrl: '' } }, base).one
+    assert.deepEqual(saved.profile, { ...base.profile, description: 'edited', coverUrl: '', group: 'external' })
+    assert.deepEqual(repository.getPlaylistMetadata().one, saved)
+  })
   it('bootstraps schema 6 with constrained application-state tables', async() => {
     const { result, db } = await createStore()
 

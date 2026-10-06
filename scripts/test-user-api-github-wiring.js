@@ -164,7 +164,6 @@ assertInOrder(githubImportMethod, [
   'if (!confirmed)',
   "this.githubStatus = ''",
   'return',
-  'const oldCustomIds = new Set(this.apiList.map(api => api.id))',
   'downloadGitHubUserApiSnapshot(snapshot)',
   'if (!this.isGitHubViewCurrent(viewGeneration)) return',
   'replaceUserApisFromGitHub(items)',
@@ -172,24 +171,29 @@ assertInOrder(githubImportMethod, [
 assertInOrder(githubImportMethod, [
   'const oldCustomIds = new Set(this.apiList.map(api => api.id))',
   'const items = await downloadGitHubUserApiSnapshot(snapshot)',
-  'const apiList = await replaceUserApisFromGitHub(items)',
-  'userApi.list = apiList',
-  "const selectedId = appSetting['common.apiSource']",
-  'if (oldCustomIds.has(selectedId) && !apiList.some(api => api.id == selectedId))',
-  'const fallback = apiSourceInfo.find(api => !api.disabled) ?? apiList[0]',
-  "updateSetting({ 'common.apiSource': fallback?.id ?? '' })",
+  'const { apiList, skipped } = await replaceUserApisFromGitHub(items)',
+  'this.reconcileApiList(apiList, oldCustomIds)',
   'if (!this.isGitHubViewCurrent(viewGeneration)) return',
   "this.githubStatus = this.$t('user_api__github_import_success'",
+  'if (skipped.length)',
 ], 'live selected custom source preservation')
+const reconcileMethod = extractBracedBlock(userApiModal, 'reconcileApiList(apiList, previousCustomIds)')
+assertInOrder(reconcileMethod, [
+  'userApi.list = apiList',
+  "const selectedId = appSetting['common.apiSource']",
+  'if (!previousCustomIds.has(selectedId) || apiList.some(api => api.id == selectedId)) return',
+  'const fallback = apiSourceInfo.find(api => !api.disabled) ?? apiList[0]',
+  "setApiSource(fallback?.id ?? '')",
+], 'canonical selection reconciliation')
 assert.match(
   githubImportMethod,
-  /catch\s*\(err\)\s*{[\s\S]*err\s+instanceof\s+Error[\s\S]*['"]apiList['"]\s+in\s+err[\s\S]*userApi\.list\s*=\s*err\.apiList[\s\S]*this\.formatGitHubError\(err\)/,
+  /catch\s*\(err\)\s*{[\s\S]*err\s+instanceof\s+Error[\s\S]*['"]apiList['"]\s+in\s+err[\s\S]*this\.reconcileApiList\(err\.apiList, oldCustomIds\)[\s\S]*this\.formatGitHubError\(err\)/,
   'GitHub import failure must reconcile the canonical API list before reporting the error',
 )
 
 assertInOrder(githubImportMethod, [
   '} catch (err) {',
-  'userApi.list = err.apiList',
+  'this.reconcileApiList(err.apiList, oldCustomIds)',
   'if (!this.isGitHubViewCurrent(viewGeneration)) return',
   'const message = this.formatGitHubError(err)',
 ], 'GitHub import failure reconciliation')
@@ -212,8 +216,8 @@ assertInOrder(removeMethod, [
   "if (appSetting['common.apiSource'] == api.id)",
   'apiSourceInfo.find(api => !api.disabled)',
   'userApi.list.find(item => item.id != api.id)',
-  "updateSetting({ 'common.apiSource': backApi?.id ?? '' })",
-  'removeUserApi([api.id])',
+  "setApiSource(backApi?.id ?? '')",
+  'removeUserApi([api.id], apiList =>',
 ], 'custom source removal')
 assert.match(groupTemplate, /@click\.stop="handleRemove\(api\)"/)
 assert.match(groupTemplate, /base-btn\([^\r\n]*:disabled="!!githubAction"[^\r\n]*@click\.stop="handleRemove\(api\)"/)
@@ -409,6 +413,10 @@ const rollbackLoadError = new Error('simulated replacement load failure')
 const rendererRuntime = loadTsModule(
   path.join(root, 'src/renderer/utils/ipc.ts'),
   {
+    '@common/utils': { log: { error() {} } },
+    '@common/storage/cache': { STORAGE_CACHE_GENERATION_EVENT: 'cache-generation' },
+    './storageState': {},
+    './shutdown': {},
     '@common/rendererIpc': {
       rendererSend() {},
       async rendererInvoke() {
@@ -446,12 +454,18 @@ const mainRuntime = loadTsModule(
   path.join(root, 'src/main/modules/winMain/rendererEvent/userApi.ts'),
   {
     '@common/ipcNames': { WIN_MAIN_RENDERER_EVENT_NAME: winMainEventNames },
+    '@common/utils': { log: { error() {} } },
+    '@main/modules/userApi/ipcValidation': loadTsModule(path.join(root, 'src/main/modules/userApi/ipcValidation.ts')),
+    '@main/modules/userApi/runtimeError': { normalizeRuntimeFailure: error => error },
+    '@main/modules/userApi/runtimePool': { getUserApiRuntimePool: () => ({}) },
     '@common/mainIpc': {
+      mainOn() {},
       mainHandle(name, handler) {
         registeredHandlers.set(name, handler)
       },
     },
     '@main/modules/userApi': {
+      createReplacementFailureApiListCarrier: () => ({}),
       getApiList() {
         return canonicalApiList
       },
@@ -501,10 +515,11 @@ const invokeMainReplacement = async() => structuredClone(await replaceHandler({
   )
 
   const successList = [{ id: 'github-source' }]
-  rendererResult = { success: true, apiList: successList }
+  const skipped = [{ path: 'invalid.js', reason: 'invalid_metadata' }]
+  rendererResult = { success: true, apiList: successList, skipped }
   assert.deepStrictEqual(
     await rendererRuntime.replaceUserApisFromGitHub([]),
-    successList,
+    { apiList: successList, skipped },
   )
 
   rendererResult = {
@@ -566,10 +581,11 @@ const invokeMainReplacement = async() => structuredClone(await replaceHandler({
   assert.equal(boundedResult.error.code.length, 100)
   assert.equal(boundedResult.error.detail.length, 500)
 
-  replaceImplementation = async() => successList
+  replaceImplementation = async() => ({ apiList: successList, skipped })
   assert.deepStrictEqual(await invokeMainReplacement(), {
     success: true,
     apiList: successList,
+    skipped,
   })
 
   console.log('GitHub user API IPC wiring tests passed')

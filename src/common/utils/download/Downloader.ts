@@ -44,6 +44,9 @@ class Task extends EventEmitter {
   private dataWriteQueueLength = 0
   private closeWaiting = false
   private timeout: null | NodeJS.Timeout = null
+  private operationVersion = 0
+  private pendingResumeReset: Promise<void> | null = null
+  private stopping: Promise<void> | null = null
 
 
   constructor(url: string, savePath: string, filename: string, options: Partial<Options> = {}) {
@@ -290,24 +293,24 @@ class Task extends EventEmitter {
   }
 
   __handleWriteData(chunk: Buffer) {
+    if (this.pendingResumeReset) return
     if (this.resumeLastChunk) {
       const result = this.__handleDiffChunk(chunk)
       if (result) chunk = result
       else {
-        void this.__handleStop().finally(() => {
-          // this.__handleError(new Error('Resume failed, response chunk does not match.'))
-          // Resume failed, response chunk does not match, remove file and restart download
-          console.log('Resume failed, response chunk does not match.')
-          fs.unlink(this.chunkInfo.path, (unlinkErr: any) => {
-            // this.__handleError(err)
-            this.chunkInfo.startByte = '0'
-            this.resumeLastChunk = null
-            if (unlinkErr && unlinkErr.code !== 'ENOENT') {
-              this.__handleError(unlinkErr)
-              return
-            }
-            void this.start()
+        const version = this.operationVersion
+        this.pendingResumeReset = this.__handleStop().then(async() => {
+          if (version != this.operationVersion) return
+          await fs.promises.unlink(this.chunkInfo.path).catch((error: NodeJS.ErrnoException) => {
+            if (error.code != 'ENOENT') throw error
           })
+          this.chunkInfo.startByte = '0'
+          this.resumeLastChunk = null
+          if (version == this.operationVersion) await this.start()
+        }).catch((error: Error) => {
+          if (version == this.operationVersion) this.__handleError(error)
+        }).finally(() => {
+          this.pendingResumeReset = null
         })
         return
       }
@@ -395,19 +398,37 @@ class Task extends EventEmitter {
   }
 
   async start() {
+    const version = ++this.operationVersion
     this.status = STATUS.init
     await this.__init()
-    if (this.status !== STATUS.init) return
+    if (version != this.operationVersion || this.status !== STATUS.init) return
     this.status = STATUS.running
     this.__httpFetch(this.downloadUrl, this.requestOptions)
     this.emit('start')
   }
 
   async stop() {
-    if (this.status == STATUS.stopped || this.status == STATUS.completed) return
-    this.status = STATUS.stopped
-    await this.__handleStop()
-    this.emit('stop')
+    if (this.stopping) return this.stopping
+    ++this.operationVersion
+    this.stopping = (async() => {
+      if (this.status == STATUS.stopped || this.status == STATUS.completed) {
+        await this.pendingResumeReset
+        return
+      }
+      this.status = STATUS.stopped
+      await this.__handleStop()
+      await this.pendingResumeReset
+      this.emit('stop')
+    })()
+    try {
+      await this.stopping
+    } catch (error) {
+      // Keep a failed close retryable; stopped must only mean safely closed.
+      this.status = STATUS.error
+      throw error
+    } finally {
+      this.stopping = null
+    }
   }
 
   refreshUrl(url: string) {

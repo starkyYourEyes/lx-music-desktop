@@ -22,6 +22,8 @@ const toStorePersistenceError = (): Error => new Error('Store persistence failed
 
 
 class Store {
+  private recoveryPath?: string
+  get recoveredFilePath(): string | undefined { return this.recoveryPath }
   private readonly filePath: string
   private readonly atomicFile: AtomicJsonFile<Record<string, any>>
   private store: Record<string, any>
@@ -56,19 +58,37 @@ class Store {
       initialCleanupComplete: true,
     })
 
+    const recoverInvalidStore = (): Record<string, any> => {
+      if (!clearInvalidConfig) throw new Error('Store data load failed')
+      // Atomic writes reject an invalid destination. Preserve the original bytes
+      // before starting a clean document instead of silently overwriting them.
+      try {
+        const quarantine = fs.mkdtempSync(this.filePath + '.invalid-')
+        const recoveredFilePath = path.join(quarantine, 'original.json')
+        fs.renameSync(this.filePath, recoveredFilePath)
+        this.recoveryPath = recoveredFilePath
+      } catch {
+        throw new Error('Store data recovery failed')
+      }
+      return {}
+    }
     let store: Record<string, any>
     if (fs.existsSync(this.filePath)) {
+      let source: string
       try {
-        store = JSON.parse(fs.readFileSync(this.filePath, 'utf8'))
+        source = fs.readFileSync(this.filePath, 'utf8')
       } catch {
-        if (clearInvalidConfig) store = {}
-        else throw new Error('Store data load failed')
+        throw new Error('Store data load failed')
+      }
+      try {
+        store = JSON.parse(source)
+      } catch {
+        store = recoverInvalidStore()
       }
     } else store = {}
 
     if (!isStoreRecord(store)) {
-      if (clearInvalidConfig) store = {}
-      else throw new Error('Store data load failed')
+      store = recoverInvalidStore()
     }
     this.store = store
   }
@@ -93,17 +113,16 @@ class Store {
   }
 
   async setDurable(key: string, value: any): Promise<void> {
+    await this.updateDurable(snapshot => ({ ...snapshot, [key]: value }))
+  }
+
+  async updateDurable(transform: (snapshot: Record<string, any>) => Record<string, any>): Promise<void> {
     const operation = this.durableWriteTail.then(async() => {
       try {
         while (true) {
           const revision = this.revision
-          const snapshot = structuredClone(this.store)
-          Object.defineProperty(snapshot, key, {
-            value,
-            enumerable: true,
-            writable: true,
-            configurable: true,
-          })
+          const snapshot = transform(structuredClone(this.store))
+          if (!isStoreRecord(snapshot)) throw new Error('invalid store data')
           await this.atomicFile.replace(snapshot)
           if (revision != this.revision) continue
           this.store = snapshot
@@ -158,19 +177,16 @@ export default (name: string, isIgnoredError = true, isShowErrorAlert = true): S
     log.error(error)
 
     if (!isIgnoredError) throw error
-
+    store = stores[name] = new Store(storePath, true)
 
     if (isShowErrorAlert) {
       dialog.showMessageBoxSync({
         type: 'error',
         message: name + ' data load error',
-        detail: `The invalid ${name} file has been preserved at: ${storePath}\nYou can try to repair it manually\n\nError detail: ${error.message}`,
+        detail: `The invalid ${name} file has been preserved at: ${store.recoveredFilePath ?? storePath}\nYou can try to repair it manually\n\nError detail: ${error.message}`,
       })
-      shell.showItemInFolder(storePath)
+      shell.showItemInFolder(store.recoveredFilePath ?? storePath)
     }
-
-
-    store = stores[name] = new Store(storePath, true)
   }
   return store
 }

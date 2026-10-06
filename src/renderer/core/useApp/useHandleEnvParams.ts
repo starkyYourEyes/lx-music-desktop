@@ -4,6 +4,7 @@ import { defaultList, loveList, userLists } from '@renderer/store/list/state'
 import { getListMusics } from '@renderer/store/list/action'
 import usePlaySonglist from './compositions/usePlaySonglist'
 import { playList } from '@renderer/core/player'
+import { retainMusicList } from '@renderer/store/list/listManage/state'
 
 const getListPlayIndex = (list: LX.Music.MusicInfo[], indexStr?: string): number => {
   let index: number
@@ -61,7 +62,10 @@ const useInitEnvParamPlay = () => {
           }
           if (!targetList) return
 
-          playList(targetList.id, getListPlayIndex(await getListMusics(targetList.id), params.index))
+          const release = retainMusicList(targetList.id)
+          try {
+            playList(targetList.id, getListPlayIndex(await getListMusics(targetList.id), params.index))
+          } finally { release() }
         }
         break
       case 'kw':

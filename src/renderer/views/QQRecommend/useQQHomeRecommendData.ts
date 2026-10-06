@@ -1,6 +1,7 @@
 import { computed, ref, shallowRef } from '@common/utils/vueTools'
 import { initQQMusicAccount } from '@renderer/store/qqMusic'
 import { getQQMusicHomeRecommendation } from '@renderer/utils/ipc'
+import { useRecommendationPage } from '@renderer/core/features/recommendationAccess'
 
 const LOAD_ERROR = 'QQ 音乐推荐加载失败，请稍后重试'
 const cache = new Map<string, LX.QQMusic.HomeRecommendation>()
@@ -19,6 +20,7 @@ export const useQQHomeRecommendData = ({
   const isLoading = computed(() => loadingAccountKey.value != null)
 
   const load = async(force = false) => {
+    if (!isEnabled()) return null
     const key = accountKey.value
     if (!key) {
       clear()
@@ -64,6 +66,11 @@ export const useQQHomeRecommendData = ({
     isRefreshing.value = false
     loadError.value = ''
   }
+
+  const isEnabled = useRecommendationPage('qqRecommend', () => {
+    cache.clear()
+    clear()
+  })
 
   return {
     data,

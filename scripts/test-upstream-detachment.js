@@ -265,6 +265,10 @@ const hasOnlyIntendedReadmeAttribution = text => {
   return !upstreamIdentityPattern.test(withoutAttribution)
 }
 const findUpstreamRecordViolations = files => files.filter(file => {
+  if (file.path === 'docs/blog/lx-music-desktop-introduction/article.md') {
+    const attribution = '项目基于 [LX Music Desktop](https://github.com/lyswhut/lx-music-desktop) v2.12.1'
+    return upstreamIdentityPattern.test(file.text.replace(attribution, ''))
+  }
   if (file.path === 'README.md') return !hasOnlyIntendedReadmeAttribution(file.text)
   return upstreamIdentityPattern.test(file.text) &&
     !upstreamRecordAllowed.some(pattern => pattern.test(file.path))
@@ -319,11 +323,12 @@ const legacyBackupAllowed = [
   /^src\/common\/backupFormats\.js$/,
   /^scripts\/test-(?:backup-formats|upstream-detachment)\.js$/,
   /^README\.md$/,
+  /^build-config\/my-list-group-flows\.test\.js$/,
   /^docs\/superpowers\/(?:specs|plans)\//,
 ]
 const legacyBackupPattern = /\blxmc\b/i
 const findLegacyBackupViolations = files => files.filter(file =>
-  legacyBackupPattern.test(file.text) &&
+  legacyBackupPattern.test(file.path === '.gitignore' ? file.text.replace(/^\*\.lxmc\r?$/m, '') : file.text) &&
   !legacyBackupAllowed.some(pattern => pattern.test(file.path)),
 ).sort(compareTextFilePaths)
 
@@ -486,4 +491,13 @@ test('removed-source diagnostics identify the violating file and pattern', () =>
     text: 'electron-updater',
   }])
   assert.deepEqual(violations, ['package.json: /electron-updater/'])
+})
+
+test('narrow attribution and backup ignore allowances still reject extra operational tokens', () => {
+  const blog = 'docs/blog/lx-music-desktop-introduction/article.md'
+  const attribution = '项目基于 [LX Music Desktop](https://github.com/lyswhut/lx-music-desktop) v2.12.1'
+  assert.deepEqual(findUpstreamRecordViolations([{ path: blog, text: attribution }]), [])
+  assert.deepEqual(findUpstreamRecordViolations([{ path: blog, text: attribution + '\nhttps://github.com/lyswhut/releases' }]).map(file => file.path), [blog])
+  assert.deepEqual(findLegacyBackupViolations([{ path: '.gitignore', text: '*.lxmc\n' }]), [])
+  assert.deepEqual(findLegacyBackupViolations([{ path: '.gitignore', text: '*.lxmc\nstray.lxmc' }]).map(file => file.path), ['.gitignore'])
 })

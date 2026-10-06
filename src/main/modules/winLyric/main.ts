@@ -4,12 +4,19 @@ import { debounce, getPlatform, isLinux, isWin } from '@common/utils'
 import { initWindowSize, minHeight, minWidth } from './utils'
 import { mainSend } from '@common/mainIpc'
 import { encodePath } from '@common/utils/electron'
+import { getFeatureMode } from '@common/performance/featurePolicy'
+import { reportOptionalResourceState } from '@main/services/optionalResources'
 
 // require('./event')
 // require('./rendererEvent')
 
 let browserWindow: Electron.BrowserWindow | null = null
 let isWinBoundsUpdateing = false
+let isMainWindowFullscreen = false
+let isWindowReady = false
+
+const hasDisplayDemand = () => global.lx.appSetting['desktopLyric.enable'] &&
+  !(isMainWindowFullscreen && global.lx.appSetting['desktopLyric.fullscreenHide'])
 
 const saveBoundsConfig = debounce((config: Partial<LX.AppSetting>) => {
   global.lx.event_app.update_config(config)
@@ -18,6 +25,7 @@ const saveBoundsConfig = debounce((config: Partial<LX.AppSetting>) => {
 
 const winEvent = () => {
   if (!browserWindow) return
+  const win = browserWindow
 
   // browserWindow.on('close', () => {
   //   if (global.lx.appSetting['desktopLyric.enable'] && !global.lx.mainWindowClosed) {
@@ -27,7 +35,11 @@ const winEvent = () => {
   // })
 
   browserWindow.on('closed', () => {
+    if (browserWindow !== win) return
     browserWindow = null
+    isWindowReady = false
+    alwaysOnTopTools.clearLoop()
+    reportOptionalResourceState('desktopLyric', { loaded: false, active: false })
   })
 
   browserWindow.on('move', () => {
@@ -73,21 +85,25 @@ const winEvent = () => {
   // })
 
   browserWindow.once('ready-to-show', () => {
+    if (browserWindow !== win || win.isDestroyed()) return
+    isWindowReady = true
     showWindow()
     if (global.lx.appSetting['desktopLyric.isLock']) {
-      browserWindow!.setIgnoreMouseEvents(true, { forward: !isLinux && global.lx.appSetting['desktopLyric.isHoverHide'] })
+      browserWindow.setIgnoreMouseEvents(true, { forward: !isLinux && global.lx.appSetting['desktopLyric.isHoverHide'] })
     }
-    if (global.lx.appSetting['desktopLyric.isAlwaysOnTop']) {
+    if (hasDisplayDemand() && global.lx.appSetting['desktopLyric.isAlwaysOnTop']) {
       alwaysOnTopTools.setAlwaysOnTop(global.lx.appSetting['desktopLyric.isAlwaysOnTopLoop'])
     } else {
       alwaysOnTopTools.clearLoop()
     }
-    browserWindow!.blur()
+    browserWindow.blur()
   })
 }
 
 export const createWindow = () => {
-  closeWindow()
+  const mode = getFeatureMode(global.lx.appSetting, 'desktopLyric')
+  if (mode == 'off' || (mode == 'onDemand' && !hasDisplayDemand())) return
+  if (browserWindow && !browserWindow.isDestroyed()) return
   if (!global.envParams.workAreaSize) return
   let x = global.lx.appSetting['desktopLyric.x']
   let y = global.lx.appSetting['desktopLyric.y']
@@ -142,9 +158,16 @@ export const createWindow = () => {
       backgroundThrottling: false,
     },
   })
+  isWindowReady = false
+  reportOptionalResourceState('desktopLyric', { loaded: true, active: false, error: undefined })
 
   const winURL = process.env.NODE_ENV !== 'production' ? 'http://localhost:9081/lyric.html' : `file://${path.join(encodePath(__dirname), 'lyric.html')}`
-  void browserWindow.loadURL(winURL + `?os=${getPlatform()}&dark=${shouldUseDarkColors}&theme=${encodeURIComponent(JSON.stringify(theme))}`)
+  const win = browserWindow
+  void win.loadURL(winURL + `?os=${getPlatform()}&dark=${shouldUseDarkColors}&theme=${encodeURIComponent(JSON.stringify(theme))}`).catch(error => {
+    if (browserWindow !== win) return
+    closeWindow()
+    reportOptionalResourceState('desktopLyric', { error: String(error) })
+  })
 
   winEvent()
   // browserWindow.webContents.openDevTools()
@@ -153,13 +176,32 @@ export const createWindow = () => {
 export const isExistWindow = (): boolean => !!browserWindow
 
 export const closeWindow = () => {
+  alwaysOnTopTools.clearLoop()
   if (!browserWindow) return
-  browserWindow.close()
+  browserWindow.destroy()
 }
 
 export const showWindow = () => {
-  if (!browserWindow) return
+  if (!browserWindow || !isWindowReady || !hasDisplayDemand() || getFeatureMode(global.lx.appSetting, 'desktopLyric') == 'off') return
   browserWindow.show()
+  if (global.lx.appSetting['desktopLyric.isAlwaysOnTop']) alwaysOnTopTools.setAlwaysOnTop(global.lx.appSetting['desktopLyric.isAlwaysOnTopLoop'])
+  reportOptionalResourceState('desktopLyric', { active: true })
+}
+
+export const applyDesktopLyricPolicy = (fullscreen = isMainWindowFullscreen) => {
+  isMainWindowFullscreen = fullscreen
+  const mode = getFeatureMode(global.lx.appSetting, 'desktopLyric')
+  if (mode == 'off' || (mode == 'onDemand' && !hasDisplayDemand())) {
+    closeWindow()
+    return
+  }
+  createWindow()
+  if (hasDisplayDemand()) showWindow()
+  else {
+    browserWindow?.hide()
+    alwaysOnTopTools.clearLoop()
+    reportOptionalResourceState('desktopLyric', { active: false })
+  }
 }
 
 export const setResizeable = (isResizeable: boolean) => {

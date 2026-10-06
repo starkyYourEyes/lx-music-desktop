@@ -12,6 +12,8 @@ import { type DEFAULT_SETTING, LIST_IDS } from '@common/constants'
 import type { CatalogPreferencesV1, PlaylistMetadataCommandV1 } from '@common/storage/stateContracts'
 import { dateFormat } from './index'
 import { setUpdateTime } from '@renderer/store/list/action'
+import { rendererOn } from '@common/rendererIpc'
+import { WIN_MAIN_RENDERER_EVENT_NAME } from '@common/ipcNames'
 
 let listPosition: LX.List.ListPositionInfo
 let listPrevSelectId: string
@@ -19,6 +21,19 @@ let listUpdateInfo: LX.List.ListUpdateInfo
 let listPositionInitPromise: Promise<void> | null = null
 let playlistMetadataInitPromise: Promise<void> | null = null
 let playlistMetadataMutationQueue: Promise<void> = Promise.resolve()
+let playlistMetadataRevision = 0
+rendererOn<LX.List.ListUpdateInfo>(WIN_MAIN_RENDERER_EVENT_NAME.storage_playlist_metadata_changed, ({ params }) => {
+  playlistMetadataRevision++
+  listUpdateInfo = params
+  const revision = playlistMetadataRevision
+  void import('@renderer/store/list/group').then(({ cacheUserListGroup }) => {
+    if (revision != playlistMetadataRevision) return
+    for (const [id, info] of Object.entries(params)) {
+      if (info.profile?.group) cacheUserListGroup(id, info.profile.group)
+    }
+  })
+  window.app_event.listProfilesUpdated()
+})
 
 let searchSetting: CatalogPreferencesV1['search']
 let songListSetting: CatalogPreferencesV1['songList']
@@ -130,8 +145,10 @@ export const saveListPrevSelectId = (id: string) => {
 
 const initListUpdateInfo = async() => {
   if (listUpdateInfo != null) return
+  const revision = playlistMetadataRevision
   playlistMetadataInitPromise ??= getPlaylistMetadata()
     .then(info => {
+      if (revision != playlistMetadataRevision) return
       listUpdateInfo = info
       for (const [id, info] of Object.entries(listUpdateInfo)) {
         setUpdateTime(id, info.updateTime ? dateFormat(info.updateTime) : '')
@@ -154,7 +171,11 @@ const queuePlaylistMetadataMutation = async<T>(operation: () => Promise<T>): Pro
 }
 
 const applyPlaylistMetadataMutation = async(command: PlaylistMetadataCommandV1): Promise<void> => {
-  listUpdateInfo = await mutatePlaylistMetadata(command)
+  const nextCommand = command.action == 'upsert' ? { ...command, base: listUpdateInfo[command.playlistId] ?? null } : command
+  const revision = playlistMetadataRevision
+  await mutatePlaylistMetadata(nextCommand).then(info => {
+    if (revision == playlistMetadataRevision) listUpdateInfo = info
+  })
 }
 
 export const getListUpdateInfo = async() => {

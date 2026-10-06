@@ -12,6 +12,7 @@ import data from './data'
 import storage from './storage'
 import storageState from './storageState'
 import playback from './playback'
+import performance from './performance'
 import { createRendererShutdownBridge } from './rendererShutdown'
 import music from './music'
 import webdav from './webdav'
@@ -70,6 +71,10 @@ export default () => {
     rendererShutdown.acknowledge(params)
   })
   rendererShutdown.registerPlayback()
+  performance(async() => {
+    await rendererShutdown.flushPerformance()
+    await rendererShutdown.flushPlayback()
+  })
   music()
   webdav()
   localMusic()

@@ -24,7 +24,7 @@ export type LocalStateUpdateV1 =
   | { version: 1, key: 'list_prev_select_id', value: string, updatedAtMs: number }
 
 export type PlaylistMetadataCommandV1 =
-  | { version: 1, action: 'upsert', playlistId: string, value: LX.List.ListUpdateInfo[string], updatedAtMs: number }
+  | { version: 1, action: 'upsert', playlistId: string, value: LX.List.ListUpdateInfo[string], base?: LX.List.ListUpdateInfo[string] | null, updatedAtMs: number }
   | { version: 1, action: 'remove', playlistId: string }
   | { version: 1, action: 'retain', playlistIds: string[] }
 

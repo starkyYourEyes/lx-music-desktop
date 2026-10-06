@@ -12,6 +12,7 @@ import {
   playInfo,
   playMusicInfo,
   tempPlayList,
+  playbackNotice,
   musicInfo as _musicInfo,
 } from '@renderer/store/player/state'
 import {
@@ -30,6 +31,7 @@ import { appSetting } from '@renderer/store/setting'
 import { party } from '@renderer/store/party'
 import { getPicPath, getLyricInfo } from '../music/index'
 import { filterList } from './utils'
+import { preloadFailureState } from './preloadState'
 import { getRandom } from '@renderer/utils/index'
 import { addListMusics, removeListMusics } from '@renderer/store/list/action'
 import { loveList } from '@renderer/store/list/state'
@@ -209,6 +211,7 @@ export const createPlaybackActionController: CreatePlaybackActionController = de
       startTime: binding.options.startTime,
       shouldPlay: binding.options.shouldPlay,
       resource,
+      preloadedAudio: deps.coordinator.takePreloadedAudio?.(resource),
     })
   }
   const fail = (binding: ActiveForegroundBinding, error: LX.Playback.SourceError) => {
@@ -298,9 +301,14 @@ export const initializePlaybackActionController = (): PlaybackActionController =
     autoSkipOnError: () => appSetting['player.autoSkipOnError'],
     setAllStatus,
     emitVisibleError: () => window.app_event.error(),
-    reportPlaybackError: () => window.app_event.playbackError({
-      stage: 'url', code: null, recoverable: false, attempt: 1,
-    }),
+    reportPlaybackError: () => {
+      const info = playMusicInfo.musicInfo
+      if (info) {
+        const name = 'progress' in info ? info.metadata.musicInfo.name : info.name
+        playbackNotice.value = window.i18n.t('player__unplayable', { name })
+      }
+      window.app_event.playbackError({ stage: 'url', code: null, recoverable: false, attempt: 1 })
+    },
     scheduleAutoSkip: addDelayNextTimeout,
     clearLoadTimeout,
     setPlaybackQuality: value => { currentPlaybackQuality.value = value },
@@ -385,7 +393,13 @@ const handlePlay = (options?: SetMusicUrlOptions) => {
   loadMusicMeta(currentMusicInfo, playMusicInfo.listId)
 }
 
+const resetPreloadFailures = () => {
+  preloadFailureState.reset()
+  playbackNotice.value = ''
+}
+
 export const playListById = (listId: string, id: string) => {
+  resetPreloadFailures()
   const prevListId = playInfo.playerListId
   setPlayListId(listId)
   const currentMusicInfo = getList(listId).find(m => m.id == id)
@@ -402,6 +416,7 @@ export const playList = (
   index: number,
   advanceOptions: PlaybackAdvanceOptions = { automatic: false, reason: 'select', startReason: 'select' },
 ) => {
+  resetPreloadFailures()
   const prevListId = playInfo.playerListId
   setPlayListId(listId)
   emitPlaybackAdvance(advanceOptions)
@@ -412,6 +427,7 @@ export const playList = (
 }
 
 export const playMusicByInfo = (musicInfo: LX.Music.MusicInfo, options?: PlayMusicByInfoOptions) => {
+  resetPreloadFailures()
   const normalizedOptions = normalizePlayMusicByInfoOptions(options)
   if (normalizedOptions.listId != null || !normalizedOptions.isTempPlay) {
     setPlayListId(normalizedOptions.listId)
@@ -445,17 +461,37 @@ export const resetRandomNextMusicInfo = () => {
   if (randomNextMusicInfo.info) randomNextMusicInfo.info = null
 }
 
-export const getNextPlayMusicInfo = async(): Promise<LX.Player.PlayMusicInfo | null> => {
-  const partyQueuePlayMusicInfo = getPartyQueuePlayMusicInfo(1)
-  if (partyQueuePlayMusicInfo) return partyQueuePlayMusicInfo
+const selectNextPlayMusicInfo = async(
+  excluded: ReadonlySet<string>,
+  automatic: boolean,
+  preview: boolean,
+  onEmptyList: () => void,
+): Promise<LX.Player.PlayMusicInfo | null> => {
+  const allowed = (info: LX.Player.PlayMusicInfo) => !excluded.has(getPlaybackSongIdentity(info.musicInfo))
+  const partyNext = getPartyQueuePlayMusicInfo(1)
+  if (partyNext) {
+    for (let offset = 1; offset <= (party.room?.playback.queue.length ?? 0); offset++) {
+      const next = getPartyQueuePlayMusicInfo(offset)
+      if (!next) break
+      if (allowed(next)) return next
+    }
+    return null
+  }
 
-  if (tempPlayList.length) return tempPlayList[0]
+  const temporary = tempPlayList.find(allowed)
+  if (temporary) return temporary
   if (playMusicInfo.musicInfo == null) return null
-  if (randomNextMusicInfo.info) return randomNextMusicInfo.info
 
+  const currentMusic = playMusicInfo.musicInfo
   const currentListId = playInfo.playerListId
   if (!currentListId) return null
   const currentList = getList(currentListId)
+  if (randomNextMusicInfo.info) {
+    const cached = randomNextMusicInfo.info
+    if (cached.listId == currentListId && allowed(cached) &&
+        currentList.some(info => getPlaybackSongIdentity(info) == getPlaybackSongIdentity(cached.musicInfo))) return cached
+    resetRandomNextMusicInfo()
+  }
 
   if (playedList.length) {
     let currentId: string
@@ -471,13 +507,11 @@ export const getNextPlayMusicInfo = async(): Promise<LX.Player.PlayMusicInfo | n
       const currentPlayMusicInfo = playedList[index]
       const playedMusicId = currentPlayMusicInfo.musicInfo.id
       if (currentPlayMusicInfo.listId == currentListId && !currentList.some(m => m.id === playedMusicId)) {
-        removePlayedList(index)
+        if (!preview) removePlayedList(index--)
         continue
       }
-      break
+      if (allowed(currentPlayMusicInfo)) return currentPlayMusicInfo
     }
-
-    if (index < playedList.length) return playedList[index]
   }
 
   let { filteredList, playerIndex } = await filterList({
@@ -486,18 +520,26 @@ export const getNextPlayMusicInfo = async(): Promise<LX.Player.PlayMusicInfo | n
     playedList,
     playerMusicInfo: currentList[playInfo.playerPlayIndex],
     isNext: true,
+    preview,
   })
 
-  if (!filteredList.length) return null
+  if (playMusicInfo.musicInfo != currentMusic || playInfo.playerListId != currentListId) return null
+  if (!filteredList.length) {
+    onEmptyList()
+    return null
+  }
   if (playerIndex == -1 && filteredList.length) playerIndex = 0
   let nextIndex = playerIndex
 
-  const togglePlayMethod = appSetting['player.togglePlayMethod']
+  let togglePlayMethod = appSetting['player.togglePlayMethod']
+  if (!automatic && ['list', 'singleLoop', 'none'].includes(togglePlayMethod)) togglePlayMethod = 'listLoop'
   switch (togglePlayMethod) {
     case 'listLoop':
       nextIndex = playerIndex === filteredList.length - 1 ? 0 : playerIndex + 1
       break
     case 'random':
+      filteredList = filteredList.filter(info => !excluded.has(getPlaybackSongIdentity(info)))
+      if (!filteredList.length) return null
       nextIndex = getRandom(0, filteredList.length)
       break
     case 'list':
@@ -510,6 +552,15 @@ export const getNextPlayMusicInfo = async(): Promise<LX.Player.PlayMusicInfo | n
   }
   if (nextIndex < 0) return null
 
+  for (let checked = 0; excluded.has(getPlaybackSongIdentity(filteredList[nextIndex])); checked++) {
+    if (togglePlayMethod == 'singleLoop' || checked >= filteredList.length - 1) return null
+    nextIndex++
+    if (nextIndex == filteredList.length) {
+      if (togglePlayMethod == 'list') return null
+      nextIndex = 0
+    }
+  }
+
   const nextPlayMusicInfo = {
     musicInfo: filteredList[nextIndex],
     listId: currentListId,
@@ -519,6 +570,11 @@ export const getNextPlayMusicInfo = async(): Promise<LX.Player.PlayMusicInfo | n
   if (togglePlayMethod == 'random') randomNextMusicInfo.info = nextPlayMusicInfo
   return nextPlayMusicInfo
 }
+
+export const getNextPlayMusicInfo = async(
+  excluded: ReadonlySet<string> = new Set(),
+  automatic = true,
+): Promise<LX.Player.PlayMusicInfo | null> => selectNextPlayMusicInfo(excluded, automatic, true, () => {})
 
 const handlePlayNext = (nextPlayMusicInfo: LX.Player.PlayMusicInfo, options: PlaybackAdvanceOptions) => {
   emitPlaybackAdvance(options)
@@ -534,113 +590,49 @@ const handlePlayNext = (nextPlayMusicInfo: LX.Player.PlayMusicInfo, options: Pla
 export const playNext = async(
   options: PlaybackAdvanceOptions = { automatic: false, reason: 'next', startReason: 'next' },
 ): Promise<void> => {
-  const partyQueuePlayMusicInfo = getPartyQueuePlayMusicInfo(1)
-  if (partyQueuePlayMusicInfo) {
-    handlePlayNext(partyQueuePlayMusicInfo, options)
-    return
-  }
-
-  if (tempPlayList.length) {
-    const currentPlayMusicInfo = tempPlayList[0]
-    removeTempPlayList(0)
-    handlePlayNext(currentPlayMusicInfo, options)
-    return
-  }
-
-  if (playMusicInfo.musicInfo == null) {
-    handleToggleStop(options)
-    return
-  }
-
-  const currentListId = playInfo.playerListId
-  if (!currentListId) {
-    handleToggleStop(options)
-    return
-  }
-  const currentList = getList(currentListId)
-
-  if (playedList.length) {
-    let currentId: string
-    if (playMusicInfo.isTempPlay) {
-      const currentMusicInfo = currentList[playInfo.playerPlayIndex]
-      if (currentMusicInfo) currentId = currentMusicInfo.id
-    } else {
-      currentId = playMusicInfo.musicInfo.id
-    }
-
-    let index
-    for (index = playedList.findIndex(m => m.musicInfo.id === currentId) + 1; index < playedList.length; index++) {
-      const currentPlayMusicInfo = playedList[index]
-      const playedMusicId = currentPlayMusicInfo.musicInfo.id
-      if (currentPlayMusicInfo.listId == currentListId && !currentList.some(m => m.id === playedMusicId)) {
-        removePlayedList(index)
-        continue
-      }
-      break
-    }
-
-    if (index < playedList.length) {
-      handlePlayNext(playedList[index], options)
-      return
+  const usePreload = appSetting['player.preloadNext'] && appSetting['player.autoSkipOnError']
+  if (!options.automatic && preloadFailureState.stopped) resetPreloadFailures()
+  if (usePreload && options.automatic && ['error', 'load_timeout', 'buffer_timeout'].includes(options.reason)) {
+    const current = playMusicInfo.musicInfo
+    if (current) {
+      preloadFailureState.add(current)
+      const name = 'progress' in current ? current.metadata.musicInfo.name : current.name
+      playbackNotice.value = window.i18n.t('player__unplayable_skipped', { name })
     }
   }
-
-  if (randomNextMusicInfo.info) {
-    handlePlayNext(randomNextMusicInfo.info, options)
+  if (usePreload && preloadFailureState.stopped) {
+    stop()
+    playbackNotice.value = window.i18n.t('player__preload_stopped')
     return
   }
-
-  let { filteredList, playerIndex } = await filterList({
-    listId: currentListId,
-    list: currentList,
-    playedList,
-    playerMusicInfo: currentList[playInfo.playerPlayIndex],
-    isNext: true,
-  })
-
-  if (!filteredList.length) {
-    handleToggleStop(options)
+  const excluded = new Set(usePreload ? preloadFailureState.failed : [])
+  // Do not wrap back to the current song after exhausting the other candidates.
+  if (excluded.size && playMusicInfo.musicInfo) excluded.add(getPlaybackSongIdentity(playMusicInfo.musicInfo))
+  const current = playMusicInfo.musicInfo
+  const listId = playInfo.playerListId
+  let emptyList = false
+  const next = await selectNextPlayMusicInfo(excluded, options.automatic, false, () => { emptyList = true })
+  if (current != playMusicInfo.musicInfo || listId != playInfo.playerListId) return
+  if (!next) {
+    if (excluded.size) {
+      stop()
+      playbackNotice.value = window.i18n.t('player__preload_exhausted')
+    } else if (!current || !listId || emptyList) handleToggleStop(options)
     return
   }
-  if (playerIndex == -1 && filteredList.length) playerIndex = 0
-  let nextIndex = playerIndex
-
-  let togglePlayMethod = appSetting['player.togglePlayMethod']
-  if (!options.automatic) {
-    switch (togglePlayMethod) {
-      case 'list':
-      case 'singleLoop':
-      case 'none':
-        togglePlayMethod = 'listLoop'
-    }
+  const temporaryIndex = tempPlayList.indexOf(next)
+  if (temporaryIndex >= 0) {
+    for (let index = 0; index <= temporaryIndex; index++) removeTempPlayList(0)
+  } else if (usePreload) {
+    while (tempPlayList.length && excluded.has(getPlaybackSongIdentity(tempPlayList[0].musicInfo))) removeTempPlayList(0)
   }
-  switch (togglePlayMethod) {
-    case 'listLoop':
-      nextIndex = playerIndex === filteredList.length - 1 ? 0 : playerIndex + 1
-      break
-    case 'random':
-      nextIndex = getRandom(0, filteredList.length)
-      break
-    case 'list':
-      nextIndex = playerIndex === filteredList.length - 1 ? -1 : playerIndex + 1
-      break
-    case 'singleLoop':
-      break
-    default:
-      return
-  }
-  if (nextIndex < 0) return
-
-  handlePlayNext({
-    musicInfo: filteredList[nextIndex],
-    listId: currentListId,
-    isTempPlay: false,
-  }, options)
+  handlePlayNext(next, options)
 }
 
 export const playPrev = async(
   options: PlaybackAdvanceOptions = { automatic: false, reason: 'previous', startReason: 'previous' },
 ): Promise<void> => {
+  resetPreloadFailures()
   const partyQueuePlayMusicInfo = getPartyQueuePlayMusicInfo(-1)
   if (partyQueuePlayMusicInfo) {
     handlePlayNext(partyQueuePlayMusicInfo, options)

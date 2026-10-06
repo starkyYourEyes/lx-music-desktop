@@ -74,36 +74,40 @@ const vueRuntime = {
   withKeys: callback => callback,
 }
 
-const loadSidebarRender = (overrides = {}) => loadVueSfc(myListPath, {
-  vue: vueRuntime,
-  '@common/utils/electron': { openUrl: () => {} },
-  '@common/utils/common': { encodePath: value => value },
-  '@renderer/utils/musicSdk': {},
-  './components/DuplicateMusicModal.vue': {},
-  './components/ListSortModal.vue': {},
-  './components/ListUpdateModal.vue': {},
-  '@renderer/store/list/state': { allMusicList: new Map(), loveList: { id: 'love', name: 'Love' }, userLists: [], fetchingListStatus: {} },
-  '@renderer/store/list/action': { getListMusics: async() => [], removeUserList: async() => {} },
-  '@renderer/store/setting': { appSetting: {} },
-  '@renderer/store/platformPlaylists/action': { getPlatformPlaylistGroups: () => ({ value: [] }), retryPlatformUserPlaylistGroup: async() => {} },
-  '@common/utils/vueTools': { computed: () => ({ value: {} }), onBeforeUnmount: () => {}, ref: value => ({ value }), watch: () => {} },
-  '@common/utils/vueRouter': { useRouter: () => ({ replace: async() => {} }) },
-  '@common/constants': { LIST_IDS: { LOVE: 'love' } },
-  '@renderer/plugins/Dialog': { dialog: { confirm: async() => false } },
-  '@renderer/utils/data': { getListUpdateInfo: async() => ({}), saveListPrevSelectId: () => {} },
-  '@renderer/plugins/i18n': { useI18n: () => key => key },
-  './useShare': () => ({}),
-  './useMenu': () => ({}),
-  './useListUpdate': () => ({}),
-  './useSort': () => ({}),
-  './useDarg': () => ({}),
-  './useEditList': () => ({}),
-  './useListScroll': () => ({ scrollToList: () => {} }),
-  './useGroups': () => ({}),
-  './groupState': loadTsModule(groupStatePath),
-  './useDuplicate': () => ({}),
-  ...overrides,
-}).default
+const loadSidebarRender = (overrides = {}) => {
+  const mocks = {
+    vue: vueRuntime,
+    '@common/utils/electron': { openUrl: () => {} },
+    '@common/utils/common': { encodePath: value => value },
+    '@renderer/utils/musicSdk': {},
+    './components/DuplicateMusicModal.vue': {},
+    './components/ListSortModal.vue': {},
+    './components/ListUpdateModal.vue': {},
+    '@renderer/store/list/state': { allMusicList: new Map(), loveList: { id: 'love', name: 'Love' }, userLists: [], fetchingListStatus: {} },
+    '@renderer/store/list/action': { getListMusics: async() => [], removeUserList: async() => {} },
+    '@renderer/store/setting': { appSetting: {} },
+    '@renderer/store/platformPlaylists/action': { getPlatformPlaylistGroups: () => ({ value: [] }), retryPlatformUserPlaylistGroup: async() => {} },
+    '@common/utils/vueTools': { computed: () => ({ value: {} }), onBeforeUnmount: () => {}, ref: value => ({ value }), watch: () => {} },
+    '@common/utils/vueRouter': { useRouter: () => ({ replace: async() => {} }) },
+    '@common/constants': { LIST_IDS: { LOVE: 'love' } },
+    '@renderer/plugins/Dialog': { dialog: { confirm: async() => false } },
+    '@renderer/utils/data': { getListUpdateInfo: async() => ({}), saveListPrevSelectId: () => {} },
+    '@renderer/plugins/i18n': { useI18n: () => key => key },
+    './useShare': () => ({}),
+    './useMenu': () => ({}),
+    './useListUpdate': () => ({}),
+    './useSort': () => ({}),
+    './useDarg': () => ({}),
+    './useEditList': () => ({}),
+    './useListScroll': () => ({ scrollToList: () => {} }),
+    './useGroups': () => ({}),
+    './groupState': loadTsModule(groupStatePath),
+    './useDuplicate': () => ({}),
+    ...overrides,
+  }
+  mocks['./useListCovers'] = loadTsModule(path.join(root, 'src/renderer/views/List/MyList/useListCovers.ts'), mocks)
+  return loadVueSfc(myListPath, mocks).default
+}
 
 const walkNodes = (node, predicate, matches = []) => {
   if (Array.isArray(node)) node.forEach(item => walkNodes(item, predicate, matches))

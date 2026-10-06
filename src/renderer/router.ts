@@ -1,15 +1,20 @@
 /* eslint-disable @typescript-eslint/no-var-requires */
 // import Vue from 'vue'
 import { createRouter, createWebHashHistory } from 'vue-router'
+import { watch } from 'vue'
+import { appSetting } from '@renderer/store/setting'
+import { getFeatureForPath, isFeatureEnabled } from '@common/performance/featurePolicy'
+import { loadRecommendationPage, noteFeaturePageLoaded } from '@renderer/core/features/recommendations'
 
 
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
+    { path: '/feature-disabled', component: async() => import('./views/FeatureDisabled.vue') },
     {
       path: '/search',
       name: 'Search',
-      component: require('./views/Search/index.vue').default,
+      component: async() => import('./views/Search/index.vue'),
       meta: {
         name: 'Search',
       },
@@ -17,7 +22,7 @@ const router = createRouter({
     {
       path: '/recommend',
       name: 'Recommend',
-      component: require('./views/Recommend/index.vue').default,
+      component: () => loadRecommendationPage('neteaseRecommend'),
       meta: {
         name: 'Recommend',
       },
@@ -25,7 +30,7 @@ const router = createRouter({
     {
       path: '/qq-recommend',
       name: 'QQRecommend',
-      component: require('./views/QQRecommend/index.vue').default,
+      component: () => loadRecommendationPage('qqRecommend'),
       meta: {
         name: 'QQRecommend',
       },
@@ -33,7 +38,7 @@ const router = createRouter({
     {
       path: '/kg-recommend',
       name: 'KugouRecommend',
-      component: require('./views/KugouRecommend/index.vue').default,
+      component: () => loadRecommendationPage('kugouRecommend'),
       meta: {
         name: 'KugouRecommend',
       },
@@ -41,7 +46,7 @@ const router = createRouter({
     {
       path: '/recent-play',
       name: 'RecentPlay',
-      component: require('./views/RecentPlay/index.vue').default,
+      component: async() => import('./views/RecentPlay/index.vue'),
       meta: {
         name: 'RecentPlay',
       },
@@ -49,7 +54,7 @@ const router = createRouter({
     {
       path: '/cloud-disk',
       name: 'CloudDisk',
-      component: require('./views/CloudDisk/index.vue').default,
+      component: async() => import('./views/CloudDisk/index.vue'),
       meta: {
         name: 'CloudDisk',
       },
@@ -57,7 +62,7 @@ const router = createRouter({
     {
       path: '/local-music',
       name: 'LocalMusic',
-      component: require('./views/LocalMusic/index.vue').default,
+      component: async() => import('./views/LocalMusic/index.vue'),
       meta: {
         name: 'LocalMusic',
       },
@@ -65,7 +70,7 @@ const router = createRouter({
     {
       path: '/songList/list',
       name: 'SongList',
-      component: require('./views/songList/List/index.vue').default,
+      component: async() => import('./views/songList/List/index.vue'),
       meta: {
         name: 'SongList',
       },
@@ -73,7 +78,7 @@ const router = createRouter({
     {
       path: '/songList/detail',
       name: 'SongListDetail',
-      component: require('./views/songList/Detail/index.vue').default,
+      component: async() => import('./views/songList/Detail/index.vue'),
       meta: {
         name: 'SongList',
       },
@@ -81,7 +86,7 @@ const router = createRouter({
     {
       path: '/leaderboard',
       name: 'Leaderboard',
-      component: require('./views/Leaderboard/index.vue').default,
+      component: async() => import('./views/Leaderboard/index.vue'),
       meta: {
         name: 'Leaderboard',
       },
@@ -89,7 +94,7 @@ const router = createRouter({
     {
       path: '/list',
       name: 'List',
-      component: require('./views/List/index.vue').default,
+      component: async() => import('./views/List/index.vue'),
       meta: {
         name: 'List',
       },
@@ -97,7 +102,7 @@ const router = createRouter({
     {
       path: '/download',
       name: 'Download',
-      component: require('./views/Download/index.vue').default,
+      component: async() => import('./views/Download/index.vue'),
       meta: {
         name: 'Download',
       },
@@ -105,7 +110,7 @@ const router = createRouter({
     {
       path: '/setting',
       name: 'Setting',
-      component: require('./views/Setting/index.vue').default,
+      component: async() => import('./views/Setting/index.vue'),
       meta: {
         name: 'Setting',
       },
@@ -116,5 +121,23 @@ const router = createRouter({
   linkExactActiveClass: 'exact-active-link',
 })
 
+
+const guardFeatureRoute = (to: { path: string }) => {
+  const feature = getFeatureForPath(to.path)
+  if (feature && !isFeatureEnabled(appSetting, feature)) return { path: '/feature-disabled', query: { feature } }
+}
+router.beforeEach(guardFeatureRoute)
+router.beforeResolve(guardFeatureRoute)
+router.afterEach((to, _from, failure) => {
+  if (failure) return
+  const feature = getFeatureForPath(to.path)
+  noteFeaturePageLoaded(feature)
+})
+watch(() => {
+  const feature = getFeatureForPath(router.currentRoute.value.path)
+  return feature && !isFeatureEnabled(appSetting, feature) ? feature : null
+}, feature => {
+  if (feature) void router.replace({ path: '/feature-disabled', query: { feature } })
+})
 
 export default router

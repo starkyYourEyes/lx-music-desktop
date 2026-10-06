@@ -34,9 +34,10 @@ const loadOnlineModule = ({ cachedUrl = null, resolvedResult }) => loadTsModule(
   '@renderer/utils/ipc': {
     saveLyric: () => {},
     saveMusicUrl: () => {},
-    getMusicUrl: async() => cachedUrl,
+    getMusicUrl: async() => cachedUrl == null ? null : { url: cachedUrl },
   },
   './utils': {
+    getMusicUrlCacheKey: async(musicInfo, quality) => ({ track: musicInfo.id, quality }),
     buildLyricInfo: value => value,
     getPlayQuality: quality => quality,
     handleGetOnlineLyricInfo: async() => { throw new Error('not used') },

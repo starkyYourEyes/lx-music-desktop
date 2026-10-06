@@ -1,6 +1,7 @@
 import { computed, onBeforeUnmount, ref, shallowRef } from '@common/utils/vueTools'
 import { isKugouAuthError } from '@common/kugouMusic'
 import { initKugouMusicAccount } from '@renderer/store/kugouMusic'
+import { useRecommendationPage } from '@renderer/core/features/recommendationAccess'
 import {
   getKugouDailyRecommendSongs,
   getKugouPrivateFmSongs,
@@ -102,6 +103,7 @@ export const useKugouRecommendData = ({ accountKey }: { accountKey: { value: str
   }
 
   const loadPublicRecommendation = async(force = false) => {
+    if (!isEnabled()) return
     if (!force && publicCache.recommendation) {
       publicRecommendation.value = publicCache.recommendation
       return
@@ -124,6 +126,7 @@ export const useKugouRecommendData = ({ accountKey }: { accountKey: { value: str
   }
 
   const loadRankRecommendation = async(force = false) => {
+    if (!isEnabled()) return
     if (!force && publicCache.rankRecommendation) {
       rankRecommendation.value = publicCache.rankRecommendation
       return
@@ -144,6 +147,7 @@ export const useKugouRecommendData = ({ accountKey }: { accountKey: { value: str
   }
 
   const loadDailySongs = async(force = false) => {
+    if (!isEnabled()) return
     handleAccountChange()
     const requestAccountKey = accountKey.value
     if (!requestAccountKey) return
@@ -174,6 +178,7 @@ export const useKugouRecommendData = ({ accountKey }: { accountKey: { value: str
   }
 
   const loadStyleSongs = async(force = false) => {
+    if (!isEnabled()) return
     handleAccountChange()
     const requestAccountKey = accountKey.value
     if (!requestAccountKey) return
@@ -204,6 +209,7 @@ export const useKugouRecommendData = ({ accountKey }: { accountKey: { value: str
   }
 
   const loadFmSongs = async(force = false) => {
+    if (!isEnabled()) return
     handleAccountChange()
     const requestAccountKey = accountKey.value
     if (!requestAccountKey) return
@@ -277,6 +283,8 @@ export const useKugouRecommendData = ({ accountKey }: { accountKey: { value: str
     isLoadingPublicSongs.value = false
     clearPrivateState()
   })
+
+  const isEnabled = useRecommendationPage('kugouRecommend', clearAll)
 
   return {
     publicRecommendation,

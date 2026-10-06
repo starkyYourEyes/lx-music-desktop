@@ -1,6 +1,7 @@
 const assert = require('node:assert')
 const path = require('node:path')
 const loadTsModule = require('./qq-music-test-loader')
+const { accountRepository, musicUrlAuthorization } = require('./test-utils/qq-account-repository')
 
 class QQMusicAuthError extends Error {
   constructor(message = 'expired') {
@@ -44,6 +45,7 @@ const {
         throw new Error('unexpected singleton login service')
       },
     },
+    './userPlaylists': { createQQMusicUserPlaylistService: () => ({}) },
     './auth': { getQQMusicAccountUin },
     './credential': {
       createQQMusicCredentialService: () => {
@@ -186,7 +188,8 @@ const createFacade = ({
     getRefreshDueAt,
   }
   const service = createQQMusicAccountService({
-    store,
+    accounts: accountRepository(data),
+    musicUrlAuthorization,
     ...services,
     credentialService,
     onRefreshDiagnostic,

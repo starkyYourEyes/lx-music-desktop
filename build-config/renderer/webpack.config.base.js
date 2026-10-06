@@ -16,6 +16,7 @@ module.exports = {
   },
   output: {
     filename: '[name].js',
+    chunkFilename: 'renderer-[name].js',
     library: {
       type: 'commonjs2',
     },
@@ -143,7 +144,7 @@ module.exports = {
       // Options similar to the same options in webpackOptions.output
       // both options are optional
       filename: isDev ? '[name].css' : '[name].[contenthash:8].css',
-      chunkFilename: isDev ? '[id].css' : '[id].[contenthash:8].css',
+      chunkFilename: isDev ? 'renderer-[id].css' : 'renderer-[id].[contenthash:8].css',
     }),
     new ESLintPlugin({
       extensions: ['js', 'vue'],

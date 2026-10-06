@@ -8,6 +8,7 @@ declare namespace LX {
       'desktopLyric.isShowTaskbar': LX.AppSetting['desktopLyric.isShowTaskbar']
       'desktopLyric.pauseHide': LX.AppSetting['desktopLyric.pauseHide']
       'desktopLyric.audioVisualization': LX.AppSetting['desktopLyric.audioVisualization']
+      'performance.features.audioVisualization'?: LX.AppSetting['performance.features.audioVisualization']
       'desktopLyric.width': LX.AppSetting['desktopLyric.width']
       'desktopLyric.height': LX.AppSetting['desktopLyric.height']
       'desktopLyric.x': LX.AppSetting['desktopLyric.x']
@@ -84,6 +85,7 @@ declare namespace LX {
     | LyricAction<'set_pause'>
     | LyricAction<'set_stop'>
     | LyricAction<'send_analyser_data_array', Uint8Array>
+    | LyricAction<'set_analyser_available', boolean>
 
 
     interface NewBounds {

@@ -232,6 +232,8 @@ export default {
       })
     }
     refreshUserListProfiles()
+    window.app_event.on('listProfilesUpdated', refreshUserListProfiles)
+    onBeforeUnmount(() => { window.app_event.off('listProfilesUpdated', refreshUserListProfiles) })
 
     const {
       selectedList,

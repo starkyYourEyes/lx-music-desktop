@@ -21,6 +21,14 @@ module.exports = (filePath, mocks = {}) => {
   const originalLoad = Module._load
   Module._load = (request, parent, isMain) => {
     if (Object.prototype.hasOwnProperty.call(mocks, request)) return mocks[request]
+    if (request == '@renderer/core/features/recommendationAccess') return require('./test-utils/recommendation-access-enabled')
+    if (/^@common\/performance\/[a-zA-Z]+$/.test(request)) {
+      const target = path.resolve(__dirname, '../src/common/performance', `${request.split('/').at(-1)}.ts`)
+      if (fs.existsSync(target)) {
+        mocks[request] = module.exports(target, mocks)
+        return mocks[request]
+      }
+    }
     return originalLoad(request, parent, isMain)
   }
   try {

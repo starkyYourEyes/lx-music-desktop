@@ -69,11 +69,12 @@ const createTask = async(downloadInfo: LX.Download.ListItem, savePath: string, s
     })
     return
   }
-  if (!tasks.has(downloadInfo.id)) return
+  if (tasks.get(downloadInfo.id) !== downloadInfo) return
 
   if (downloadInfo.downloaded == 0) {
     if (skipExistFile) {
       const stats = await getFileStats(downloadInfo.metadata.filePath)
+      if (tasks.get(downloadInfo.id) !== downloadInfo) return
       if (stats && stats.size > 100) {
         sendAction(downloadInfo.id, {
           action: 'error',
@@ -84,6 +85,7 @@ const createTask = async(downloadInfo: LX.Download.ListItem, savePath: string, s
         return
       }
     } else if (await checkPath(downloadInfo.metadata.filePath)) {
+      if (tasks.get(downloadInfo.id) !== downloadInfo) return
       try {
         await removeFile(downloadInfo.metadata.filePath)
       } catch (err) {
@@ -97,6 +99,7 @@ const createTask = async(downloadInfo: LX.Download.ListItem, savePath: string, s
       }
     }
   }
+  if (tasks.get(downloadInfo.id) !== downloadInfo) return
 
   const downloadOptions: DownloadOptions = {
     url: downloadInfo.metadata.url ?? '',
@@ -145,6 +148,7 @@ const createTask = async(downloadInfo: LX.Download.ListItem, savePath: string, s
           console.log('删除不匹配的文件失败：', err.message)
           // commit('onError', { downloadInfo, errorMsg: '删除不匹配的文件失败：' + err.message })
         }).finally(() => {
+          if (tasks.get(downloadInfo.id) !== downloadInfo) return
           console.log('正在重试')
           void dls.get(downloadInfo.id)?.start()
           // sendAction(downloadInfo.id, {
@@ -159,6 +163,7 @@ const createTask = async(downloadInfo: LX.Download.ListItem, savePath: string, s
       } else {
         console.log('Download failed, Attempting Retry')
         setTimeout(() => {
+          if (tasks.get(downloadInfo.id) !== downloadInfo) return
           void dls.get(downloadInfo.id)?.start()
         }, 1000)
       }
@@ -284,36 +289,19 @@ export const startTask = async(downloadInfo: LX.Download.ListItem, savePath: str
 
 export const pauseTask = async(id: string) => {
   const dl = dls.get(id)
+  tasks.delete(id)
+  taskActions.delete(id)
+  tryNum.delete(id)
   if (dl) {
-    dls.delete(id)
-    tasks.delete(id)
-    taskActions.delete(id)
-    tryNum.delete(id)
-
-    try {
-      await dl.stop()
-    } catch (e) {
-      console.log(e)
-    }
+    await dl.stop()
+    if (dls.get(id) === dl) dls.delete(id)
   }
   // commit('setStatus', { downloadInfo: downloadInfo, status: DOWNLOAD_STATUS.PAUSE })
 }
 
 export const removeTask = async(id: string) => {
-  const dl = dls.get(id)
   const downloadInfo = tasks.get(id)
-  if (dl) {
-    dls.delete(id)
-    tasks.delete(id)
-    taskActions.delete(id)
-    tryNum.delete(id)
-
-    try {
-      await dl.stop()
-    } catch (e) {
-      console.log(e)
-    }
-  }
+  await pauseTask(id)
 
   if (downloadInfo) {
     // 没有未完成、已下载大于1k

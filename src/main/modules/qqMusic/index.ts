@@ -579,7 +579,7 @@ const getAccountService = () => {
   if (musicUrlAuthorization == null) throw new Error('Music URL authorization has not been initialized')
   const loginService = createQQMusicLoginService()
   const credentialService = createQQMusicCredentialService()
-  const getCookie = () => accounts.getCookie('qq_music') ?? ''
+  const getCookie = () => getAccountData(accounts).cookie
   const songService = createQQMusicSongService({ getCookie })
   const dailyRecommendService = createQQMusicDailyRecommendService({ getCookie })
   const homeRecommendService = createQQMusicHomeRecommendService({ getCookie })

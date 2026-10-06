@@ -164,6 +164,7 @@ const handleStartServer = async(port = 9527, ip = '0.0.0.0') => await new Promis
       list: false,
       dislike: false,
       userApi: false,
+      listProfile: false,
     }
     socket.feature = {
       list: false,
@@ -209,6 +210,7 @@ const handleStartServer = async(port = 9527, ip = '0.0.0.0') => await new Promis
     socket.remoteQueueList = syncRpc.createQueueRemote('list')
     socket.remoteQueueDislike = syncRpc.createQueueRemote('dislike')
     socket.remoteQueueUserApi = syncRpc.createQueueRemote('userApi')
+    socket.remoteQueueListProfile = syncRpc.createQueueRemote('listProfile')
     socket.addEventListener('message', ({ data }) => {
       if (typeof data != 'string') return
       void decryptMsg(socket.keyInfo, data).then((data) => {
